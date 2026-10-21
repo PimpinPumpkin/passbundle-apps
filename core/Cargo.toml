@@ -56,6 +56,12 @@ arboard = { version = "3", default-features = false }
 [target.'cfg(not(target_os = "android"))'.dependencies]
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
 
+# The Android app's native calls (src/android.rs), and Android's own
+# certificate checks, which need the app's context.
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.22"
+rustls-platform-verifier = "0.7"
+
 # SHA-256 in the chip's own instructions on ARM (Apple silicon, phones): PBKDF2
 # takes a sixth of the time (46 ms instead of 288 on an M1 Pro). x86 uses its
 # SHA extensions without this; the assembly doesn't build with MSVC.

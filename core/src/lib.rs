@@ -16,6 +16,8 @@ pub mod store;
 pub mod totp;
 pub mod vault;
 
+#[cfg(all(feature = "ffi", target_os = "android"))]
+pub mod android;
 #[cfg(feature = "ffi")]
 pub mod ffi;
 

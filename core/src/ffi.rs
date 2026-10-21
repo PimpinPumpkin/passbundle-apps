@@ -319,6 +319,19 @@ pub extern "C" fn pb_lock() -> *mut c_char {
     })
 }
 
+/// An item's value for the clipboard, for the Android app's native piece
+/// (android.rs). None while locked, while a slow call has the app, or if
+/// there's nothing to copy.
+#[cfg(target_os = "android")]
+pub(crate) fn value_for_copy(id: &str, what: &str) -> Option<Zeroizing<String>> {
+    let guard = match APP.try_lock() {
+        Ok(guard) => guard,
+        Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        Err(TryLockError::WouldBlock) => return None,
+    };
+    guard.as_ref()?.value(id, what).ok()
+}
+
 fn unlocked(app: &App) -> bool {
     matches!(app.state(), State::Unlocked { .. })
 }

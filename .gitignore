@@ -3,3 +3,5 @@ core/target/
 
 # The core built for Android (tools/android-core.sh build).
 app/android/app/src/main/jniLibs/
+app/android/rustls-maven/
+app/integration_test/fixtures.g.dart

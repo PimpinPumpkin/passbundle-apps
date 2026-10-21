@@ -8,6 +8,7 @@ import 'dart:io';
 import 'dart:isolate';
 
 import 'package:ffi/ffi.dart';
+import 'package:flutter/services.dart';
 
 typedef _Str0 = Pointer<Utf8> Function();
 typedef _Str1 = Pointer<Utf8> Function(Pointer<Utf8>);
@@ -34,6 +35,7 @@ DynamicLibrary _open() {
   if (Platform.isMacOS) {
     return DynamicLibrary.open('$dir/../Frameworks/libpassbundle_core.dylib');
   }
+  if (Platform.isAndroid) return DynamicLibrary.open('libpassbundle_core.so');
   return DynamicLibrary.process();
 }
 
@@ -143,9 +145,21 @@ class Core {
 
   String version() => _answer(_version()) as String;
 
-  /// For tests and tools: the app on a folder of its own, the refresh token in memory.
-  Map<String, dynamic> openAt(String dir) =>
-      _with([dir], (p) => _answer(_openAt(p[0], true))) as Map<String, dynamic>;
+  /// The app on a folder of its own: Android's app folder, or a test's, with
+  /// the refresh token in memory for tests and tools.
+  Map<String, dynamic> openAt(String dir, {bool memorySecrets = true}) =>
+      _with([dir], (p) => _answer(_openAt(p[0], memorySecrets)))
+          as Map<String, dynamic>;
+
+  /// What only the phone's own code does (docs/phones.md, "Talking to the OS").
+  static const platform = MethodChannel('passbundle/platform');
+
+  /// Android keeps the vault in the app's own folder, which only Android knows.
+  static Future<void> openOnThisDevice() async {
+    if (!Platform.isAndroid) return;
+    final dir = await platform.invokeMethod<String>('filesDir');
+    Core().openAt(dir!, memorySecrets: false);
+  }
 
   /// "signedOut", "locked", or "unlocked", with "server" and "email".
   Map<String, dynamic> state() => _answer(_state()) as Map<String, dynamic>;
@@ -258,11 +272,24 @@ class Core {
   String? reveal(String id, String what) =>
       _with([id, what], (p) => _answer(_reveal(p[0], p[1]))) as String?;
 
-  /// Copies without the value passing through Dart; secrets clear after 30 seconds.
-  Answer copy(String id, String what) => Answer(
-    _with([id, what], (p) => _answer(_copy(p[0], p[1])))
-        as Map<String, dynamic>,
-  );
+  /// Copies without the value passing through Dart; secrets clear after 30
+  /// seconds. On Android the app's Kotlin takes it from the core to the clipboard.
+  Future<Answer> copy(String id, String what) async {
+    if (Platform.isAndroid) {
+      final copied = await platform.invokeMethod<bool>('copy', {
+        'id': id,
+        'what': what,
+      });
+      return Answer({
+        'ok': copied == true,
+        if (copied != true) 'error': 'Couldn\'t copy that. Try again.',
+      });
+    }
+    return Answer(
+      _with([id, what], (p) => _answer(_copy(p[0], p[1])))
+          as Map<String, dynamic>,
+    );
+  }
 
   Map<String, dynamic>? totp(String id) =>
       _with([id], (p) => _answer(_totp(p[0]))) as Map<String, dynamic>?;

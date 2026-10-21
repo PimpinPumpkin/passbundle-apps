@@ -44,7 +44,7 @@ void main() {
 
     testWidgets('sign in, $b', (tester) async {
       await size(tester, const Size(1280, 800));
-      openEmpty();
+      openEmpty(lockOnSleep: true);
       await tester.pumpWidget(
         PassBundleApp(themeMode: dark ? ThemeMode.dark : ThemeMode.light),
       );
@@ -53,7 +53,7 @@ void main() {
 
     testWidgets('unlock, vault, item, editor, desktop, $b', (tester) async {
       await size(tester, const Size(1280, 800));
-      openSample();
+      openSample(lockOnSleep: true);
       await tester.pumpWidget(
         PassBundleApp(themeMode: dark ? ThemeMode.dark : ThemeMode.light),
       );
@@ -85,7 +85,7 @@ void main() {
         ),
       ))!;
       addTearDown(agent.kill);
-      openSample();
+      openSample(lockOnSleep: true);
       Core().useAgentHome(home, program);
       for (var i = 0; i < 100; i++) {
         if ((await tester.runAsync(Core.biometricStatus))!['status'] !=
@@ -124,7 +124,7 @@ void main() {
 
     testWidgets('vault, phone, $b', (tester) async {
       await size(tester, const Size(390, 844));
-      openSample();
+      openSample(lockOnSleep: true);
       await tester.pumpWidget(
         PassBundleApp(themeMode: dark ? ThemeMode.dark : ThemeMode.light),
       );

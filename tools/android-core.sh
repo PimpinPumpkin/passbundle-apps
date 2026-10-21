@@ -2,7 +2,8 @@
 # Builds the core for Android with the NDK (docs/phones.md, "The core on
 # phones"), or builds its tests and runs them on a device or emulator over adb.
 #
-#   tools/android-core.sh build [abi...]   # libpassbundle_core.so into app/android/app/src/main/jniLibs/<abi>/
+#   tools/android-core.sh build [abi...]   # libpassbundle_core.so into app/android/app/src/main/jniLibs/<abi>/,
+#                                          # and the certificate checks' Kotlin half (checked) into app/android/rustls-maven
 #   tools/android-core.sh test [abi]       # the core's tests, on the device adb sees
 #
 # ABIs: arm64-v8a (phones) and x86_64 (the emulator); both by default for a
@@ -58,6 +59,23 @@ case "$command" in
       mkdir -p "$out"
       cp "core/target/$t/release/libpassbundle_core.so" "$out/"
       echo "$out/libpassbundle_core.so: $(wc -c < "$out/libpassbundle_core.so") bytes"
+    done
+    # Android's certificate checks have a Kotlin half, which the project
+    # publishes on its own Maven branch. The app's Gradle build takes it from
+    # here, at the version Cargo.lock has, only if it's the file pinned in
+    # app/android/rustls-platform-verifier.sha256.
+    version=$(grep -A1 '^name = "rustls-platform-verifier-android"$' core/Cargo.lock | sed -n 's/^version = "\(.*\)"$/\1/p')
+    [ -n "$version" ] || { echo "rustls-platform-verifier-android isn't in core/Cargo.lock" >&2; exit 1; }
+    repo="app/android/rustls-maven/org/rustls/rustls-platform-verifier/$version"
+    base="https://github.com/rustls/rustls-platform-verifier/raw/maven-archive/android-release-support/maven/org/rustls/rustls-platform-verifier/$version"
+    rm -rf app/android/rustls-maven
+    mkdir -p "$repo"
+    for file in "rustls-platform-verifier-$version.aar" "rustls-platform-verifier-$version.pom"; do
+      pinned=$(awk -v v="$version" -v f="$file" '$1 == v && $2 == f { print $3 }' app/android/rustls-platform-verifier.sha256)
+      [ -n "$pinned" ] || { echo "No pinned checksum for $file in app/android/rustls-platform-verifier.sha256" >&2; exit 1; }
+      curl -fsSL -o "$repo/$file" "$base/$file"
+      got=$(shasum -a 256 "$repo/$file" | cut -d' ' -f1)
+      [ "$got" = "$pinned" ] || { echo "$file isn't the pinned file (got $got)" >&2; rm -rf app/android/rustls-maven; exit 1; }
     done
     ;;
   test)

@@ -381,13 +381,24 @@ impl App {
     /// Copies one of an item's values: "username", "password", "totp" (the
     /// current code), "notes", or "field:<index>". Secrets clear after 30 seconds.
     pub fn copy(&self, id: &str, what: &str) -> Result<()> {
+        if what == "username" {
+            return clipboard::copy_text(&self.value(id, what)?);
+        }
+        clipboard::copy_secret(&self.value(id, what)?, clipboard::CLEAR_AFTER)
+    }
+
+    /// The value `copy` copies. On phones the app's native piece puts it on
+    /// the clipboard itself (docs/phones.md, "Copying").
+    pub fn value(&self, id: &str, what: &str) -> Result<zeroize::Zeroizing<String>> {
         let item = self
             .vault
             .as_ref()
             .and_then(|v| v.item(id))
             .ok_or(Error::Damaged("no such item"))?;
         if what == "username" {
-            return clipboard::copy_text(item.username.as_deref().unwrap_or_default());
+            return Ok(zeroize::Zeroizing::new(
+                item.username.clone().unwrap_or_default(),
+            ));
         }
         let secret = match what {
             "password" => item.password.as_ref().map(|p| p.as_str().to_owned()),
@@ -412,6 +423,6 @@ impl App {
         }
         .map(zeroize::Zeroizing::new)
         .ok_or(Error::Damaged("nothing to copy"))?;
-        clipboard::copy_secret(&secret, clipboard::CLEAR_AFTER)
+        Ok(secret)
     }
 }

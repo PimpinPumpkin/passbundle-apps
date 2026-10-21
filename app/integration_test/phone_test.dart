@@ -1,0 +1,115 @@
+// The app on a real Android phone or emulator (docs/phones.md, "Order and
+// tests"), with the real core: it opens the vault kept in the app's own
+// folder, unlocks it, copies a password straight from the core to the
+// clipboard through Kotlin, locks, and checks certificates with Android's own
+// verifier. Run it with tools/android-app-test.sh, which makes fixtures.g.dart
+// (the sample vault and a throwaway self-signed certificate).
+import 'dart:io';
+
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:integration_test/integration_test.dart';
+
+import 'package:passbundle/core.dart';
+import 'package:passbundle/main.dart';
+
+import 'fixtures.g.dart';
+
+/// Pumps until something shows up, giving slow core calls real time.
+Future<void> pumpUntil(
+  WidgetTester tester,
+  Finder finder, {
+  Duration timeout = const Duration(seconds: 30),
+}) async {
+  final end = DateTime.now().add(timeout);
+  while (DateTime.now().isBefore(end)) {
+    await tester.pump(const Duration(milliseconds: 100));
+    if (finder.evaluate().isNotEmpty) return;
+  }
+  throw TestFailure('Never showed up: $finder');
+}
+
+void main() {
+  IntegrationTestWidgetsFlutterBinding.ensureInitialized();
+
+  testWidgets(
+    'unlocks the kept vault, copies straight from the core, locks, and refuses an untrusted server',
+    (tester) async {
+      // The sample vault, kept in the app's own folder as if signed in.
+      final dir = await Core.platform.invokeMethod<String>('filesDir');
+      File('$dir/settings.json').writeAsStringSync(sampleSettings);
+      File('$dir/sync.json').writeAsStringSync(sampleSync);
+      await Core.openOnThisDevice();
+      await tester.pumpWidget(const PassBundleApp());
+      await pumpUntil(tester, find.text('Unlock PassBundle'));
+
+      await tester.enterText(find.byType(TextField), samplePassword);
+      await tester.tap(find.text('Unlock'));
+      await pumpUntil(tester, find.text('Backup service'));
+      // No refresh token is kept yet on Android, so syncing asks to sign in again.
+      await pumpUntil(tester, find.textContaining('Sign in again'));
+
+      await tester.tap(find.text('Backup service'));
+      // The item's own page, past its slide-in.
+      await pumpUntil(tester, find.byTooltip('Copy password'));
+      await tester.pump(const Duration(milliseconds: 500));
+      await tester.tap(find.byTooltip('Copy password'));
+      await pumpUntil(
+        tester,
+        find.text('Copied the password. It clears in 30 seconds.'),
+      );
+      // Read back here only to check it; the app itself never has it in Dart.
+      final copied = await Clipboard.getData(Clipboard.kTextPlain);
+      expect(copied?.text, samplePasswordOfBackupService);
+      final copiedAt = DateTime.now();
+
+      // Back to the list, where the header has Lock.
+      await tester.pageBack();
+      await pumpUntil(tester, find.byTooltip('Lock'));
+      await tester.tap(find.byTooltip('Lock'));
+      await pumpUntil(tester, find.text('Unlock PassBundle'));
+      expect(find.text('Backup service'), findsNothing);
+
+      // Android's own verifier checks the server's certificate: a self-signed
+      // one is refused, rather than the core stopping for want of its setup.
+      final context = SecurityContext()
+        ..useCertificateChainBytes(certificatePem.codeUnits)
+        ..usePrivateKeyBytes(privateKeyPem.codeUnits);
+      final server = await HttpServer.bindSecure('localhost', 0, context);
+      server.listen((request) => request.response.close());
+      try {
+        await tester.tap(find.text('Sign out').first);
+        await pumpUntil(tester, find.text('Sign out?'));
+        await tester.tap(find.widgetWithText(FilledButton, 'Sign out'));
+        await pumpUntil(tester, find.text('Sign in to PassBundle'));
+        await tester.enterText(
+          find.widgetWithText(TextField, 'Server'),
+          'https://localhost:${server.port}',
+        );
+        await tester.enterText(
+          find.widgetWithText(TextField, 'Email'),
+          'ana@example.test',
+        );
+        await tester.enterText(
+          find.widgetWithText(TextField, 'Master password'),
+          'anything',
+        );
+        await tester.tap(find.text('Sign in'));
+        await pumpUntil(tester, find.textContaining('certificate'));
+        expect(
+          find.textContaining('Couldn\'t reach the server'),
+          findsOneWidget,
+        );
+      } finally {
+        await server.close(force: true);
+      }
+
+      // 30 seconds after copying, the password is off the clipboard.
+      final waited = DateTime.now().difference(copiedAt);
+      await Future<void>.delayed(const Duration(seconds: 32) - waited);
+      final later = await Clipboard.getData(Clipboard.kTextPlain);
+      expect(later?.text ?? '', isEmpty);
+    },
+  );
+}

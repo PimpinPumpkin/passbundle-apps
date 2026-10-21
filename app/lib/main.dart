@@ -33,8 +33,9 @@ void report(String line) {
   }
 }
 
-void main() {
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await Core.openOnThisDevice();
   if (measuring) {
     SchedulerBinding.instance.addPostFrameCallback((_) {
       report('first-frame ${DateTime.now().microsecondsSinceEpoch}');
