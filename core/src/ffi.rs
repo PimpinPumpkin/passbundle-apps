@@ -352,6 +352,41 @@ pub(crate) fn value_for_copy(id: &str, what: &str) -> Option<Zeroizing<String>> 
     guard.as_ref()?.value(id, what).ok()
 }
 
+/// The unlocked vault's user key, for the Android app to seal for biometric
+/// unlock (android.rs). None while locked or busy.
+#[cfg(target_os = "android")]
+pub(crate) fn user_key_for_biometric() -> Option<Zeroizing<Vec<u8>>> {
+    let guard = match APP.try_lock() {
+        Ok(guard) => guard,
+        Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        Err(TryLockError::WouldBlock) => return None,
+    };
+    Some(Zeroizing::new(
+        guard.as_ref()?.vault()?.user_key().to_bytes().to_vec(),
+    ))
+}
+
+/// Opens the kept vault with the user key the Android app's biometric unlock
+/// opened (android.rs); the error's words otherwise.
+#[cfg(target_os = "android")]
+pub(crate) fn unlock_with_key_for_biometric(key: &[u8]) -> Result<(), String> {
+    let mut guard = match APP.try_lock() {
+        Ok(guard) => guard,
+        Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        Err(TryLockError::WouldBlock) => return Err("PassBundle is busy; try again.".into()),
+    };
+    let app = guard.as_mut().ok_or_else(|| Error::SignedOut.to_string())?;
+    let key = crate::crypto::SymmetricKey::from_bytes(key).map_err(|e| e.to_string())?;
+    match app.unlock_with_key(key) {
+        // Out of date (the account's keys changed): it's turned off.
+        Err(e @ Error::Refused(_)) => {
+            let _ = app.remove_biometric();
+            Err(e.to_string())
+        }
+        other => other.map_err(|e| e.to_string()),
+    }
+}
+
 fn unlocked(app: &App) -> bool {
     matches!(app.state(), State::Unlocked { .. })
 }

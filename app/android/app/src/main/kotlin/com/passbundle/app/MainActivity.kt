@@ -13,6 +13,7 @@ class MainActivity : FlutterActivity() {
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         Core.init(applicationContext)
+        Biometric.init(applicationContext)
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "passbundle/platform")
             .setMethodCallHandler { call, result ->
                 when (call.method) {
@@ -22,6 +23,21 @@ class MainActivity : FlutterActivity() {
                         val id = call.argument<String>("id")
                         val what = call.argument<String>("what")
                         result.success(id != null && what != null && Clipboard.copy(this, id, what))
+                    }
+                    // Unlocking with the phone's biometrics (Biometric.kt).
+                    "biometricStatus" ->
+                        result.success(mapOf("status" to Biometric.status(this), "method" to Biometric.method(this)))
+                    "biometricEnroll" ->
+                        Biometric.enroll(this) { on, error ->
+                            result.success(mapOf("ok" to (error == null), "on" to on, "error" to error))
+                        }
+                    "biometricUnlock" ->
+                        Biometric.unlock(this) { unlocked, error ->
+                            result.success(mapOf("ok" to (error == null), "unlocked" to unlocked, "error" to error))
+                        }
+                    "biometricRemove" -> {
+                        Biometric.remove()
+                        result.success(mapOf("ok" to true))
                     }
                     else -> result.notImplemented()
                 }

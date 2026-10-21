@@ -39,6 +39,10 @@ DynamicLibrary _open() {
   return DynamicLibrary.process();
 }
 
+/// A phone: biometric unlock is the phone's own, with no desktop agent or
+/// browser extension sharing it.
+final isPhone = Platform.isAndroid || Platform.isIOS;
+
 /// An answer from a call that can fail: ok, or the core's words.
 class Answer {
   Answer(Map<String, dynamic> json)
@@ -199,14 +203,23 @@ class Core {
         ], (p) => c._answer(c._save(p[0], p[1]))),
       );
 
-  /// Unlocking with Windows Hello or Touch ID, through the desktop agent:
+  /// Unlocking with Windows Hello or Touch ID, through the desktop agent, or
+  /// on Android with the phone's own biometrics, through the app's Kotlin:
   /// `status` is setUp, notSetUp, unavailable, or noAgent, and `method` its name.
-  static Future<Map<String, dynamic>> biometricStatus() async =>
+  static Future<Map<String, dynamic>> biometricStatus() async {
+    if (Platform.isAndroid) return _onPhone('biometricStatus');
+    return Map<String, dynamic>.from(
+      await Isolate.run(() {
+        final core = Core();
+        return core._answer(core._bioStatus()) as Map;
+      }),
+    );
+  }
+
+  /// A call to the phone's own code (MainActivity.kt), answered as the core would.
+  static Future<Map<String, dynamic>> _onPhone(String method) async =>
       Map<String, dynamic>.from(
-        await Isolate.run(() {
-          final core = Core();
-          return core._answer(core._bioStatus()) as Map;
-        }),
+        (await platform.invokeMethod<Map>(method)) ?? {'ok': false},
       );
 
   /// Starts the desktop agent installed next to the app if it isn't running
@@ -215,16 +228,19 @@ class Core {
       _background((c) => c._answer(c._startAgent()));
 
   /// Turns it on (the agent asks); `on` says whether the person agreed.
-  static Future<Answer> enrollBiometric() =>
-      _background((c) => c._answer(c._bioEnroll()));
+  static Future<Answer> enrollBiometric() async => Platform.isAndroid
+      ? Answer(await _onPhone('biometricEnroll'))
+      : _background((c) => c._answer(c._bioEnroll()));
 
   /// Unlocks with it; `unlocked` is false if the person cancelled.
-  static Future<Answer> unlockWithBiometric() =>
-      _background((c) => c._answer(c._bioUnlock()));
+  static Future<Answer> unlockWithBiometric() async => Platform.isAndroid
+      ? Answer(await _onPhone('biometricUnlock'))
+      : _background((c) => c._answer(c._bioUnlock()));
 
-  /// Turns it off, for the browser extension too.
-  static Future<Answer> removeBiometric() =>
-      _background((c) => c._answer(c._bioRemove()));
+  /// Turns it off, for the browser extension too (on a computer).
+  static Future<Answer> removeBiometric() async => Platform.isAndroid
+      ? Answer(await _onPhone('biometricRemove'))
+      : _background((c) => c._answer(c._bioRemove()));
 
   /// For tests: the agent with this home folder and program, instead of the installed one.
   void useAgentHome(String home, String program) =>

@@ -11,6 +11,8 @@ use jni::jni_mangle;
 use jni::objects::JString;
 use jni::objects::{Global, JByteArray, JClass, JClassLoader, JObject, JValue};
 use jni::strings::JNIStr;
+#[cfg(feature = "ffi")]
+use jni::sys::jstring;
 use jni::{jni_sig, jni_str, Env, EnvUnowned, JavaVM};
 use zeroize::Zeroizing;
 
@@ -66,6 +68,68 @@ pub fn value<'caller>(
             }
         })
         .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+/// The unlocked vault's user key, for Kotlin to seal with the Keystore key
+/// that needs biometrics (docs/phones.md, "Unlocking with biometrics"), as
+/// bytes it zeroes after use; null while locked or busy. It goes from here to
+/// the Keystore without passing through Dart.
+#[cfg(feature = "ffi")]
+#[jni_mangle("com.passbundle.app.Core")]
+pub fn user_key<'caller>(
+    mut unowned_env: EnvUnowned<'caller>,
+    _class: JClass<'caller>,
+) -> JByteArray<'caller> {
+    unowned_env
+        .with_env(|env| -> JniResult<JByteArray<'caller>> {
+            match crate::ffi::user_key_for_biometric() {
+                Some(key) => env.byte_array_from_slice(&key),
+                None => Ok(JByteArray::default()),
+            }
+        })
+        .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+/// Opens the kept vault with the user key Kotlin opened after the person's
+/// biometrics: "" if it opened, else the words to show (null only if JNI
+/// itself failed, which Kotlin takes as not opened). A key that no longer
+/// opens it means biometric unlock is out of date, and is turned off.
+#[cfg(feature = "ffi")]
+#[jni_mangle("com.passbundle.app.Core")]
+pub fn unlock_with_key<'caller>(
+    mut unowned_env: EnvUnowned<'caller>,
+    _class: JClass<'caller>,
+    key: JByteArray<'caller>,
+) -> jstring {
+    unowned_env
+        .with_env(|env| -> JniResult<jstring> {
+            let key = Zeroizing::new(env.convert_byte_array(&key)?);
+            match crate::ffi::unlock_with_key_for_biometric(&key) {
+                Ok(()) => Ok(env.new_string("")?.into_raw()),
+                Err(why) => Ok(env.new_string(why)?.into_raw()),
+            }
+        })
+        .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+/// Turns biometric unlock off: Kotlin deletes its Keystore key and the user
+/// key it sealed (signing out, or a key that's out of date).
+pub(crate) fn remove_biometric() {
+    let Some((vm, loader)) = JVM.get() else {
+        return;
+    };
+    let _ = vm.attach_current_thread_for_scope(|env| -> JniResult<()> {
+        let result = (|| -> JniResult<()> {
+            let name = env.new_string("com.passbundle.app.Biometric")?;
+            let class = loader.load_class(env, name)?;
+            env.call_static_method(&class, jni_str!("remove"), jni_sig!(() -> void), &[])?
+                .v()
+        })();
+        if result.is_err() {
+            env.exception_clear();
+        }
+        Ok(())
+    });
 }
 
 /// Calls `Keystore.<method>(byte[]): byte[]` in the app.

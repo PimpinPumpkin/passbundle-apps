@@ -87,7 +87,11 @@ class _SettingsDialogState extends State<SettingsDialog> {
         context: context,
         builder: (context) => AlertDialog(
           title: Text('Turn off unlocking with $method?'),
-          content: const Text('It turns off in your browser extension too.'),
+          content: Text(
+            isPhone
+                ? 'You can turn it on again here any time.'
+                : 'It turns off in your browser extension too.',
+          ),
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(context, false),
@@ -144,8 +148,10 @@ class _SettingsDialogState extends State<SettingsDialog> {
         onChanged: working ? null : (on) => turn(on, method),
         secondary: const Icon(Icons.fingerprint_rounded),
         title: Text('Unlock with $method'),
-        subtitle: const Text(
-          'Also in your browser extension, which shares it.',
+        subtitle: Text(
+          isPhone
+              ? 'Instead of your master password'
+              : 'Also in your browser extension, which shares it.',
         ),
         contentPadding: EdgeInsets.zero,
       );
@@ -156,7 +162,7 @@ class _SettingsDialogState extends State<SettingsDialog> {
         subtitle: Text(
           status['status'] == 'noAgent'
               ? 'Needs PassBundle\'s desktop agent, which isn\'t running.'
-              : '$method isn\'t set up on this computer.',
+              : '${method[0].toUpperCase()}${method.substring(1)} isn\'t set up on this ${isPhone ? 'phone' : 'computer'}.',
         ),
         contentPadding: EdgeInsets.zero,
       );

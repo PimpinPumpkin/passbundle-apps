@@ -48,5 +48,23 @@ if [ -n "${PB_TEST_SERVER:-}" ]; then
   defines=(--dart-define="PB_TEST_SERVER=$PB_TEST_SERVER" --dart-define="PB_TEST_EMAIL=$email" --dart-define="PB_TEST_PASSWORD=$password")
 fi
 
+# On an emulator, its simulated fingerprint sensor is touched every two
+# seconds while the tests run, answering any fingerprint prompt they bring up
+# (tools/android-enroll-fingerprint.sh enrolls the finger).
+toucher=""
+case "$serial" in
+  emulator-*)
+    (while true; do
+      adb -s "$serial" emu finger touch 1 > /dev/null 2>&1 || true
+      sleep 1
+      adb -s "$serial" emu finger remove 1 > /dev/null 2>&1 || true
+      sleep 1
+    done) &
+    toucher=$!
+    defines+=(--dart-define=PB_TEST_FINGERPRINT=true)
+    ;;
+esac
+trap 'rm -rf "$tmp"; [ -z "$toucher" ] || kill "$toucher" 2> /dev/null || true' EXIT
+
 cd app
 flutter test integration_test -d "$serial" ${defines[@]+"${defines[@]}"}

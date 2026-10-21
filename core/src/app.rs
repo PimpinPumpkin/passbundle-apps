@@ -234,28 +234,46 @@ impl App {
     /// the person cancelled. A key that no longer opens the vault (the account's
     /// keys changed) turns it off, and the master password is needed.
     pub fn unlock_with_biometric(&mut self) -> Result<bool> {
-        let text = self.store.sync().ok_or(Error::SignedOut)?;
         let mut agent = self.agent()?;
         let Some(key): Option<SymmetricKey> = agent.unlock()? else {
             return Ok(false);
         };
+        match self.unlock_with_key(key) {
+            Err(Error::Refused(why)) => {
+                let _ = agent.remove();
+                Err(Error::Refused(why))
+            }
+            other => other.map(|()| true),
+        }
+    }
+
+    /// Opens the kept vault with a user key the OS kept for biometric unlock
+    /// (the desktop agent's, or a phone's Keystore or Keychain), without the
+    /// KDF. A key that no longer opens it (the account's keys changed) is
+    /// refused, and the caller turns that unlock off.
+    pub fn unlock_with_key(&mut self, key: SymmetricKey) -> Result<()> {
+        let text = self.store.sync().ok_or(Error::SignedOut)?;
         match Vault::open(&Sync::from_json(&text)?, key) {
             Ok(vault) => {
                 self.opened(vault);
-                Ok(true)
+                Ok(())
             }
-            Err(Error::Refused(_)) | Err(Error::Damaged(_)) => {
-                let _ = agent.remove();
-                Err(Error::Refused(
-                    "that unlock is out of date; use your master password, then turn it on again",
-                ))
-            }
+            Err(Error::Refused(_)) | Err(Error::Damaged(_)) => Err(Error::Refused(
+                "that unlock is out of date; use your master password, then turn it on again",
+            )),
             Err(e) => Err(e),
         }
     }
 
-    /// Turns it off (for the extension too: it's one enrollment).
+    /// Turns it off (for the extension too: it's one enrollment). On Android
+    /// the app's own Keystore key and the user key it sealed go instead.
     pub fn remove_biometric(&self) -> Result<()> {
+        #[cfg(target_os = "android")]
+        {
+            crate::android::remove_biometric();
+            Ok(())
+        }
+        #[cfg(not(target_os = "android"))]
         self.agent()?.remove()
     }
 

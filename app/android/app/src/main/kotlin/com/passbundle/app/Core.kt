@@ -16,4 +16,10 @@ object Core {
      * while the vault is locked or busy, or if there's nothing to copy.
      */
     @JvmStatic external fun value(id: String, what: String): ByteArray?
+
+    /** The unlocked vault's user key, to seal for biometric unlock; zero it after use. Null while locked. */
+    @JvmStatic external fun userKey(): ByteArray?
+
+    /** Opens the kept vault with the user key biometric unlock opened: "" if it opened, else the words to show. */
+    @JvmStatic external fun unlockWithKey(key: ByteArray): String?
 }
