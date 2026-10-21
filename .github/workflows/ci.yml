@@ -110,6 +110,11 @@ jobs:
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
+          # One place for the emulator's AVD, where avdmanager writes it and the emulator reads it
+          # (avdmanager otherwise follows $XDG_CONFIG_HOME, which the runner sets).
+          export ANDROID_AVD_HOME="$HOME/.android/avd"
+          mkdir -p "$ANDROID_AVD_HOME"
+          echo "ANDROID_AVD_HOME=$ANDROID_AVD_HOME" >> "$GITHUB_ENV"
           tools="$ANDROID_HOME/cmdline-tools/latest/bin"
           # Accepting the licenses ends `yes` with a broken pipe, which isn't a failure.
           (yes || true) | "$tools/sdkmanager" --licenses > /dev/null
