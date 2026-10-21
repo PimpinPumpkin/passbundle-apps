@@ -190,6 +190,16 @@ pub extern "C" fn pb_biometric_status() -> *mut c_char {
     })
 }
 
+/// Starts the desktop agent installed next to the app if it isn't running
+/// (its tray, and Windows Hello). `started` says whether it started one.
+#[no_mangle]
+pub extern "C" fn pb_start_agent() -> *mut c_char {
+    out(match crate::agent::Agent::start_installed() {
+        Ok(started) => json!({ "ok": true, "started": started }),
+        Err(e) => failed(e),
+    })
+}
+
 /// Turns it on (the agent asks); `on` says whether the person agreed.
 #[no_mangle]
 pub extern "C" fn pb_biometric_enroll() -> *mut c_char {

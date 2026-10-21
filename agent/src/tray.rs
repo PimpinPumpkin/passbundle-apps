@@ -1,6 +1,9 @@
-//! The tray icon (the menu bar on macOS) and its menu. Version 1 has no
-//! windows: anything visual opens in the web vault or the extension.
+//! The tray icon (the menu bar on macOS) and its menu. The agent has no
+//! windows of its own: "Open PassBundle" starts the app installed next to it
+//! (a separate process, which ends when its window closes), and anything else
+//! visual opens in the web vault or the extension.
 
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use tao::event::{Event, StartCause};
@@ -38,6 +41,12 @@ pub fn run(config: Config) -> ! {
         false,
         None,
     );
+    // The app, when it's installed next to the agent.
+    let app = std::env::current_exe()
+        .ok()
+        .map(|agent| app_next_to(&agent))
+        .filter(|app| app.is_file());
+    let open_app = MenuItem::new(format!("Open {}", brand::NAME), true, None);
     let open = MenuItem::new("Open web vault", true, None);
     let quit = MenuItem::new(format!("Quit {}", brand::NAME), true, None);
     let mut tray: Option<TrayIcon> = None;
@@ -48,8 +57,12 @@ pub fn run(config: Config) -> ! {
             // macOS needs the event loop running before a status item exists.
             Event::NewEvents(StartCause::Init) => {
                 let menu = Menu::new();
-                menu.append_items(&[&title, &PredefinedMenuItem::separator(), &open, &quit])
+                menu.append_items(&[&title, &PredefinedMenuItem::separator()])
                     .expect("tray menu");
+                if app.is_some() {
+                    menu.append(&open_app).expect("tray menu");
+                }
+                menu.append_items(&[&open, &quit]).expect("tray menu");
                 let builder = TrayIconBuilder::new()
                     .with_menu(Box::new(menu))
                     .with_tooltip(brand::NAME);
@@ -61,7 +74,12 @@ pub fn run(config: Config) -> ! {
                 tray = Some(builder.build().expect("tray icon"));
             }
             Event::UserEvent(UserEvent::Menu(event)) => {
-                if event.id == open.id() {
+                if event.id == open_app.id() {
+                    if let Some(app) = &app {
+                        // Its own process: closing its window ends it, and the agent stays.
+                        let _ = Command::new(app).spawn();
+                    }
+                } else if event.id == open.id() {
                     open_url(&config.server_url);
                 } else if event.id == quit.id() {
                     tray.take();
@@ -71,6 +89,12 @@ pub fn run(config: Config) -> ! {
             _ => {}
         }
     })
+}
+
+/// The app installed with the agent: `passbundle`, next to it (inside the
+/// app bundle on macOS, in the same folder on Windows and Linux).
+fn app_next_to(agent: &Path) -> PathBuf {
+    agent.with_file_name(format!("passbundle{}", std::env::consts::EXE_SUFFIX))
 }
 
 fn icon() -> Icon {
@@ -108,6 +132,16 @@ fn open_url(url: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_app_is_the_passbundle_program_next_to_the_agent() {
+        let agent =
+            Path::new("install").join(format!("passbundle-agent{}", std::env::consts::EXE_SUFFIX));
+        assert_eq!(
+            app_next_to(&agent),
+            Path::new("install").join(format!("passbundle{}", std::env::consts::EXE_SUFFIX))
+        );
+    }
 
     #[test]
     fn the_tray_icon_decodes() {
