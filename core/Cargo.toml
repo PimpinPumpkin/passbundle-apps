@@ -37,6 +37,8 @@ dirs = "6"
 hkdf = "0.12"
 hmac = "0.12"
 pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
+# The Public Suffix List, for which logins fill on a website (src/matching.rs).
+psl = "2"
 rand = "0.8"
 rsa = { version = "0.9", default-features = false, features = ["std", "u64_digit"] }
 serde = { version = "1", features = ["derive"] }
