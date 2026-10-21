@@ -14,7 +14,10 @@ pub fn address() -> PathBuf {
 /// The agent this host was installed with: `passbundle-agent`, next to the
 /// host's own program.
 pub fn installed_agent() -> io::Result<PathBuf> {
-    Ok(passbundle_ipc::agent_next_to(&std::env::current_exe()?))
+    Ok(passbundle_ipc::agent_next_to(
+        &std::env::current_exe()?,
+        crate::brand::NAME,
+    ))
 }
 
 /// Whether the program at the other end is the agent installed next to this host.

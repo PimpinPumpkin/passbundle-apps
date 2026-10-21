@@ -330,17 +330,19 @@ jobs:
                 echo "The Mac app is sandboxed; it must not be (see app/macos/Runner/Release.entitlements)." >&2
                 exit 1
               fi
-              mkdir -p "${{ matrix.bundle }}/Contents/Frameworks"
-              cp "${{ matrix.lib }}" "${{ matrix.bundle }}/Contents/Frameworks/"
-              # The agent next to the app's own program, so each finds the other.
-              cp agent/target/universal/passbundle-agent agent/target/universal/passbundle-agent-host "${{ matrix.bundle }}/Contents/MacOS/"
-              # Ad hoc, as Flutter's own release build is, until code signing:
-              # what was added first, on its own (the app's entitlements are
-              # the app's, never the agent's), then the app with its own.
-              codesign --force --sign - "${{ matrix.bundle }}/Contents/Frameworks/libpassbundle_core.dylib" \
-                "${{ matrix.bundle }}/Contents/MacOS/passbundle-agent" "${{ matrix.bundle }}/Contents/MacOS/passbundle-agent-host"
-              codesign --force --sign - --entitlements app/macos/Runner/Release.entitlements "${{ matrix.bundle }}"
-              codesign --verify --deep --strict "${{ matrix.bundle }}" ;;
+              # The core in Frameworks, the agent as an app of its own in Helpers, signed ad hoc.
+              tools/bundle-mac.sh "${{ matrix.bundle }}" "${{ matrix.lib }}" agent/target/universal
+              # With the agent running, opening the app brings up the app: the
+              # agent's own bundle keeps macOS from taking one for the other.
+              helper="${{ matrix.bundle }}/Contents/Helpers/PassBundle Agent.app"
+              "$helper/Contents/MacOS/passbundle-agent" &
+              agent=$!
+              sleep 3
+              open "${{ matrix.bundle }}"
+              for _ in $(seq 30); do pgrep -x passbundle > /dev/null && break; sleep 1; done
+              pgrep -x passbundle > /dev/null || { echo "Opening the app didn't start it." >&2; exit 1; }
+              pkill -x passbundle
+              kill "$agent" ;;
             windows)
               cp "${{ matrix.lib }}" "${{ matrix.bundle }}/"
               cp agent/target/release/passbundle-agent.exe agent/target/release/passbundle-agent-host.exe "${{ matrix.bundle }}/" ;;

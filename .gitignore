@@ -1,2 +1,7 @@
 .DS_Store
 core/target/
+
+# Built and made by tools/android-core.sh and tools/android-app-test.sh.
+app/android/app/src/main/jniLibs/
+app/android/rustls-maven/
+app/integration_test/fixtures.g.dart

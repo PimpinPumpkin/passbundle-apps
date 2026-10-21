@@ -76,8 +76,7 @@ pub fn run(config: Config) -> ! {
             Event::UserEvent(UserEvent::Menu(event)) => {
                 if event.id == open_app.id() {
                     if let Some(app) = &app {
-                        // Its own process: closing its window ends it, and the agent stays.
-                        let _ = Command::new(app).spawn();
+                        launch_app(app);
                     }
                 } else if event.id == open.id() {
                     open_url(&config.server_url);
@@ -91,10 +90,34 @@ pub fn run(config: Config) -> ! {
     })
 }
 
-/// The app installed with the agent: `passbundle`, next to it (inside the
-/// app bundle on macOS, in the same folder on Windows and Linux).
+/// The app installed with the agent: `passbundle` next to it (Windows), or on
+/// macOS the app whose helper the agent is
+/// (`<App>.app/Contents/Helpers/<Name> Agent.app/Contents/MacOS/passbundle-agent`).
 fn app_next_to(agent: &Path) -> PathBuf {
-    agent.with_file_name(format!("passbundle{}", std::env::consts::EXE_SUFFIX))
+    let sibling = agent.with_file_name(format!("passbundle{}", std::env::consts::EXE_SUFFIX));
+    #[cfg(target_os = "macos")]
+    if !sibling.exists() {
+        // Up from MacOS, Contents, the helper app, and Helpers, to the app's Contents.
+        if let Some(contents) = agent.ancestors().nth(5) {
+            return contents.join("MacOS/passbundle");
+        }
+    }
+    sibling
+}
+
+/// Opens the app in its own process: closing its window ends it, and the agent stays.
+fn launch_app(app: &Path) {
+    // On macOS as the Mac opens apps, so it comes to the front with its own Dock icon.
+    #[cfg(target_os = "macos")]
+    if let Some(bundle) = app
+        .ancestors()
+        .nth(3)
+        .filter(|bundle| bundle.extension() == Some("app".as_ref()))
+    {
+        let _ = Command::new("open").arg(bundle).spawn();
+        return;
+    }
+    let _ = Command::new(app).spawn();
 }
 
 fn icon() -> Icon {
@@ -140,6 +163,16 @@ mod tests {
         assert_eq!(
             app_next_to(&agent),
             Path::new("install").join(format!("passbundle{}", std::env::consts::EXE_SUFFIX))
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn on_a_mac_the_app_is_the_one_whose_helper_the_agent_is() {
+        let agent = Path::new("/Applications/PassBundle.app/Contents/Helpers/PassBundle Agent.app/Contents/MacOS/passbundle-agent");
+        assert_eq!(
+            app_next_to(agent),
+            Path::new("/Applications/PassBundle.app/Contents/MacOS/passbundle")
         );
     }
 

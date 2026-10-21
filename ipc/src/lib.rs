@@ -103,9 +103,29 @@ fn reverse_domain(domain: &str) -> String {
     labels.join(".")
 }
 
-/// The agent installed with a program: `passbundle-agent`, next to it.
-pub fn agent_next_to(program: &Path) -> PathBuf {
-    program.with_file_name(format!("passbundle-agent{}", std::env::consts::EXE_SUFFIX))
+/// The agent installed with a program: `passbundle-agent` next to it, or, for
+/// the Mac app's own program, in the app's helper,
+/// `<App>.app/Contents/Helpers/<name> Agent.app`. The agent is an app of its
+/// own on macOS: inside the app's own folder of programs, macOS would take it
+/// for the app, and bring it forward when someone opens the app.
+pub fn agent_next_to(program: &Path, name: &str) -> PathBuf {
+    let sibling =
+        program.with_file_name(format!("passbundle-agent{}", std::env::consts::EXE_SUFFIX));
+    #[cfg(target_os = "macos")]
+    if !sibling.exists() {
+        if let Some(contents) = program.parent().and_then(Path::parent) {
+            let helper = contents
+                .join("Helpers")
+                .join(format!("{name} Agent.app"))
+                .join("Contents/MacOS/passbundle-agent");
+            if helper.exists() {
+                return helper;
+            }
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = name;
+    sibling
 }
 
 /// Whether the program at the other end of `stream` is `expected` (the agent
@@ -586,9 +606,40 @@ mod tests {
             std::fs::canonicalize(std::env::current_exe().unwrap()).unwrap()
         );
         let this = std::env::current_exe().unwrap();
-        assert!(!reached(&client, &agent_next_to(&this)));
+        assert!(!reached(&client, &agent_next_to(&this, "PassBundle")));
         // It is the program it is.
         assert!(reached(&client, &this));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_agent_is_next_to_its_program_or_in_the_mac_apps_helper() {
+        let dir = std::env::temp_dir().join(format!("pb-ipc-layout-{}", std::process::id()));
+        let exe = std::env::consts::EXE_SUFFIX;
+        // The installs that put the agent next to the app (Windows) or the host.
+        let flat = dir.join("flat");
+        std::fs::create_dir_all(&flat).unwrap();
+        assert_eq!(
+            agent_next_to(&flat.join(format!("passbundle{exe}")), "PassBundle"),
+            flat.join(format!("passbundle-agent{exe}"))
+        );
+        // The Mac app: from the app's own program, the agent's helper app inside it.
+        let app = dir.join("PassBundle.app/Contents");
+        let helper = app.join("Helpers/PassBundle Agent.app/Contents/MacOS");
+        std::fs::create_dir_all(app.join("MacOS")).unwrap();
+        std::fs::create_dir_all(&helper).unwrap();
+        std::fs::write(helper.join("passbundle-agent"), b"").unwrap();
+        let found = agent_next_to(&app.join("MacOS/passbundle"), "PassBundle");
+        if cfg!(target_os = "macos") {
+            assert_eq!(found, helper.join("passbundle-agent"));
+        } else {
+            assert_eq!(found, app.join(format!("MacOS/passbundle-agent{exe}")));
+        }
+        // The host, inside the helper: the agent next to it.
+        assert_eq!(
+            agent_next_to(&helper.join("passbundle-agent-host"), "PassBundle"),
+            helper.join(format!("passbundle-agent{exe}"))
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
