@@ -63,7 +63,7 @@ impl Agent {
         let program = std::env::current_exe().map_err(|_| Error::NoAgent)?;
         Ok((
             passbundle_ipc::address(crate::brand::NAME, crate::brand::DOMAIN),
-            passbundle_ipc::agent_next_to(&program),
+            passbundle_ipc::agent_next_to(&program, crate::brand::NAME),
         ))
     }
 
