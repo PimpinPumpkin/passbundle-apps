@@ -67,6 +67,8 @@ class MainActivity : FlutterActivity() {
                         Biometric.unlock(this) { unlocked, error ->
                             result.success(mapOf("ok" to (error == null), "unlocked" to unlocked, "error" to error))
                         }
+                    // Tests only: debug builds' stand-in for Android's prompt (false in a release build).
+                    "biometricStandIn" -> result.success(Biometric.useStandIn(this, call.argument<Boolean>("on") == true))
                     "biometricRemove" -> {
                         Biometric.remove()
                         result.success(mapOf("ok" to true))

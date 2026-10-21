@@ -41,8 +41,6 @@ Future<void> pumpUntil(
 const server = String.fromEnvironment('PB_TEST_SERVER');
 const email = String.fromEnvironment('PB_TEST_EMAIL');
 const password = String.fromEnvironment('PB_TEST_PASSWORD');
-// Set on an emulator, whose fingerprint sensor the script touches.
-const fingerprintTouched = bool.fromEnvironment('PB_TEST_FINGERPRINT');
 
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
@@ -170,16 +168,14 @@ void main() {
   );
 
   testWidgets(
-    'turns on unlocking with a fingerprint, unlocks with it, and signing out turns it off',
+    'turns on biometric unlock, unlocks with it, and signing out turns it off',
     (tester) async {
-      // An emulator with a fingerprint enrolled (tools/android-enroll-fingerprint.sh),
-      // whose sensor tools/android-app-test.sh touches while this runs. A real
-      // phone has nobody to touch it.
-      final status = await Core.biometricStatus();
-      if (!fingerprintTouched || status['status'] == 'unavailable') {
-        markTestSkipped('No simulated fingerprint on this device.');
-        return;
-      }
+      // Debug builds' stand-in for Android's prompt says yes; the real
+      // prompt is checked by hand on a real phone (docs/phones.md).
+      expect(await Core.useBiometricStandIn(true), isTrue);
+      addTearDown(() => Core.useBiometricStandIn(false));
+      final unlockWith =
+          'Unlock with ${(await Core.biometricStatus())['method']}';
       final dir = (await Core.platform.invokeMethod<String>('filesDir'))!;
       for (final kept in Directory(dir).listSync()) {
         kept.deleteSync(recursive: true);
@@ -194,10 +190,10 @@ void main() {
       await tester.tap(find.text('Unlock'));
       await pumpUntil(tester, find.text('Backup service'));
 
-      // Turning it on: Android asks for the fingerprint, then the user key is sealed.
+      // Turning it on: Android asks (the stand-in, here), then the user key is sealed.
       await tester.tap(find.byTooltip('Settings'));
-      await pumpUntil(tester, find.text('Unlock with fingerprint'));
-      await tester.tap(find.text('Unlock with fingerprint'));
+      await pumpUntil(tester, find.text(unlockWith));
+      await tester.tap(find.text(unlockWith));
       await pumpUntil(
         tester,
         find.byWidgetPredicate(
@@ -213,8 +209,8 @@ void main() {
 
       // Unlocking with it: no master password.
       await tester.tap(find.byTooltip('Lock'));
-      await pumpUntil(tester, find.text('Unlock with fingerprint'));
-      await tester.tap(find.text('Unlock with fingerprint'));
+      await pumpUntil(tester, find.text(unlockWith));
+      await tester.tap(find.text(unlockWith));
       await pumpUntil(tester, find.text('Backup service'));
 
       // Signing out turns it off: the core asks Kotlin to delete the key and the sealed user key.

@@ -2,6 +2,7 @@ package com.passbundle.app
 
 import android.app.Activity
 import android.content.Context
+import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.hardware.biometrics.BiometricManager
 import android.hardware.biometrics.BiometricPrompt
@@ -25,6 +26,11 @@ import javax.crypto.spec.GCMParameterSpec
  * Keystore that needs the person's strong biometrics for every use, and that
  * Android voids when someone adds a fingerprint or face. The user key goes
  * between the core and the Keystore here, never through Dart.
+ *
+ * For tests, debug builds have a stand-in for Android's prompt that says yes,
+ * with a key that needs no biometrics, as the desktop agent's test
+ * authenticator does; release builds refuse it. Real prompts are checked by
+ * hand on real phones.
  */
 object Biometric {
     private const val ALIAS = "passbundle-biometric"
@@ -33,13 +39,27 @@ object Biometric {
     private const val TAG_BITS = 128
 
     private lateinit var files: File
+    private var standIn = false
 
     /** At start: where the sealed user key is kept (the app's own files). */
     fun init(context: Context) {
         files = context.filesDir
+        standIn = debuggable(context) && standInMark.exists()
     }
 
     private val sealed get() = File(files, "biometric.sealed")
+    private val standInMark get() = File(files, "biometric-stand-in")
+
+    private fun debuggable(context: Context) = (context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
+
+    /** Tests only: the stand-in for Android's prompt, kept across the app's processes. False in a release build. */
+    fun useStandIn(context: Context, on: Boolean): Boolean {
+        if (!debuggable(context)) return false
+        remove()
+        standIn = on
+        if (on) standInMark.writeText("") else standInMark.delete()
+        return true
+    }
 
     /** "fingerprint", "face unlock", or "biometrics": what the screens call it. */
     fun method(context: Context): String {
@@ -53,6 +73,7 @@ object Biometric {
 
     /** "setUp", "notSetUp", or "unavailable" (no strong biometrics enrolled on this phone). */
     fun status(context: Context): String {
+        if (standIn) return if (sealed.exists()) "setUp" else "notSetUp"
         val manager = context.getSystemService(BiometricManager::class.java)
         val can =
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
@@ -76,9 +97,10 @@ object Biometric {
                 .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
                 .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
                 .setKeySize(256)
-                .setUserAuthenticationRequired(true)
-                .setInvalidatedByBiometricEnrollment(true)
                 .apply {
+                    if (standIn) return@apply
+                    setUserAuthenticationRequired(true)
+                    setInvalidatedByBiometricEnrollment(true)
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                         setUserAuthenticationParameters(0, KeyProperties.AUTH_BIOMETRIC_STRONG)
                     }
@@ -119,6 +141,7 @@ object Biometric {
         cipher: Cipher,
         done: (Cipher?, String?) -> Unit,
     ) {
+        if (standIn) return done(cipher, null)
         val executor = activity.mainExecutor
         val builder =
             BiometricPrompt.Builder(activity)

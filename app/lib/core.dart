@@ -243,6 +243,12 @@ class Core {
       ? Answer(await _onPhone('biometricRemove'))
       : _background((c) => c._answer(c._bioRemove()));
 
+  /// For the phone tests: debug builds' stand-in for Android's biometric
+  /// prompt, which says yes (Biometric.kt). False in a release build.
+  static Future<bool> useBiometricStandIn(bool on) async =>
+      await platform.invokeMethod<bool>('biometricStandIn', {'on': on}) ??
+      false;
+
   /// For tests: the agent with this home folder and program, instead of the installed one.
   void useAgentHome(String home, String program) =>
       _with([home, program], (p) => _answer(_useAgentHome(p[0], p[1])));

@@ -112,6 +112,43 @@ pub fn unlock_with_key<'caller>(
         .resolve::<ThrowRuntimeExAndDefault>()
 }
 
+/// Opens the core on the app's own folder unless it's open: the autofill
+/// service can start the app's process without its screens (or Dart).
+#[cfg(feature = "ffi")]
+#[jni_mangle("com.passbundle.app.Core")]
+pub fn open_if_closed<'caller>(
+    mut unowned_env: EnvUnowned<'caller>,
+    _class: JClass<'caller>,
+    dir: JString<'caller>,
+) {
+    unowned_env
+        .with_env(|env| -> JniResult<()> {
+            crate::ffi::open_if_closed(&dir.try_to_string(env)?);
+            Ok(())
+        })
+        .resolve::<ThrowRuntimeExAndDefault>();
+}
+
+/// The logins for an app (its package name) or a page (its domain, when a
+/// browser gives one), as JSON: names and usernames only, never a password
+/// (docs/phones.md, "Autofill").
+#[cfg(feature = "ffi")]
+#[jni_mangle("com.passbundle.app.Core")]
+pub fn fillable<'caller>(
+    mut unowned_env: EnvUnowned<'caller>,
+    _class: JClass<'caller>,
+    package: JString<'caller>,
+    domain: JString<'caller>,
+) -> jstring {
+    unowned_env
+        .with_env(|env| -> JniResult<jstring> {
+            let answer =
+                crate::ffi::fillable(&package.try_to_string(env)?, &domain.try_to_string(env)?);
+            Ok(env.new_string(answer.to_string())?.into_raw())
+        })
+        .resolve::<ThrowRuntimeExAndDefault>()
+}
+
 /// Turns biometric unlock off: Kotlin deletes its Keystore key and the user
 /// key it sealed (signing out, or a key that's out of date).
 pub(crate) fn remove_biometric() {

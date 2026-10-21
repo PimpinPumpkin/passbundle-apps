@@ -360,6 +360,48 @@ pub(crate) fn value_for_copy(id: &str, what: &str) -> Option<Zeroizing<String>> 
     guard.as_ref()?.value(id, what).ok()
 }
 
+/// Opens the core on the Android app's folder, unless it's open already: the
+/// autofill service can start the app's process without its screens.
+#[cfg(target_os = "android")]
+pub(crate) fn open_if_closed(dir: &str) {
+    let mut guard = APP.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if guard.is_none() {
+        let secrets = Box::new(OsSecretStore::new(std::path::Path::new(dir)));
+        *guard = Some(App::open(Store::new(dir), secrets));
+    }
+}
+
+/// The logins for an Android app or the page a browser shows, for its
+/// autofill (android.rs): names and usernames only. `locked` while there's no
+/// open vault, and `busy` while a slow call has the app.
+#[cfg(target_os = "android")]
+pub(crate) fn fillable(package: &str, domain: &str) -> Value {
+    use crate::matching::Target;
+    let guard = match APP.try_lock() {
+        Ok(guard) => guard,
+        Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        Err(TryLockError::WouldBlock) => return json!({ "busy": true }),
+    };
+    let Some(app) = guard.as_ref() else {
+        return json!({ "locked": true, "signedOut": true });
+    };
+    let Some(vault) = app.vault() else {
+        let signed_out = matches!(app.state(), State::SignedOut { .. });
+        return json!({ "locked": true, "signedOut": signed_out });
+    };
+    let target = if domain.is_empty() {
+        Target::App(package)
+    } else {
+        Target::Website(domain)
+    };
+    let items: Vec<Value> = vault
+        .matching(&target)
+        .iter()
+        .map(|i| json!({ "id": i.id, "name": i.name, "username": i.username }))
+        .collect();
+    json!({ "locked": false, "items": items })
+}
+
 /// The unlocked vault's user key, for the Android app to seal for biometric
 /// unlock (android.rs). None while locked or busy.
 #[cfg(target_os = "android")]

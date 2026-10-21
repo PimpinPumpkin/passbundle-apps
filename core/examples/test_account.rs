@@ -1,4 +1,4 @@
-//! A throwaway account on a test server, with one login in its vault, for
+//! A throwaway account on a test server, with two logins in its vault, for
 //! tests that sign in from elsewhere (the phone app's test,
 //! tools/android-app-test.sh). Signs up as an app would, then saves the item
 //! through the core.
@@ -41,6 +41,20 @@ fn main() {
         &[],
     )
     .expect("saving the item");
+    // For the autofill test's sign-in form (tools/android-autofill-test.sh):
+    // a login for its app, by the app's own androidapp:// link.
+    app.save(
+        None,
+        &ItemDraft {
+            name: "Autofill test app".into(),
+            username: Some("autofill@example.test".into()),
+            password: Some(Zeroizing::new("not-a-real-password-autofill".into())),
+            uris: vec!["androidapp://com.passbundle.autofilltest".into()],
+            ..Default::default()
+        },
+        &[],
+    )
+    .expect("saving the autofill item");
     let _ = std::fs::remove_dir_all(dir);
     println!("{email}");
 }

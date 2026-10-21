@@ -22,4 +22,10 @@ object Core {
 
     /** Opens the kept vault with the user key biometric unlock opened: "" if it opened, else the words to show. */
     @JvmStatic external fun unlockWithKey(key: ByteArray): String?
+
+    /** Opens the core on the app's own folder unless it's open (autofill can start the app without its screens). */
+    @JvmStatic external fun openIfClosed(dir: String)
+
+    /** The logins for an app or a page, as JSON: names and usernames only (Responses.kt). */
+    @JvmStatic external fun fillable(packageName: String, webDomain: String): String?
 }

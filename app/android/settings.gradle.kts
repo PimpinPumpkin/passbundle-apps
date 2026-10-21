@@ -24,3 +24,5 @@ plugins {
 }
 
 include(":app")
+// A sign-in form PassBundle fills in the autofill test (tools/android-autofill-test.sh).
+include(":autofilltest")
