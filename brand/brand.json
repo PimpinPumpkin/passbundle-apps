@@ -1,0 +1,21 @@
+{
+  "name": "PassBundle",
+  "nameFull": "PassBundle Password Manager",
+  "company": "PassBundle",
+  "domain": "passbundle.com",
+  "color": "#1F6F5C",
+  "urls": {
+    "website": "https://passbundle.com",
+    "help": "https://passbundle.com/help",
+    "api": "https://vault.passbundle.com/api",
+    "identity": "https://vault.passbundle.com/identity",
+    "icons": "https://vault.passbundle.com/icons",
+    "webVault": "https://vault.passbundle.com",
+    "notifications": "https://vault.passbundle.com/notifications",
+    "events": "https://vault.passbundle.com/events",
+    "scim": "https://vault.passbundle.com/scim/v2",
+    "send": "https://vault.passbundle.com/#/send/"
+  },
+  "installScript": "Install-PassBundle.ps1",
+  "nativeMessagingHost": "com.passbundle.agent"
+}

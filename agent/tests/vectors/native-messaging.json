@@ -1,0 +1,31 @@
+{
+  "about": "Test vectors for the native-messaging channel between the extension and the desktop agent. TEST KEYS ONLY. See DESIGN.md, \"Biometric unlock\".",
+  "sessionKey": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0+Pw==",
+  "messages": [
+    {
+      "iv": "oKGio6SlpqeoqaqrrK2urw==",
+      "plaintext": "{\"command\":\"unlockWithBiometricsForUser\",\"messageId\":7,\"userId\":\"3f1c2a64-8d0e-4b7f-9a55-6c2e1d0b9f10\",\"timestamp\":1760000000000}",
+      "encString": "2.oKGio6SlpqeoqaqrrK2urw==|qzdrs+/mh4hKdwJbRV/o1whNbfE2hcCIP7c5Cz9z0jOe/NSV/a1NfsbTzFOQ846ufX/yZ0tYBY5uMep2Xrom3p4s0dk/8usaYvrG2lJFwUcwaa+1ev1oyIPTxJUCRWSb86olAe6YDy9ncStRF5mTUxa7diPlUAne4xOueg4DrujRcv86IDxVxFmyYS0aZ2b5|zOcrgQFIlgFTBSLas8egGf/sG/ndcC5JnAiHuAhTRIU="
+    },
+    {
+      "iv": "sLGys7S1tre4ubq7vL2+vw==",
+      "plaintext": "{\"command\":\"unlockWithBiometricsForUser\",\"messageId\":7,\"response\":true,\"timestamp\":1760000000500,\"userKeyB64\":\"QEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaW1xdXl9gYWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXp7fH1+fw==\"}",
+      "encString": "2.sLGys7S1tre4ubq7vL2+vw==|KKmCCxUypHWkcgiKelorOXNgR/9S42bycO4qey9+JDXvJOF8gxX8yPV/NuE6pZABbC3JqLp1q4Psrfl+tXWV6tpGDSqE1eGD8jtCLh5sLbb7c1ZvxJKOvmP941mwa/iizTvGPj0N9WSXK4HEgC4QJGLqLHi2NeVYb8BMWI3UpcTazYyljqrSEYG5gUdsHXqrQj6Ee2OZHWHfRTWqTNV7D0Lb+zOzzkypwV4w/ihOaVQ2Z/ZSM83Vw3nOrfCm4M+iMcSrouz4TMzPfXiFHxDcUA==|6l6AzCobusiQRX+oQOp7IdbDwtJ7JGW6/v7uWoH0x6k="
+    },
+    {
+      "iv": "wMHCw8TFxsfIycrLzM3Ozw==",
+      "plaintext": "0123456789abcdef0123456789abcdef",
+      "encString": "2.wMHCw8TFxsfIycrLzM3Ozw==|h1KmqSRTayE0qVrQLTtDrDyDrfgYr+CcJcurOQJcBg94aIj2P4FxMn8ion5xIEGH|7lG2HhXVgPQXdmTpAko5zdn7mG4ZpJTzOUrmsFrLB70="
+    },
+    {
+      "iv": "0NHS09TV1tfY2drb3N3e3w==",
+      "plaintext": "Ünïcödé ✓ 鍵",
+      "encString": "2.0NHS09TV1tfY2drb3N3e3w==|sM9rjnGM6bbueME7LRnUslvaq5S0zUWnZ13gqR9wwTA=|sYPxaTJoCHz05Dnb05VCkyeSGZhiPArqn8dapvyhtkw="
+    }
+  ],
+  "rsa": {
+    "publicKeySpki": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEArF74xMuAij7H9PAlpPtVhVcy6IXhvZRRXwN8K/+Zv//BpVTMcGrOrlS5aLUbz+k47+Yq2hC+uUEnYeeRVFYVtr0r9pxbruqLCBHvnoDLyXJuZhgplScqma5qkZKhiMzLywWRHrEvkExJNZjpdVHhXauUPk1tgHMTGLBSp7KntH1ON6tozTPUJ2K0IsfBFbSkFEJZNwVCYXsKeXgLncHmHC0kzew3ck0hOuv/Cs4SnA67VNuCm4KOhgHtkBej3SqyX/nM3bq9784CJp5+L8dxzd9Z0dhj3GcsXrYVSHC6+7JSmDvut4KNjUql55Vu6jyEGG3SUXazIm3mNx5PAhJH2QIDAQAB",
+    "privateKeyPkcs8": "MIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQCsXvjEy4CKPsf08CWk+1WFVzLoheG9lFFfA3wr/5m//8GlVMxwas6uVLlotRvP6Tjv5iraEL65QSdh55FUVhW2vSv2nFuu6osIEe+egMvJcm5mGCmVJyqZrmqRkqGIzMvLBZEesS+QTEk1mOl1UeFdq5Q+TW2AcxMYsFKnsqe0fU43q2jNM9QnYrQix8EVtKQUQlk3BUJhewp5eAudweYcLSTN7DdyTSE66/8KzhKcDrtU24Kbgo6GAe2QF6PdKrJf+czdur3vzgImnn4vx3HN31nR2GPcZyxethVIcLr7slKYO+63go2NSqXnlW7qPIQYbdJRdrMibeY3Hk8CEkfZAgMBAAECggEAIO24sOGecep56Pcafei8pu8oTMbMv9pubAv+o+odjVH2xJaNQpmI18FcNR5KDJ8lbyDlhUiHIt1JQHkMKJQUbFc5p5AprKHmQvmoMLuyko5/fBX4FaQIjZjGB36/SKK0+NkcpsQbDcIhBzHpwW2Ns8cEGB3TAiOZnZELjTlCM+ae1bff2X3cNIDor4rbJ9HFE/NN0PEFz9ZThRMxwJOHyy0zNfr/iWLMvZfIwX8TqPvoUXMCvb6ToS/28Oui162xKT4+RLI65cPH+DG/lyhZHwDOLpuTOtUPJjNHRf7hA/2lreRVK71CgsVfBkWlBnVmtc3F3wn4Ptr0ExIMXd+p/QKBgQDdJZ2inlrfMiXZ6WvLIiMs6XlLLrM9J6xhNq1Tf4qJ0saKFm5N0Bx2zF4M4HvkWp5GikgJlBuSzG8bUrOgLrBomyQN4IVzoBTUwhQRPY/vgFfcS/NiogBboI8sW3bIDOVus+LuH5m8y2pRCHWPlx5i840BTetS7iqq/hEttkfpFQKBgQDHiXGQB6+VATz4pBhnEyAqu/i1M+SB8wpDljbN2858qAMstahSH6Z3qZTTGCwIRdWLHjXrscF3h8AzyGMs/qrvvn+ElN0WVV+ck9t6wWD3UqsSFRg+s25Di9D9PCBS7Vr/iVWxkROCnvbajkAbcFQnaDZ5L0PNlRqbuvkx4XeMtQKBgGQ4+PDK/XnrmzXf0IdV6EUhZmQJPRf5E+lWw0R1J88AZBQOyFyhdVTtl64USnGaE+L6Jl2Y7softjbWyytMHYy6yqMzXqehI++sKTYLBWFQdAEVtq67ppff8yLyLKnLFmuOQMkULzNdqMgioky5+v5zTDMMIhsKbvHhhN2Hn51lAoGAUBI0kyKyb+3mRLS84igHoX566GQhj5AzDzopVeSd8OIPHBLtr77ps11GzosFqHA1qDUAWEulokzEcUM5oSW0/K4KR+7g5YRu8MtYqOMPAVCYO5Jhf0/LsKlbvTMymXSMLr0yuSXJmYIm9z9cNGaYLpQgP/Mal1X9Ln8SXtTmf30CgYAl18HAUxxw1ka1A/WkO8SfPFE7a5exEGDB/XxZoO/lQTW8o17B1k2IDDP1NPcOwSV1A+L9aOC1biATUkGOoO27VxId1gnqDSnJTxaJTMhBtWI9TQe71z49+MWoe+X6HgsSFx8bXdWk5i9yswXuB4tgudHxGyy5SPjHOyIWgPt+ZA==",
+    "wrappedSessionKey": "Z2Zs130OsaCJliYU8JudzUL9pB8WzjcMk5iNmqjdT/C0xyMK4xUSJ0jV/t5HTHeTuG1M16CcSV0ZSqINOGCHwzVjFyRzriDzulzf6HuoVtI0H4uxnYIGPTlxFJXWiN9VatLlKEfI3sTbfnrAHwD0D6uP/Wn37lVxa+kZu/UifRXlHg6JJ8W0Kb2kvVnCGtp2ldojnsVNmFKErnXZgSHoj68cXAJNlzVxiVUBm9akq5DvPCrJtLbwknik0sp1viU6HoYt7Woa/LJBUSEiOhcOglmBGEiHN9ATjDMqOe+/NNMfi32GkI7FzdGjG/b4U4sauv+sfUgVP5/5ssTujAALqQ=="
+  }
+}
