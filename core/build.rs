@@ -1,9 +1,18 @@
 // Bakes the brand (../brand/brand.json, shared with the agent) into the core:
-// the agent's socket address is named after it.
+// the agent's socket address is named after it. Also sets `cfg(phone)` for
+// Android and iOS, where the OS's own APIs stand in for the desktop's
+// clipboard and secret store (docs/phones.md).
 
 use std::{env, fs, path::Path};
 
 fn main() {
+    println!("cargo::rustc-check-cfg=cfg(phone)");
+    if matches!(
+        env::var("CARGO_CFG_TARGET_OS").as_deref(),
+        Ok("android" | "ios")
+    ) {
+        println!("cargo::rustc-cfg=phone");
+    }
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let brand_path = root.join("../brand/brand.json");
     println!("cargo:rerun-if-changed={}", brand_path.display());

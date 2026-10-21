@@ -1,2 +1,5 @@
 .DS_Store
 core/target/
+
+# The core built for Android (tools/android-core.sh build).
+app/android/app/src/main/jniLibs/
