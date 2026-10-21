@@ -14,6 +14,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use serde_json::{json, Value};
 use zeroize::Zeroizing;
 
+use crate::agent::Status;
 use crate::app::{App, State, Step};
 use crate::error::Error;
 use crate::generator;
@@ -137,6 +138,80 @@ pub unsafe extern "C" fn pb_open(dir: *const c_char, memory_secrets: bool) -> *m
     *APP.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) =
         Some(App::open(Store::new(dir), secrets));
     with_app(|app| state(app))
+}
+
+/// Talks to the agent whose home folder is `home` and whose program is
+/// `program`, instead of the one installed next to the app: for tests.
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_use_agent_home(
+    home: *const c_char,
+    program: *const c_char,
+) -> *mut c_char {
+    let (home, program) = (text(home), text(program));
+    with_app(|app| {
+        let address = passbundle_ipc::address_for(
+            std::ffi::OsStr::new(&home),
+            crate::brand::NAME,
+            crate::brand::DOMAIN,
+        );
+        app.use_agent_at(address, program.into());
+        json!({ "ok": true })
+    })
+}
+
+/// What unlocking with the OS's biometrics is called here.
+fn method() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "Windows Hello"
+    } else if cfg!(target_os = "macos") {
+        "Touch ID"
+    } else {
+        "biometrics"
+    }
+}
+
+/// Whether this account can unlock with Windows Hello or Touch ID here:
+/// "setUp", "notSetUp", "unavailable", or "noAgent" (the desktop agent isn't
+/// running), with the method's name.
+#[no_mangle]
+pub extern "C" fn pb_biometric_status() -> *mut c_char {
+    with_app(|app| {
+        let status = match app.biometric_status() {
+            Ok(Status::SetUp) => "setUp",
+            Ok(Status::NotSetUp) => "notSetUp",
+            Ok(Status::Unavailable) => "unavailable",
+            Err(Error::NoAgent) => "noAgent",
+            Err(_) => "unavailable",
+        };
+        json!({ "status": status, "method": method() })
+    })
+}
+
+/// Turns it on (the agent asks); `on` says whether the person agreed.
+#[no_mangle]
+pub extern "C" fn pb_biometric_enroll() -> *mut c_char {
+    with_app(|app| match app.enroll_biometric() {
+        Ok(on) => json!({ "ok": true, "on": on }),
+        Err(e) => failed(e),
+    })
+}
+
+/// Unlocks with it (the agent asks); `unlocked` is false if the person cancelled.
+#[no_mangle]
+pub extern "C" fn pb_biometric_unlock() -> *mut c_char {
+    with_app(|app| match app.unlock_with_biometric() {
+        Ok(unlocked) => json!({ "ok": true, "unlocked": unlocked }),
+        Err(e) => failed(e),
+    })
+}
+
+/// Turns it off, for the browser extension too.
+#[no_mangle]
+pub extern "C" fn pb_biometric_remove() -> *mut c_char {
+    with_app(|app| done(app.remove_biometric()))
 }
 
 #[no_mangle]

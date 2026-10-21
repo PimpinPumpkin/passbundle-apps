@@ -38,14 +38,21 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: The OS secret store's headers (Linux)
+      - name: The OS secret store's and TLS headers (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libdbus-1-dev pkg-config
-      - name: Install the pinned Rust toolchain
-        run: rustup toolchain install
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libdbus-1-dev libssl-dev pkg-config
+      - name: Install the pinned Rust toolchains
+        run: |
+          rustup toolchain install
+          (cd ../agent && rustup toolchain install)
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          workspaces: core
+          workspaces: |
+            core
+            agent
+      - name: The agent's test build, for the core's agent tests
+        working-directory: agent
+        run: cargo build --locked --features test-authenticator
       - name: No Bitwarden crates
         run: ../tools/check-no-bitwarden-crates.sh
       - name: Formatting
@@ -54,11 +61,12 @@ jobs:
         run: |
           cargo clippy --locked --all-targets -- -D warnings
           cargo clippy --locked --all-targets --features ffi -- -D warnings
-      - name: Tests (the vectors, and the real clipboard where there's a desktop)
+      - name: Tests (the vectors, a real agent, and the real clipboard where there's a desktop)
         env:
           PB_TEST_CLIPBOARD: ${{ runner.os != 'Linux' && '1' || '' }}
         run: |
           [ -n "$PB_TEST_CLIPBOARD" ] || unset PB_TEST_CLIPBOARD
+          export PB_TEST_AGENT="$GITHUB_WORKSPACE/agent/target/debug/passbundle-agent$( [ "$RUNNER_OS" = Windows ] && echo .exe)"
           cargo test --locked
 
   agent:
@@ -100,6 +108,13 @@ jobs:
           cargo clippy --locked --all-targets --features test-authenticator -- -D warnings
       - name: Unit tests
         run: cargo test --locked
+      - name: The shared socket crate (../ipc)
+        working-directory: ipc
+        run: |
+          cargo fmt --check
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo clippy --locked --all-targets --features test-home -- -D warnings
+          cargo test --locked
       - name: The agent and the native-messaging host as separate processes
         # With the stand-in authenticator, which release builds refuse.
         run: cargo test --locked --features test-authenticator --test host
@@ -230,12 +245,19 @@ jobs:
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          workspaces: core
+          workspaces: |
+            core
+            agent
       - name: Linux build tools and a virtual display
         if: matrix.platform == 'linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends clang cmake ninja-build pkg-config libgtk-3-dev libdbus-1-dev xvfb imagemagick
+          sudo apt-get install -y --no-install-recommends clang cmake ninja-build pkg-config libgtk-3-dev libdbus-1-dev libssl-dev xvfb imagemagick
+      - name: The agent's test build, for the app's unlock test
+        working-directory: agent
+        run: |
+          rustup toolchain install
+          cargo build --locked --features test-authenticator
       - name: Build the core
         working-directory: core
         run: |
@@ -267,7 +289,9 @@ jobs:
         run: $FLUTTER analyze
       - name: Tests, against the real core
         working-directory: app
-        run: PB_CORE_LIB="$GITHUB_WORKSPACE/${{ matrix.lib }}" $FLUTTER test --exclude-tags screenshots
+        run: |
+          export PB_TEST_AGENT="$GITHUB_WORKSPACE/agent/target/debug/passbundle-agent$( [ "$RUNNER_OS" = Windows ] && echo .exe)"
+          PB_CORE_LIB="$GITHUB_WORKSPACE/${{ matrix.lib }}" $FLUTTER test --exclude-tags screenshots
       - name: Build
         working-directory: app
         run: $FLUTTER build ${{ matrix.platform }} --release

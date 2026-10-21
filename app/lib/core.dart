@@ -62,6 +62,21 @@ class Core {
         Pointer<Utf8> Function(Pointer<Utf8>, bool)
       >('pb_open');
   late final _version = _lib.lookupFunction<_Str0, _Str0>('pb_version');
+  late final _useAgentHome = _lib.lookupFunction<_Str2, _Str2>(
+    'pb_use_agent_home',
+  );
+  late final _bioStatus = _lib.lookupFunction<_Str0, _Str0>(
+    'pb_biometric_status',
+  );
+  late final _bioEnroll = _lib.lookupFunction<_Str0, _Str0>(
+    'pb_biometric_enroll',
+  );
+  late final _bioUnlock = _lib.lookupFunction<_Str0, _Str0>(
+    'pb_biometric_unlock',
+  );
+  late final _bioRemove = _lib.lookupFunction<_Str0, _Str0>(
+    'pb_biometric_remove',
+  );
   late final _state = _lib.lookupFunction<_Str0, _Str0>('pb_state');
   late final _signIn = _lib.lookupFunction<_Str3, _Str3>('pb_sign_in');
   late final _finish = _lib.lookupFunction<_FinishNative, _Finish>(
@@ -161,6 +176,32 @@ class Core {
           jsonEncode(draft),
         ], (p) => c._answer(c._save(p[0], p[1]))),
       );
+
+  /// Unlocking with Windows Hello or Touch ID, through the desktop agent:
+  /// `status` is setUp, notSetUp, unavailable, or noAgent, and `method` its name.
+  static Future<Map<String, dynamic>> biometricStatus() async =>
+      Map<String, dynamic>.from(
+        await Isolate.run(() {
+          final core = Core();
+          return core._answer(core._bioStatus()) as Map;
+        }),
+      );
+
+  /// Turns it on (the agent asks); `on` says whether the person agreed.
+  static Future<Answer> enrollBiometric() =>
+      _background((c) => c._answer(c._bioEnroll()));
+
+  /// Unlocks with it; `unlocked` is false if the person cancelled.
+  static Future<Answer> unlockWithBiometric() =>
+      _background((c) => c._answer(c._bioUnlock()));
+
+  /// Turns it off, for the browser extension too.
+  static Future<Answer> removeBiometric() =>
+      _background((c) => c._answer(c._bioRemove()));
+
+  /// For tests: the agent with this home folder and program, instead of the installed one.
+  void useAgentHome(String home, String program) =>
+      _with([home, program], (p) => _answer(_useAgentHome(p[0], p[1])));
 
   static Future<Answer> trash(String id) =>
       _background((c) => c._with([id], (p) => c._answer(c._trash(p[0]))));

@@ -9,6 +9,7 @@ import 'package:flutter/services.dart';
 
 import 'core.dart';
 import 'editor.dart';
+import 'settings.dart';
 import 'theme.dart';
 import 'widgets.dart';
 
@@ -423,6 +424,7 @@ class Sidebar extends StatelessWidget {
             child: Row(
               children: [
                 ThemeMenu(mode: mode, onMode: onMode, color: c.sidebarText),
+                SettingsButton(color: c.sidebarText),
                 const Spacer(),
                 TextButton.icon(
                   onPressed: onLock,
@@ -469,6 +471,7 @@ class PhoneHeader extends StatelessWidget {
           ),
         ),
         ThemeMenu(mode: mode, onMode: onMode),
+        const SettingsButton(),
         IconButton(
           tooltip: 'Lock',
           icon: const Icon(Icons.lock_outline_rounded),

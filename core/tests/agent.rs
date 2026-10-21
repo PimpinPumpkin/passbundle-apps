@@ -174,3 +174,65 @@ fn refuses_a_program_pretending_to_be_the_agent() {
         Some(Error::NoAgent)
     );
 }
+
+#[test]
+fn the_app_turns_it_on_unlocks_with_it_and_signing_out_turns_it_off() {
+    use passbundle_core::app::{App, State};
+    use passbundle_core::secrets::MemorySecretStore;
+    use passbundle_core::store::{Settings, Store};
+
+    let Some(agent) = TestAgent::start() else {
+        return;
+    };
+    // The vectors' sample vault, kept on this device as if signed in.
+    let v: serde_json::Value = serde_json::from_str(include_str!("vectors/core-v1.json")).unwrap();
+    let pre = &v["account"]["pbkdf2"]["prelogin"];
+    let dir = std::env::temp_dir().join(format!(
+        "pb-core-app-agent-{}",
+        uuid::Uuid::new_v4().simple()
+    ));
+    let store = Store::new(&dir);
+    store
+        .save_settings(&Settings {
+            server: "https://vault.example.test".into(),
+            email: v["account"]["salt"].as_str().unwrap().into(),
+            kdf: 0,
+            kdf_iterations: pre["kdfIterations"].as_u64().unwrap() as u32,
+            kdf_memory: None,
+            kdf_parallelism: None,
+            device_identifier: "d".into(),
+        })
+        .unwrap();
+    store.save_sync(&v["sync"].to_string()).unwrap();
+    let mut app = App::open(store, Box::new(MemorySecretStore::default()));
+    app.use_agent_at(agent.address.clone(), agent.program.clone());
+
+    assert_eq!(app.biometric_status().unwrap(), Status::NotSetUp);
+    app.unlock(v["account"]["password"].as_str().unwrap())
+        .unwrap();
+    agent.answers(&[true]);
+    assert!(app.enroll_biometric().unwrap());
+    app.lock();
+    assert!(matches!(app.state(), State::Locked { .. }));
+
+    // Unlocked with the agent's key, no master password, no KDF.
+    assert_eq!(app.biometric_status().unwrap(), Status::SetUp);
+    agent.answers(&[true]);
+    assert!(app.unlock_with_biometric().unwrap());
+    assert!(matches!(app.state(), State::Unlocked { .. }));
+    assert_eq!(app.vault().unwrap().items.len(), 4);
+
+    app.sign_out();
+    assert_eq!(
+        Agent::connect(
+            &agent.address,
+            &agent.program,
+            v["sync"]["profile"]["id"].as_str().unwrap()
+        )
+        .unwrap()
+        .status()
+        .unwrap(),
+        Status::NotSetUp
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
