@@ -152,7 +152,20 @@ jobs:
           sudo apt-get install -y --no-install-recommends clang cmake ninja-build pkg-config libgtk-3-dev libdbus-1-dev xvfb imagemagick
       - name: Build the core
         working-directory: core
-        run: cargo build --locked --release --features ffi
+        run: |
+          if [ "${{ matrix.platform }}" = macos ]; then
+            # The Mac app is universal (Apple silicon and Intel), so the core is too.
+            rustup target add aarch64-apple-darwin x86_64-apple-darwin
+            cargo build --locked --release --features ffi --target aarch64-apple-darwin
+            cargo build --locked --release --features ffi --target x86_64-apple-darwin
+            mkdir -p target/release
+            lipo -create -output target/release/libpassbundle_core.dylib \
+              target/aarch64-apple-darwin/release/libpassbundle_core.dylib \
+              target/x86_64-apple-darwin/release/libpassbundle_core.dylib
+            lipo -info target/release/libpassbundle_core.dylib
+          else
+            cargo build --locked --release --features ffi
+          fi
       - name: Install Flutter at the pinned release
         run: |
           git clone --quiet --depth 1 --branch "$FLUTTER_VERSION" https://github.com/flutter/flutter.git "$RUNNER_TEMP/flutter"
