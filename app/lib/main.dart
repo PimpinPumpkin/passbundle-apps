@@ -38,6 +38,10 @@ void main() {
       report('first-frame ${DateTime.now().microsecondsSinceEpoch}');
     });
   }
+  // The tray, and Windows Hello with it, come from the desktop agent.
+  if (!measuring && (Platform.isWindows || Platform.isMacOS)) {
+    Core.startAgent();
+  }
   runApp(const PassBundleApp());
 }
 

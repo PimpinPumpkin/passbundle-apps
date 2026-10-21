@@ -65,6 +65,7 @@ class Core {
   late final _useAgentHome = _lib.lookupFunction<_Str2, _Str2>(
     'pb_use_agent_home',
   );
+  late final _startAgent = _lib.lookupFunction<_Str0, _Str0>('pb_start_agent');
   late final _bioStatus = _lib.lookupFunction<_Str0, _Str0>(
     'pb_biometric_status',
   );
@@ -186,6 +187,11 @@ class Core {
           return core._answer(core._bioStatus()) as Map;
         }),
       );
+
+  /// Starts the desktop agent installed next to the app if it isn't running
+  /// (its tray, and Windows Hello). Windows and macOS, where the tray is.
+  static Future<Answer> startAgent() =>
+      _background((c) => c._answer(c._startAgent()));
 
   /// Turns it on (the agent asks); `on` says whether the person agreed.
   static Future<Answer> enrollBiometric() =>

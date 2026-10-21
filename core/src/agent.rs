@@ -67,6 +67,23 @@ impl Agent {
         ))
     }
 
+    /// Starts the agent installed next to this program when it isn't running,
+    /// so its tray is there (and Windows Hello with it). It keeps running when
+    /// the app closes; only one runs per person. Returns whether it started one.
+    pub fn start_installed() -> Result<bool> {
+        let (address, program) = Agent::installed()?;
+        if passbundle_ipc::connect(&address).is_ok() {
+            return Ok(false);
+        }
+        if !program.is_file() {
+            return Err(Error::NoAgent);
+        }
+        std::process::Command::new(&program)
+            .spawn()
+            .map(|_| true)
+            .map_err(|e| Error::Network(format!("the desktop agent didn't start ({e})")))
+    }
+
     /// Connects to the agent at `address`, which must be the program at
     /// `expected`, and sets up the encrypted channel for `user_id`.
     pub fn connect(address: &Path, expected: &Path, user_id: &str) -> Result<Agent> {
