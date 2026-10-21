@@ -1,5 +1,12 @@
 package com.passbundle.app
 
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.os.Build
+import android.os.Bundle
+import android.view.WindowManager
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -10,8 +17,33 @@ import io.flutter.plugin.common.MethodChannel
  * copying straight from the core to the clipboard.
  */
 class MainActivity : FlutterActivity() {
+    private var screenOff: BroadcastReceiver? = null
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        // The vault stays out of screenshots, screen recordings, and the
+        // app switcher's preview (docs/phones.md, "Locking").
+        window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+    }
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        // The phone locking (its screen going off) is the computer sleeping:
+        // the app locks if the person chose that (main.dart).
+        val computer = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "passbundle/computer")
+        screenOff =
+            object : BroadcastReceiver() {
+                override fun onReceive(context: Context, intent: Intent) {
+                    computer.invokeMethod("sleeping", null)
+                }
+            }.also {
+                val filter = IntentFilter(Intent.ACTION_SCREEN_OFF)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    registerReceiver(it, filter, Context.RECEIVER_NOT_EXPORTED)
+                } else {
+                    registerReceiver(it, filter)
+                }
+            }
         Core.init(applicationContext)
         Biometric.init(applicationContext)
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "passbundle/platform")
@@ -42,5 +74,11 @@ class MainActivity : FlutterActivity() {
                     else -> result.notImplemented()
                 }
             }
+    }
+
+    override fun cleanUpFlutterEngine(flutterEngine: FlutterEngine) {
+        screenOff?.let { unregisterReceiver(it) }
+        screenOff = null
+        super.cleanUpFlutterEngine(flutterEngine)
     }
 }

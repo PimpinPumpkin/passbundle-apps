@@ -341,6 +341,16 @@ impl App {
         Some(reason)
     }
 
+    /// The app left the screen (a phone's app switcher or home): locks if the
+    /// person chose "Immediately". Returns whether it locked.
+    pub fn left(&mut self) -> bool {
+        if self.vault.is_none() || !self.preferences.immediately() {
+            return false;
+        }
+        self.lock();
+        true
+    }
+
     /// The OS says the computer is about to sleep: locks if the person chose
     /// that. Returns whether it locked.
     pub fn sleeping(&mut self) -> bool {

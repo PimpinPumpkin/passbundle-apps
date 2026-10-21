@@ -29,6 +29,8 @@ static APP: Mutex<Option<App>> = Mutex::new(None);
 /// The OS said the computer is going to sleep while a slow call had the app:
 /// the app hears it as soon as that call is done.
 static SLEEP_NOTICE: AtomicBool = AtomicBool::new(false);
+/// The same for the app leaving the screen (a phone's "Immediately").
+static LEFT_NOTICE: AtomicBool = AtomicBool::new(false);
 
 fn text(ptr: *const c_char) -> String {
     if ptr.is_null() {
@@ -90,14 +92,20 @@ fn on_app(mut guard: MutexGuard<'_, Option<App>>, call: impl FnOnce(&mut App) ->
         let dir = Store::default_dir();
         App::open(Store::new(&dir), secrets(&dir))
     });
-    if SLEEP_NOTICE.swap(false, Ordering::SeqCst) {
-        app.sleeping();
-    }
+    notices(app);
     let value = call(app);
+    notices(app);
+    value
+}
+
+/// What the OS said while a slow call had the app.
+fn notices(app: &mut App) {
     if SLEEP_NOTICE.swap(false, Ordering::SeqCst) {
         app.sleeping();
     }
-    value
+    if LEFT_NOTICE.swap(false, Ordering::SeqCst) {
+        app.left();
+    }
 }
 
 fn secrets(dir: &std::path::Path) -> Box<dyn SecretStore> {
@@ -432,6 +440,20 @@ pub extern "C" fn pb_tick() -> *mut c_char {
         json!({ "busy": false, "locked": !unlocked(app), "reason": reason.map(|r| r.name()) })
     })
     .unwrap_or_else(|| out(json!({ "busy": true, "locked": false })))
+}
+
+/// The app left the screen (a phone's app switcher or home): locks now if the
+/// person chose "Immediately". `locked` says whether the vault is locked now.
+#[no_mangle]
+pub extern "C" fn pb_left() -> *mut c_char {
+    with_app_now(|app| {
+        app.left();
+        json!({ "busy": false, "locked": !unlocked(app) })
+    })
+    .unwrap_or_else(|| {
+        LEFT_NOTICE.store(true, Ordering::SeqCst);
+        out(json!({ "busy": true, "locked": false }))
+    })
 }
 
 /// The OS says the computer is about to sleep: locks now if the person chose

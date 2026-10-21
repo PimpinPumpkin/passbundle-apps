@@ -79,16 +79,32 @@ class _PassBundleAppState extends State<PassBundleApp> {
   /// The native runner's word that the computer is about to sleep.
   static const computer = MethodChannel('passbundle/computer');
 
+  /// Leaving the screen and coming back (on phones, the app switcher and home).
+  late final AppLifecycleListener lifecycle;
+
   @override
   void initState() {
     super.initState();
     computer.setMethodCallHandler(fromComputer);
     HardwareKeyboard.instance.addHandler(keyPressed);
+    lifecycle = AppLifecycleListener(
+      // "Immediately" locks as the app leaves the screen.
+      onHide: () {
+        if (state['state'] == 'unlocked' && core.left()['locked'] == true) {
+          refresh();
+        }
+      },
+      // Back: check at once, before the vault is in front of anyone.
+      onShow: () {
+        if (state['state'] == 'unlocked') tick();
+      },
+    );
     watch();
   }
 
   @override
   void dispose() {
+    lifecycle.dispose();
     ticker?.cancel();
     HardwareKeyboard.instance.removeHandler(keyPressed);
     computer.setMethodCallHandler(null);

@@ -103,6 +103,7 @@ class Core {
   late final _used = _lib.lookupFunction<_Str0, _Str0>('pb_used');
   late final _tick = _lib.lookupFunction<_Str0, _Str0>('pb_tick');
   late final _sleeping = _lib.lookupFunction<_Str0, _Str0>('pb_sleeping');
+  late final _left = _lib.lookupFunction<_Str0, _Str0>('pb_left');
   late final _places = _lib.lookupFunction<_Str0, _Str0>('pb_places');
   late final _list = _lib.lookupFunction<_Str1, _Str1>('pb_list');
   late final _item = _lib.lookupFunction<_Str1, _Str1>('pb_item');
@@ -271,6 +272,9 @@ class Core {
   Map<String, dynamic> tick() => _answer(_tick()) as Map<String, dynamic>;
 
   /// The OS says the computer is about to sleep: locks if the person chose that.
+  /// The app left the screen: locks if the person chose "Immediately" (phones).
+  Map<String, dynamic> left() => _answer(_left()) as Map<String, dynamic>;
+
   Map<String, dynamic> sleeping() =>
       _answer(_sleeping()) as Map<String, dynamic>;
 

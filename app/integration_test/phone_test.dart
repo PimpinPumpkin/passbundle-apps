@@ -228,4 +228,42 @@ void main() {
       expect((await Core.biometricStatus())['status'], 'notSetUp');
     },
   );
+
+  testWidgets('chosen "Immediately", leaving the app locks it', (tester) async {
+    final dir = (await Core.platform.invokeMethod<String>('filesDir'))!;
+    for (final kept in Directory(dir).listSync()) {
+      kept.deleteSync(recursive: true);
+    }
+    File('$dir/settings.json').writeAsStringSync(sampleSettings);
+    File('$dir/sync.json').writeAsStringSync(sampleSync);
+    await Core.openOnThisDevice();
+    await tester.pumpWidget(PassBundleApp(key: UniqueKey()));
+    await pumpUntil(tester, find.text('Unlock PassBundle'));
+    await tester.enterText(find.byType(TextField), samplePassword);
+    await tester.tap(find.text('Unlock'));
+    await pumpUntil(tester, find.text('Backup service'));
+
+    // A phone's own words and choices: 5 minutes away by default.
+    await tester.tap(find.byTooltip('Settings'));
+    await pumpUntil(tester, find.text('Lock when the phone locks'));
+    expect(find.text('Away from PassBundle'), findsOneWidget);
+    await tester.tap(find.text('5 minutes'));
+    await pumpUntil(tester, find.text('Immediately'));
+    await tester.tap(find.text('Immediately').last);
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(Core().preferences()['lockAfterMinutes'], 0);
+    await tester.tap(find.text('Close'));
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.text('Backup service'), findsWidgets);
+
+    // Home, or the app switcher: the app leaves the screen. It locks right
+    // then (no frame comes while it's hidden, so nothing is pumped here).
+    final binding = tester.binding;
+    binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+    expect(Core().state()['state'], 'locked');
+    binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await pumpUntil(tester, find.text('Unlock PassBundle'));
+  });
 }
