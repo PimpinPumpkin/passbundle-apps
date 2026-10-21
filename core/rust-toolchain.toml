@@ -1,0 +1,5 @@
+[toolchain]
+# The same toolchain as the server and the desktop agent.
+channel = "1.99.0"
+components = [ "rustfmt", "clippy" ]
+profile = "minimal"

@@ -1,0 +1,4 @@
+tags:
+  # Drawn on purpose with --update-goldens, never a check: normal runs use
+  # --exclude-tags screenshots.
+  screenshots: {}
