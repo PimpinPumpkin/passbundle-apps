@@ -108,7 +108,9 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
           tools="$ANDROID_HOME/cmdline-tools/latest/bin"
-          yes | "$tools/sdkmanager" --install emulator "system-images;android-29;default;x86_64" > /dev/null
+          # Accepting the licenses ends `yes` with a broken pipe, which isn't a failure.
+          (yes || true) | "$tools/sdkmanager" --licenses > /dev/null
+          "$tools/sdkmanager" --install emulator "system-images;android-29;default;x86_64" > /dev/null
           echo no | "$tools/avdmanager" create avd -n ci -k "system-images;android-29;default;x86_64" --force
           "$ANDROID_HOME/emulator/emulator" -avd ci -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect -no-snapshot > emulator.log 2>&1 &
           adb wait-for-device
