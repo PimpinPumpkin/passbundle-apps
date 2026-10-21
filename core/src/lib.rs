@@ -2,6 +2,7 @@
 //! design is docs/core.md in the meta repo (PimpinPumpkin/Passbundle), with
 //! test vectors in docs/vectors/core-v1.json (a copy is in tests/vectors).
 
+pub mod agent;
 pub mod app;
 pub mod clipboard;
 pub mod crypto;
@@ -21,6 +22,11 @@ pub mod ffi;
 mod vectors;
 
 pub use error::{Error, Result};
+
+/// The brand, from ../brand/brand.json.
+pub mod brand {
+    include!(concat!(env!("OUT_DIR"), "/brand.rs"));
+}
 
 /// This core's version.
 pub fn version() -> &'static str {
