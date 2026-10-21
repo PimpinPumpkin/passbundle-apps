@@ -13,8 +13,17 @@ name = "passbundle_core"
 crate-type = ["rlib", "cdylib"]
 
 [features]
-# The prototype's C bridge (src/ffi.rs). The real app uses flutter_rust_bridge.
+# The app's C bridge (src/ffi.rs).
 ffi = []
+# Trusting a given certificate instead of the OS's, for tests against a
+# throwaway HTTPS server (examples/interop.rs). Never in the app.
+test-trust = []
+
+# Signs in, prints what it reads, and saves an item: the e2e suite checks the
+# web vault and the core read each other's items.
+[[example]]
+name = "interop"
+required-features = ["test-trust"]
 
 # RustCrypto, as the desktop agent uses. Never a Bitwarden crate (docs/core.md).
 [dependencies]

@@ -129,9 +129,13 @@ fn summary(vault: &Vault, item: &Item) -> Value {
 #[no_mangle]
 pub unsafe extern "C" fn pb_open(dir: *const c_char, memory_secrets: bool) -> *mut c_char {
     let dir = text(dir);
-    let secrets: Box<dyn SecretStore> =
-        if memory_secrets { Box::new(MemorySecretStore::default()) } else { Box::new(OsSecretStore) };
-    *APP.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(App::open(Store::new(dir), secrets));
+    let secrets: Box<dyn SecretStore> = if memory_secrets {
+        Box::new(MemorySecretStore::default())
+    } else {
+        Box::new(OsSecretStore)
+    };
+    *APP.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) =
+        Some(App::open(Store::new(dir), secrets));
     with_app(|app| state(app))
 }
 

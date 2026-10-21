@@ -162,6 +162,25 @@ fn message_of(body: &Value) -> Option<String> {
 
 impl Server {
     pub fn new(url: &str, device: Device) -> Result<Server> {
+        // The OS's own certificate checks, so an office's root works as in its browser.
+        Self::build(url, device, RootCerts::PlatformVerifier)
+    }
+
+    /// Trusting one certificate (PEM) instead of the OS's, for tests against a
+    /// throwaway HTTPS server. Only in builds with the `test-trust` feature,
+    /// such as the `interop` example; never the app's.
+    #[cfg(feature = "test-trust")]
+    pub fn new_trusting(url: &str, device: Device, pem: &[u8]) -> Result<Server> {
+        let cert = ureq::tls::Certificate::from_pem(pem)
+            .map_err(|e| Error::Malformed(format!("a certificate the core can't read ({e})")))?;
+        Self::build(
+            url,
+            device,
+            RootCerts::Specific(std::sync::Arc::new(vec![cert])),
+        )
+    }
+
+    fn build(url: &str, device: Device, roots: RootCerts) -> Result<Server> {
         let base = url.trim().trim_end_matches('/').to_owned();
         if !allowed(&base) {
             return Err(Error::Refused(
@@ -172,12 +191,7 @@ impl Server {
             .http_status_as_error(false)
             .timeout_global(Some(Duration::from_secs(30)))
             .user_agent(format!("PassBundle/{}", crate::version()))
-            // The OS's own certificate checks, so an office's root works as in its browser.
-            .tls_config(
-                TlsConfig::builder()
-                    .root_certs(RootCerts::PlatformVerifier)
-                    .build(),
-            )
+            .tls_config(TlsConfig::builder().root_certs(roots).build())
             .build()
             .into();
         Ok(Server {
