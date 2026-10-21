@@ -2,13 +2,18 @@
 //! the core puts it on the clipboard, marked to stay out of clipboard history
 //! where the OS has a way (Windows: history, cloud clipboard, and clipboard
 //! monitors; macOS: the concealed type clipboard managers respect), and clears
-//! it after 30 seconds if it's still there.
+//! it after 30 seconds if it's still there. Phones copy through the app's own
+//! native piece instead (docs/phones.md, "Copying"), which isn't built yet.
 
+#[cfg(not(phone))]
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(not(phone))]
 use std::sync::Mutex;
 use std::time::Duration;
 
+#[cfg(not(phone))]
 use arboard::Clipboard;
+#[cfg(not(phone))]
 use zeroize::Zeroizing;
 
 use crate::error::{Error, Result};
@@ -17,10 +22,13 @@ pub const CLEAR_AFTER: Duration = Duration::from_secs(30);
 
 // One clipboard for the process: on Linux the copying process serves the
 // contents, so it must stay alive.
+#[cfg(not(phone))]
 static CLIPBOARD: Mutex<Option<Clipboard>> = Mutex::new(None);
 // Each copy's number; a later copy cancels an earlier one's clearing.
+#[cfg(not(phone))]
 static GENERATION: AtomicU64 = AtomicU64::new(0);
 
+#[cfg(not(phone))]
 fn with_clipboard<T>(
     f: impl FnOnce(&mut Clipboard) -> std::result::Result<T, arboard::Error>,
 ) -> Result<T> {
@@ -35,6 +43,7 @@ fn with_clipboard<T>(
 }
 
 /// Copies a secret, and clears it after `clear_after` if nothing replaced it.
+#[cfg(not(phone))]
 pub fn copy_secret(text: &str, clear_after: Duration) -> Result<()> {
     with_clipboard(|c| {
         let set = c.set();
@@ -73,12 +82,23 @@ pub fn copy_secret(text: &str, clear_after: Duration) -> Result<()> {
 }
 
 /// Copies something that isn't secret (a username, a website).
+#[cfg(not(phone))]
 pub fn copy_text(text: &str) -> Result<()> {
     GENERATION.fetch_add(1, Ordering::SeqCst);
     with_clipboard(|c| c.set_text(text))
 }
 
-#[cfg(test)]
+#[cfg(phone)]
+pub fn copy_secret(_text: &str, _clear_after: Duration) -> Result<()> {
+    Err(Error::Refused("copying isn't built for phones yet"))
+}
+
+#[cfg(phone)]
+pub fn copy_text(_text: &str) -> Result<()> {
+    Err(Error::Refused("copying isn't built for phones yet"))
+}
+
+#[cfg(all(test, not(phone)))]
 mod tests {
     use super::*;
 
