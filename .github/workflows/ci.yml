@@ -103,7 +103,7 @@ jobs:
           (yes || true) | "$tools/sdkmanager" --licenses > /dev/null
           "$tools/sdkmanager" --install emulator "system-images;android-29;default;x86_64" > /dev/null
           echo no | "$tools/avdmanager" create avd -n ci -k "system-images;android-29;default;x86_64" --force
-          nohup "$ANDROID_HOME/emulator/emulator" -avd ci -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect -no-snapshot > "$RUNNER_TEMP/emulator.log" 2>&1 &
+          nohup "$ANDROID_HOME/emulator/emulator" -avd ci -no-window -no-audio -no-boot-anim -no-metrics -gpu swiftshader_indirect -no-snapshot > "$RUNNER_TEMP/emulator.log" 2>&1 &
       - name: Server build dependencies
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential libssl-dev libdbus-1-dev pkg-config
       - name: Install the pinned Rust toolchains, with Android's targets
@@ -140,11 +140,19 @@ jobs:
           flutter --disable-analytics
       - name: The emulator, booted
         run: |
-          adb wait-for-device
+          booted=""
           for _ in $(seq 150); do
-            [ "$(adb shell getprop sys.boot_completed 2> /dev/null | tr -d '\r')" = 1 ] && break
+            if [ "$(adb shell getprop sys.boot_completed 2> /dev/null | tr -d '\r')" = 1 ]; then
+              booted=yes
+              break
+            fi
             sleep 2
           done
+          if [ -z "$booted" ]; then
+            echo "The emulator didn't boot in 5 minutes:" >&2
+            tail -50 "$RUNNER_TEMP/emulator.log" >&2
+            exit 1
+          fi
           adb shell getprop ro.build.version.release
       - name: The core's tests, on the emulator
         run: ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME" tools/android-core.sh test x86_64
