@@ -89,13 +89,13 @@ BEGIN
     BEGIN
         BLOCK "040904e4"
         BEGIN
-            VALUE "CompanyName", "org.passbundle" "\0"
-            VALUE "FileDescription", "passbundle" "\0"
+            VALUE "CompanyName", "PassBundle" "\0"
+            VALUE "FileDescription", "PassBundle" "\0"
             VALUE "FileVersion", VERSION_AS_STRING "\0"
             VALUE "InternalName", "passbundle" "\0"
-            VALUE "LegalCopyright", "Copyright (C) 2026 org.passbundle. All rights reserved." "\0"
+            VALUE "LegalCopyright", "Copyright (C) 2026 the PassBundle authors. GPL-3.0." "\0"
             VALUE "OriginalFilename", "passbundle.exe" "\0"
-            VALUE "ProductName", "passbundle" "\0"
+            VALUE "ProductName", "PassBundle" "\0"
             VALUE "ProductVersion", VERSION_AS_STRING "\0"
         END
     END

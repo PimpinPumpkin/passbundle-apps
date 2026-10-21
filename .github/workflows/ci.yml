@@ -318,12 +318,23 @@ jobs:
           case "${{ matrix.platform }}" in
             linux) cp "${{ matrix.lib }}" "${{ matrix.bundle }}/lib/" ;;
             macos)
+              # Named PassBundle, and not sandboxed: a sandboxed app can't
+              # reach its server, the keychain, or the agent's socket.
+              plist="${{ matrix.bundle }}/Contents/Info.plist"
+              test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$plist")" = com.passbundle.app
+              test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleName' "$plist")" = PassBundle
+              codesign --display --entitlements - --xml "${{ matrix.bundle }}" > entitlements.xml
+              if grep -q app-sandbox entitlements.xml; then
+                echo "The Mac app is sandboxed; it must not be (see app/macos/Runner/Release.entitlements)." >&2
+                exit 1
+              fi
               mkdir -p "${{ matrix.bundle }}/Contents/Frameworks"
               cp "${{ matrix.lib }}" "${{ matrix.bundle }}/Contents/Frameworks/"
               # The agent next to the app's own program, so each finds the other.
               cp agent/target/universal/passbundle-agent agent/target/universal/passbundle-agent-host "${{ matrix.bundle }}/Contents/MacOS/"
-              # Ad hoc, as Flutter's own release build is, until code signing.
-              codesign --force --deep --sign - "${{ matrix.bundle }}" ;;
+              # Ad hoc, as Flutter's own release build is, until code signing,
+              # with the app's own entitlements (re-signing drops them otherwise).
+              codesign --force --deep --sign - --entitlements app/macos/Runner/Release.entitlements "${{ matrix.bundle }}" ;;
             windows)
               cp "${{ matrix.lib }}" "${{ matrix.bundle }}/"
               cp agent/target/release/passbundle-agent.exe agent/target/release/passbundle-agent-host.exe "${{ matrix.bundle }}/" ;;
