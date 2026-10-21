@@ -26,6 +26,8 @@ pub enum Error {
     Server(String),
     /// Signed out: the session ended and needs the master password again.
     SignedOut,
+    /// The desktop agent isn't running here (or isn't installed).
+    NoAgent,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -47,6 +49,7 @@ impl fmt::Display for Error {
             Error::Network(why) => write!(f, "Couldn't reach the server: {why}."),
             Error::Server(message) => write!(f, "The server said: {message}"),
             Error::SignedOut => write!(f, "You've been signed out. Sign in again."),
+            Error::NoAgent => write!(f, "PassBundle's desktop agent isn't running. Start it from the Start menu or Applications, then try again."),
         }
     }
 }

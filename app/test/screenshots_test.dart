@@ -3,8 +3,12 @@
 @Tags(['screenshots'])
 library;
 
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+
+import 'package:passbundle/core.dart';
 
 import 'package:passbundle/main.dart';
 
@@ -61,6 +65,57 @@ void main() {
       await tester.pumpAndSettle();
       await shoot('editor-desktop-$b');
     });
+
+    testWidgets('unlocking with Windows Hello or Touch ID, $b', (tester) async {
+      await size(tester, const Size(1280, 800));
+      final program = Platform.environment['PB_TEST_AGENT']!;
+      final home = Directory('/tmp').createTempSync('pb-ag-').path;
+      final agent = (await tester.runAsync(
+        () => Process.start(
+          program,
+          ['--serve'],
+          environment: {
+            'HOME': home,
+            'PASSBUNDLE_AGENT_TEST_HOME': home,
+            'PASSBUNDLE_AGENT_TEST_AUTHENTICATOR': home,
+          },
+        ),
+      ))!;
+      addTearDown(agent.kill);
+      openSample();
+      Core().useAgentHome(home, program);
+      for (var i = 0; i < 100; i++) {
+        if ((await tester.runAsync(Core.biometricStatus))!['status'] !=
+            'noAgent') {
+          break;
+        }
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 100)),
+        );
+      }
+      await tester.pumpWidget(
+        PassBundleApp(themeMode: dark ? ThemeMode.dark : ThemeMode.light),
+      );
+      await unlock(tester);
+      await tester.tap(find.byTooltip('Settings'));
+      await tester.pump();
+      await pumpUntil(tester, find.byType(SwitchListTile));
+      File('$home/answers').writeAsStringSync('yes');
+      await tester.tap(find.byType(SwitchListTile));
+      await pumpUntil(
+        tester,
+        find.byWidgetPredicate((w) => w is SwitchListTile && w.value),
+      );
+      // Past the dialog's fade-in, which the test's clock doesn't advance by itself.
+      await tester.pump(const Duration(milliseconds: 400));
+      await shoot('settings-$b');
+      await tester.tap(find.text('Close'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Lock'));
+      await tester.pump();
+      await pumpUntil(tester, find.textContaining('Unlock with '));
+      await shoot('unlock-with-biometrics-$b');
+    }, skip: Platform.environment['PB_TEST_AGENT'] == null);
 
     testWidgets('vault, phone, $b', (tester) async {
       await size(tester, const Size(390, 844));

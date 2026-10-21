@@ -3,7 +3,11 @@
 //! See docs/core.md: signing in, two-step login, unlocking from the kept sync,
 //! and syncing with the kept refresh token.
 
+use std::path::PathBuf;
+
+use crate::agent::{self, Agent};
 use crate::clipboard;
+use crate::crypto::SymmetricKey;
 use crate::error::{Error, Result};
 use crate::kdf::normalize_email;
 use crate::secrets::SecretStore;
@@ -45,6 +49,8 @@ pub struct App {
     session: Option<Session>,
     pending: Option<PendingSignIn>,
     vault: Option<Vault>,
+    /// The agent's address and program, when not the ones installed next to this app (tests).
+    agent: Option<(PathBuf, PathBuf)>,
 }
 
 impl App {
@@ -61,7 +67,13 @@ impl App {
             session: None,
             pending: None,
             vault: None,
+            agent: None,
         }
+    }
+
+    /// Talks to the agent at `address`, which must be the program at `program` (tests).
+    pub fn use_agent_at(&mut self, address: PathBuf, program: PathBuf) {
+        self.agent = Some((address, program));
     }
 
     pub fn state(&self) -> State {
@@ -158,6 +170,12 @@ impl App {
         let settings = self.settings.as_ref().ok_or(Error::SignedOut)?;
         let text = self.store.sync().ok_or(Error::SignedOut)?;
         let vault = Vault::unlock(&Sync::from_json(&text)?, &settings.prelogin(), password)?;
+        self.opened(vault);
+        Ok(())
+    }
+
+    fn opened(&mut self, vault: Vault) {
+        let settings = self.settings.as_ref().expect("checked before opening");
         self.session = self
             .secrets
             .get(&settings.server, &settings.email)
@@ -168,7 +186,68 @@ impl App {
                 user_key: vault.user_key().clone(),
             });
         self.vault = Some(vault);
-        Ok(())
+    }
+
+    /// The account's id: the open vault's, or the kept sync's.
+    fn user_id(&self) -> Result<String> {
+        if let Some(vault) = &self.vault {
+            return Ok(vault.user_id.clone());
+        }
+        Ok(
+            Sync::from_json(&self.store.sync().ok_or(Error::SignedOut)?)?
+                .profile
+                .id,
+        )
+    }
+
+    fn agent(&self) -> Result<Agent> {
+        let (address, program) = match &self.agent {
+            Some(found) => found.clone(),
+            None => Agent::installed()?,
+        };
+        Agent::connect(&address, &program, &self.user_id()?)
+    }
+
+    /// Whether this account can unlock with Windows Hello or Touch ID here
+    /// (docs/core.md, "Unlock with Windows Hello or Touch ID").
+    pub fn biometric_status(&self) -> Result<agent::Status> {
+        self.agent()?.status()
+    }
+
+    /// Turns it on, while unlocked: the agent asks, then keeps the user key
+    /// sealed (the same enrollment as the extension's). Returns whether the person agreed.
+    pub fn enroll_biometric(&self) -> Result<bool> {
+        let vault = self.vault.as_ref().ok_or(Error::SignedOut)?;
+        self.agent()?.enroll(vault.user_key(), &vault.email)
+    }
+
+    /// Unlocks the kept vault with the user key the agent returns. False if
+    /// the person cancelled. A key that no longer opens the vault (the account's
+    /// keys changed) turns it off, and the master password is needed.
+    pub fn unlock_with_biometric(&mut self) -> Result<bool> {
+        let text = self.store.sync().ok_or(Error::SignedOut)?;
+        let mut agent = self.agent()?;
+        let Some(key): Option<SymmetricKey> = agent.unlock()? else {
+            return Ok(false);
+        };
+        match Vault::open(&Sync::from_json(&text)?, key) {
+            Ok(vault) => {
+                self.opened(vault);
+                Ok(true)
+            }
+            Err(Error::Refused(_)) | Err(Error::Damaged(_)) => {
+                let _ = agent.remove();
+                Err(Error::Refused(
+                    "that unlock is out of date; use your master password, then turn it on again",
+                ))
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Turns it off (for the extension too: it's one enrollment).
+    pub fn remove_biometric(&self) -> Result<()> {
+        self.agent()?.remove()
     }
 
     /// Brings the vault up to date from the server and keeps the new sync.
@@ -204,8 +283,12 @@ impl App {
         self.pending = None;
     }
 
-    /// Forgets the vault and the session on this device; keeps the server and email.
+    /// Forgets the vault and the session on this device, and unlocking with
+    /// Windows Hello or Touch ID if it was on; keeps the server and email.
     pub fn sign_out(&mut self) {
+        if self.store.sync().is_some() {
+            let _ = self.remove_biometric();
+        }
         if let Some(s) = &self.settings {
             self.secrets.forget(&s.server, &s.email);
         }

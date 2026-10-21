@@ -81,7 +81,7 @@ impl SymmetricKey {
         self.encrypt(plaintext.as_bytes())
     }
 
-    fn encrypt_with_iv(&self, plaintext: &[u8], iv: [u8; 16]) -> EncString {
+    pub(crate) fn encrypt_with_iv(&self, plaintext: &[u8], iv: [u8; 16]) -> EncString {
         let data = Aes256CbcEnc::new(&self.enc.into(), &iv.into())
             .encrypt_padded_vec_mut::<Pkcs7>(plaintext);
         let mac = self.mac_of(&iv, &data).finalize().into_bytes().into();

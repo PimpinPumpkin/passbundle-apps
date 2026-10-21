@@ -27,6 +27,8 @@ required-features = ["test-trust"]
 
 # RustCrypto, as the desktop agent uses. Never a Bitwarden crate (docs/core.md).
 [dependencies]
+# The desktop agent's socket, shared with the agent (../ipc).
+passbundle-ipc = { path = "../ipc" }
 aes = "0.8"
 arboard = { version = "3", default-features = false }
 argon2 = { version = "0.5", default-features = false, features = ["alloc", "zeroize"] }
@@ -52,6 +54,9 @@ zeroize = { version = "1", features = ["derive"] }
 # SHA extensions without this; the assembly doesn't build with MSVC.
 [target.'cfg(all(target_arch = "aarch64", not(target_os = "windows")))'.dependencies]
 sha2 = { version = "0.10", features = ["asm"] }
+
+[build-dependencies]
+serde_json = "1"
 
 # The KDFs at full strength in tests, so they take milliseconds, not minutes.
 [profile.dev.package."*"]

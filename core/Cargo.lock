@@ -1307,6 +1307,7 @@ dependencies = [
  "hkdf",
  "hmac",
  "keyring",
+ "passbundle-ipc",
  "pbkdf2",
  "rand",
  "rsa",
@@ -1317,6 +1318,16 @@ dependencies = [
  "ureq",
  "uuid",
  "zeroize",
+]
+
+[[package]]
+name = "passbundle-ipc"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "libc",
+ "sha2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

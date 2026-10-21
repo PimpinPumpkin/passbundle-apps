@@ -1,0 +1,5 @@
+[toolchain]
+# The same toolchain as the server (passbundle-server).
+channel = "1.99.0"
+components = [ "rustfmt", "clippy" ]
+profile = "minimal"

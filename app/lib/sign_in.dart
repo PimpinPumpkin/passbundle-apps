@@ -271,12 +271,40 @@ class _UnlockScreenState extends State<UnlockScreen> {
   bool working = false;
   bool hidden = true;
 
+  /// "Windows Hello" or "Touch ID" when this account can unlock with it here.
+  String? method;
+
   @override
   void initState() {
     super.initState();
     if (_measuring) {
       WidgetsBinding.instance.addPostFrameCallback((_) => unlock());
+    } else {
+      Core.biometricStatus().then((status) {
+        if (mounted && status['status'] == 'setUp') {
+          setState(() => method = status['method'] as String);
+        }
+      });
     }
+  }
+
+  Future<void> unlockWithBiometric() async {
+    setState(() {
+      working = true;
+      error = null;
+    });
+    final answer = await whileBusy(Core.unlockWithBiometric);
+    if (!mounted) return;
+    if (answer.ok && answer.body['unlocked'] == true) {
+      widget.onUnlocked(0);
+      return;
+    }
+    setState(() {
+      working = false;
+      error = answer.ok ? null : answer.error;
+      // An out-of-date setup was turned off: the master password, then turn it on again.
+      if (!answer.ok) method = null;
+    });
   }
 
   Future<void> unlock() async {
@@ -324,6 +352,14 @@ class _UnlockScreenState extends State<UnlockScreen> {
       ),
       const SizedBox(height: 16),
       WorkingButton(label: 'Unlock', working: working, onPressed: unlock),
+      if (method != null) ...[
+        const SizedBox(height: 10),
+        OutlinedButton.icon(
+          onPressed: working ? null : unlockWithBiometric,
+          icon: const Icon(Icons.fingerprint_rounded),
+          label: Text('Unlock with $method'),
+        ),
+      ],
       const SizedBox(height: 18),
       Text(
         Uri.tryParse(widget.server)?.host ?? widget.server,
@@ -338,8 +374,10 @@ class _UnlockScreenState extends State<UnlockScreen> {
                   context: context,
                   builder: (context) => AlertDialog(
                     title: const Text('Sign out?'),
-                    content: const Text(
-                      'This removes the vault from this device. Signing in again brings it back from the server.',
+                    content: Text(
+                      method == null
+                          ? 'This removes the vault from this device. Signing in again brings it back from the server.'
+                          : 'This removes the vault from this device and turns off unlocking with $method, in your browser extension too. Signing in again brings the vault back from the server.',
                     ),
                     actions: [
                       TextButton(
