@@ -50,6 +50,18 @@ static void listen_for_sleep(MyApplication* self, FlView* view) {
       prepare_for_sleep_cb, self, nullptr);
 }
 
+// The app's icon, from its bundle's data folder.
+static void set_icon(GtkWindow* window) {
+  g_autofree gchar* program = g_file_read_link("/proc/self/exe", nullptr);
+  if (program == nullptr) {
+    return;
+  }
+  g_autofree gchar* dir = g_path_get_dirname(program);
+  g_autofree gchar* icon =
+      g_build_filename(dir, "data", APPLICATION_ID ".png", nullptr);
+  gtk_window_set_icon_from_file(window, icon, nullptr);
+}
+
 // Called when first Flutter frame received.
 static void first_frame_cb(MyApplication* self, FlView* view) {
   gtk_widget_show(gtk_widget_get_toplevel(GTK_WIDGET(view)));
@@ -81,14 +93,15 @@ static void my_application_activate(GApplication* application) {
   if (use_header_bar) {
     GtkHeaderBar* header_bar = GTK_HEADER_BAR(gtk_header_bar_new());
     gtk_widget_show(GTK_WIDGET(header_bar));
-    gtk_header_bar_set_title(header_bar, "passbundle");
+    gtk_header_bar_set_title(header_bar, "PassBundle");
     gtk_header_bar_set_show_close_button(header_bar, TRUE);
     gtk_window_set_titlebar(window, GTK_WIDGET(header_bar));
   } else {
-    gtk_window_set_title(window, "passbundle");
+    gtk_window_set_title(window, "PassBundle");
   }
 
   gtk_window_set_default_size(window, 1280, 720);
+  set_icon(window);
 
   g_autoptr(FlDartProject) project = fl_dart_project_new();
   fl_dart_project_set_dart_entrypoint_arguments(
