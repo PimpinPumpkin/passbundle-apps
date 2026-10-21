@@ -48,11 +48,28 @@ fn out(value: Value) -> *mut c_char {
 
 /// Runs a call on the app, turning a panic into an error instead of unwinding into Dart.
 fn with_app(call: impl FnOnce(&mut App) -> Value) -> *mut c_char {
-    out(catch_unwind(AssertUnwindSafe(|| {
+    out(app_value(call))
+}
+
+fn app_value(call: impl FnOnce(&mut App) -> Value) -> Value {
+    catch_unwind(AssertUnwindSafe(|| {
         let guard = APP.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         on_app(guard, call)
     }))
-    .unwrap_or_else(|_| json!({ "ok": false, "error": "The core stopped unexpectedly." })))
+    .unwrap_or_else(|_| json!({ "ok": false, "error": "The core stopped unexpectedly." }))
+}
+
+/// `with_app`, for calls that wait on the network or the desktop agent's
+/// socket: run on a thread of the core's own. Dart signals the threads that
+/// run Dart (its profiler, in debug builds), and a signal arriving in a
+/// blocking read or connect ends it with "Interrupted system call".
+fn with_app_waiting(call: impl FnOnce(&mut App) -> Value + Send) -> *mut c_char {
+    out(std::thread::scope(|scope| {
+        scope
+            .spawn(|| app_value(call))
+            .join()
+            .unwrap_or_else(|_| json!({ "ok": false, "error": "The core stopped unexpectedly." }))
+    }))
 }
 
 /// `with_app`, but None instead of waiting while a slow call (a sync, say) has the app.
@@ -69,7 +86,10 @@ fn with_app_now(call: impl FnOnce(&mut App) -> Value) -> Option<*mut c_char> {
 }
 
 fn on_app(mut guard: MutexGuard<'_, Option<App>>, call: impl FnOnce(&mut App) -> Value) -> Value {
-    let app = guard.get_or_insert_with(|| App::open(Store::new(Store::default_dir()), secrets()));
+    let app = guard.get_or_insert_with(|| {
+        let dir = Store::default_dir();
+        App::open(Store::new(&dir), secrets(&dir))
+    });
     if SLEEP_NOTICE.swap(false, Ordering::SeqCst) {
         app.sleeping();
     }
@@ -80,12 +100,12 @@ fn on_app(mut guard: MutexGuard<'_, Option<App>>, call: impl FnOnce(&mut App) ->
     value
 }
 
-fn secrets() -> Box<dyn SecretStore> {
+fn secrets(dir: &std::path::Path) -> Box<dyn SecretStore> {
     // Tests and CI keep the refresh token in memory, never in the OS's store.
     if std::env::var("PB_SECRETS").as_deref() == Ok("memory") {
         Box::new(MemorySecretStore::default())
     } else {
-        Box::new(OsSecretStore)
+        Box::new(OsSecretStore::new(dir))
     }
 }
 
@@ -161,7 +181,7 @@ pub unsafe extern "C" fn pb_open(dir: *const c_char, memory_secrets: bool) -> *m
     let secrets: Box<dyn SecretStore> = if memory_secrets {
         Box::new(MemorySecretStore::default())
     } else {
-        Box::new(OsSecretStore)
+        Box::new(OsSecretStore::new(std::path::Path::new(&dir)))
     };
     *APP.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) =
         Some(App::open(Store::new(dir), secrets));
@@ -206,7 +226,7 @@ fn method() -> &'static str {
 /// running), with the method's name.
 #[no_mangle]
 pub extern "C" fn pb_biometric_status() -> *mut c_char {
-    with_app(|app| {
+    with_app_waiting(|app| {
         let status = match app.biometric_status() {
             Ok(Status::SetUp) => "setUp",
             Ok(Status::NotSetUp) => "notSetUp",
@@ -231,7 +251,7 @@ pub extern "C" fn pb_start_agent() -> *mut c_char {
 /// Turns it on (the agent asks); `on` says whether the person agreed.
 #[no_mangle]
 pub extern "C" fn pb_biometric_enroll() -> *mut c_char {
-    with_app(|app| match app.enroll_biometric() {
+    with_app_waiting(|app| match app.enroll_biometric() {
         Ok(on) => json!({ "ok": true, "on": on }),
         Err(e) => failed(e),
     })
@@ -240,7 +260,7 @@ pub extern "C" fn pb_biometric_enroll() -> *mut c_char {
 /// Unlocks with it (the agent asks); `unlocked` is false if the person cancelled.
 #[no_mangle]
 pub extern "C" fn pb_biometric_unlock() -> *mut c_char {
-    with_app(|app| match app.unlock_with_biometric() {
+    with_app_waiting(|app| match app.unlock_with_biometric() {
         Ok(unlocked) => json!({ "ok": true, "unlocked": unlocked }),
         Err(e) => failed(e),
     })
@@ -249,7 +269,7 @@ pub extern "C" fn pb_biometric_unlock() -> *mut c_char {
 /// Turns it off, for the browser extension too.
 #[no_mangle]
 pub extern "C" fn pb_biometric_remove() -> *mut c_char {
-    with_app(|app| done(app.remove_biometric()))
+    with_app_waiting(|app| done(app.remove_biometric()))
 }
 
 #[no_mangle]
@@ -272,7 +292,7 @@ pub unsafe extern "C" fn pb_sign_in(
     password: *const c_char,
 ) -> *mut c_char {
     let (server, email, password) = (text(server), text(email), Zeroizing::new(text(password)));
-    with_app(|app| step(app.sign_in(&server, &email, &password)))
+    with_app_waiting(|app| step(app.sign_in(&server, &email, &password)))
 }
 
 /// # Safety
@@ -284,12 +304,12 @@ pub unsafe extern "C" fn pb_finish_sign_in(
     remember: bool,
 ) -> *mut c_char {
     let code = text(code);
-    with_app(|app| step(app.finish_sign_in(provider, &code, remember)))
+    with_app_waiting(|app| step(app.finish_sign_in(provider, &code, remember)))
 }
 
 #[no_mangle]
 pub extern "C" fn pb_send_email_code() -> *mut c_char {
-    with_app(|app| done(app.send_email_code()))
+    with_app_waiting(|app| done(app.send_email_code()))
 }
 
 /// # Safety
@@ -308,7 +328,7 @@ pub unsafe extern "C" fn pb_unlock(password: *const c_char) -> *mut c_char {
 
 #[no_mangle]
 pub extern "C" fn pb_sync() -> *mut c_char {
-    with_app(|app| done(app.sync()))
+    with_app_waiting(|app| done(app.sync()))
 }
 
 #[no_mangle]
@@ -395,7 +415,7 @@ pub extern "C" fn pb_sleeping() -> *mut c_char {
 
 #[no_mangle]
 pub extern "C" fn pb_sign_out() -> *mut c_char {
-    with_app(|app| {
+    with_app_waiting(|app| {
         app.sign_out();
         state(app)
     })
@@ -561,7 +581,7 @@ pub unsafe extern "C" fn pb_totp(id: *const c_char) -> *mut c_char {
 pub unsafe extern "C" fn pb_save(id: *const c_char, draft: *const c_char) -> *mut c_char {
     let id = text(id);
     let draft_json = Zeroizing::new(text(draft));
-    with_app(|app| {
+    with_app_waiting(|app| {
         let d: Value = match serde_json::from_str(&draft_json) {
             Ok(d) => d,
             Err(e) => {
@@ -626,7 +646,7 @@ pub unsafe extern "C" fn pb_save(id: *const c_char, draft: *const c_char) -> *mu
 #[no_mangle]
 pub unsafe extern "C" fn pb_trash(id: *const c_char) -> *mut c_char {
     let id = text(id);
-    with_app(|app| done(app.trash(&id)))
+    with_app_waiting(|app| done(app.trash(&id)))
 }
 
 /// A new password for the editor (it goes into the field, so the person sees it).

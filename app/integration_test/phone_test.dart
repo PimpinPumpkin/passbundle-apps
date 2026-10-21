@@ -27,8 +27,20 @@ Future<void> pumpUntil(
     await tester.pump(const Duration(milliseconds: 100));
     if (finder.evaluate().isNotEmpty) return;
   }
-  throw TestFailure('Never showed up: $finder');
+  final shown = find
+      .byType(Text)
+      .evaluate()
+      .map((e) => (e.widget as Text).data)
+      .whereType<String>()
+      .join(' | ');
+  throw TestFailure('Never showed up: $finder\nOn screen: $shown');
 }
+
+// A real server the phone reaches (tools/android-app-test.sh, with
+// PB_TEST_SERVER), and an account on it with one login.
+const server = String.fromEnvironment('PB_TEST_SERVER');
+const email = String.fromEnvironment('PB_TEST_EMAIL');
+const password = String.fromEnvironment('PB_TEST_PASSWORD');
 
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
@@ -111,5 +123,47 @@ void main() {
       final later = await Clipboard.getData(Clipboard.kTextPlain);
       expect(later?.text ?? '', isEmpty);
     },
+  );
+
+  testWidgets(
+    'signs in to a real server, and the Keystore keeps the session across a restart',
+    (tester) async {
+      // From nothing kept on the phone.
+      final dir = (await Core.platform.invokeMethod<String>('filesDir'))!;
+      for (final kept in Directory(dir).listSync()) {
+        kept.deleteSync(recursive: true);
+      }
+      await Core.openOnThisDevice();
+      await tester.pumpWidget(PassBundleApp(key: UniqueKey()));
+      await pumpUntil(tester, find.text('Sign in to PassBundle'));
+      await tester.enterText(find.widgetWithText(TextField, 'Server'), server);
+      await tester.enterText(find.widgetWithText(TextField, 'Email'), email);
+      await tester.enterText(
+        find.widgetWithText(TextField, 'Master password'),
+        password,
+      );
+      await tester.tap(find.text('Sign in'));
+      await pumpUntil(tester, find.text('Saved before the phone signed in'));
+
+      // Kept sealed by the Keystore: one file, of the IV, ciphertext, and tag,
+      // not the token (which is printable base64) as text.
+      final tokens = Directory('$dir/tokens').listSync();
+      expect(tokens, hasLength(1));
+      final sealed = (tokens.single as File).readAsBytesSync();
+      expect(sealed.length, greaterThan(12 + 16));
+      expect(sealed.any((b) => b < 0x20 || b > 0x7e), isTrue);
+
+      // A restart: the core opens again from only what's kept. The vault
+      // unlocks, and it syncs with the kept session, without signing in.
+      await Core.openOnThisDevice();
+      await tester.pumpWidget(PassBundleApp(key: UniqueKey()));
+      await pumpUntil(tester, find.text('Unlock PassBundle'));
+      await tester.enterText(find.byType(TextField), password);
+      await tester.tap(find.text('Unlock'));
+      await pumpUntil(tester, find.text('Saved before the phone signed in'));
+      await pumpUntil(tester, find.byTooltip('Sync'));
+      expect(find.textContaining('Sign in again'), findsNothing);
+    },
+    skip: server.isEmpty,
   );
 }

@@ -1,11 +1,14 @@
 //! Where the refresh token is kept: the OS's secret store, Keychain (macOS,
 //! iOS), Credential Manager (Windows), or Secret Service (Linux). Where
 //! there's none, such as a Linux desktop without a keyring running, nothing is
-//! kept and the person signs in again next time. Android's comes with the
-//! Keystore (docs/phones.md); until then it keeps nothing. Tests use a store in memory,
+//! kept and the person signs in again next time. On Android it's sealed with
+//! a key in the Keystore and kept in the app's own folder (docs/phones.md). Tests use a store in memory,
 //! so they never touch the real one.
 
 use std::collections::HashMap;
+use std::path::Path;
+#[cfg(target_os = "android")]
+use std::path::PathBuf;
 use std::sync::Mutex;
 
 use zeroize::Zeroizing;
@@ -25,19 +28,57 @@ fn account(server: &str, email: &str) -> String {
 }
 
 /// The OS's own secret store.
-pub struct OsSecretStore;
+pub struct OsSecretStore {
+    /// Where Android keeps the sealed tokens: the app's own folder.
+    #[cfg(target_os = "android")]
+    dir: PathBuf,
+}
+
+impl OsSecretStore {
+    /// The OS's store, for the app whose data folder is `dir` (Android keeps
+    /// the sealed tokens there; the others' stores are the OS's own).
+    pub fn new(dir: &Path) -> OsSecretStore {
+        #[cfg(not(target_os = "android"))]
+        let _ = dir;
+        OsSecretStore {
+            #[cfg(target_os = "android")]
+            dir: dir.join("tokens"),
+        }
+    }
+}
+
+#[cfg(target_os = "android")]
+impl OsSecretStore {
+    /// One file per account, named by a hash so the email isn't in the name.
+    fn path(&self, server: &str, email: &str) -> PathBuf {
+        use sha2::{Digest, Sha256};
+        let digest = Sha256::digest(account(server, email).as_bytes());
+        let name: String = digest[..16].iter().map(|b| format!("{b:02x}")).collect();
+        self.dir.join(format!("{name}.sealed"))
+    }
+}
 
 #[cfg(target_os = "android")]
 impl SecretStore for OsSecretStore {
-    fn keep(&self, _server: &str, _email: &str, _refresh_token: &str) -> bool {
-        false
+    fn keep(&self, server: &str, email: &str, refresh_token: &str) -> bool {
+        let Some(sealed) = crate::android::seal(refresh_token.as_bytes()) else {
+            return false;
+        };
+        std::fs::create_dir_all(&self.dir).is_ok()
+            && std::fs::write(self.path(server, email), sealed).is_ok()
     }
 
-    fn get(&self, _server: &str, _email: &str) -> Option<Zeroizing<String>> {
-        None
+    fn get(&self, server: &str, email: &str) -> Option<Zeroizing<String>> {
+        let sealed = std::fs::read(self.path(server, email)).ok()?;
+        let plain = crate::android::open(&sealed)?;
+        std::str::from_utf8(&plain)
+            .ok()
+            .map(|token| Zeroizing::new(token.to_owned()))
     }
 
-    fn forget(&self, _server: &str, _email: &str) {}
+    fn forget(&self, server: &str, email: &str) {
+        let _ = std::fs::remove_file(self.path(server, email));
+    }
 }
 
 #[cfg(not(target_os = "android"))]
