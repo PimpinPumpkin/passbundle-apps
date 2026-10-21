@@ -316,7 +316,9 @@ jobs:
       - name: Put the core and the agent in the app
         run: |
           case "${{ matrix.platform }}" in
-            linux) cp "${{ matrix.lib }}" "${{ matrix.bundle }}/lib/" ;;
+            linux)
+              cp "${{ matrix.lib }}" "${{ matrix.bundle }}/lib/"
+              test -f "${{ matrix.bundle }}/data/com.passbundle.app.png" ;;
             macos)
               # Named PassBundle, and not sandboxed: a sandboxed app can't
               # reach its server, the keychain, or the agent's socket.
