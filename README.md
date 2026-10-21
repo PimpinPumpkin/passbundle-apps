@@ -17,7 +17,8 @@ Early, and not released.
 - **The core** opens a vault (PBKDF2 and Argon2id accounts, organization keys, item keys) and refuses weak KDF settings and tampered data, checked against the vectors.
 - **On a real server**, the core signs in (with two-step login), syncs, saves, edits, and trashes items. It keeps the vault on the device to unlock offline, with the refresh token in the OS's secret store.
 - **The app** signs in, unlocks, browses, searches, copies through the core (cleared after 30 seconds), and adds, edits, and trashes items.
-- **Not yet:** unlocking with Windows Hello or Touch ID, passkeys, attachments, phones' autofill, and code signing.
+- **Windows Hello** (Touch ID once the agent has it) unlocks the app through the desktop agent, sharing the browser extension's enrollment. The agent's tray opens the app, and the app starts the agent.
+- **Not yet:** passkeys, attachments, the macOS and Linux installs, phones, and code signing.
 
 ## Tests
 
