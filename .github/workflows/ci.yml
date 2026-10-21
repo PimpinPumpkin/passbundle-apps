@@ -1,0 +1,160 @@
+# Every commit: the core's checks, then the app built, tested against the
+# real core, measured, and screenshotted on Linux, macOS, and Windows. The
+# numbers land in each run's summary; the builds and screenshots are its
+# artifacts.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLUTTER_VERSION: 3.47.6
+  FLUTTER_COMMIT: 5fc346839b5d0eef006ed8404392afb4dfae428d
+
+jobs:
+  core:
+    name: Core (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+        working-directory: core
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: core
+      - name: No Bitwarden crates
+        run: ../tools/check-no-bitwarden-crates.sh
+      - name: Formatting
+        run: cargo fmt --check
+      - name: Lints
+        run: |
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo clippy --locked --all-targets --features ffi -- -D warnings
+      - name: Tests (the vectors)
+        run: cargo test --locked
+
+  app:
+    name: App (${{ matrix.platform }})
+    needs: core
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux
+            os: ubuntu-24.04
+            flutter: flutter
+            lib: core/target/release/libpassbundle_core.so
+            bundle: app/build/linux/x64/release/bundle
+            exe: app/build/linux/x64/release/bundle/passbundle
+          - platform: macos
+            os: macos-15
+            flutter: flutter
+            lib: core/target/release/libpassbundle_core.dylib
+            bundle: app/build/macos/Build/Products/Release/passbundle.app
+            exe: app/build/macos/Build/Products/Release/passbundle.app/Contents/MacOS/passbundle
+          - platform: windows
+            os: windows-2025
+            flutter: flutter.bat
+            lib: core/target/release/passbundle_core.dll
+            bundle: app/build/windows/x64/runner/Release
+            exe: app/build/windows/x64/runner/Release/passbundle.exe
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    env:
+      FLUTTER: ${{ matrix.flutter }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the pinned Rust toolchain
+        working-directory: core
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: core
+      - name: Build the core
+        working-directory: core
+        run: cargo build --locked --release --features ffi
+      - name: Linux build tools and a virtual display
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang cmake ninja-build pkg-config libgtk-3-dev xvfb imagemagick
+      - name: Install Flutter at the pinned release
+        run: |
+          git clone --quiet --depth 1 --branch "$FLUTTER_VERSION" https://github.com/flutter/flutter.git "$RUNNER_TEMP/flutter"
+          test "$(git -C "$RUNNER_TEMP/flutter" rev-parse HEAD)" = "$FLUTTER_COMMIT"
+          echo "$RUNNER_TEMP/flutter/bin" >> "$GITHUB_PATH"
+      - name: Turn off analytics
+        run: |
+          $FLUTTER config --no-analytics
+          $FLUTTER --disable-analytics
+      - name: Analyze
+        if: matrix.platform == 'linux'
+        working-directory: app
+        run: $FLUTTER analyze
+      - name: Tests, against the real core
+        working-directory: app
+        run: PB_CORE_LIB="$GITHUB_WORKSPACE/${{ matrix.lib }}" $FLUTTER test --exclude-tags screenshots
+      - name: Build
+        working-directory: app
+        run: $FLUTTER build ${{ matrix.platform }} --release
+      - name: Put the core in the app
+        run: |
+          case "${{ matrix.platform }}" in
+            linux) cp "${{ matrix.lib }}" "${{ matrix.bundle }}/lib/" ;;
+            macos)
+              mkdir -p "${{ matrix.bundle }}/Contents/Frameworks"
+              cp "${{ matrix.lib }}" "${{ matrix.bundle }}/Contents/Frameworks/"
+              # Ad hoc, as Flutter's own release build is, until code signing.
+              codesign --force --deep --sign - "${{ matrix.bundle }}" ;;
+            windows) cp "${{ matrix.lib }}" "${{ matrix.bundle }}/" ;;
+          esac
+      - name: Measure (Linux)
+        if: matrix.platform == 'linux'
+        run: |
+          Xvfb :99 -screen 0 1440x900x24 &
+          export DISPLAY=:99
+          sleep 2
+          tools/measure.sh "${{ matrix.exe }}" "${{ matrix.bundle }}" screenshot-linux.png | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Measure (macOS)
+        if: matrix.platform == 'macos'
+        run: tools/measure.sh "${{ matrix.exe }}" "${{ matrix.bundle }}" screenshot-macos.png | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Measure (Windows)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: tools/measure.ps1 -Exe "${{ matrix.exe }}" -Bundle "${{ matrix.bundle }}" -Shot screenshot-windows.png | Tee-Object -Append -FilePath $env:GITHUB_STEP_SUMMARY
+      - name: Pack the build
+        run: tar -czf "passbundle-${{ matrix.platform }}.tar.gz" -C "$(dirname "${{ matrix.bundle }}")" "$(basename "${{ matrix.bundle }}")"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: passbundle-${{ matrix.platform }}
+          path: |
+            passbundle-${{ matrix.platform }}.tar.gz
+            screenshot-${{ matrix.platform }}.png
+          if-no-files-found: warn
+          retention-days: 7

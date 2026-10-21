@@ -12,13 +12,29 @@ import 'core.dart';
 import 'theme.dart';
 
 final measuring = Platform.environment['PB_MEASURE'] == '1';
+final _measureFile = Platform.environment['PB_MEASURE_FILE'];
+
+/// A timing line for tools/measure.sh: to PB_MEASURE_FILE when set (a Windows
+/// app has no stdout), and to stdout where there is one.
+void report(String line) {
+  final file = _measureFile;
+  if (file != null) {
+    File(file).writeAsStringSync('$line\n', mode: FileMode.append, flush: true);
+  }
+  try {
+    stdout.writeln(line);
+  } on Exception {
+    // No console.
+  }
+}
+
 const samplePassword = 'correct horse battery staple 1';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
   if (measuring) {
     SchedulerBinding.instance.addPostFrameCallback((_) {
-      stdout.writeln('first-frame ${DateTime.now().microsecondsSinceEpoch}');
+      report('first-frame ${DateTime.now().microsecondsSinceEpoch}');
     });
   }
   runApp(const PassBundleApp());
@@ -161,7 +177,7 @@ class _UnlockScreenState extends State<UnlockScreen> {
     if (!mounted) return;
     if (answer['ok'] == true) {
       if (measuring) {
-        stdout.writeln('unlocked ${answer['ms']} ms, ${answer['count']} items');
+        report('unlocked ${answer['ms']} ms, ${answer['count']} items');
       }
       widget.onUnlocked();
     } else {
@@ -291,7 +307,7 @@ class _VaultScreenState extends State<VaultScreen> {
         setState(
           () => selected = items.isEmpty ? null : items.first['id'] as String,
         );
-        Timer(const Duration(seconds: 1), () => stdout.writeln('ready'));
+        Timer(const Duration(seconds: 1), () => report('ready'));
       });
     }
   }
