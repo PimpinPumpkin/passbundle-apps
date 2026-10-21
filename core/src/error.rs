@@ -18,6 +18,12 @@ pub enum Error {
     Malformed(String),
     /// A one-time code secret the core can't use, and why.
     Totp(&'static str),
+    /// The server couldn't be reached.
+    Network(String),
+    /// The server answered with an error, in its words.
+    Server(String),
+    /// Signed out: the session ended and needs the master password again.
+    SignedOut,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -35,6 +41,9 @@ impl fmt::Display for Error {
             Error::Damaged(why) => write!(f, "This is damaged ({why})."),
             Error::Malformed(what) => write!(f, "The server sent something unexpected: {what}."),
             Error::Totp(why) => write!(f, "That one-time code secret can't be used: {why}."),
+            Error::Network(why) => write!(f, "Couldn't reach the server: {why}."),
+            Error::Server(message) => write!(f, "The server said: {message}"),
+            Error::SignedOut => write!(f, "You've been signed out. Sign in again."),
         }
     }
 }

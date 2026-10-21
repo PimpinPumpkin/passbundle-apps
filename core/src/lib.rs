@@ -5,6 +5,7 @@
 pub mod crypto;
 pub mod error;
 pub mod kdf;
+pub mod server;
 pub mod totp;
 pub mod vault;
 

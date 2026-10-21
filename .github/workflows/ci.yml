@@ -54,6 +54,48 @@ jobs:
       - name: Tests (the vectors)
         run: cargo test --locked
 
+  core-server:
+    # Real keys against a real PassBundle server (core/tests/server.rs):
+    # signing up, signing in, two-step login, sync, saving, and organizations.
+    name: Core against a real server
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: PimpinPumpkin/passbundle-server
+          ref: keykeeper
+          path: server
+          persist-credentials: false
+      - name: Server build dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential libssl-dev pkg-config
+      - name: Install the pinned Rust toolchains
+        run: |
+          (cd core && rustup toolchain install)
+          (cd server && rustup toolchain install)
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: |
+            core
+            server
+      - name: Build the server
+        working-directory: server
+        run: cargo build --features sqlite
+      - name: Start it
+        run: echo "PB_TEST_SERVER=$(tools/test-server.sh server/target/debug/vaultwarden 8591 "$RUNNER_TEMP/server")" >> "$GITHUB_ENV"
+      - name: The core against it
+        working-directory: core
+        run: cargo test --locked --test server
+      - name: The server's log
+        if: failure()
+        run: cat "$RUNNER_TEMP/server/server.log" || true
+
   app:
     name: App (${{ matrix.platform }})
     needs: core

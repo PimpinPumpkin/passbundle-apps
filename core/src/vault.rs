@@ -76,6 +76,7 @@ pub struct CipherData {
     pub fields: Option<Vec<FieldData>>,
     #[serde(default)]
     pub collection_ids: Vec<String>,
+    pub revision_date: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -157,6 +158,55 @@ pub struct Item {
     pub password: Option<Zeroizing<String>>,
     pub totp: Option<Zeroizing<String>>,
     pub fields: Vec<Field>,
+    /// The server's revision, which an edit names so it can't overwrite a newer one.
+    pub revision_date: Option<String>,
+}
+
+/// An item as the person edits it, before it's encrypted.
+#[derive(Default)]
+pub struct ItemDraft {
+    /// Login or secure note.
+    pub note: bool,
+    pub name: String,
+    pub notes: Option<Zeroizing<String>>,
+    pub username: Option<String>,
+    pub password: Option<Zeroizing<String>>,
+    pub totp: Option<Zeroizing<String>>,
+    pub uris: Vec<String>,
+    pub fields: Vec<Field>,
+    pub folder_id: Option<String>,
+    pub organization_id: Option<String>,
+    pub favorite: bool,
+}
+
+impl ItemDraft {
+    /// A draft of an opened item, to edit.
+    pub fn of(item: &Item) -> ItemDraft {
+        let copy = |z: &Option<Zeroizing<String>>| {
+            z.as_ref().map(|v| Zeroizing::new(v.as_str().to_owned()))
+        };
+        ItemDraft {
+            note: item.kind == ItemKind::SecureNote,
+            name: item.name.clone(),
+            notes: copy(&item.notes),
+            username: item.username.clone(),
+            password: copy(&item.password),
+            totp: copy(&item.totp),
+            uris: item.uris.clone(),
+            fields: item
+                .fields
+                .iter()
+                .map(|f| Field {
+                    name: f.name.clone(),
+                    value: Zeroizing::new(f.value.as_str().to_owned()),
+                    hidden: f.hidden,
+                })
+                .collect(),
+            folder_id: item.folder_id.clone(),
+            organization_id: item.organization_id.clone(),
+            favorite: item.favorite,
+        }
+    }
 }
 
 /// An item that doesn't open, and why: shown in the list as such, never guessed at.
@@ -292,6 +342,56 @@ impl Vault {
         })
     }
 
+    /// Encrypts a draft as the server takes it (upstream's cipher request):
+    /// under its organization's key, or the user key, and without an item key,
+    /// like the other apps. Pass the item being edited, if any, so the server
+    /// can refuse an edit to a version that's since changed.
+    pub fn encrypt_item(
+        &self,
+        draft: &ItemDraft,
+        editing: Option<&Item>,
+    ) -> Result<serde_json::Value> {
+        use serde_json::json;
+        let key = match &draft.organization_id {
+            Some(org) => self
+                .keys
+                .organizations
+                .get(org)
+                .ok_or(Error::Damaged("that organization's key doesn't open"))?,
+            None => &self.keys.user,
+        };
+        let enc = |text: &str| key.encrypt_str(text).to_string();
+        let enc_opt = |text: Option<&str>| text.filter(|t| !t.is_empty()).map(enc);
+        let mut body = json!({
+            "type": if draft.note { 2 } else { 1 },
+            "organizationId": draft.organization_id,
+            "folderId": draft.folder_id,
+            "name": enc(&draft.name),
+            "notes": enc_opt(draft.notes.as_deref().map(String::as_str)),
+            "favorite": draft.favorite,
+            "reprompt": 0,
+            "fields": draft.fields.iter().map(|f| json!({
+                "name": enc(&f.name),
+                "value": enc(&f.value),
+                "type": if f.hidden { 1 } else { 0 },
+                "linkedId": null,
+            })).collect::<Vec<_>>(),
+            "encryptedFor": self.user_id,
+            "lastKnownRevisionDate": editing.and_then(|i| i.revision_date.clone()),
+        });
+        if draft.note {
+            body["secureNote"] = json!({ "type": 0 });
+        } else {
+            body["login"] = json!({
+                "username": enc_opt(draft.username.as_deref()),
+                "password": enc_opt(draft.password.as_deref().map(String::as_str)),
+                "totp": enc_opt(draft.totp.as_deref().map(String::as_str)),
+                "uris": draft.uris.iter().map(|u| json!({ "uri": enc(u), "match": null })).collect::<Vec<_>>(),
+            });
+        }
+        Ok(body)
+    }
+
     pub fn item(&self, id: &str) -> Option<&Item> {
         self.items.iter().find(|i| i.id == id)
     }
@@ -378,6 +478,7 @@ impl Keyring {
             password,
             totp,
             fields,
+            revision_date: c.revision_date.clone(),
         })
     }
 }

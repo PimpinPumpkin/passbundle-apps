@@ -230,6 +230,25 @@ impl PrivateKey {
         Ok(PrivateKey(key))
     }
 
+    /// A new RSA-2048 key pair, as a new account or organization gets.
+    pub fn generate() -> Result<Self> {
+        RsaPrivateKey::new(&mut OsRng, 2048)
+            .map(PrivateKey)
+            .map_err(|_| Error::Damaged("an RSA key that couldn't be made"))
+    }
+
+    /// The private key as PKCS#8 DER, to encrypt for the server.
+    pub fn to_pkcs8_der(&self) -> Zeroizing<Vec<u8>> {
+        use rsa::pkcs8::EncodePrivateKey;
+        Zeroizing::new(
+            self.0
+                .to_pkcs8_der()
+                .expect("an RSA private key always encodes")
+                .as_bytes()
+                .to_vec(),
+        )
+    }
+
     /// The public key, as SPKI DER.
     pub fn public_key_der(&self) -> Vec<u8> {
         self.0
