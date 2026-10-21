@@ -295,17 +295,40 @@ jobs:
       - name: Build
         working-directory: app
         run: $FLUTTER build ${{ matrix.platform }} --release
-      - name: Put the core in the app
+      - name: The desktop agent's release build (Windows and macOS, where its tray is)
+        if: matrix.platform != 'linux'
+        working-directory: agent
+        run: |
+          if [ "${{ matrix.platform }}" = macos ]; then
+            # Universal, like the app and the core.
+            rustup target add aarch64-apple-darwin x86_64-apple-darwin
+            mkdir -p target/universal
+            for target in aarch64-apple-darwin x86_64-apple-darwin; do
+              cargo build --locked --release --target "$target"
+            done
+            for program in passbundle-agent passbundle-agent-host; do
+              lipo -create -output "target/universal/$program" \
+                "target/aarch64-apple-darwin/release/$program" "target/x86_64-apple-darwin/release/$program"
+            done
+          else
+            cargo build --locked --release
+          fi
+      - name: Put the core and the agent in the app
         run: |
           case "${{ matrix.platform }}" in
             linux) cp "${{ matrix.lib }}" "${{ matrix.bundle }}/lib/" ;;
             macos)
               mkdir -p "${{ matrix.bundle }}/Contents/Frameworks"
               cp "${{ matrix.lib }}" "${{ matrix.bundle }}/Contents/Frameworks/"
+              # The agent next to the app's own program, so each finds the other.
+              cp agent/target/universal/passbundle-agent agent/target/universal/passbundle-agent-host "${{ matrix.bundle }}/Contents/MacOS/"
               # Ad hoc, as Flutter's own release build is, until code signing.
               codesign --force --deep --sign - "${{ matrix.bundle }}" ;;
-            windows) cp "${{ matrix.lib }}" "${{ matrix.bundle }}/" ;;
+            windows)
+              cp "${{ matrix.lib }}" "${{ matrix.bundle }}/"
+              cp agent/target/release/passbundle-agent.exe agent/target/release/passbundle-agent-host.exe "${{ matrix.bundle }}/" ;;
           esac
+          ls "${{ matrix.bundle }}" | head -20
       - name: Measure (Linux)
         if: matrix.platform == 'linux'
         run: |

@@ -4,7 +4,12 @@ PassBundle's own desktop and mobile apps: one Rust core and one Flutter app, so 
 
 - **`core/`**: the core, in Rust. Keys, the vault format, sync, search, one-time codes: everything but drawing. The design is `docs/core.md` in the meta repo (PimpinPumpkin/Passbundle), with test vectors in `docs/vectors/core-v1.json` (copied into `core/tests/vectors`).
 - **`app/`**: the Flutter app, for Windows, macOS, Linux, iOS, and Android. Its own look (brand colors and the bundled Inter font), light and dark.
+- **`agent/`**: the desktop agent: the tray (menu bar on macOS), Windows Hello for the app and the browser extension, and the extension's native-messaging host. Moved here from passbundle-clients on October 21, 2026.
+- **`ipc/`**: the agent's socket, shared by the agent and the core.
+- **`brand/`**: the brand the agent and the core bake in (`brand/README.md`).
 - **`tools/linux/`**: a Linux build image (Flutter and Rust at pinned versions).
+
+CI's builds (each run's artifacts) are the whole desktop app: on Windows the app, the core, and the agent in one folder (what the installer in the meta repo takes as its `app` and `agent` folders), and on macOS one app bundle with the agent inside, both ad hoc signed until code signing.
 
 ## Status
 
