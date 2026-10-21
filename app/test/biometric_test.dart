@@ -14,6 +14,9 @@ import 'support.dart';
 
 final agentProgram = Platform.environment['PB_TEST_AGENT'];
 
+/// The switch for unlocking with Windows Hello or Touch ID, in Settings.
+const biometric = ValueKey('biometric');
+
 void main() {
   setUpAll(loadFonts);
 
@@ -69,16 +72,15 @@ void main() {
 
     await tester.tap(find.byTooltip('Settings'));
     await tester.pump();
-    await pumpUntil(tester, find.byType(SwitchListTile));
-    expect(
-      tester.widget<SwitchListTile>(find.byType(SwitchListTile)).value,
-      false,
-    );
+    await pumpUntil(tester, find.byKey(biometric));
+    expect(tester.widget<SwitchListTile>(find.byKey(biometric)).value, false);
     answer('yes');
-    await tester.tap(find.byType(SwitchListTile));
+    await tester.tap(find.byKey(biometric));
     await pumpUntil(
       tester,
-      find.byWidgetPredicate((w) => w is SwitchListTile && w.value),
+      find.byWidgetPredicate(
+        (w) => w is SwitchListTile && w.key == biometric && w.value,
+      ),
     );
     expect(
       File('$home/prompts').readAsStringSync(),

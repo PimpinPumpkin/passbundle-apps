@@ -90,6 +90,13 @@ class Core {
   late final _sync = _lib.lookupFunction<_Str0, _Str0>('pb_sync');
   late final _lock = _lib.lookupFunction<_Str0, _Str0>('pb_lock');
   late final _signOut = _lib.lookupFunction<_Str0, _Str0>('pb_sign_out');
+  late final _preferences = _lib.lookupFunction<_Str0, _Str0>('pb_preferences');
+  late final _setPreferences = _lib.lookupFunction<_Str1, _Str1>(
+    'pb_set_preferences',
+  );
+  late final _used = _lib.lookupFunction<_Str0, _Str0>('pb_used');
+  late final _tick = _lib.lookupFunction<_Str0, _Str0>('pb_tick');
+  late final _sleeping = _lib.lookupFunction<_Str0, _Str0>('pb_sleeping');
   late final _places = _lib.lookupFunction<_Str0, _Str0>('pb_places');
   late final _list = _lib.lookupFunction<_Str1, _Str1>('pb_list');
   late final _item = _lib.lookupFunction<_Str1, _Str1>('pb_item');
@@ -215,6 +222,27 @@ class Core {
   Map<String, dynamic> lock() => _answer(_lock()) as Map<String, dynamic>;
 
   Map<String, dynamic> signOut() => _answer(_signOut()) as Map<String, dynamic>;
+
+  /// When to lock by itself: `lockAfterMinutes` (null: only when the app
+  /// closes) and `lockOnSleep` (when the screen locks or the computer sleeps).
+  Map<String, dynamic> preferences() =>
+      _answer(_preferences()) as Map<String, dynamic>;
+
+  Answer setPreferences(Map<String, dynamic> preferences) => Answer(
+    _with([jsonEncode(preferences)], (p) => _answer(_setPreferences(p[0])))
+        as Map<String, dynamic>,
+  );
+
+  /// The person used the app just now.
+  void used() => _answer(_used());
+
+  /// Locks if it's time to (the core decides, from what the OS says):
+  /// `locked` says whether the vault is locked now.
+  Map<String, dynamic> tick() => _answer(_tick()) as Map<String, dynamic>;
+
+  /// The OS says the computer is about to sleep: locks if the person chose that.
+  Map<String, dynamic> sleeping() =>
+      _answer(_sleeping()) as Map<String, dynamic>;
 
   /// Folders, and organizations with their collections.
   Map<String, dynamic> places() => _answer(_places()) as Map<String, dynamic>;

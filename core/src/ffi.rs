@@ -8,7 +8,8 @@
 
 use std::ffi::{c_char, CStr, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, MutexGuard, TryLockError};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
@@ -16,6 +17,7 @@ use zeroize::Zeroizing;
 
 use crate::agent::Status;
 use crate::app::{App, State, Step};
+use crate::autolock::{self, Preferences};
 use crate::error::Error;
 use crate::generator;
 use crate::secrets::{MemorySecretStore, OsSecretStore, SecretStore};
@@ -24,6 +26,9 @@ use crate::totp::Totp;
 use crate::vault::{Field, Item, ItemDraft, ItemKind, Vault};
 
 static APP: Mutex<Option<App>> = Mutex::new(None);
+/// The OS said the computer is going to sleep while a slow call had the app:
+/// the app hears it as soon as that call is done.
+static SLEEP_NOTICE: AtomicBool = AtomicBool::new(false);
 
 fn text(ptr: *const c_char) -> String {
     if ptr.is_null() {
@@ -44,12 +49,35 @@ fn out(value: Value) -> *mut c_char {
 /// Runs a call on the app, turning a panic into an error instead of unwinding into Dart.
 fn with_app(call: impl FnOnce(&mut App) -> Value) -> *mut c_char {
     out(catch_unwind(AssertUnwindSafe(|| {
-        let mut guard = APP.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let app =
-            guard.get_or_insert_with(|| App::open(Store::new(Store::default_dir()), secrets()));
-        call(app)
+        let guard = APP.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        on_app(guard, call)
     }))
     .unwrap_or_else(|_| json!({ "ok": false, "error": "The core stopped unexpectedly." })))
+}
+
+/// `with_app`, but None instead of waiting while a slow call (a sync, say) has the app.
+fn with_app_now(call: impl FnOnce(&mut App) -> Value) -> Option<*mut c_char> {
+    let guard = match APP.try_lock() {
+        Ok(guard) => guard,
+        Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        Err(TryLockError::WouldBlock) => return None,
+    };
+    Some(out(catch_unwind(AssertUnwindSafe(|| on_app(guard, call)))
+        .unwrap_or_else(
+            |_| json!({ "ok": false, "error": "The core stopped unexpectedly." }),
+        )))
+}
+
+fn on_app(mut guard: MutexGuard<'_, Option<App>>, call: impl FnOnce(&mut App) -> Value) -> Value {
+    let app = guard.get_or_insert_with(|| App::open(Store::new(Store::default_dir()), secrets()));
+    if SLEEP_NOTICE.swap(false, Ordering::SeqCst) {
+        app.sleeping();
+    }
+    let value = call(app);
+    if SLEEP_NOTICE.swap(false, Ordering::SeqCst) {
+        app.sleeping();
+    }
+    value
 }
 
 fn secrets() -> Box<dyn SecretStore> {
@@ -288,6 +316,67 @@ pub extern "C" fn pb_lock() -> *mut c_char {
     with_app(|app| {
         app.lock();
         state(app)
+    })
+}
+
+fn unlocked(app: &App) -> bool {
+    matches!(app.state(), State::Unlocked { .. })
+}
+
+/// When to lock by itself: `lockAfterMinutes` (null: only when the app
+/// closes) and `lockOnSleep` (when the screen locks or the computer sleeps).
+#[no_mangle]
+pub extern "C" fn pb_preferences() -> *mut c_char {
+    with_app(|app| json!(app.preferences()))
+}
+
+/// # Safety
+/// `preferences` is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_set_preferences(preferences: *const c_char) -> *mut c_char {
+    let preferences = serde_json::from_str::<Preferences>(&text(preferences));
+    with_app(|app| match preferences {
+        Ok(preferences) => done(app.set_preferences(preferences)),
+        Err(_) => failed(Error::Damaged("those choices")),
+    })
+}
+
+/// The person used the app just now. Skipped while a slow call has the app.
+#[no_mangle]
+pub extern "C" fn pb_used() -> *mut c_char {
+    with_app_now(|app| {
+        app.used();
+        json!({ "ok": true })
+    })
+    .unwrap_or_else(|| out(json!({ "ok": true })))
+}
+
+/// Locks if it's time to (docs/core.md, "Locking by itself"). The app asks
+/// every two seconds while unlocked: `locked` says whether the vault is locked
+/// now, and `reason` why it just locked ("idle", "screenLocked", "slept").
+/// While a slow call has the app, `busy` is true, and the next tick decides.
+#[no_mangle]
+pub extern "C" fn pb_tick() -> *mut c_char {
+    // Asked outside the app's lock: on Linux it's a D-Bus call.
+    let readings = autolock::readings();
+    with_app_now(|app| {
+        let reason = app.tick(&readings);
+        json!({ "busy": false, "locked": !unlocked(app), "reason": reason.map(|r| r.name()) })
+    })
+    .unwrap_or_else(|| out(json!({ "busy": true, "locked": false })))
+}
+
+/// The OS says the computer is about to sleep: locks now if the person chose
+/// that, or as soon as a slow call that has the app is done.
+#[no_mangle]
+pub extern "C" fn pb_sleeping() -> *mut c_char {
+    with_app_now(|app| {
+        app.sleeping();
+        json!({ "busy": false, "locked": !unlocked(app) })
+    })
+    .unwrap_or_else(|| {
+        SLEEP_NOTICE.store(true, Ordering::SeqCst);
+        out(json!({ "busy": true, "locked": false }))
     })
 }
 

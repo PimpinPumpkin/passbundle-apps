@@ -1,6 +1,7 @@
 //! What the app keeps on this device (docs/core.md, "What's kept where"):
-//! the server, email, KDF settings, and this install's device identifier, and
-//! the last sync as the server sent it (its secrets still encrypted). The
+//! the server, email, KDF settings, and this install's device identifier, the
+//! person's choices for locking, and the last sync as the server sent it (its
+//! secrets still encrypted). The
 //! refresh token goes to the OS's secret store instead (`secrets`). Nothing
 //! decrypted is ever written.
 
@@ -9,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::autolock::Preferences;
 use crate::error::{Error, Result};
 use crate::kdf::Prelogin;
 
@@ -88,6 +90,20 @@ impl Store {
         )
     }
 
+    /// When to lock by itself; the defaults until the person chooses.
+    pub fn preferences(&self) -> Preferences {
+        self.read("preferences.json")
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn save_preferences(&self, preferences: &Preferences) -> Result<()> {
+        self.write(
+            "preferences.json",
+            &serde_json::to_string_pretty(preferences).expect("preferences always serialize"),
+        )
+    }
+
     /// The last sync, as the server sent it.
     pub fn sync(&self) -> Option<String> {
         self.read("sync.json")
@@ -123,7 +139,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn keeps_settings_and_the_sync_and_forgets_the_vault_on_sign_out() {
+    fn keeps_settings_choices_and_the_sync_and_forgets_the_vault_on_sign_out() {
         let dir = std::env::temp_dir().join(format!("pb-store-{}", uuid::Uuid::new_v4()));
         let store = Store::new(&dir);
         assert!(store.settings().is_none());
@@ -149,9 +165,17 @@ mod tests {
                 .mode();
             assert_eq!(mode & 0o777, 0o600);
         }
+        assert_eq!(store.preferences(), Preferences::default());
+        let chosen = Preferences {
+            lock_after_minutes: None,
+            lock_on_sleep: false,
+        };
+        store.save_preferences(&chosen).unwrap();
         store.forget_vault();
         assert!(store.sync().is_none());
         assert!(store.settings().is_some());
+        // The choices are this device's, kept for whoever signs in next.
+        assert_eq!(store.preferences(), chosen);
         let _ = fs::remove_dir_all(dir);
     }
 }

@@ -1,5 +1,6 @@
 // PassBundle: sign in to a PassBundle server, unlock the vault kept on this
-// device, and use it, with the look every platform shares. Set PB_MEASURE=1
+// device, and use it, with the look every platform shares. It locks by itself
+// as chosen in Settings (docs/core.md, "Locking by itself"). Set PB_MEASURE=1
 // to unlock by itself (with PB_MEASURE_PASSWORD) and report timings
 // (tools/measure.sh).
 import 'dart:async';
@@ -7,6 +8,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
+import 'package:flutter/services.dart';
 
 import 'core.dart';
 import 'sign_in.dart';
@@ -69,10 +71,74 @@ class _PassBundleAppState extends State<PassBundleApp> {
   /// Signing in again while a vault is kept here (the server signed this device out).
   bool signingInAgain = false;
 
-  void refresh() => setState(() {
-    state = core.state();
-    signingInAgain = false;
-  });
+  /// While unlocked, asks the core every two seconds whether to lock by itself.
+  Timer? ticker;
+  DateTime lastUsed = DateTime(0);
+
+  /// The native runner's word that the computer is about to sleep.
+  static const computer = MethodChannel('passbundle/computer');
+
+  @override
+  void initState() {
+    super.initState();
+    computer.setMethodCallHandler(fromComputer);
+    HardwareKeyboard.instance.addHandler(keyPressed);
+    watch();
+  }
+
+  @override
+  void dispose() {
+    ticker?.cancel();
+    HardwareKeyboard.instance.removeHandler(keyPressed);
+    computer.setMethodCallHandler(null);
+    super.dispose();
+  }
+
+  void refresh() {
+    setState(() {
+      state = core.state();
+      signingInAgain = false;
+    });
+    watch();
+  }
+
+  void watch() {
+    final unlocked = state['state'] == 'unlocked';
+    if (unlocked) {
+      ticker ??= Timer.periodic(const Duration(seconds: 2), (_) => tick());
+    } else {
+      ticker?.cancel();
+      ticker = null;
+    }
+  }
+
+  void tick() {
+    if (core.tick()['locked'] == true) refresh();
+  }
+
+  Future<void> fromComputer(MethodCall call) async {
+    if (call.method == 'sleeping' &&
+        state['state'] == 'unlocked' &&
+        core.sleeping()['locked'] == true) {
+      refresh();
+    }
+  }
+
+  /// The person used the app: the core hears it at most once a second.
+  void used() {
+    final now = DateTime.now();
+    if (state['state'] != 'unlocked' ||
+        now.difference(lastUsed) < const Duration(seconds: 1)) {
+      return;
+    }
+    lastUsed = now;
+    core.used();
+  }
+
+  bool keyPressed(KeyEvent event) {
+    used();
+    return false;
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -125,13 +191,22 @@ class _PassBundleAppState extends State<PassBundleApp> {
         );
       }
     }
-    return MaterialApp(
-      title: 'PassBundle',
-      debugShowCheckedModeBanner: false,
-      theme: passBundleTheme(Brightness.light),
-      darkTheme: passBundleTheme(Brightness.dark),
-      themeMode: mode,
-      home: home,
+    return Listener(
+      onPointerDown: (_) => used(),
+      onPointerMove: (_) => used(),
+      onPointerHover: (_) => used(),
+      onPointerSignal: (_) => used(),
+      child: MaterialApp(
+        // A new one for each state: locking closes whatever was open over
+        // the vault (an item's editor, a menu) at once, with no fade.
+        key: ValueKey(state['state']),
+        title: 'PassBundle',
+        debugShowCheckedModeBanner: false,
+        theme: passBundleTheme(Brightness.light),
+        darkTheme: passBundleTheme(Brightness.dark),
+        themeMode: mode,
+        home: home,
+      ),
     );
   }
 }

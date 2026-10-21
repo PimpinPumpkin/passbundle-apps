@@ -10,9 +10,45 @@
 struct _MyApplication {
   GtkApplication parent_instance;
   char** dart_entrypoint_arguments;
+  // Tells the app the computer is about to sleep, so it can lock first
+  // (docs/core.md, "Locking by itself"): systemd-logind's PrepareForSleep.
+  FlMethodChannel* computer;
+  GDBusConnection* system_bus;
+  guint sleep_signal;
 };
 
 G_DEFINE_TYPE(MyApplication, my_application, GTK_TYPE_APPLICATION)
+
+static void prepare_for_sleep_cb(GDBusConnection* connection,
+                                 const gchar* sender, const gchar* path,
+                                 const gchar* interface, const gchar* signal,
+                                 GVariant* parameters, gpointer user_data) {
+  MyApplication* self = MY_APPLICATION(user_data);
+  gboolean going_to_sleep = FALSE;
+  g_variant_get(parameters, "(b)", &going_to_sleep);
+  if (going_to_sleep && self->computer != nullptr) {
+    fl_method_channel_invoke_method(self->computer, "sleeping", nullptr,
+                                    nullptr, nullptr, nullptr);
+  }
+}
+
+static void listen_for_sleep(MyApplication* self, FlView* view) {
+  g_autoptr(FlStandardMethodCodec) codec = fl_standard_method_codec_new();
+  self->computer = fl_method_channel_new(
+      fl_engine_get_binary_messenger(fl_view_get_engine(view)),
+      "passbundle/computer", FL_METHOD_CODEC(codec));
+  g_autoptr(GError) error = nullptr;
+  self->system_bus = g_bus_get_sync(G_BUS_TYPE_SYSTEM, nullptr, &error);
+  if (self->system_bus == nullptr) {
+    // No system bus (a container, say): the app still locks on waking.
+    return;
+  }
+  self->sleep_signal = g_dbus_connection_signal_subscribe(
+      self->system_bus, "org.freedesktop.login1",
+      "org.freedesktop.login1.Manager", "PrepareForSleep",
+      "/org/freedesktop/login1", nullptr, G_DBUS_SIGNAL_FLAGS_NONE,
+      prepare_for_sleep_cb, self, nullptr);
+}
 
 // Called when first Flutter frame received.
 static void first_frame_cb(MyApplication* self, FlView* view) {
@@ -74,6 +110,7 @@ static void my_application_activate(GApplication* application) {
   gtk_widget_realize(GTK_WIDGET(view));
 
   fl_register_plugins(FL_PLUGIN_REGISTRY(view));
+  listen_for_sleep(self, view);
 
   gtk_widget_grab_focus(GTK_WIDGET(view));
 }
@@ -121,6 +158,12 @@ static void my_application_shutdown(GApplication* application) {
 static void my_application_dispose(GObject* object) {
   MyApplication* self = MY_APPLICATION(object);
   g_clear_pointer(&self->dart_entrypoint_arguments, g_strfreev);
+  if (self->system_bus != nullptr && self->sleep_signal != 0) {
+    g_dbus_connection_signal_unsubscribe(self->system_bus, self->sleep_signal);
+    self->sleep_signal = 0;
+  }
+  g_clear_object(&self->system_bus);
+  g_clear_object(&self->computer);
   G_OBJECT_CLASS(my_application_parent_class)->dispose(object);
 }
 

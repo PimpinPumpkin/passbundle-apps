@@ -4,6 +4,7 @@
 
 pub mod agent;
 pub mod app;
+pub mod autolock;
 pub mod clipboard;
 pub mod crypto;
 pub mod error;
