@@ -4,8 +4,10 @@
 //! and syncing with the kept refresh token.
 
 use std::path::PathBuf;
+use std::time::{Instant, SystemTime};
 
 use crate::agent::{self, Agent};
+use crate::autolock::{AutoLock, Preferences, Readings, Reason};
 use crate::clipboard;
 use crate::crypto::SymmetricKey;
 use crate::error::{Error, Result};
@@ -51,6 +53,8 @@ pub struct App {
     vault: Option<Vault>,
     /// The agent's address and program, when not the ones installed next to this app (tests).
     agent: Option<(PathBuf, PathBuf)>,
+    preferences: Preferences,
+    autolock: AutoLock,
 }
 
 impl App {
@@ -59,6 +63,7 @@ impl App {
         let server = settings
             .as_ref()
             .and_then(|s| Server::new(&s.server, Device::this_one(&s.device_identifier)).ok());
+        let preferences = store.preferences();
         App {
             store,
             secrets,
@@ -68,6 +73,8 @@ impl App {
             pending: None,
             vault: None,
             agent: None,
+            preferences,
+            autolock: AutoLock::new(Instant::now(), SystemTime::now()),
         }
     }
 
@@ -161,6 +168,7 @@ impl App {
             .keep(&settings.server, &settings.email, &session.refresh_token);
         self.session = Some(session);
         self.sync()?;
+        self.autolock = AutoLock::new(Instant::now(), SystemTime::now());
         Ok(Step::Done)
     }
 
@@ -186,6 +194,7 @@ impl App {
                 user_key: vault.user_key().clone(),
             });
         self.vault = Some(vault);
+        self.autolock = AutoLock::new(Instant::now(), SystemTime::now());
     }
 
     /// The account's id: the open vault's, or the kept sync's.
@@ -274,6 +283,54 @@ impl App {
             .keep(&settings.server, &settings.email, &session.refresh_token);
         self.vault = Some(Vault::open(&sync, session.user_key().clone())?);
         Ok(())
+    }
+
+    /// When to lock by itself (docs/core.md, "Locking by itself").
+    pub fn preferences(&self) -> Preferences {
+        self.preferences
+    }
+
+    pub fn set_preferences(&mut self, preferences: Preferences) -> Result<()> {
+        preferences.check()?;
+        self.store.save_preferences(&preferences)?;
+        self.preferences = preferences;
+        Ok(())
+    }
+
+    /// The app was used just now (the screens say, at most about once a second).
+    pub fn used(&mut self) {
+        self.autolock.used(Instant::now(), SystemTime::now());
+    }
+
+    /// Locks if it's time to, from what the OS says; returns why it locked.
+    /// The app asks every two seconds while unlocked.
+    pub fn tick(&mut self, readings: &Readings) -> Option<Reason> {
+        self.tick_at(readings, Instant::now(), SystemTime::now())
+    }
+
+    /// `tick`, at a given time (tests).
+    pub fn tick_at(
+        &mut self,
+        readings: &Readings,
+        now: Instant,
+        wall: SystemTime,
+    ) -> Option<Reason> {
+        self.vault.as_ref()?;
+        let reason = self
+            .autolock
+            .check(&self.preferences, readings, now, wall)?;
+        self.lock();
+        Some(reason)
+    }
+
+    /// The OS says the computer is about to sleep: locks if the person chose
+    /// that. Returns whether it locked.
+    pub fn sleeping(&mut self) -> bool {
+        if self.vault.is_none() || !self.preferences.lock_on_sleep {
+            return false;
+        }
+        self.lock();
+        true
     }
 
     /// Drops every key and everything decrypted.

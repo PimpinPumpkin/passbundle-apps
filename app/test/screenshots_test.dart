@@ -33,6 +33,9 @@ Future<void> unlock(WidgetTester tester) async {
   await pumpUntil(tester, find.textContaining('Sign in again to get changes'));
 }
 
+/// The switch for unlocking with Windows Hello or Touch ID, in Settings.
+const biometric = ValueKey('biometric');
+
 void main() {
   setUpAll(loadFonts);
 
@@ -99,12 +102,14 @@ void main() {
       await unlock(tester);
       await tester.tap(find.byTooltip('Settings'));
       await tester.pump();
-      await pumpUntil(tester, find.byType(SwitchListTile));
+      await pumpUntil(tester, find.byKey(biometric));
       File('$home/answers').writeAsStringSync('yes');
-      await tester.tap(find.byType(SwitchListTile));
+      await tester.tap(find.byKey(biometric));
       await pumpUntil(
         tester,
-        find.byWidgetPredicate((w) => w is SwitchListTile && w.value),
+        find.byWidgetPredicate(
+          (w) => w is SwitchListTile && w.key == biometric && w.value,
+        ),
       );
       // Past the dialog's fade-in, which the test's clock doesn't advance by itself.
       await tester.pump(const Duration(milliseconds: 400));
