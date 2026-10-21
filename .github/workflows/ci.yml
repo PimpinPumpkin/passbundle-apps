@@ -61,6 +61,92 @@ jobs:
           [ -n "$PB_TEST_CLIPBOARD" ] || unset PB_TEST_CLIPBOARD
           cargo test --locked
 
+  agent:
+    # The desktop agent (agent/README.md): the tray app, Windows Hello for the
+    # browser extension, and the native-messaging host. Moved here from
+    # passbundle-clients, with the checks it had in tier 1.
+    name: Agent (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2025, macos-15, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+        working-directory: agent
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: agent
+      - name: No Bitwarden SDK or desktop_native crates
+        # They aren't all under standard open-source licenses (see agent/README.md).
+        run: |
+          if grep -nE '^name = "(bitwarden|desktop_|biometric|secure_memory)' Cargo.lock; then
+            echo "The agent must not depend on these crates." >&2
+            exit 1
+          fi
+      - name: Formatting
+        run: cargo fmt --check
+      - name: Lints
+        run: |
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo clippy --locked --all-targets --features test-authenticator -- -D warnings
+      - name: Unit tests
+        run: cargo test --locked
+      - name: The agent and the native-messaging host as separate processes
+        # With the stand-in authenticator, which release builds refuse.
+        run: cargo test --locked --features test-authenticator --test host
+      - name: Release build
+        if: runner.os != 'Linux'
+        run: |
+          cargo build --locked --release
+          if cargo build --locked --release --features test-authenticator 2> refused.txt; then
+            echo "A release build included the test authenticator." >&2
+            exit 1
+          fi
+          grep -q "release builds can't include it" refused.txt
+      - name: Size, version, and a run in the tray
+        if: runner.os != 'Linux'
+        run: |
+          exe=target/release/passbundle-agent
+          host=target/release/passbundle-agent-host
+          if [ -f "$exe.exe" ]; then exe="$exe.exe"; host="$host.exe"; fi
+          size=$(( $(wc -c < "$exe") + $(wc -c < "$host") ))
+          echo "Size: $size bytes (agent and host)"
+          # DESIGN.md: under 10 MB.
+          test "$size" -lt 10485760
+          name=$(node -p 'require("../brand/brand.json").name')
+          "$exe" --version | tee version.txt
+          grep -qx "$name agent [0-9]*\.[0-9]*\.[0-9]*" version.txt
+          # CI builds have no update key, so they never update themselves.
+          "$exe" --update | grep -qx "This build doesn't update itself."
+          # The tray app starts and stays up; a second one for the same user exits.
+          "$exe" &
+          pid=$!
+          sleep 5
+          kill -0 "$pid"
+          "$exe"
+          kill -0 "$pid"
+          kill "$pid"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: runner.os != 'Linux'
+        with:
+          name: agent-${{ matrix.os }}
+          path: |
+            agent/target/release/passbundle-agent
+            agent/target/release/passbundle-agent.exe
+            agent/target/release/passbundle-agent-host
+            agent/target/release/passbundle-agent-host.exe
+          if-no-files-found: error
+          retention-days: 3
+
   core-server:
     # Real keys against a real PassBundle server (core/tests/server.rs):
     # signing up, signing in, two-step login, sync, saving, and organizations.

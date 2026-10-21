@@ -1,0 +1,10 @@
+{
+  "about": "Test vector for sealing a user key with a key derived from a Windows Hello signature. TEST VALUES ONLY. See DESIGN.md, \"Biometric unlock\".",
+  "info": "passbundle-agent windows-hello seal v1",
+  "userId": "3f1c2a64-8d0e-4b7f-9a55-6c2e1d0b9f10",
+  "challenge": "ERgfJi00O0JJUFdeZWxzeoGIj5adpKuyucDHztXc4+o=",
+  "signature": "IikwNz5FTFNaYWhvdn2Ei5KZoKeutbzDytHY3+bt9PsCCRAXHiUsMzpBSE9WXWRrcnmAh46VnKOqsbi/xs3U2+Lp8Pf+BQwTGiEoLzY9REtSWWBnbnV8g4qRmJ+mrbS7wsnQ197l7PP6AQgPFh0kKzI5QEdOVVxjanF4f4aNlJuiqbC3vsXM09rh6O/2/QQLEhkgJy41PENKUVhfZm10e4KJkJeepayzusHIz9bd5Ovy+QAHDhUcIyoxOD9GTVRbYmlwd36FjJOaoaivtr3Ey9LZ4Ofu9fwDChEYHyYtNDtCSVBXXmVsc3qBiI+WnaSrsrnAx87V3OPq8fj/Bg0UGw==",
+  "userKey": "MzpBSE9WXWRrcnmAh46VnKOqsbi/xs3U2+Lp8Pf+BQwTGiEoLzY9REtSWWBnbnV8g4qRmJ+mrbS7wsnQ197l7A==",
+  "nonce": "REtSWWBnbnV8g4qR",
+  "ciphertext": "zcBAj9iJoZfdsRtA9vPgsJeo8fY5d1hLzMVDw2IgFVkNOQYsNuRpcxOpoUBHgvYvYYs8L8l2TcxxyKqzLxS267t4Y8741JYPtXlraZXqqOA="
+}
