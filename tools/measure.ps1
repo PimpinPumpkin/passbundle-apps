@@ -10,9 +10,18 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 
+# The sample vault (the core's test vectors) kept as a device keeps one, so
+# the app opens locked and unlocks it by itself, offline.
+$data = Join-Path ([IO.Path]::GetTempPath()) ('pb-measure-' + [guid]::NewGuid())
+New-Item -ItemType Directory -Path $data | Out-Null
+$sample = Join-Path $PSScriptRoot '..\app\test\sample'
+Copy-Item (Join-Path $sample 'settings.json'), (Join-Path $sample 'sync.json') $data
 $lines = [IO.Path]::GetTempFileName()
 $env:PB_MEASURE = '1'
 $env:PB_MEASURE_FILE = $lines
+$env:PB_MEASURE_PASSWORD = 'correct horse battery staple 1'
+$env:PB_DATA_DIR = $data
+$env:PB_SECRETS = 'memory'
 $started = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() * 1000
 $app = Start-Process -FilePath $Exe -PassThru
 $ready = $false

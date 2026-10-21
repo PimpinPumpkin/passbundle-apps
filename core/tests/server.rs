@@ -6,9 +6,12 @@
 //! these tests say so and pass.
 
 use base64::{engine::general_purpose::STANDARD, Engine};
+use passbundle_core::app::{App, State, Step};
 use passbundle_core::crypto::{encrypt_for, PrivateKey, SymmetricKey};
 use passbundle_core::kdf::{Kdf, MasterKey};
+use passbundle_core::secrets::MemorySecretStore;
 use passbundle_core::server::{Device, Server, Session, SignIn, TwoFactor};
+use passbundle_core::store::Store;
 use passbundle_core::totp::Totp;
 use passbundle_core::vault::{Field, ItemDraft, Vault};
 use passbundle_core::Error;
@@ -301,21 +304,100 @@ fn two_step_login_with_an_authenticator_app() {
         code: "000000".into(),
         remember: false,
     };
-    assert!(server.finish_sign_in(pending, &wrong).is_err());
-
-    // The KDF runs again only because the wrong code used up the pending sign-in.
-    let SignIn::NeedsTwoFactor(pending) = server.sign_in(&email, PASSWORD).unwrap() else {
-        panic!()
-    };
-    // A code from the next window, so it isn't the one used to turn it on.
+    assert_eq!(
+        server.finish_sign_in(&pending, &wrong).err(),
+        Some(Error::WrongCode)
+    );
+    // The same waiting sign-in takes the right code: no second KDF. A code from
+    // the next window, so it isn't the one used to turn two-step login on.
     std::thread::sleep(std::time::Duration::from_secs(totp.seconds_left(now()) + 1));
     let right = TwoFactor {
         provider: 0,
         code: totp.code_at(now()),
         remember: false,
     };
-    let SignIn::Done(mut session) = server.finish_sign_in(pending, &right).unwrap() else {
-        panic!("the right code should finish signing in");
-    };
+    let mut session = server.finish_sign_in(&pending, &right).unwrap();
     assert!(open(&server, &mut session).items.is_empty());
+}
+
+#[test]
+fn the_app_keeps_the_vault_locks_unlocks_offline_and_signs_out() {
+    let Some(server) = server() else { return };
+    let url = std::env::var("PB_TEST_SERVER").unwrap();
+    let email = new_email("app");
+    sign_up(&server, &email);
+    let dir = std::env::temp_dir().join(format!("pb-app-{}", uuid::Uuid::new_v4()));
+
+    let mut app = App::open(Store::new(&dir), Box::new(MemorySecretStore::default()));
+    assert_eq!(
+        app.state(),
+        State::SignedOut {
+            server: None,
+            email: None
+        }
+    );
+    assert_eq!(
+        app.sign_in(&url, &email, "not the password").err(),
+        Some(Error::WrongPassword)
+    );
+    assert_eq!(app.sign_in(&url, &email, PASSWORD).unwrap(), Step::Done);
+    assert_eq!(
+        app.state(),
+        State::Unlocked {
+            server: url.clone(),
+            email: email.clone()
+        }
+    );
+    let draft = ItemDraft {
+        name: "Example Mail".into(),
+        password: secret("not-a-real-password-1"),
+        ..ItemDraft::default()
+    };
+    app.save(None, &draft, &[]).unwrap();
+    assert_eq!(app.vault().unwrap().items.len(), 1);
+
+    // Locked: nothing decrypted; the master password opens the kept vault.
+    app.lock();
+    assert_eq!(
+        app.state(),
+        State::Locked {
+            server: url.clone(),
+            email: email.clone()
+        }
+    );
+    assert!(app.vault().is_none());
+    assert_eq!(
+        app.unlock("not the password").err(),
+        Some(Error::WrongPassword)
+    );
+    app.unlock(PASSWORD).unwrap();
+    assert_eq!(app.vault().unwrap().items[0].name, "Example Mail");
+    // With the kept refresh token, it syncs.
+    app.sync().unwrap();
+
+    // After a restart without a kept refresh token (no secret store), the
+    // vault still unlocks from this device; syncing says to sign in again.
+    drop(app);
+    let mut app = App::open(Store::new(&dir), Box::new(MemorySecretStore::default()));
+    assert_eq!(
+        app.state(),
+        State::Locked {
+            server: url.clone(),
+            email: email.clone()
+        }
+    );
+    app.unlock(PASSWORD).unwrap();
+    assert_eq!(app.vault().unwrap().items.len(), 1);
+    assert_eq!(app.sync().err(), Some(Error::SignedOut));
+    assert!(app.vault().is_some());
+
+    app.sign_out();
+    assert_eq!(
+        app.state(),
+        State::SignedOut {
+            server: Some(url),
+            email: Some(email)
+        }
+    );
+    let _ = std::fs::remove_dir_all(dir);
 }

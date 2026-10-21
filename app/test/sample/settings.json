@@ -1,0 +1,9 @@
+{
+  "server": "https://vault.example.test",
+  "email": "ana.lopez@example.test",
+  "kdf": 0,
+  "kdfIterations": 600000,
+  "kdfMemory": null,
+  "kdfParallelism": null,
+  "deviceIdentifier": "00000000-0000-4000-8000-000000000000"
+}

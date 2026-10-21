@@ -2,10 +2,15 @@
 //! design is docs/core.md in the meta repo (PimpinPumpkin/Passbundle), with
 //! test vectors in docs/vectors/core-v1.json (a copy is in tests/vectors).
 
+pub mod app;
+pub mod clipboard;
 pub mod crypto;
 pub mod error;
+pub mod generator;
 pub mod kdf;
+pub mod secrets;
 pub mod server;
+pub mod store;
 pub mod totp;
 pub mod vault;
 

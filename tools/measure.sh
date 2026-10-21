@@ -13,9 +13,14 @@ bundle=$2
 shot=$3
 now_us() { python3 -c 'import time; print(int(time.time() * 1e6))'; }
 
+# The sample vault (the core's test vectors) kept as a device keeps one, so
+# the app opens locked and unlocks it by itself, offline.
+data=$(mktemp -d)
+cp "$(dirname "$0")/../app/test/sample/settings.json" "$(dirname "$0")/../app/test/sample/sync.json" "$data/"
 lines=$(mktemp)
 started=$(now_us)
-PB_MEASURE=1 PB_MEASURE_FILE="$lines" "$exe" > /dev/null 2>&1 &
+PB_MEASURE=1 PB_MEASURE_FILE="$lines" PB_MEASURE_PASSWORD='correct horse battery staple 1' \
+  PB_DATA_DIR="$data" PB_SECRETS=memory "$exe" > /dev/null 2>&1 &
 pid=$!
 for _ in $(seq 1 120); do
   grep -q '^ready' "$lines" 2> /dev/null && break

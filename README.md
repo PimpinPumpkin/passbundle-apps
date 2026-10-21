@@ -8,7 +8,11 @@ PassBundle's own desktop and mobile apps: one Rust core and one Flutter app, so 
 
 ## Status
 
-A prototype. The core opens a vault (PBKDF2 and Argon2id accounts, organization keys, item keys), refuses weak KDF settings and tampered data, and makes one-time codes, all checked against the vectors. The app unlocks the vectors' sample vault and browses it. Not yet: signing in to a server, sync, editing, the clipboard through the core, and the real bridge (flutter_rust_bridge; the prototype uses plain C functions).
+Early, and not released.
+- **The core** opens a vault (PBKDF2 and Argon2id accounts, organization keys, item keys) and refuses weak KDF settings and tampered data, checked against the vectors.
+- **On a real server**, the core signs in (with two-step login), syncs, saves, edits, and trashes items. It keeps the vault on the device to unlock offline, with the refresh token in the OS's secret store.
+- **The app** signs in, unlocks, browses, searches, copies through the core (cleared after 30 seconds), and adds, edits, and trashes items.
+- **Not yet:** unlocking with Windows Hello or Touch ID, passkeys, attachments, phones' autofill, and code signing.
 
 ## Tests
 
@@ -17,6 +21,12 @@ cd core && cargo test && cargo clippy --all-targets --features ffi -- -D warning
 tools/check-no-bitwarden-crates.sh
 cd core && cargo build --release --features ffi
 cd app && PB_CORE_LIB=../core/target/release/libpassbundle_core.dylib flutter test --exclude-tags screenshots
+```
+
+Against a real server (`tools/test-server.sh` starts a throwaway one from a passbundle-server build):
+
+```bash
+PB_TEST_SERVER=$(tools/test-server.sh <passbundle-server binary> 8591 /tmp/pb-server) cargo test --test server
 ```
 
 `flutter test --tags screenshots --update-goldens` redraws `app/test/screenshots/`.

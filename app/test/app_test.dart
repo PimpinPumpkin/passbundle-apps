@@ -1,62 +1,95 @@
-// The prototype against the real core (PB_CORE_LIB): unlocking the sample
-// vault, a wrong password, search, an item's view, revealing, and locking.
+// The app against the real core (PB_CORE_LIB): signing in with nothing kept,
+// unlocking the sample vault kept on this device, browsing, search, revealing,
+// the editor, and locking.
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:passbundle/core.dart';
 import 'package:passbundle/main.dart';
-import 'package:passbundle/theme.dart';
 
 import 'support.dart';
 
+void setSize(WidgetTester tester, Size size) {
+  tester.view.physicalSize = size;
+  tester.view.devicePixelRatio = 1;
+  addTearDown(tester.view.reset);
+}
+
 void main() {
   setUpAll(loadFonts);
-  tearDown(() => Core().lock());
-
-  test('a wrong password is refused, in the core\'s words', () async {
-    final answer = await Core.unlock(
-      '{"profile":{"id":"x","email":"a@b.test","key":"2.AAAAAAAAAAAAAAAAAAAAAA==|AAAAAAAAAAAAAAAAAAAAAA==|AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}}',
-      '{"kdf":0,"kdfIterations":600000}',
-      'nope',
-    );
-    expect(answer['ok'], false);
-    expect(answer['error'], "That master password isn't right.");
-  });
 
   testWidgets(
-    'the sample vault opens, searches, shows an item, reveals its password, and locks',
+    'with nothing kept, it asks to sign in, and says when the server can\'t be reached',
     (tester) async {
-      tester.view.physicalSize = const Size(1280, 800);
-      tester.view.devicePixelRatio = 1;
-      addTearDown(tester.view.reset);
-      final answer = await unlockSample(tester);
-      expect(answer['ok'], true);
-      expect(answer['count'], 4);
-
-      var locked = false;
-      await tester.pumpWidget(
-        MaterialApp(
-          theme: passBundleTheme(Brightness.light),
-          home: VaultScreen(
-            core: Core(),
-            mode: ThemeMode.light,
-            onMode: (_) {},
-            onLock: () => locked = true,
-          ),
-        ),
+      setSize(tester, const Size(1280, 800));
+      openEmpty();
+      await tester.pumpWidget(const PassBundleApp());
+      expect(find.text('Sign in to PassBundle'), findsOneWidget);
+      await tester.enterText(
+        find.widgetWithText(TextField, 'Server'),
+        'http://127.0.0.1:9',
       );
-      await tester.pump();
+      await tester.enterText(
+        find.widgetWithText(TextField, 'Email'),
+        'ana@example.test',
+      );
+      await tester.enterText(
+        find.widgetWithText(TextField, 'Master password'),
+        'anything',
+      );
+      await tester.tap(find.text('Sign in'));
+      await pumpUntil(
+        tester,
+        find.textContaining('Couldn\'t reach the server'),
+      );
+      // The field doesn't keep the master password.
+      expect(find.text('anything'), findsNothing);
+
+      await tester.enterText(
+        find.widgetWithText(TextField, 'Server'),
+        'http://vault.example.test',
+      );
+      await tester.enterText(
+        find.widgetWithText(TextField, 'Master password'),
+        'anything',
+      );
+      await tester.tap(find.text('Sign in'));
+      await pumpUntil(
+        tester,
+        find.textContaining('only talks to servers over HTTPS'),
+      );
+    },
+  );
+
+  testWidgets(
+    'the kept vault unlocks, browses, searches, reveals, edits, and locks',
+    (tester) async {
+      setSize(tester, const Size(1280, 800));
+      openSample();
+      await tester.pumpWidget(const PassBundleApp());
+      expect(find.text('Unlock PassBundle'), findsOneWidget);
+      expect(find.text('ana.lopez@example.test'), findsOneWidget);
+
+      await tester.enterText(find.byType(TextField), 'not the password');
+      await tester.tap(find.text('Unlock'));
+      await pumpUntil(tester, find.text('That master password isn\'t right.'));
+
+      await tester.enterText(find.byType(TextField), samplePassword);
+      await tester.tap(find.text('Unlock'));
+      await pumpUntil(tester, find.text('Backup service'));
+      // No refresh token kept here, so syncing asks to sign in again; the vault stays open.
+      await pumpUntil(
+        tester,
+        find.textContaining('Sign in again to get changes'),
+      );
       for (final name in [
-        'Backup service',
         'Example Mail',
         'Gate code',
         'Office Wi-Fi',
+        'Personal',
+        'Contoso',
       ]) {
         expect(find.text(name), findsWidgets);
       }
-      // Folders and organizations from the sync, with their real names.
-      expect(find.text('Personal'), findsOneWidget);
-      expect(find.text('Contoso'), findsOneWidget);
 
       await tester.enterText(
         find.widgetWithText(TextField, 'Search'),
@@ -74,31 +107,40 @@ void main() {
       expect(find.text('not-a-real-password-3'), findsOneWidget);
       expect(find.textContaining(RegExp(r'^\d{3} \d{3}$')), findsOneWidget);
 
+      // The editor opens with the item's values; saving without a server says so.
+      await tester.tap(find.byTooltip('Edit'));
+      await tester.pumpAndSettle();
+      expect(find.text('Edit item'), findsOneWidget);
+      expect(find.widgetWithText(TextField, 'Backup service'), findsOneWidget);
+      await tester.tap(find.text('Save'));
+      await pumpUntil(
+        tester,
+        find.text('You\'ve been signed out. Sign in again.'),
+      );
+      await tester.tap(find.byTooltip('Cancel'));
+      await tester.pumpAndSettle();
+
       await tester.tap(find.text('Lock'));
-      expect(locked, true);
+      await tester.pump();
+      expect(find.text('Unlock PassBundle'), findsOneWidget);
+      expect(find.text('Backup service'), findsNothing);
     },
   );
 
   testWidgets(
     'on a phone-width window, a header has the theme and Lock, and an item opens on its own page',
     (tester) async {
-      tester.view.physicalSize = const Size(390, 844);
-      tester.view.devicePixelRatio = 1;
-      addTearDown(tester.view.reset);
-      await unlockSample(tester);
-      var locked = false;
-      await tester.pumpWidget(
-        MaterialApp(
-          theme: passBundleTheme(Brightness.light),
-          home: VaultScreen(
-            core: Core(),
-            mode: ThemeMode.light,
-            onMode: (_) {},
-            onLock: () => locked = true,
-          ),
-        ),
+      setSize(tester, const Size(390, 844));
+      openSample();
+      await tester.pumpWidget(const PassBundleApp());
+      await tester.enterText(find.byType(TextField), samplePassword);
+      await tester.tap(find.text('Unlock'));
+      await pumpUntil(tester, find.text('Office Wi-Fi'));
+      // The background sync finishes (offline: no server behind the sample).
+      await pumpUntil(
+        tester,
+        find.textContaining('Sign in again to get changes'),
       );
-      await tester.pump();
       expect(find.text('Favorites'), findsNothing);
       await tester.tap(find.text('Office Wi-Fi'));
       await tester.pumpAndSettle();
@@ -106,7 +148,8 @@ void main() {
       await tester.pageBack();
       await tester.pumpAndSettle();
       await tester.tap(find.byTooltip('Lock'));
-      expect(locked, true);
+      await tester.pump();
+      expect(find.text('Unlock PassBundle'), findsOneWidget);
     },
   );
 }

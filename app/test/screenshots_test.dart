@@ -6,91 +6,70 @@ library;
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:passbundle/core.dart';
 import 'package:passbundle/main.dart';
-import 'package:passbundle/theme.dart';
 
 import 'support.dart';
 
-Future<void> shoot(
-  WidgetTester tester,
-  String name,
-  Size size,
-  Brightness brightness,
-  Widget home,
-) async {
+Future<void> size(WidgetTester tester, Size size) async {
   tester.view.physicalSize = size * 2;
   tester.view.devicePixelRatio = 2;
   addTearDown(tester.view.reset);
-  await tester.pumpWidget(
-    MaterialApp(
-      debugShowCheckedModeBanner: false,
-      theme: passBundleTheme(brightness),
-      home: home,
-    ),
-  );
-  await tester.pump();
-  await expectLater(
-    find.byType(MaterialApp),
-    matchesGoldenFile('screenshots/$name.png'),
-  );
+}
+
+Future<void> shoot(String name) => expectLater(
+  find.byType(MaterialApp),
+  matchesGoldenFile('screenshots/$name.png'),
+);
+
+Future<void> unlock(WidgetTester tester) async {
+  await tester.enterText(find.byType(TextField), samplePassword);
+  await tester.tap(find.text('Unlock'));
+  await pumpUntil(tester, find.text('Backup service'));
+  // The offline banner (no server behind the sample) settles first.
+  await pumpUntil(tester, find.textContaining('Sign in again to get changes'));
 }
 
 void main() {
   setUpAll(loadFonts);
-  tearDown(() => Core().lock());
 
-  for (final brightness in Brightness.values) {
-    final b = brightness.name;
-    testWidgets('unlock, $b', (tester) async {
-      await shoot(
-        tester,
-        'unlock-$b',
-        const Size(1280, 800),
-        brightness,
-        UnlockScreen(onUnlocked: () {}),
+  for (final dark in [false, true]) {
+    final b = dark ? 'dark' : 'light';
+
+    testWidgets('sign in, $b', (tester) async {
+      await size(tester, const Size(1280, 800));
+      openEmpty();
+      await tester.pumpWidget(
+        PassBundleApp(themeMode: dark ? ThemeMode.dark : ThemeMode.light),
       );
+      await shoot('sign-in-$b');
     });
 
-    testWidgets('vault, desktop, $b', (tester) async {
-      await unlockSample(tester);
-      final core = Core();
-      await shoot(
-        tester,
-        'vault-desktop-$b',
-        const Size(1280, 800),
-        brightness,
-        VaultScreen(
-          core: core,
-          mode: ThemeMode.light,
-          onMode: (_) {},
-          onLock: () {},
-        ),
+    testWidgets('unlock, vault, item, editor, desktop, $b', (tester) async {
+      await size(tester, const Size(1280, 800));
+      openSample();
+      await tester.pumpWidget(
+        PassBundleApp(themeMode: dark ? ThemeMode.dark : ThemeMode.light),
       );
+      await shoot('unlock-$b');
+      await unlock(tester);
       await tester.tap(find.text('Example Mail').first);
       await tester.pump();
       await tester.tap(find.byTooltip('Reveal').first);
       await tester.pump();
-      await expectLater(
-        find.byType(MaterialApp),
-        matchesGoldenFile('screenshots/item-desktop-$b.png'),
-      );
+      await shoot('item-desktop-$b');
+      await tester.tap(find.byTooltip('Edit'));
+      await tester.pumpAndSettle();
+      await shoot('editor-desktop-$b');
     });
 
     testWidgets('vault, phone, $b', (tester) async {
-      await unlockSample(tester);
-      await shoot(
-        tester,
-        'vault-phone-$b',
-        const Size(390, 844),
-        brightness,
-        VaultScreen(
-          core: Core(),
-          mode: ThemeMode.light,
-          onMode: (_) {},
-          onLock: () {},
-        ),
+      await size(tester, const Size(390, 844));
+      openSample();
+      await tester.pumpWidget(
+        PassBundleApp(themeMode: dark ? ThemeMode.dark : ThemeMode.light),
       );
+      await unlock(tester);
+      await shoot('vault-phone-$b');
     });
   }
 }

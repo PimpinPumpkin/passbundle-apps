@@ -95,6 +95,11 @@ pub struct PendingSignIn {
     pub providers: Vec<u8>,
 }
 
+enum Token {
+    Done(Session),
+    TwoFactor(Vec<u8>),
+}
+
 pub enum SignIn {
     Done(Session),
     NeedsTwoFactor(PendingSignIn),
@@ -231,20 +236,36 @@ impl Server {
     /// anything is derived; the user key is opened on the device, so a wrong
     /// password fails here as well as on the server.
     pub fn sign_in(&self, email: &str, password: &str) -> Result<SignIn> {
-        let kdf = Kdf::from_prelogin(&self.prelogin(email)?)?;
+        let prelogin = self.prelogin(email)?;
+        self.sign_in_with(&prelogin, email, password)
+    }
+
+    /// Signs in with a prelogin answer the app already asked for (and keeps).
+    pub fn sign_in_with(&self, prelogin: &Prelogin, email: &str, password: &str) -> Result<SignIn> {
+        let kdf = Kdf::from_prelogin(prelogin)?;
         let master = MasterKey::derive(password, email, &kdf)?;
-        let pending = PendingSignIn {
+        let mut pending = PendingSignIn {
             email: normalize_email(email),
             login_hash: Zeroizing::new(master.login_hash(password)),
             stretched: master.stretch(),
             providers: Vec::new(),
         };
-        self.token(pending, None)
+        match self.token(&pending, None)? {
+            Token::Done(session) => Ok(SignIn::Done(session)),
+            Token::TwoFactor(providers) => {
+                pending.providers = providers;
+                Ok(SignIn::NeedsTwoFactor(pending))
+            }
+        }
     }
 
-    /// Finishes a sign-in with its second step.
-    pub fn finish_sign_in(&self, pending: PendingSignIn, second: &TwoFactor) -> Result<SignIn> {
-        self.token(pending, Some(second))
+    /// Finishes a sign-in with its second step. A wrong code leaves `pending`
+    /// as it was, for another try without deriving the master key again.
+    pub fn finish_sign_in(&self, pending: &PendingSignIn, second: &TwoFactor) -> Result<Session> {
+        match self.token(pending, Some(second))? {
+            Token::Done(session) => Ok(session),
+            Token::TwoFactor(_) => Err(Error::WrongCode),
+        }
     }
 
     /// Asks the server to email a sign-in code (provider 1).
@@ -260,7 +281,7 @@ impl Server {
         Self::checked(status, body).map(|_| ())
     }
 
-    fn token(&self, mut pending: PendingSignIn, second: Option<&TwoFactor>) -> Result<SignIn> {
+    fn token(&self, pending: &PendingSignIn, second: Option<&TwoFactor>) -> Result<Token> {
         let kind = self.device.kind.to_string();
         let mut form: Vec<(&str, &str)> = vec![
             ("grant_type", "password"),
@@ -286,22 +307,24 @@ impl Server {
         )?;
         if status == 400 {
             if let Some(providers) = body["TwoFactorProviders"].as_array() {
-                pending.providers = providers
-                    .iter()
-                    .filter_map(|p| {
-                        p.as_str()
-                            .and_then(|s| s.parse().ok())
-                            .or_else(|| p.as_u64().map(|n| n as u8))
-                    })
-                    .collect();
-                return Ok(SignIn::NeedsTwoFactor(pending));
+                return Ok(Token::TwoFactor(
+                    providers
+                        .iter()
+                        .filter_map(|p| {
+                            p.as_str()
+                                .and_then(|s| s.parse().ok())
+                                .or_else(|| p.as_u64().map(|n| n as u8))
+                        })
+                        .collect(),
+                ));
             }
-            // The server's words for a wrong password become the core's; any
-            // other refusal (a disabled account, say) keeps the server's.
+            // The server's words for a wrong password or code become the
+            // core's; any other refusal (a disabled account, say) keeps the server's.
             return Err(match message_of(&body) {
                 Some(m) if m.to_lowercase().contains("password is incorrect") => {
                     Error::WrongPassword
                 }
+                _ if second.is_some() => Error::WrongCode,
                 Some(m) => Error::Server(m),
                 None => Error::WrongPassword,
             });
@@ -319,7 +342,7 @@ impl Server {
             Err(Error::Refused(_)) => return Err(Error::WrongPassword),
             other => other?,
         };
-        Ok(SignIn::Done(Session {
+        Ok(Token::Done(Session {
             access_token: Zeroizing::new(token.access_token),
             refresh_token: Zeroizing::new(token.refresh_token.unwrap_or_default()),
             expires_at: now() + token.expires_in,

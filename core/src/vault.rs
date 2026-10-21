@@ -220,6 +220,8 @@ pub struct Vault {
     pub email: String,
     pub folders: HashMap<String, String>,
     pub collections: HashMap<String, String>,
+    /// Each collection's organization.
+    pub collection_orgs: HashMap<String, String>,
     pub organizations: HashMap<String, String>,
     pub items: Vec<Item>,
     pub damaged: Vec<DamagedItem>,
@@ -317,6 +319,11 @@ impl Vault {
             })
             .collect();
 
+        let collection_orgs = sync
+            .collections
+            .iter()
+            .map(|c| (c.id.clone(), c.organization_id.clone()))
+            .collect();
         let mut items = Vec::new();
         let mut damaged = Vec::new();
         for cipher in &sync.ciphers {
@@ -335,6 +342,7 @@ impl Vault {
             email: sync.profile.email.clone(),
             folders,
             collections,
+            collection_orgs,
             organizations,
             items,
             damaged,
@@ -390,6 +398,10 @@ impl Vault {
             });
         }
         Ok(body)
+    }
+
+    pub(crate) fn user_key(&self) -> &SymmetricKey {
+        &self.keys.user
     }
 
     pub fn item(&self, id: &str) -> Option<&Item> {

@@ -1,6 +1,7 @@
-// The core (Rust), through the prototype's C bridge (core/src/ffi.rs). The
-// real app uses flutter_rust_bridge. No key crosses here, and a secret only
-// when the person reveals it (docs/core.md, "Memory").
+// The core (Rust), through its C bridge (core/src/ffi.rs). No key crosses
+// here, and a secret only when the person reveals it or edits it
+// (docs/core.md, "Memory"). Slow calls (signing in, unlocking, syncing,
+// saving) run on a background isolate; the screens don't read while one runs.
 import 'dart:convert';
 import 'dart:ffi';
 import 'dart:io';
@@ -16,6 +17,8 @@ typedef _Str3 = Pointer<Utf8> Function(
   Pointer<Utf8>,
   Pointer<Utf8>,
 );
+typedef _FinishNative = Pointer<Utf8> Function(Uint8, Pointer<Utf8>, Bool);
+typedef _Finish = Pointer<Utf8> Function(int, Pointer<Utf8>, bool);
 
 DynamicLibrary _open() {
   // Tests and tools point at a library they built.
@@ -34,20 +37,52 @@ DynamicLibrary _open() {
   return DynamicLibrary.process();
 }
 
+/// An answer from a call that can fail: ok, or the core's words.
+class Answer {
+  Answer(Map<String, dynamic> json)
+    : ok = json['ok'] == true,
+      error = json['error'] as String?,
+      signedOut = json['signedOut'] == true,
+      body = json;
+
+  final bool ok;
+  final String? error;
+  final bool signedOut;
+  final Map<String, dynamic> body;
+}
+
 class Core {
   Core() : _lib = _open();
 
   final DynamicLibrary _lib;
 
+  late final _openAt = _lib
+      .lookupFunction<
+        Pointer<Utf8> Function(Pointer<Utf8>, Bool),
+        Pointer<Utf8> Function(Pointer<Utf8>, bool)
+      >('pb_open');
   late final _version = _lib.lookupFunction<_Str0, _Str0>('pb_version');
+  late final _state = _lib.lookupFunction<_Str0, _Str0>('pb_state');
+  late final _signIn = _lib.lookupFunction<_Str3, _Str3>('pb_sign_in');
+  late final _finish = _lib.lookupFunction<_FinishNative, _Finish>(
+    'pb_finish_sign_in',
+  );
+  late final _sendEmail = _lib.lookupFunction<_Str0, _Str0>(
+    'pb_send_email_code',
+  );
+  late final _unlock = _lib.lookupFunction<_Str1, _Str1>('pb_unlock');
+  late final _sync = _lib.lookupFunction<_Str0, _Str0>('pb_sync');
+  late final _lock = _lib.lookupFunction<_Str0, _Str0>('pb_lock');
+  late final _signOut = _lib.lookupFunction<_Str0, _Str0>('pb_sign_out');
+  late final _places = _lib.lookupFunction<_Str0, _Str0>('pb_places');
   late final _list = _lib.lookupFunction<_Str1, _Str1>('pb_list');
   late final _item = _lib.lookupFunction<_Str1, _Str1>('pb_item');
   late final _reveal = _lib.lookupFunction<_Str2, _Str2>('pb_reveal');
+  late final _copy = _lib.lookupFunction<_Str2, _Str2>('pb_copy');
   late final _totp = _lib.lookupFunction<_Str1, _Str1>('pb_totp');
-  late final _unlock = _lib.lookupFunction<_Str3, _Str3>('pb_unlock');
-  late final _lock = _lib.lookupFunction<Void Function(), void Function()>(
-    'pb_lock',
-  );
+  late final _save = _lib.lookupFunction<_Str2, _Str2>('pb_save');
+  late final _trash = _lib.lookupFunction<_Str1, _Str1>('pb_trash');
+  late final _generate = _lib.lookupFunction<_Str1, _Str1>('pb_generate');
   late final _free = _lib
       .lookupFunction<
         Void Function(Pointer<Utf8>),
@@ -69,7 +104,7 @@ class Core {
       return call(pointers);
     } finally {
       for (final p in pointers) {
-        // Wipe before freeing: a password passes through here.
+        // Wipe before freeing: passwords pass through here.
         final bytes = p.cast<Uint8>().asTypedList(p.length);
         bytes.fillRange(0, bytes.length, 0);
         malloc.free(p);
@@ -77,20 +112,65 @@ class Core {
     }
   }
 
+  /// Runs a slow call on a background isolate (the core is the same library there).
+  static Future<Answer> _background(dynamic Function(Core core) call) async =>
+      Answer(
+        Map<String, dynamic>.from(await Isolate.run(() => call(Core()) as Map)),
+      );
+
   String version() => _answer(_version()) as String;
 
-  /// Unlocks off the screen's thread: the KDF takes a moment.
-  static Future<Map<String, dynamic>> unlock(
-    String sync,
-    String prelogin,
-    String password,
-  ) => Isolate.run(() {
-    final core = Core();
-    return core._with(
-      [sync, prelogin, password],
-      (p) => core._answer(core._unlock(p[0], p[1], p[2])),
-    ) as Map<String, dynamic>;
-  });
+  /// For tests and tools: the app on a folder of its own, the refresh token in memory.
+  Map<String, dynamic> openAt(String dir) =>
+      _with([dir], (p) => _answer(_openAt(p[0], true))) as Map<String, dynamic>;
+
+  /// "signedOut", "locked", or "unlocked", with "server" and "email".
+  Map<String, dynamic> state() => _answer(_state()) as Map<String, dynamic>;
+
+  static Future<Answer> signIn(String server, String email, String password) =>
+      _background(
+        (c) => c._with([
+          server,
+          email,
+          password,
+        ], (p) => c._answer(c._signIn(p[0], p[1], p[2]))),
+      );
+
+  static Future<Answer> finishSignIn(
+    int provider,
+    String code,
+    bool remember,
+  ) => _background(
+    (c) =>
+        c._with([code], (p) => c._answer(c._finish(provider, p[0], remember))),
+  );
+
+  static Future<Answer> sendEmailCode() =>
+      _background((c) => c._answer(c._sendEmail()));
+
+  static Future<Answer> unlock(String password) => _background(
+    (c) => c._with([password], (p) => c._answer(c._unlock(p[0]))),
+  );
+
+  static Future<Answer> sync() => _background((c) => c._answer(c._sync()));
+
+  static Future<Answer> save(String? id, Map<String, dynamic> draft) =>
+      _background(
+        (c) => c._with([
+          id ?? '',
+          jsonEncode(draft),
+        ], (p) => c._answer(c._save(p[0], p[1]))),
+      );
+
+  static Future<Answer> trash(String id) =>
+      _background((c) => c._with([id], (p) => c._answer(c._trash(p[0]))));
+
+  Map<String, dynamic> lock() => _answer(_lock()) as Map<String, dynamic>;
+
+  Map<String, dynamic> signOut() => _answer(_signOut()) as Map<String, dynamic>;
+
+  /// Folders, and organizations with their collections.
+  Map<String, dynamic> places() => _answer(_places()) as Map<String, dynamic>;
 
   List<Map<String, dynamic>> list(String query) =>
       (_with([query], (p) => _answer(_list(p[0]))) as List)
@@ -99,12 +179,24 @@ class Core {
   Map<String, dynamic>? item(String id) =>
       _with([id], (p) => _answer(_item(p[0]))) as Map<String, dynamic>?;
 
-  /// A secret, while the person reveals it: `password`, `notes`, or `field:<index>`.
+  /// A secret, while the person reveals it or edits: `password`, `notes`, `totp`, or `field:<index>`.
   String? reveal(String id, String what) =>
       _with([id, what], (p) => _answer(_reveal(p[0], p[1]))) as String?;
+
+  /// Copies without the value passing through Dart; secrets clear after 30 seconds.
+  Answer copy(String id, String what) => Answer(
+    _with([id, what], (p) => _answer(_copy(p[0], p[1])))
+        as Map<String, dynamic>,
+  );
 
   Map<String, dynamic>? totp(String id) =>
       _with([id], (p) => _answer(_totp(p[0]))) as Map<String, dynamic>?;
 
-  void lock() => _lock();
+  /// A new password, for the editor's field.
+  String? generate({int length = 20}) {
+    final answer = _with([
+      jsonEncode({'length': length}),
+    ], (p) => _answer(_generate(p[0]))) as Map<String, dynamic>;
+    return answer['password'] as String?;
+  }
 }

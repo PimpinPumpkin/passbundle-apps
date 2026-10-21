@@ -1,0 +1,277 @@
+//! The app's state, as the screens see it: signed out, locked, or unlocked,
+//! and everything they ask for. One per process; the bridge (ffi.rs) holds it.
+//! See docs/core.md: signing in, two-step login, unlocking from the kept sync,
+//! and syncing with the kept refresh token.
+
+use crate::clipboard;
+use crate::error::{Error, Result};
+use crate::kdf::normalize_email;
+use crate::secrets::SecretStore;
+use crate::server::{Device, PendingSignIn, Server, Session, SignIn, TwoFactor};
+use crate::store::{Settings, Store};
+use crate::vault::{ItemDraft, Sync, Vault};
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum State {
+    /// Nothing kept: sign in. The server and email of the last account, if any.
+    SignedOut {
+        server: Option<String>,
+        email: Option<String>,
+    },
+    /// A vault kept on this device: unlock it with the master password.
+    Locked {
+        server: String,
+        email: String,
+    },
+    Unlocked {
+        server: String,
+        email: String,
+    },
+}
+
+/// Where signing in got to.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Step {
+    Done,
+    /// The second step, with the methods the server offers (0 authenticator, 1 email).
+    TwoFactor(Vec<u8>),
+}
+
+pub struct App {
+    store: Store,
+    secrets: Box<dyn SecretStore>,
+    settings: Option<Settings>,
+    server: Option<Server>,
+    session: Option<Session>,
+    pending: Option<PendingSignIn>,
+    vault: Option<Vault>,
+}
+
+impl App {
+    pub fn open(store: Store, secrets: Box<dyn SecretStore>) -> App {
+        let settings = store.settings();
+        let server = settings
+            .as_ref()
+            .and_then(|s| Server::new(&s.server, Device::this_one(&s.device_identifier)).ok());
+        App {
+            store,
+            secrets,
+            settings,
+            server,
+            session: None,
+            pending: None,
+            vault: None,
+        }
+    }
+
+    pub fn state(&self) -> State {
+        match (&self.settings, &self.vault, self.store.sync().is_some()) {
+            (Some(s), Some(_), _) => State::Unlocked {
+                server: s.server.clone(),
+                email: s.email.clone(),
+            },
+            (Some(s), None, true) => State::Locked {
+                server: s.server.clone(),
+                email: s.email.clone(),
+            },
+            (s, _, _) => State::SignedOut {
+                server: s.as_ref().map(|s| s.server.clone()),
+                email: s.as_ref().map(|s| s.email.clone()),
+            },
+        }
+    }
+
+    pub fn vault(&self) -> Option<&Vault> {
+        self.vault.as_ref()
+    }
+
+    /// Signs in to a server: the vault comes down, is kept, and opens.
+    pub fn sign_in(&mut self, server_url: &str, email: &str, password: &str) -> Result<Step> {
+        self.lock();
+        // One identifier per install, whichever account signs in.
+        let identifier = self
+            .settings
+            .as_ref()
+            .map(|s| s.device_identifier.clone())
+            .unwrap_or_else(Device::new_identifier);
+        let server = Server::new(server_url, Device::this_one(&identifier))?;
+        let prelogin = server.prelogin(email)?;
+        let signed_in = server.sign_in_with(&prelogin, email, password)?;
+        self.settings = Some(Settings {
+            server: server_url.trim().trim_end_matches('/').to_owned(),
+            email: normalize_email(email),
+            kdf: prelogin.kdf,
+            kdf_iterations: prelogin.kdf_iterations,
+            kdf_memory: prelogin.kdf_memory,
+            kdf_parallelism: prelogin.kdf_parallelism,
+            device_identifier: identifier,
+        });
+        self.server = Some(server);
+        match signed_in {
+            SignIn::Done(session) => self.signed_in(session),
+            SignIn::NeedsTwoFactor(pending) => {
+                let providers = pending.providers.clone();
+                self.pending = Some(pending);
+                Ok(Step::TwoFactor(providers))
+            }
+        }
+    }
+
+    /// Two-step login's second step. A wrong code can be tried again.
+    pub fn finish_sign_in(&mut self, provider: u8, code: &str, remember: bool) -> Result<Step> {
+        let (Some(server), Some(pending)) = (&self.server, &self.pending) else {
+            return Err(Error::SignedOut);
+        };
+        let session = server.finish_sign_in(
+            pending,
+            &TwoFactor {
+                provider,
+                code: code.to_owned(),
+                remember,
+            },
+        )?;
+        self.pending = None;
+        self.signed_in(session)
+    }
+
+    /// Asks the server to email the code, for a sign-in waiting on one.
+    pub fn send_email_code(&self) -> Result<()> {
+        let (Some(server), Some(pending)) = (&self.server, &self.pending) else {
+            return Err(Error::SignedOut);
+        };
+        server.send_email_code(pending)
+    }
+
+    fn signed_in(&mut self, session: Session) -> Result<Step> {
+        let settings = self.settings.as_ref().expect("set before signing in");
+        self.store.save_settings(settings)?;
+        self.secrets
+            .keep(&settings.server, &settings.email, &session.refresh_token);
+        self.session = Some(session);
+        self.sync()?;
+        Ok(Step::Done)
+    }
+
+    /// Unlocks the vault kept on this device, without the network. The kept
+    /// refresh token, if any, lets `sync` bring it up to date afterwards.
+    pub fn unlock(&mut self, password: &str) -> Result<()> {
+        let settings = self.settings.as_ref().ok_or(Error::SignedOut)?;
+        let text = self.store.sync().ok_or(Error::SignedOut)?;
+        let vault = Vault::unlock(&Sync::from_json(&text)?, &settings.prelogin(), password)?;
+        self.session = self
+            .secrets
+            .get(&settings.server, &settings.email)
+            .map(|refresh_token| Session {
+                access_token: Default::default(),
+                refresh_token,
+                expires_at: 0,
+                user_key: vault.user_key().clone(),
+            });
+        self.vault = Some(vault);
+        Ok(())
+    }
+
+    /// Brings the vault up to date from the server and keeps the new sync.
+    /// Signed out (the session ended) leaves the kept vault open, to read.
+    pub fn sync(&mut self) -> Result<()> {
+        let (Some(server), Some(settings)) = (&self.server, &self.settings) else {
+            return Err(Error::SignedOut);
+        };
+        let Some(session) = self.session.as_mut() else {
+            return Err(Error::SignedOut);
+        };
+        let synced = server.sync(session);
+        let (sync, text) = match synced {
+            Err(Error::SignedOut) => {
+                self.session = None;
+                self.secrets.forget(&settings.server, &settings.email);
+                return Err(Error::SignedOut);
+            }
+            other => other?,
+        };
+        self.store.save_sync(&text)?;
+        // The server may have issued a new refresh token.
+        self.secrets
+            .keep(&settings.server, &settings.email, &session.refresh_token);
+        self.vault = Some(Vault::open(&sync, session.user_key().clone())?);
+        Ok(())
+    }
+
+    /// Drops every key and everything decrypted.
+    pub fn lock(&mut self) {
+        self.vault = None;
+        self.session = None;
+        self.pending = None;
+    }
+
+    /// Forgets the vault and the session on this device; keeps the server and email.
+    pub fn sign_out(&mut self) {
+        if let Some(s) = &self.settings {
+            self.secrets.forget(&s.server, &s.email);
+        }
+        self.store.forget_vault();
+        self.lock();
+    }
+
+    /// Saves an item, new (no id) or edited, then syncs.
+    pub fn save(
+        &mut self,
+        id: Option<&str>,
+        draft: &ItemDraft,
+        collection_ids: &[String],
+    ) -> Result<()> {
+        let vault = self.vault.as_ref().ok_or(Error::SignedOut)?;
+        let editing = id.and_then(|id| vault.item(id));
+        let body = vault.encrypt_item(draft, editing)?;
+        let (Some(server), Some(session)) = (&self.server, self.session.as_mut()) else {
+            return Err(Error::SignedOut);
+        };
+        server.save_item(session, id, body, collection_ids)?;
+        self.sync()
+    }
+
+    pub fn trash(&mut self, id: &str) -> Result<()> {
+        let (Some(server), Some(session)) = (&self.server, self.session.as_mut()) else {
+            return Err(Error::SignedOut);
+        };
+        server.trash_item(session, id)?;
+        self.sync()
+    }
+
+    /// Copies one of an item's values: "username", "password", "totp" (the
+    /// current code), "notes", or "field:<index>". Secrets clear after 30 seconds.
+    pub fn copy(&self, id: &str, what: &str) -> Result<()> {
+        let item = self
+            .vault
+            .as_ref()
+            .and_then(|v| v.item(id))
+            .ok_or(Error::Damaged("no such item"))?;
+        if what == "username" {
+            return clipboard::copy_text(item.username.as_deref().unwrap_or_default());
+        }
+        let secret = match what {
+            "password" => item.password.as_ref().map(|p| p.as_str().to_owned()),
+            "notes" => item.notes.as_ref().map(|n| n.as_str().to_owned()),
+            "totp" => {
+                let totp = crate::totp::Totp::parse(
+                    item.totp
+                        .as_deref()
+                        .ok_or(Error::Damaged("no one-time code"))?,
+                )?;
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                Some(totp.code_at(now))
+            }
+            other => other
+                .strip_prefix("field:")
+                .and_then(|i| i.parse::<usize>().ok())
+                .and_then(|i| item.fields.get(i))
+                .map(|f| f.value.as_str().to_owned()),
+        }
+        .map(zeroize::Zeroizing::new)
+        .ok_or(Error::Damaged("nothing to copy"))?;
+        clipboard::copy_secret(&secret, clipboard::CLEAR_AFTER)
+    }
+}

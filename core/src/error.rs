@@ -6,6 +6,8 @@ use std::fmt;
 pub enum Error {
     /// The master password didn't open the user key.
     WrongPassword,
+    /// Two-step login's code wasn't right, or has expired.
+    WrongCode,
     /// The server asked for KDF settings outside the bounds in docs/core.md.
     WeakKdf(&'static str),
     /// An encrypted value the core won't open, and why.
@@ -32,6 +34,7 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Error::WrongPassword => write!(f, "That master password isn't right."),
+            Error::WrongCode => write!(f, "That code isn't right, or it's expired. Try the newest one."),
             Error::WeakKdf(why) => write!(
                 f,
                 "This account's security settings are weaker than PassBundle allows ({why}). Change them in the web vault, under Settings, Security, Keys."
