@@ -29,6 +29,8 @@ name = "passbundle-agent-host"
 path = "src/host.rs"
 
 [dependencies]
+# The socket, shared with the app's core.
+passbundle-ipc = { path = "../ipc" }
 aes = "0.8"
 aes-gcm = "0.10"
 base64 = "0.22"
@@ -85,7 +87,7 @@ libc = "0.2"
 [features]
 # A stand-in for Windows Hello, for end-to-end tests. Debug builds only:
 # release builds refuse to compile with it.
-test-authenticator = []
+test-authenticator = ["passbundle-ipc/test-home"]
 
 [build-dependencies]
 serde_json = "1"

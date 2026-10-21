@@ -1739,6 +1739,7 @@ dependencies = [
  "libc",
  "minisign",
  "minisign-verify",
+ "passbundle-ipc",
  "plist",
  "png",
  "rand",
@@ -1755,6 +1756,16 @@ dependencies = [
  "windows-registry",
  "windows-sys 0.61.2",
  "zeroize",
+]
+
+[[package]]
+name = "passbundle-ipc"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "libc",
+ "sha2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
