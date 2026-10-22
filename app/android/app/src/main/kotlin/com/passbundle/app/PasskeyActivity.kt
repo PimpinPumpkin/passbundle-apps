@@ -346,11 +346,26 @@ class PasskeyActivity : Activity() {
     }
 
     /** Runs slow work (the network, the KDF) off the main thread, then `then` on it, unless the person left. */
+    /** The core at work (checking, saving, signing): Back waits, so a site never misses a passkey the vault kept. */
+    private var working = 0
+
+    @Deprecated("Back while the core works is ignored; Activity has no other hook before Android 13.")
+    override fun onBackPressed() {
+        if (working == 0) {
+            @Suppress("DEPRECATION")
+            super.onBackPressed()
+        }
+    }
+
     private fun <T> background(work: () -> T, then: (T?) -> Unit) {
+        working++
         Thread {
             // Anything going wrong ends as nothing, which every caller refuses.
             val result = runCatching(work).getOrNull()
-            runOnUiThread { if (!isFinishing && !isDestroyed) then(result) }
+            runOnUiThread {
+                working--
+                if (!isFinishing && !isDestroyed) then(result)
+            }
         }.start()
     }
 }
