@@ -37,6 +37,8 @@ dirs = "6"
 hkdf = "0.12"
 hmac = "0.12"
 pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
+# Passkeys: ES256 keys, signed with RFC 6979's nonces (src/passkey.rs).
+p256 = { version = "0.13", default-features = false, features = ["ecdsa", "pkcs8", "pem", "std"] }
 # The Public Suffix List, for which logins fill on a website (src/matching.rs).
 psl = "2"
 rand = "0.8"
