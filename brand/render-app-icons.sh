@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Draws the desktop app's icon from the mark (mark.svg, the same as
+# Draws the app's icon from the mark (mark.svg, the same as
 # passbundle-clients' brand/assets/mark.svg) and the brand color: the mark in
 # white on a rounded square of the color. Run after changing either, then
 # commit what it writes into app/. Needs rsvg-convert (librsvg) and python3
@@ -56,4 +56,37 @@ images[-1].save(out, format="ICO", sizes=[(s, s) for s in sizes], append_images=
 EOF
 mkdir -p "$APP/linux/icons"
 cp "$TMP/256.png" "$APP/linux/icons/com.passbundle.app.png"
-echo "Drew the app icon for macOS, Windows, and Linux."
+
+# Android: an adaptive icon (app/android/app/src/main/res/mipmap-anydpi), the
+# mark in white, 40 of the 108 units tall so it stays inside the 66-unit circle
+# every launcher's shape keeps, on the color. Launchers that tint icons to the
+# wallpaper use the mark alone.
+RES=$APP/android/app/src/main/res
+cat > "$RES/drawable/ic_launcher_foreground.xml" << EOF
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Drawn by brand/render-app-icons.sh from brand/mark.svg. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <group
+        android:scaleX="1.25"
+        android:scaleY="1.25"
+        android:translateX="37.75"
+        android:translateY="34">
+        <path
+            android:fillColor="#FFFFFF"
+            android:fillType="evenOdd"
+            android:pathData="$PATH_D" />
+    </group>
+</vector>
+EOF
+cat > "$RES/values/colors.xml" << EOF
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Drawn by brand/render-app-icons.sh from brand/brand.json. -->
+<resources>
+    <color name="ic_launcher_background">$COLOR</color>
+</resources>
+EOF
+echo "Drew the app icon for macOS, Windows, Linux, and Android."
