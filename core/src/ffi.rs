@@ -763,30 +763,47 @@ pub unsafe extern "C" fn pb_trash(id: *const c_char) -> *mut c_char {
     with_app_waiting(|app| done(app.trash(&id)))
 }
 
-/// A new password for the editor (it goes into the field, so the person sees it).
+/// A new password or passphrase (`generator::Options`, as JSON; missing
+/// choices take the defaults, and null takes the last choices), held to the
+/// organizations' policy. The choices become the next ones on this device.
+/// `{ok, password, options}`, with the choices it was made with.
 ///
 /// # Safety
-/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+/// `options` is null or a NUL-terminated UTF-8 string, valid for the call.
 #[no_mangle]
 pub unsafe extern "C" fn pb_generate(options: *const c_char) -> *mut c_char {
-    let o: Value = serde_json::from_str(&text(options)).unwrap_or(Value::Null);
-    let defaults = generator::Options::default();
-    let flag = |key: &str, default: bool| o[key].as_bool().unwrap_or(default);
-    let options = generator::Options {
-        length: o["length"]
-            .as_u64()
-            .map(|l| l as usize)
-            .unwrap_or(defaults.length),
-        uppercase: flag("uppercase", defaults.uppercase),
-        lowercase: flag("lowercase", defaults.lowercase),
-        digits: flag("digits", defaults.digits),
-        symbols: flag("symbols", defaults.symbols),
-        avoid_ambiguous: flag("avoidAmbiguous", defaults.avoid_ambiguous),
+    let given = text(options);
+    let options = match given.trim() {
+        "" | "null" => None,
+        given => match serde_json::from_str::<generator::Options>(given) {
+            Ok(options) => Some(options),
+            Err(_) => return out(failed(Error::Damaged("those choices"))),
+        },
     };
-    out(match generator::password(&options) {
-        Ok(p) => json!({ "ok": true, "password": p.as_str() }),
-        Err(e) => failed(e),
+    with_app(|app| {
+        let options = options.unwrap_or_else(|| app.generator_options());
+        match app.generate(&options) {
+            Ok((p, held)) => json!({ "ok": true, "password": p.as_str(), "options": held }),
+            Err(e) => failed(e),
+        }
     })
+}
+
+/// The generator's last choices on this device (`generator::Options`), held
+/// to the organizations' policy.
+#[no_mangle]
+pub extern "C" fn pb_generator_options() -> *mut c_char {
+    with_app(|app| json!(app.generator_options()))
+}
+
+/// The organizations' "Password generator" policy (docs/core.md, "New
+/// passwords"): `kind` (the only kind allowed, or null), `minLength`,
+/// `uppercase`, `lowercase`, `digits`, `symbols`, `minDigits`,
+/// `minSymbols`, `minWords`, `capitalize`, and `includeNumber`. Nothing set
+/// when no organization sets it.
+#[no_mangle]
+pub extern "C" fn pb_generator_policy() -> *mut c_char {
+    with_app(|app| json!(app.generator_policy()))
 }
 
 /// Frees a string the core returned.

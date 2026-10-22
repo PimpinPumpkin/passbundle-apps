@@ -115,6 +115,12 @@ class Core {
   late final _save = _lib.lookupFunction<_Str2, _Str2>('pb_save');
   late final _trash = _lib.lookupFunction<_Str1, _Str1>('pb_trash');
   late final _generate = _lib.lookupFunction<_Str1, _Str1>('pb_generate');
+  late final _generatorOptions = _lib.lookupFunction<_Str0, _Str0>(
+    'pb_generator_options',
+  );
+  late final _generatorPolicy = _lib.lookupFunction<_Str0, _Str0>(
+    'pb_generator_policy',
+  );
   late final _free = _lib
       .lookupFunction<
         Void Function(Pointer<Utf8>),
@@ -351,11 +357,27 @@ class Core {
   Map<String, dynamic>? totp(String id) =>
       _with([id], (p) => _answer(_totp(p[0]))) as Map<String, dynamic>?;
 
-  /// A new password, for the editor's field.
-  String? generate({int length = 20}) {
-    final answer = _with([
-      jsonEncode({'length': length}),
-    ], (p) => _answer(_generate(p[0]))) as Map<String, dynamic>;
-    return answer['password'] as String?;
-  }
+  /// The generator's last choices on this device (core/src/generator.rs):
+  /// `kind` (`password` or `passphrase`), `length`, `uppercase`,
+  /// `lowercase`, `digits`, `symbols`, `avoidAmbiguous`, `words`,
+  /// `separator`, `capitalize`, and `includeNumber`.
+  Map<String, dynamic> generatorOptions() =>
+      _answer(_generatorOptions()) as Map<String, dynamic>;
+
+  /// The organizations' "Password generator" policy: `kind` (the only kind
+  /// allowed, or null), `minLength`, `uppercase`, `lowercase`, `digits`,
+  /// `symbols`, `minDigits`, `minSymbols`, `minWords`, `capitalize`, and
+  /// `includeNumber`.
+  Map<String, dynamic> generatorPolicy() =>
+      _answer(_generatorPolicy()) as Map<String, dynamic>;
+
+  /// A new password or passphrase for the editor's field: `{ok, password,
+  /// options}`, with the choices held to the organizations' policy, or the
+  /// words to show. Without options, the last choices; the choices become
+  /// the next ones.
+  Answer generate([Map<String, dynamic>? options]) => Answer(
+    _with([
+      options == null ? 'null' : jsonEncode(options),
+    ], (p) => _answer(_generate(p[0]))) as Map<String, dynamic>,
+  );
 }

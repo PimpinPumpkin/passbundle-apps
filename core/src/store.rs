@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::autolock::Preferences;
 use crate::error::{Error, Result};
+use crate::generator;
 use crate::kdf::Prelogin;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -104,6 +105,20 @@ impl Store {
         )
     }
 
+    /// The generator's last choices; the defaults until the person makes one.
+    pub fn generator_options(&self) -> generator::Options {
+        self.read("generator.json")
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn save_generator_options(&self, options: &generator::Options) -> Result<()> {
+        self.write(
+            "generator.json",
+            &serde_json::to_string_pretty(options).expect("options always serialize"),
+        )
+    }
+
     /// The last sync, as the server sent it.
     pub fn sync(&self) -> Option<String> {
         self.read("sync.json")
@@ -171,11 +186,19 @@ mod tests {
             lock_on_sleep: false,
         };
         store.save_preferences(&chosen).unwrap();
+        assert_eq!(store.generator_options(), generator::Options::default());
+        let generating = generator::Options {
+            kind: generator::Kind::Passphrase,
+            words: 4,
+            ..generator::Options::default()
+        };
+        store.save_generator_options(&generating).unwrap();
         store.forget_vault();
         assert!(store.sync().is_none());
         assert!(store.settings().is_some());
         // The choices are this device's, kept for whoever signs in next.
         assert_eq!(store.preferences(), chosen);
+        assert_eq!(store.generator_options(), generating);
         let _ = fs::remove_dir_all(dir);
     }
 }

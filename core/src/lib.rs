@@ -9,6 +9,7 @@ pub mod clipboard;
 pub mod crypto;
 pub mod error;
 pub mod generator;
+pub mod generator_policy;
 pub mod kdf;
 pub mod lock_policy;
 pub mod managed;
