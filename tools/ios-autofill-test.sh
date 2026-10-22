@@ -129,6 +129,9 @@ echo "Filled: signed in as phone@example.test, with the 25-character password fr
 echo "Making a passkey in Safari, and signing in with it"
 xcrun simctl openurl "$device" "https://phone.example.test:$port/passkeys"
 ui_test testPasskeysInSafari
+# Made by PassBundle: the login it went in is in the vault.
+touch "$(folder)/autofill-passkeys"
+reached autofill-passkey-saved "The passkey isn't in PassBundle's vault."
 echo "Signed in: the page checked the signature with the passkey's public key, for its own challenge and origin."
 
 # The app's half can end now.

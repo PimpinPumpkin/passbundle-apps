@@ -105,12 +105,31 @@ void main() {
       expect(suggested['count'], greaterThanOrEqualTo(1));
       File('$dir/autofill-suggested').writeAsStringSync('');
 
-      // Safari fills from them now; then the script says it's done.
-      await waitFor(
-        tester,
-        File('$dir/autofill-done'),
-        const Duration(minutes: 6),
-      );
+      // Safari fills from them now, and makes a passkey on the site: the
+      // script says when, and the login it went in is in PassBundle's vault
+      // (a passkey saved anywhere else, such as Apple's Passwords, isn't).
+      final passkeys = File('$dir/autofill-passkeys');
+      final done = File('$dir/autofill-done');
+      final end = DateTime.now().add(const Duration(minutes: 15));
+      while (!passkeys.existsSync() &&
+          !done.existsSync() &&
+          DateTime.now().isBefore(end)) {
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(seconds: 1)),
+        );
+      }
+      if (passkeys.existsSync()) {
+        final synced = await Core.sync();
+        expect(synced.ok, isTrue, reason: synced.error);
+        final made = Core()
+            .list('phone.example.test')
+            .where((i) => i['name'] == 'phone.example.test');
+        expect(made, isNotEmpty, reason: 'the passkey isn\'t in PassBundle');
+        File('$dir/autofill-passkey-saved').writeAsStringSync('');
+      }
+
+      // Then the script says it's done.
+      await waitFor(tester, done, const Duration(minutes: 6));
     },
     skip: !setUp,
   );

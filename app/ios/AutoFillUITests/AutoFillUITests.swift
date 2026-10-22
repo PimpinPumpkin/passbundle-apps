@@ -46,6 +46,17 @@ final class AutoFillUITests: XCTestCase {
       passBundle.tap()
     }
     XCTAssertEqual(passBundle.value as? String, "1")
+    // Apple's own Passwords off for AutoFill, where this iOS has it, so a new
+    // passkey goes to PassBundle rather than iOS asking where, or saving it
+    // there itself.
+    let apple = settings.switches["Passwords"]
+    if apple.waitForExistence(timeout: 3), apple.value as? String == "1" {
+      apple.tap()
+      let turnOff = settings.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Turn Off'")).firstMatch
+      if turnOff.waitForExistence(timeout: 3) {
+        turnOff.tap()
+      }
+    }
   }
 
   /// Safari, already on the sign-in page: the email field offers
