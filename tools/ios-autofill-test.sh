@@ -45,11 +45,18 @@ email="iphone-autofill-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')@core.exampl
 password="correct horse battery staple iphone autofill"
 (cd core && cargo run --locked --quiet --example test_account -- "$PB_TEST_SERVER" "$email" "$password") > /dev/null
 setup_log=$(mktemp)
-(cd app && flutter test integration_test/ios_autofill_setup_test.dart -d "$device" \
-  --dart-define="PB_TEST_SERVER=$PB_TEST_SERVER" --dart-define="PB_TEST_EMAIL=$email" \
-  --dart-define="PB_TEST_PASSWORD=$password" --dart-define=PB_AUTOFILL_SETUP=true) > "$setup_log" 2>&1 &
-setup=$!
-trap 'kill "$setup" "$page" 2> /dev/null || true' EXIT
+# The app's half, in a process group of its own, so a stalled one can be
+# stopped whole (Flutter, and the simctl it waits on).
+start_setup() {
+  set -m
+  (cd app && flutter test integration_test/ios_autofill_setup_test.dart -d "$device" \
+    --dart-define="PB_TEST_SERVER=$PB_TEST_SERVER" --dart-define="PB_TEST_EMAIL=$email" \
+    --dart-define="PB_TEST_PASSWORD=$password" --dart-define=PB_AUTOFILL_SETUP=true) > "$setup_log" 2>&1 &
+  setup=$!
+  set +m
+}
+start_setup
+trap 'kill -- "-$setup" 2> /dev/null || true; kill "$page" 2> /dev/null || true' EXIT
 
 # The App Group folder, where the app keeps the vault: the files the halves leave.
 folder() {
@@ -57,9 +64,9 @@ folder() {
   group=$(xcrun simctl get_app_container "$device" com.passbundle.app group.com.passbundle.app 2> /dev/null) || return 1
   echo "$group/PassBundle"
 }
-# Waits up to ten minutes for the app's half to leave a file.
+# Waits up to ten minutes (or $3 seconds) for the app's half to leave a file.
 reached() {
-  for _ in $(seq 600); do
+  for _ in $(seq "${3:-600}"); do
     [ -f "$(folder)/$1" ] && return 0
     kill -0 "$setup" 2> /dev/null || break
     sleep 1
@@ -68,6 +75,23 @@ reached() {
   echo "$2" >&2
   exit 1
 }
+# The simulator sometimes never finishes installing or launching the app
+# (simctl stalls, with no output): a half that isn't ready in eight minutes
+# (it takes three) is stopped, the simulator restarted, and it starts again.
+for _ in $(seq 480); do
+  [ -f "$(folder)/autofill-ready" ] && break
+  kill -0 "$setup" 2> /dev/null || break
+  sleep 1
+done
+if [ ! -f "$(folder)/autofill-ready" ] && kill -0 "$setup" 2> /dev/null; then
+  echo "The app's half stalled on the simulator; restarting it." >&2
+  kill -- "-$setup" 2> /dev/null || true
+  wait "$setup" 2> /dev/null || true
+  xcrun simctl shutdown "$device" || true
+  xcrun simctl boot "$device"
+  xcrun simctl bootstatus "$device" -b > /dev/null
+  start_setup
+fi
 reached autofill-ready "The app's half never got ready."
 
 # One of AutoFillUITests' tests, in Settings or Safari. Failing, it prints
