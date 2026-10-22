@@ -172,6 +172,7 @@ fn summary(vault: &Vault, item: &Item) -> Value {
         "name": item.name,
         "subtitle": item.card.as_ref().map(|c| c.summary())
             .or_else(|| item.identity.as_ref().map(|i| i.full_name()))
+            .or_else(|| item.ssh_key.as_ref().and_then(|k| k.fingerprint.clone()))
             .or_else(|| item.username.clone())
             .or_else(|| item.uris.first().cloned())
             .unwrap_or_default(),
@@ -754,6 +755,13 @@ pub unsafe extern "C" fn pb_item(id: *const c_char) -> *mut c_char {
                 "expYear": card.exp_year,
                 "hasNumber": card.number.as_ref().is_some_and(|n| !n.is_empty()),
                 "hasCode": card.code.as_ref().is_some_and(|c| !c.is_empty()),
+            });
+        }
+        if let Some(key) = &item.ssh_key {
+            view["sshKey"] = json!({
+                "publicKey": key.public_key,
+                "fingerprint": key.fingerprint,
+                "hasPrivateKey": key.private_key.as_ref().is_some_and(|k| !k.is_empty()),
             });
         }
         if let Some(identity) = &item.identity {

@@ -993,6 +993,18 @@ class _ItemPaneState extends State<ItemPane> {
         rows.add(secretRow('Security code', 'cardCode'));
       }
     }
+    final sshKey = item['sshKey'] as Map<String, dynamic>?;
+    if (sshKey != null) {
+      plainRow('Public key', sshKey['publicKey'] as String?, 'sshPublicKey');
+      plainRow(
+        'Fingerprint',
+        sshKey['fingerprint'] as String?,
+        'sshFingerprint',
+      );
+      if (sshKey['hasPrivateKey'] == true) {
+        rows.add(secretRow('Private key', 'sshPrivateKey'));
+      }
+    }
     final identityDetails = item['identity'] as Map<String, dynamic>?;
     if (identityDetails != null) {
       plainRow('Name', identityDetails['fullName'] as String?, 'fullName');

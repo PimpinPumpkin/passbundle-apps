@@ -81,9 +81,17 @@ pub struct CipherData {
     pub reprompt: Option<u8>,
     pub password_history: Option<serde_json::Value>,
     pub secure_note: Option<serde_json::Value>,
-    pub ssh_key: Option<serde_json::Value>,
+    pub ssh_key: Option<SshKeyData>,
     pub card: Option<CardData>,
     pub identity: Option<IdentityData>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SshKeyData {
+    pub private_key: Option<String>,
+    pub public_key: Option<String>,
+    pub key_fingerprint: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -237,21 +245,37 @@ pub struct Item {
     pub card: Option<Card>,
     /// An identity's details, for an identity.
     pub identity: Option<Identity>,
+    /// An SSH key's, for an SSH key.
+    pub ssh_key: Option<SshKey>,
     /// What an edit keeps that the app doesn't show or change.
     pub kept: Kept,
 }
 
-/// A card's or an identity's values the app copies or reveals, by name:
-/// the secrets ("cardNumber", "cardCode", "ssn", "passportNumber",
-/// "licenseNumber"), and the plain ones (`PLAIN_DETAILS`).
-pub const SECRET_DETAILS: [&str; 5] = [
+/// An SSH key (docs/core.md, "Items"): its public key and fingerprint, and
+/// its private key, a secret like a password. The web vault makes and edits
+/// them; the apps show and copy them.
+#[derive(Clone, Default)]
+pub struct SshKey {
+    pub public_key: Option<String>,
+    pub fingerprint: Option<String>,
+    pub private_key: Option<Zeroizing<String>>,
+}
+
+/// A card's, an identity's, or an SSH key's values the app copies or
+/// reveals, by name: the secrets ("cardNumber", "cardCode", "ssn",
+/// "passportNumber", "licenseNumber", "sshPrivateKey"), and the plain ones
+/// (`PLAIN_DETAILS`).
+pub const SECRET_DETAILS: [&str; 6] = [
     "cardNumber",
     "cardCode",
     "ssn",
     "passportNumber",
     "licenseNumber",
+    "sshPrivateKey",
 ];
-pub const PLAIN_DETAILS: [&str; 8] = [
+pub const PLAIN_DETAILS: [&str; 10] = [
+    "sshPublicKey",
+    "sshFingerprint",
     "cardholderName",
     "expiration",
     "fullName",
@@ -272,6 +296,14 @@ impl Item {
                 .filter(|t| !t.is_empty())
                 .map(|t| Zeroizing::new(t.as_str().to_owned()))
         };
+        if let Some(key) = &self.ssh_key {
+            return match what {
+                "sshPrivateKey" => secret(&key.private_key),
+                "sshPublicKey" => text(&key.public_key),
+                "sshFingerprint" => text(&key.fingerprint),
+                _ => None,
+            };
+        }
         if let Some(card) = &self.card {
             return match what {
                 "cardNumber" => secret(&card.number),
@@ -1019,6 +1051,14 @@ impl Keyring {
             }),
             _ => None,
         };
+        let ssh_key = match &c.ssh_key {
+            Some(d) if ItemKind::from(c.kind) == ItemKind::SshKey => Some(SshKey {
+                public_key: open_plain(&d.public_key)?,
+                fingerprint: open_plain(&d.key_fingerprint)?,
+                private_key: open_text(&d.private_key, &key)?,
+            }),
+            _ => None,
+        };
         let identity = match &c.identity {
             Some(d) if ItemKind::from(c.kind) == ItemKind::Identity => Some(Identity {
                 title: open_plain(&d.title)?,
@@ -1078,6 +1118,7 @@ impl Keyring {
             revision_date: c.revision_date.clone(),
             card,
             identity,
+            ssh_key,
             kept,
         })
     }
