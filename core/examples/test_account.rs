@@ -55,6 +55,20 @@ fn main() {
         &[],
     )
     .expect("saving the autofill item");
+    // And a website's login, which the test app's screen that says it's that
+    // website must not get until it's trusted as a browser.
+    app.save(
+        None,
+        &ItemDraft {
+            name: "Bank website".into(),
+            username: Some("bank@example.test".into()),
+            password: Some(Zeroizing::new("not-a-real-password-bank".into())),
+            uris: vec!["https://bank.example.test".into()],
+            ..Default::default()
+        },
+        &[],
+    )
+    .expect("saving the website item");
     let _ = std::fs::remove_dir_all(dir);
     println!("{email}");
 }
