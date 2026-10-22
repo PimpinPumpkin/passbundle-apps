@@ -20,7 +20,7 @@ use crate::lock_policy::LockPolicy;
 use crate::secrets::SecretStore;
 use crate::server::{Device, PendingSignIn, Server, Session, SignIn, TwoFactor};
 use crate::store::{Settings, Store};
-use crate::vault::{ItemDraft, Sync, Vault};
+use crate::vault::{Item, ItemDraft, Sync, Vault};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum State {
@@ -62,6 +62,10 @@ pub struct App {
     /// The organizations' "Vault lock" policy, from the kept sync.
     policy: LockPolicy,
     generator_policy: GeneratorPolicy,
+    /// The item whose secrets the master password, asked for again, let
+    /// out (docs/core.md, "Asking for the master password again"): until
+    /// another item asks, or the vault locks.
+    reprompted: Option<String>,
     autolock: AutoLock,
 }
 
@@ -84,6 +88,7 @@ impl App {
             preferences,
             policy: LockPolicy::default(),
             generator_policy: GeneratorPolicy::default(),
+            reprompted: None,
             autolock: AutoLock::new(Instant::now(), SystemTime::now()),
         }
     }
@@ -432,6 +437,7 @@ impl App {
 
     /// Drops every key and everything decrypted.
     pub fn lock(&mut self) {
+        self.reprompted = None;
         self.vault = None;
         self.session = None;
         self.pending = None;
@@ -451,6 +457,26 @@ impl App {
     }
 
     /// Saves an item, new (no id) or edited, then syncs.
+    /// Checks the master password for an item that asks for it again; if
+    /// it's right, that item's secrets may be used (`may_use`).
+    pub fn confirm_master_password(&mut self, id: &str, password: &str) -> Result<()> {
+        let settings = self.settings.as_ref().ok_or(Error::SignedOut)?;
+        let text = self.store.sync().ok_or(Error::SignedOut)?;
+        let vault = self.vault.as_ref().ok_or(Error::SignedOut)?;
+        vault.item(id).ok_or(Error::Damaged("no such item"))?;
+        if !vault.is_master_password(&Sync::from_json(&text)?, &settings.prelogin(), password)? {
+            return Err(Error::WrongPassword);
+        }
+        self.reprompted = Some(id.to_owned());
+        Ok(())
+    }
+
+    /// Whether an item's secrets may leave the core now: it doesn't ask for
+    /// the master password again, or it was given for it.
+    pub fn may_use(&self, item: &Item) -> bool {
+        item.kept.reprompt == 0 || self.reprompted.as_deref() == Some(item.id.as_str())
+    }
+
     pub fn save(
         &mut self,
         id: Option<&str>,
@@ -459,6 +485,12 @@ impl App {
     ) -> Result<()> {
         let vault = self.vault.as_ref().ok_or(Error::SignedOut)?;
         let editing = id.and_then(|id| vault.item(id));
+        // The editor reveals an item's secrets into its fields; one that asks
+        // for the master password can't be edited before it's given, or its
+        // empty fields would be saved over its secrets.
+        if editing.is_some_and(|item| !self.may_use(item)) {
+            return Err(Error::MasterPasswordFirst);
+        }
         let body = vault.encrypt_item(draft, editing)?;
         let (Some(server), Some(session)) = (&self.server, self.session.as_mut()) else {
             return Err(Error::SignedOut);
@@ -493,6 +525,9 @@ impl App {
             .as_ref()
             .and_then(|v| v.item(id))
             .ok_or(Error::Damaged("no such item"))?;
+        if what != "username" && !self.may_use(item) {
+            return Err(Error::MasterPasswordFirst);
+        }
         if what == "username" {
             return Ok(zeroize::Zeroizing::new(
                 item.username.clone().unwrap_or_default(),

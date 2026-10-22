@@ -686,6 +686,7 @@ class _ItemPaneState extends State<ItemPane> {
   @override
   void dispose() {
     ticker?.cancel();
+    masterPassword.dispose();
     super.dispose();
   }
 
@@ -710,10 +711,93 @@ class _ItemPaneState extends State<ItemPane> {
     );
   }
 
+  /// The master password, for an item that asks for it again.
+  final masterPassword = TextEditingController();
+  String? promptError;
+  bool confirming = false;
+
+  Future<void> confirm() async {
+    if (masterPassword.text.isEmpty) return;
+    setState(() {
+      confirming = true;
+      promptError = null;
+    });
+    final answer = await whileBusy(
+      () => Core.confirmMasterPassword(widget.id, masterPassword.text),
+    );
+    if (!mounted) return;
+    masterPassword.clear();
+    setState(() {
+      confirming = false;
+      if (answer.ok) {
+        item = widget.core.item(widget.id);
+      } else {
+        promptError = answer.error;
+      }
+    });
+    tick();
+  }
+
+  /// What an item that asks for the master password shows until it's given:
+  /// its name, and the question.
+  Widget askForMasterPassword(BuildContext context, Map<String, dynamic> item) {
+    final c = context.colors;
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(28, 26, 28, 28),
+      children: [
+        Row(
+          children: [
+            Avatar(
+              name: item['name'] as String,
+              kind: item['kind'] as String,
+              size: 48,
+            ),
+            const SizedBox(width: 16),
+            Expanded(
+              child: Text(
+                item['name'] as String,
+                style: Theme.of(context).textTheme.titleLarge
+                    ?.copyWith(fontWeight: FontWeight.w700),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 22),
+        Text(
+          'This item asks for your master password.',
+          style: TextStyle(color: c.muted),
+        ),
+        const SizedBox(height: 12),
+        TextField(
+          controller: masterPassword,
+          obscureText: true,
+          autofocus: true,
+          decoration: InputDecoration(
+            labelText: 'Master password',
+            errorText: promptError,
+          ),
+          onSubmitted: (_) => confirm(),
+        ),
+        const SizedBox(height: 12),
+        Align(
+          alignment: Alignment.centerLeft,
+          child: WorkingButton(
+            label: 'Continue',
+            working: confirming,
+            onPressed: confirm,
+          ),
+        ),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final item = this.item;
     if (item == null) return const SizedBox.shrink();
+    if (item['reprompt'] == true && item['mayUse'] != true) {
+      return askForMasterPassword(context, item);
+    }
     final c = context.colors;
     final rows = <Widget>[];
     Widget row(String label, Widget value, {List<Widget> actions = const []}) =>

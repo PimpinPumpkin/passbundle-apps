@@ -149,6 +149,26 @@ pub fn fillable<'caller>(
         .resolve::<ThrowRuntimeExAndDefault>()
 }
 
+/// The master password, for a login that asks for it again before it fills
+/// (docs/core.md, "Asking for the master password again"): `{ok}`, or the
+/// words to show, as JSON. Slow (the KDF): call it off the main thread.
+#[cfg(feature = "ffi")]
+#[jni_mangle("com.passbundle.app.Core")]
+pub fn confirmMasterPassword<'caller>(
+    mut unowned_env: EnvUnowned<'caller>,
+    _class: JClass<'caller>,
+    id: JString<'caller>,
+    password: JString<'caller>,
+) -> jstring {
+    unowned_env
+        .with_env(|env| -> JniResult<jstring> {
+            let password = zeroize::Zeroizing::new(password.try_to_string(env)?);
+            let answer = crate::ffi::confirm_master_password(&id.try_to_string(env)?, &password);
+            Ok(env.new_string(answer.to_string())?.into_raw())
+        })
+        .resolve::<ThrowRuntimeExAndDefault>()
+}
+
 /// Turns biometric unlock off: Kotlin deletes its Keystore key and the user
 /// key it sealed (signing out, or a key that's out of date).
 pub(crate) fn remove_biometric() {

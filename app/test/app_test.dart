@@ -326,6 +326,54 @@ void main() {
   );
 
   testWidgets(
+    'an item that asks for the master password again shows nothing secret until it\'s given',
+    (tester) async {
+      setSize(tester, const Size(1280, 800));
+      // "Backup service", as the web vault sets it.
+      openSample(asking: {'5f607182-93a4-4b52-cde3-f40516273849'});
+      await tester.pumpWidget(const PassBundleApp());
+      await tester.enterText(find.byType(TextField), samplePassword);
+      await tester.tap(find.text('Unlock'));
+      await pumpUntil(tester, find.text('Backup service'));
+      await pumpUntil(
+        tester,
+        find.textContaining('Sign in again to get changes'),
+      );
+      await tester.tap(find.text('Backup service'));
+      await tester.pump();
+      expect(
+        find.text('This item asks for your master password.'),
+        findsOneWidget,
+      );
+      expect(find.byTooltip('Reveal'), findsNothing);
+      expect(find.byTooltip('Edit'), findsNothing);
+
+      await tester.enterText(
+        find.widgetWithText(TextField, 'Master password'),
+        'not the password',
+      );
+      await tester.tap(find.text('Continue'));
+      await pumpUntil(tester, find.text('That master password isn\'t right.'));
+      expect(find.byTooltip('Reveal'), findsNothing);
+
+      await tester.enterText(
+        find.widgetWithText(TextField, 'Master password'),
+        samplePassword,
+      );
+      await tester.tap(find.text('Continue'));
+      await pumpUntil(tester, find.byTooltip('Edit'));
+      await tester.tap(find.byTooltip('Reveal').first);
+      await tester.pump();
+      expect(find.text('not-a-real-password-3'), findsOneWidget);
+
+      // Other items don't ask.
+      await tester.tap(find.text('Example Mail'));
+      await tester.pump();
+      expect(find.byTooltip('Reveal'), findsWidgets);
+    },
+  );
+
+  testWidgets(
     'on a phone-width window, a header has the theme and Lock, and an item opens on its own page',
     (tester) async {
       setSize(tester, const Size(390, 844));

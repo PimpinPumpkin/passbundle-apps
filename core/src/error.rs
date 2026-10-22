@@ -6,6 +6,9 @@ use std::fmt;
 pub enum Error {
     /// The master password didn't open the user key.
     WrongPassword,
+    /// The item asks for the master password before its secrets are used
+    /// (docs/core.md, "Asking for the master password again").
+    MasterPasswordFirst,
     /// Two-step login's code wasn't right, or has expired.
     WrongCode,
     /// The server asked for KDF settings outside the bounds in docs/core.md.
@@ -36,6 +39,9 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Error::WrongPassword => write!(f, "That master password isn't right."),
+            Error::MasterPasswordFirst => {
+                write!(f, "This item asks for your master password first.")
+            }
             Error::WrongCode => write!(f, "That code isn't right, or it's expired. Try the newest one."),
             Error::WeakKdf(why) => write!(
                 f,
