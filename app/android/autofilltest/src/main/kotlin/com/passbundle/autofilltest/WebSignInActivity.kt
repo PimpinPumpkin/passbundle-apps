@@ -2,7 +2,10 @@ package com.passbundle.autofilltest
 
 import android.app.Activity
 import android.os.Bundle
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebView
+import android.webkit.WebViewClient
 
 /**
  * A sign-in page in the test app's own WebView (an in-app browser), for the
@@ -14,8 +17,16 @@ class WebSignInActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val web = WebView(this)
+        // The page's real address, as an in-app browser opens a link, served
+        // from here: the network never sees it, and the page's origin (what
+        // autofill is told) is the site's.
+        web.webViewClient =
+            object : WebViewClient() {
+                override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest) =
+                    WebResourceResponse("text/html", "utf-8", PAGE.byteInputStream())
+            }
         setContentView(web)
-        web.loadDataWithBaseURL(intent.getStringExtra("site") ?: "https://elsewhere.test/", PAGE, "text/html", "utf-8", null)
+        web.loadUrl(intent.getStringExtra("site") ?: "https://elsewhere.test/")
     }
 
     private companion object {
