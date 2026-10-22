@@ -108,27 +108,23 @@ enum Platform {
 /// keeping the key without biometrics, as on Android; release builds refuse
 /// it. Real prompts are checked by hand on real phones.
 enum Biometric {
-  private static var standInMark: URL? {
-    Shared.filesDir().map { URL(fileURLWithPath: $0).appendingPathComponent("biometric-stand-in") }
-  }
+  /// Kept in the app's own defaults, not the vault's folder, so a test that
+  /// clears the folder keeps it.
+  private static let standInKey = "biometricStandIn"
 
   private static var standIn: Bool {
     #if DEBUG
-      if let mark = standInMark { return FileManager.default.fileExists(atPath: mark.path) }
+      return UserDefaults.standard.bool(forKey: standInKey)
+    #else
+      return false
     #endif
-    return false
   }
 
   /// Tests only: the stand-in, kept across the app's launches. False in a release build.
   static func useStandIn(_ on: Bool) -> Bool {
     #if DEBUG
       remove()
-      guard let mark = standInMark else { return false }
-      if on {
-        FileManager.default.createFile(atPath: mark.path, contents: Data())
-      } else {
-        try? FileManager.default.removeItem(at: mark)
-      }
+      UserDefaults.standard.set(on, forKey: standInKey)
       return true
     #else
       return false
