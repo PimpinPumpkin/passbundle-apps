@@ -114,6 +114,9 @@ class PasskeyProvider : CredentialProviderService() {
                 val allowed = allowedIds(option.requestJson)
                 for (i in 0 until items.length()) {
                     val item = items.getJSONObject(i)
+                    // A site that names no credential gets only the ones it
+                    // can find by itself (discoverable), as WebAuthn has it.
+                    if (allowed == null && !item.optBoolean("discoverable", true)) continue
                     if (allowed != null && item.getString("credentialId") !in allowed) continue
                     val name = item.optString("userName").ifEmpty { item.optString("name") }
                     found +=
