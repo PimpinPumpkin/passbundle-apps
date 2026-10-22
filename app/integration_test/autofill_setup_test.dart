@@ -92,20 +92,18 @@ void main() {
       find.widgetWithText(TextField, 'not-a-real-password-new'),
       findsOneWidget,
     );
-    expect(
-      find.widgetWithText(
-        TextField,
-        'androidapp://com.passbundle.autofilltest',
-      ),
-      findsOneWidget,
-    );
     expect(find.text('New item'), findsOneWidget);
     await tester.tap(find.text('Save'));
     await pumpUntil(tester, find.text('Saved'));
-    expect(
-      Core().list('').map((i) => i['subtitle']),
-      contains('new@example.test'),
-    );
+    // Saved for the app it was signed in to (checked in the vault: on a small
+    // screen the editor's website row is below what it builds).
+    final saved = Core()
+        .list('')
+        .where((i) => i['subtitle'] == 'new@example.test');
+    expect(saved, hasLength(1));
+    expect(Core().item(saved.single['id'] as String)!['uris'], [
+      'androidapp://com.passbundle.autofilltest',
+    ]);
     File('$dir/autofill-saved').writeAsStringSync('');
 
     // Then a new password for that sign-in: the same login opens, with it.
