@@ -354,10 +354,10 @@ pub extern "C" fn pb_lock() -> *mut c_char {
     })
 }
 
-/// An item's value for the clipboard, for the Android app's native piece
-/// (android.rs). None while locked, while a slow call has the app, or if
-/// there's nothing to copy.
-#[cfg(target_os = "android")]
+/// An item's value for the clipboard, for the phone app's native piece
+/// (android.rs, or `pb_secret` for iOS's Swift). None while locked, while a
+/// slow call has the app, or if there's nothing to copy.
+#[cfg(phone)]
 pub(crate) fn value_for_copy(id: &str, what: &str) -> Option<Zeroizing<String>> {
     let guard = match APP.try_lock() {
         Ok(guard) => guard,
@@ -365,6 +365,103 @@ pub(crate) fn value_for_copy(id: &str, what: &str) -> Option<Zeroizing<String>> 
         Err(TryLockError::WouldBlock) => return None,
     };
     guard.as_ref()?.value(id, what).ok()
+}
+
+/// An item's value for the iOS app's Swift to put on the pasteboard
+/// ("username", "password", "totp", "notes", or "field:<index>"), as UTF-8
+/// bytes, without passing through Dart; null while locked or busy, or if
+/// there's nothing to copy. `len` gets its length. Free it with
+/// `pb_free_secret`, which wipes it first.
+///
+/// # Safety
+/// `id` and `what` are NUL-terminated UTF-8 strings, and `len` points to
+/// writable memory, for the call.
+#[cfg(target_os = "ios")]
+#[no_mangle]
+pub unsafe extern "C" fn pb_secret(
+    id: *const c_char,
+    what: *const c_char,
+    len: *mut usize,
+) -> *mut u8 {
+    let Some(value) = value_for_copy(&text(id), &text(what)) else {
+        return std::ptr::null_mut();
+    };
+    let bytes: Box<[u8]> = value.as_bytes().into();
+    *len = bytes.len();
+    Box::into_raw(bytes).cast()
+}
+
+/// Wipes and frees what `pb_secret` returned.
+///
+/// # Safety
+/// `bytes` and `len` are what `pb_secret` returned and set, or null, and
+/// aren't used after.
+#[cfg(target_os = "ios")]
+#[no_mangle]
+pub unsafe extern "C" fn pb_free_secret(bytes: *mut u8, len: usize) {
+    if bytes.is_null() {
+        return;
+    }
+    let mut owned = Box::from_raw(std::ptr::slice_from_raw_parts_mut(bytes, len));
+    zeroize::Zeroize::zeroize(&mut *owned);
+}
+
+/// The unlocked vault's user key, for the iOS app's Swift to keep in the
+/// Keychain for unlocking with Face ID or Touch ID (docs/phones.md,
+/// "Unlocking with biometrics"), without passing through Dart; null while
+/// locked or busy. `len` gets its length. Free it with `pb_free_secret`,
+/// which wipes it.
+///
+/// # Safety
+/// `len` points to writable memory, for the call.
+#[cfg(target_os = "ios")]
+#[no_mangle]
+pub unsafe extern "C" fn pb_user_key(len: *mut usize) -> *mut u8 {
+    let Some(key) = user_key_for_biometric() else {
+        return std::ptr::null_mut();
+    };
+    let bytes: Box<[u8]> = key.as_slice().into();
+    *len = bytes.len();
+    Box::into_raw(bytes).cast()
+}
+
+/// Opens the kept vault with the user key Swift read from the Keychain after
+/// Face ID or Touch ID: "" if it opened, else the words to show. A key that
+/// no longer opens it means biometric unlock is out of date, and is turned
+/// off. Free the answer with `pb_free`.
+///
+/// # Safety
+/// `key` points to `len` readable bytes, for the call.
+#[cfg(target_os = "ios")]
+#[no_mangle]
+pub unsafe extern "C" fn pb_unlock_with_key(key: *const u8, len: usize) -> *mut c_char {
+    let key = Zeroizing::new(std::slice::from_raw_parts(key, len).to_vec());
+    let why = match unlock_with_key_for_biometric(&key) {
+        Ok(()) => String::new(),
+        Err(why) => why,
+    };
+    CString::new(why).unwrap_or_default().into_raw()
+}
+
+/// What Swift does when the core turns biometric unlock off (signing out, or
+/// a key that's out of date): it deletes the Keychain item. Swift sets it at
+/// start.
+#[cfg(target_os = "ios")]
+static REMOVE_BIOMETRIC: std::sync::OnceLock<extern "C" fn()> = std::sync::OnceLock::new();
+
+/// Swift's function to turn biometric unlock off, set once at start.
+#[cfg(target_os = "ios")]
+#[no_mangle]
+pub extern "C" fn pb_set_remove_biometric(remove: extern "C" fn()) {
+    let _ = REMOVE_BIOMETRIC.set(remove);
+}
+
+/// Turns biometric unlock off on iOS: Swift deletes the Keychain item.
+#[cfg(target_os = "ios")]
+pub(crate) fn remove_biometric() {
+    if let Some(remove) = REMOVE_BIOMETRIC.get() {
+        remove();
+    }
 }
 
 /// Opens the core on the Android app's folder, unless it's open already: the
@@ -409,9 +506,10 @@ pub(crate) fn fillable(package: &str, domain: &str) -> Value {
     json!({ "locked": false, "items": items })
 }
 
-/// The unlocked vault's user key, for the Android app to seal for biometric
-/// unlock (android.rs). None while locked or busy.
-#[cfg(target_os = "android")]
+/// The unlocked vault's user key, for the phone app to seal for biometric
+/// unlock (android.rs, or `pb_user_key` for iOS's Keychain). None while locked
+/// or busy.
+#[cfg(phone)]
 pub(crate) fn user_key_for_biometric() -> Option<Zeroizing<Vec<u8>>> {
     let guard = match APP.try_lock() {
         Ok(guard) => guard,
@@ -423,9 +521,10 @@ pub(crate) fn user_key_for_biometric() -> Option<Zeroizing<Vec<u8>>> {
     ))
 }
 
-/// Opens the kept vault with the user key the Android app's biometric unlock
-/// opened (android.rs); the error's words otherwise.
-#[cfg(target_os = "android")]
+/// Opens the kept vault with the user key the phone app's biometric unlock
+/// opened (android.rs, or `pb_unlock_with_key` for iOS); the error's words
+/// otherwise.
+#[cfg(phone)]
 pub(crate) fn unlock_with_key_for_biometric(key: &[u8]) -> Result<(), String> {
     let mut guard = match APP.try_lock() {
         Ok(guard) => guard,

@@ -167,9 +167,9 @@ class Core {
   /// What only the phone's own code does (docs/phones.md, "Talking to the OS").
   static const platform = MethodChannel('passbundle/platform');
 
-  /// Android keeps the vault in the app's own folder, which only Android knows.
+  /// Phones keep the vault in the app's own folder, which only the OS knows.
   static Future<void> openOnThisDevice() async {
-    if (!Platform.isAndroid) return;
+    if (!isPhone) return;
     final dir = await platform.invokeMethod<String>('filesDir');
     Core().openAt(dir!, memorySecrets: false);
     final managed = await platform.invokeMethod<String>('managedServer');
@@ -228,10 +228,10 @@ class Core {
       );
 
   /// Unlocking with Windows Hello or Touch ID, through the desktop agent, or
-  /// on Android with the phone's own biometrics, through the app's Kotlin:
+  /// on a phone with its own biometrics, through the app's Kotlin or Swift:
   /// `status` is setUp, notSetUp, unavailable, or noAgent, and `method` its name.
   static Future<Map<String, dynamic>> biometricStatus() async {
-    if (Platform.isAndroid) return _onPhone('biometricStatus');
+    if (isPhone) return _onPhone('biometricStatus');
     return Map<String, dynamic>.from(
       await Isolate.run(() {
         final core = Core();
@@ -240,7 +240,8 @@ class Core {
     );
   }
 
-  /// A call to the phone's own code (MainActivity.kt), answered as the core would.
+  /// A call to the phone's own code (MainActivity.kt, AppDelegate.swift),
+  /// answered as the core would.
   static Future<Map<String, dynamic>> _onPhone(String method) async =>
       Map<String, dynamic>.from(
         (await platform.invokeMethod<Map>(method)) ?? {'ok': false},
@@ -252,17 +253,17 @@ class Core {
       _background((c) => c._answer(c._startAgent()));
 
   /// Turns it on (the agent asks); `on` says whether the person agreed.
-  static Future<Answer> enrollBiometric() async => Platform.isAndroid
+  static Future<Answer> enrollBiometric() async => isPhone
       ? Answer(await _onPhone('biometricEnroll'))
       : _background((c) => c._answer(c._bioEnroll()));
 
   /// Unlocks with it; `unlocked` is false if the person cancelled.
-  static Future<Answer> unlockWithBiometric() async => Platform.isAndroid
+  static Future<Answer> unlockWithBiometric() async => isPhone
       ? Answer(await _onPhone('biometricUnlock'))
       : _background((c) => c._answer(c._bioUnlock()));
 
   /// Turns it off, for the browser extension too (on a computer).
-  static Future<Answer> removeBiometric() async => Platform.isAndroid
+  static Future<Answer> removeBiometric() async => isPhone
       ? Answer(await _onPhone('biometricRemove'))
       : _background((c) => c._answer(c._bioRemove()));
 
@@ -274,8 +275,9 @@ class Core {
     return save == null ? null : Map<String, dynamic>.from(save);
   }
 
-  /// For the phone tests: debug builds' stand-in for Android's biometric
-  /// prompt, which says yes (Biometric.kt). False in a release build.
+  /// For the phone tests: debug builds' stand-in for the phone's biometric
+  /// prompt, which says yes (Biometric.kt, AppDelegate.swift). False in a
+  /// release build.
   static Future<bool> useBiometricStandIn(bool on) async =>
       await platform.invokeMethod<bool>('biometricStandIn', {'on': on}) ??
       false;
@@ -336,9 +338,10 @@ class Core {
       _with([id, what], (p) => _answer(_reveal(p[0], p[1]))) as String?;
 
   /// Copies without the value passing through Dart; secrets clear after 30
-  /// seconds. On Android the app's Kotlin takes it from the core to the clipboard.
+  /// seconds. On phones the app's own code (Kotlin, Swift) takes it from the
+  /// core to the clipboard.
   Future<Answer> copy(String id, String what) async {
-    if (Platform.isAndroid) {
+    if (isPhone) {
       final copied = await platform.invokeMethod<bool>('copy', {
         'id': id,
         'what': what,

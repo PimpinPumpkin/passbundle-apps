@@ -178,12 +178,13 @@ jobs:
           path: app/android/app/src/main/jniLibs
 
   ios:
-    # The core on iOS (docs/phones.md, "The core on phones"): its lints for
-    # iOS, the static library for iPhones and the simulator that the app links,
-    # and its tests run on an iPhone simulator.
+    # The core and the app on iOS (docs/phones.md): the core's lints for iOS,
+    # the static library for iPhones and the simulator that the app links, the
+    # core's tests, and the app's own tests, on an iPhone simulator, signing in
+    # to a real server on the runner.
     name: iOS
     runs-on: macos-15
-    timeout-minutes: 40
+    timeout-minutes: 75
     defaults:
       run:
         shell: bash
@@ -191,14 +192,21 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Install the pinned Rust toolchain, with iOS's targets
-        working-directory: core
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: PimpinPumpkin/passbundle-server
+          ref: keykeeper
+          path: server
+          persist-credentials: false
+      - name: Install the pinned Rust toolchains, with iOS's targets
         run: |
-          rustup toolchain install
-          rustup target add aarch64-apple-ios aarch64-apple-ios-sim
+          (cd core && rustup toolchain install && rustup target add aarch64-apple-ios aarch64-apple-ios-sim)
+          (cd server && rustup toolchain install)
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          workspaces: core
+          workspaces: |
+            core
+            server
           key: ios
       - name: Lints, for iOS
         working-directory: core
@@ -207,6 +215,24 @@ jobs:
         run: tools/ios-core.sh build
       - name: The core's tests, on an iPhone simulator
         run: tools/ios-core.sh test
+      - name: Build the server, and start it
+        run: |
+          (cd server && cargo build --features sqlite)
+          echo "PB_TEST_SERVER=$(tools/test-server.sh server/target/debug/vaultwarden 8592 "$RUNNER_TEMP/server")" >> "$GITHUB_ENV"
+      - name: Install Flutter at the pinned release
+        run: |
+          git clone --quiet --depth 1 --branch "$FLUTTER_VERSION" https://github.com/flutter/flutter.git "$RUNNER_TEMP/flutter"
+          test "$(git -C "$RUNNER_TEMP/flutter" rev-parse HEAD)" = "$FLUTTER_COMMIT"
+          echo "$RUNNER_TEMP/flutter/bin" >> "$GITHUB_PATH"
+      - name: Turn off analytics
+        run: |
+          flutter config --no-analytics
+          flutter --disable-analytics
+      - name: The app's tests, on an iPhone simulator (unlock, copying through Swift, locking, iOS's certificate checks, signing in with the Keychain keeping the session, and Face ID unlock)
+        run: tools/ios-app-test.sh
+      - name: The server's log
+        if: failure()
+        run: cat "$RUNNER_TEMP/server/server.log" || true
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: core-ios
