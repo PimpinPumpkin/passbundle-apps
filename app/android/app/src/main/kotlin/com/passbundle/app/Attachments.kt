@@ -37,9 +37,15 @@ object Attachments {
         }
         val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
             ?: return mapOf("ok" to false, "error" to "Couldn't save that.")
-        val answer = resolver.openFileDescriptor(uri, "w")?.use { file ->
-            JSONObject(Core.writeAttachmentTo(id, attachmentId, file.fd) ?: "{}")
-        } ?: JSONObject()
+        // Anything short of a whole file, however it fails, leaves nothing in Downloads.
+        val answer = try {
+            resolver.openFileDescriptor(uri, "w")?.use { file ->
+                JSONObject(Core.writeAttachmentTo(id, attachmentId, file.fd) ?: "{}")
+            } ?: JSONObject()
+        } catch (e: Exception) {
+            resolver.delete(uri, null, null)
+            throw e
+        }
         if (!answer.optBoolean("ok")) {
             resolver.delete(uri, null, null)
             return mapOf("ok" to false, "error" to answer.optString("error", "Couldn't save that."))

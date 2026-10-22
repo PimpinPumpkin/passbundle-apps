@@ -265,13 +265,18 @@ pub struct Item {
     pub kept: Kept,
 }
 
+/// What an attachment whose name or key doesn't open is called.
+pub const CANT_OPEN_ATTACHMENT: &str = "An attachment that can't be opened";
+
 /// An attachment: its file's name and size, and the key its file opens with.
-/// The file itself stays on the server until someone saves it.
+/// The file itself stays on the server until someone saves it. One whose
+/// name or key doesn't open is still listed, with no key, so the rest of its
+/// item still opens.
 pub struct Attachment {
     pub id: String,
     pub name: String,
     pub size: Option<u64>,
-    pub key: SymmetricKey,
+    pub key: Option<SymmetricKey>,
 }
 
 /// An SSH key (docs/core.md, "Items"): its public key and fingerprint, and
@@ -1077,17 +1082,24 @@ impl Keyring {
         // A file with no key of its own (very old ones) is under the item's key.
         let mut attachments = Vec::new();
         for a in c.attachments.iter().flatten() {
+            let name = open_plain(&a.file_name).ok().flatten();
+            let file_key = match &a.key {
+                Some(wrapped) => EncString::parse(wrapped)
+                    .and_then(|k| k.decrypt_key(&key))
+                    .ok(),
+                None => Some(key.clone()),
+            };
+            let opens = name.is_some() && file_key.is_some();
             attachments.push(Attachment {
                 id: a.id.clone(),
-                name: open_plain(&a.file_name)?.unwrap_or_default(),
+                name: name
+                    .filter(|_| opens)
+                    .unwrap_or_else(|| CANT_OPEN_ATTACHMENT.to_owned()),
                 size: a.size.as_ref().and_then(|s| {
                     s.as_u64()
                         .or_else(|| s.as_str().and_then(|t| t.parse().ok()))
                 }),
-                key: match &a.key {
-                    Some(wrapped) => EncString::parse(wrapped)?.decrypt_key(&key)?,
-                    None => key.clone(),
-                },
+                key: file_key.filter(|_| opens),
             });
         }
         let ssh_key = match &c.ssh_key {

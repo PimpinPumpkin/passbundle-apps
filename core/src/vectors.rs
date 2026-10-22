@@ -235,7 +235,7 @@ fn attachments_open_and_a_changed_file_is_refused() {
             assert_eq!(a.name, w["fileName"].as_str().unwrap());
             assert_eq!(a.size, w["size"].as_u64());
             let file = &v["attachmentFiles"][&a.id];
-            let opened = decrypt_file(&b64(&file["encrypted"]), &a.key).unwrap();
+            let opened = decrypt_file(b64(&file["encrypted"]), a.key.as_ref().unwrap()).unwrap();
             assert_eq!(opened.as_slice(), b64(&file["plain"]).as_slice());
             seen += 1;
         }
@@ -249,9 +249,11 @@ fn attachments_open_and_a_changed_file_is_refused() {
             .flat_map(|i| &i.attachments)
             .find(|a| a.id == id)
             .unwrap()
-            .key;
+            .key
+            .clone()
+            .unwrap();
         assert!(
-            decrypt_file(&b64(&r["encrypted"]), key).is_err(),
+            decrypt_file(b64(&r["encrypted"]), key).is_err(),
             "{}",
             r["why"]
         );
@@ -263,10 +265,61 @@ fn attachments_open_and_a_changed_file_is_refused() {
         .flat_map(|i| &i.attachments)
         .next()
         .unwrap()
-        .key;
-    assert!(decrypt_file(&[], key).is_err());
-    assert!(decrypt_file(&[2; 40], key).is_err());
-    assert!(decrypt_file(&[0; 80], key).is_err());
+        .key
+        .clone()
+        .unwrap();
+    assert!(decrypt_file(vec![], key).is_err());
+    assert!(decrypt_file(vec![2; 40], key).is_err());
+    assert!(decrypt_file(vec![0; 80], key).is_err());
+}
+
+/// An attachment whose key doesn't open is listed as one that can't be
+/// opened, and the rest of its item still opens.
+#[test]
+fn an_attachment_that_doesnt_open_leaves_its_item() {
+    let v = vectors();
+    let mut changed = v["sync"].clone();
+    let item = changed["ciphers"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|c| {
+            c["attachments"]
+                .as_array()
+                .is_some_and(|a| a.iter().any(|a| a["key"].is_string()))
+        })
+        .unwrap();
+    let id = item["id"].as_str().unwrap().to_owned();
+    let attachment = item["attachments"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|a| a["key"].is_string())
+        .unwrap();
+    let attachment_id = attachment["id"].as_str().unwrap().to_owned();
+    // Its key with another MAC: its integrity check fails.
+    let wrapped = attachment["key"].as_str().unwrap();
+    let (rest, _mac) = wrapped.rsplit_once('|').unwrap();
+    attachment["key"] = Value::String(format!("{rest}|{}", "A".repeat(43) + "="));
+    let sync = Sync::from_json(&changed.to_string()).unwrap();
+    let vault = Vault::unlock(
+        &sync,
+        &prelogin(&v["account"]["pbkdf2"]["prelogin"]),
+        v["account"]["password"].as_str().unwrap(),
+    )
+    .unwrap();
+    let item = vault.item(&id).expect("the item still opens");
+    assert_eq!(
+        item.name,
+        v["opened"]["items"][&id]["name"].as_str().unwrap()
+    );
+    let attachment = item
+        .attachments
+        .iter()
+        .find(|a| a.id == attachment_id)
+        .unwrap();
+    assert!(attachment.key.is_none());
+    assert_eq!(attachment.name, crate::vault::CANT_OPEN_ATTACHMENT);
 }
 
 #[test]

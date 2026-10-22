@@ -18,7 +18,7 @@ use crate::generator_policy::GeneratorPolicy;
 use crate::kdf::normalize_email;
 use crate::lock_policy::LockPolicy;
 use crate::secrets::SecretStore;
-use crate::server::{Device, PendingSignIn, Server, Session, SignIn, TwoFactor};
+use crate::server::{Device, Download, PendingSignIn, Server, Session, SignIn, TwoFactor};
 use crate::store::{Settings, Store};
 use crate::vault::{Item, ItemDraft, Sync, Vault};
 
@@ -496,6 +496,13 @@ impl App {
         id: &str,
         attachment_id: &str,
     ) -> Result<(String, Zeroizing<Vec<u8>>)> {
+        self.attachment_to_fetch(id, attachment_id)?.open()
+    }
+
+    /// What fetching an attachment needs, once the server has said where its
+    /// file is: the rest (the download, decrypting, saving) happens without
+    /// the app, so a long download doesn't hold up its other calls.
+    pub fn attachment_to_fetch(&mut self, id: &str, attachment_id: &str) -> Result<AttachmentFile> {
         let vault = self.vault.as_ref().ok_or(Error::SignedOut)?;
         let item = vault.item(id).ok_or(Error::Damaged("no such item"))?;
         if !self.may_use(item) {
@@ -506,22 +513,40 @@ impl App {
             .iter()
             .find(|a| a.id == attachment_id)
             .ok_or(Error::Damaged("no such attachment"))?;
-        let (name, key) = (attachment.name.clone(), attachment.key.clone());
-        let (Some(server), Some(session)) = (&self.server, self.session.as_mut()) else {
+        let key = attachment
+            .key
+            .clone()
+            .ok_or(Error::Damaged("an attachment that can't be opened"))?;
+        let name = attachment.name.clone();
+        let (Some(server), Some(settings), Some(session)) =
+            (&self.server, &self.settings, self.session.as_mut())
+        else {
             return Err(Error::SignedOut);
         };
-        let file = server.attachment(session, id, attachment_id)?;
-        Ok((name, crate::crypto::decrypt_file(&file, &key)?))
+        let download = match server.attachment_download(session, id, attachment_id) {
+            Err(Error::SignedOut) => {
+                self.session = None;
+                self.secrets.forget(&settings.server, &settings.email);
+                return Err(Error::SignedOut);
+            }
+            other => other?,
+        };
+        // Asking may have refreshed the session, and the server may have
+        // issued a new refresh token, as for a sync.
+        self.secrets
+            .keep(&settings.server, &settings.email, &session.refresh_token);
+        Ok(AttachmentFile {
+            name,
+            key,
+            download,
+        })
     }
 
     /// Saves an attachment to the Downloads folder (the home folder if
     /// there's none), next to anything of the same name rather than over
     /// it; answers where.
     pub fn save_attachment(&mut self, id: &str, attachment_id: &str) -> Result<PathBuf> {
-        let dir = dirs::download_dir()
-            .or_else(dirs::home_dir)
-            .ok_or(Error::Damaged("no folder to save to"))?;
-        self.save_attachment_in(id, attachment_id, &dir)
+        self.attachment_to_fetch(id, attachment_id)?.save()
     }
 
     /// Saves an attachment in `dir` (an iPhone's Documents folder, which
@@ -532,31 +557,7 @@ impl App {
         attachment_id: &str,
         dir: &std::path::Path,
     ) -> Result<PathBuf> {
-        let (name, contents) = self.attachment(id, attachment_id)?;
-        let path = free_path(dir, &name);
-        std::fs::write(&path, contents.as_slice())
-            .map_err(|_| Error::Damaged("the file couldn't be written"))?;
-        Ok(path)
-    }
-
-    /// Writes an attachment into a file the OS opened for it (Android's
-    /// Downloads, through MediaStore), so it never passes through Java.
-    #[cfg(unix)]
-    pub fn write_attachment_to(
-        &mut self,
-        id: &str,
-        attachment_id: &str,
-        fd: std::os::fd::RawFd,
-    ) -> Result<()> {
-        use std::io::Write;
-        use std::os::fd::FromRawFd;
-        let (_, contents) = self.attachment(id, attachment_id)?;
-        // SAFETY: `fd` is an open, writable file the caller owns and closes;
-        // ManuallyDrop keeps this from closing it too.
-        let mut file = std::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(fd) });
-        file.write_all(contents.as_slice())
-            .and_then(|()| file.flush())
-            .map_err(|_| Error::Damaged("the file couldn't be written"))
+        self.attachment_to_fetch(id, attachment_id)?.save_in(dir)
     }
 
     /// Saves an item, new (no id) or edited, then syncs.
@@ -646,75 +647,298 @@ impl App {
     }
 }
 
-/// A path in `dir` for a file named `name` that doesn't exist yet: the name
-/// itself, made safe for a file name, then "name (1).ext", and so on.
-fn free_path(dir: &std::path::Path, name: &str) -> PathBuf {
+/// An attachment to fetch, open, and save (`App::attachment_to_fetch`),
+/// away from the app: nothing here needs it.
+pub struct AttachmentFile {
+    name: String,
+    key: SymmetricKey,
+    download: Download,
+}
+
+impl AttachmentFile {
+    /// Its name and contents: downloaded, then opened in memory.
+    pub fn open(self) -> Result<(String, Zeroizing<Vec<u8>>)> {
+        let file = self.download.fetch()?;
+        Ok((self.name, crate::crypto::decrypt_file(file, &self.key)?))
+    }
+
+    /// Saves it to the Downloads folder (the home folder if there's none).
+    pub fn save(self) -> Result<PathBuf> {
+        let dir = dirs::download_dir()
+            .or_else(dirs::home_dir)
+            .ok_or(Error::Damaged("no folder to save to"))?;
+        let path = self.save_in(&dir)?;
+        mark_downloaded(&path);
+        Ok(path)
+    }
+
+    /// Saves it in `dir`, next to anything of the same name rather than
+    /// over it, under a name that can't leave the folder; answers where.
+    pub fn save_in(self, dir: &std::path::Path) -> Result<PathBuf> {
+        use std::io::Write;
+        let (name, contents) = self.open()?;
+        let (path, mut file) = create_free(dir, &name)?;
+        let written = file
+            .write_all(contents.as_slice())
+            .and_then(|()| file.sync_all());
+        drop(file);
+        if written.is_err() {
+            // Nothing half written stays behind; the file is this call's own.
+            let _ = std::fs::remove_file(&path);
+            return Err(Error::Damaged("the file couldn't be written"));
+        }
+        Ok(path)
+    }
+
+    /// Writes it into a file the OS opened for it (Android's Downloads,
+    /// through MediaStore), so it never passes through Java.
+    #[cfg(unix)]
+    pub fn write_to(self, fd: std::os::fd::RawFd) -> Result<()> {
+        use std::io::Write;
+        use std::os::fd::FromRawFd;
+        let (_, contents) = self.open()?;
+        // SAFETY: `fd` is an open, writable file the caller owns and closes;
+        // ManuallyDrop keeps this from closing it too.
+        let mut file = std::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(fd) });
+        file.write_all(contents.as_slice())
+            .and_then(|()| file.flush())
+            .map_err(|_| Error::Damaged("the file couldn't be written"))
+    }
+}
+
+/// Marks a saved file as downloaded, as browsers do, so the OS asks before
+/// opening an app or script that came in one (macOS's quarantine, Windows'
+/// Mark of the Web). Best effort: the file is saved either way.
+fn mark_downloaded(path: &std::path::Path) {
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let value = format!("0081;{now:08x};PassBundle;");
+        if let Ok(path) = std::ffi::CString::new(path.as_os_str().as_bytes()) {
+            // SAFETY: both strings are NUL-terminated and live for the call.
+            unsafe {
+                libc::setxattr(
+                    path.as_ptr(),
+                    c"com.apple.quarantine".as_ptr(),
+                    value.as_ptr().cast(),
+                    value.len(),
+                    0,
+                    0,
+                );
+            }
+        }
+    }
+    #[cfg(windows)]
+    {
+        let mut stream = path.as_os_str().to_owned();
+        stream.push(":Zone.Identifier");
+        let _ = std::fs::write(stream, "[ZoneTransfer]\r\nZoneId=3\r\n");
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
+    let _ = path;
+}
+
+/// Creates a new file in `dir` for one named `name`: the name made safe
+/// (`safe_name`), then "name (1).ext", and so on. Each try creates the file
+/// only if nothing is there, not even a link, so it never writes over
+/// anything or through a link out of the folder. Only the person can read it.
+fn create_free(dir: &std::path::Path, name: &str) -> Result<(PathBuf, std::fs::File)> {
+    let safe = safe_name(name);
+    let (stem, ext) = match safe.rfind('.') {
+        Some(at) if at > 0 => (&safe[..at], &safe[at..]),
+        _ => (safe.as_str(), ""),
+    };
+    for n in 0..10_000 {
+        let path = if n == 0 {
+            dir.join(&safe)
+        } else {
+            dir.join(format!("{stem} ({n}){ext}"))
+        };
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        match options.open(&path) {
+            Ok(file) => return Ok((path, file)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(_) => return Err(Error::Damaged("the file couldn't be written")),
+        }
+    }
+    Err(Error::Damaged("the file couldn't be written"))
+}
+
+/// An attachment's name made safe for a file name: one name in the folder
+/// (no separators or other characters file systems refuse), not hidden, not
+/// one of Windows' device names, without the invisible characters that can
+/// make "invoice\u{202E}fdp.exe" look like "invoiceexe.pdf", and short
+/// enough for any file system.
+fn safe_name(name: &str) -> String {
+    /// Invisible characters that change how a name reads: bidirectional
+    /// controls, zero-width ones, and other formatting characters.
+    fn invisible(c: char) -> bool {
+        matches!(c,
+            '\u{00AD}' | '\u{061C}' | '\u{180E}' | '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{206F}' | '\u{FEFF}'
+            | '\u{FFF9}'..='\u{FFFB}')
+    }
     let safe: String = name
         .chars()
         .map(|c| {
-            if "/\\:*?\"<>|".contains(c) || c.is_control() {
+            if "/\\:*?\"<>|".contains(c) || c.is_control() || invisible(c) {
                 '_'
             } else {
                 c
             }
         })
         .collect();
-    // No leading dots (hidden), and no trailing dots or spaces, which Windows drops.
+    // Not hidden (no leading dot, spaces before it or not), and no trailing
+    // dots or spaces, which Windows drops.
     let safe = safe
-        .trim_start_matches('.')
-        .trim()
-        .trim_end_matches(['.', ' ']);
-    let safe = if safe.is_empty() { "attachment" } else { safe };
-    // Windows' device names, with or without an extension, aren't files.
-    let device = safe.split('.').next().unwrap_or("").to_ascii_uppercase();
-    let reserved = matches!(device.as_str(), "CON" | "PRN" | "AUX" | "NUL")
-        || (device.len() == 4
-            && (device.starts_with("COM") || device.starts_with("LPT"))
-            && device.as_bytes()[3].is_ascii_digit());
-    let renamed;
-    let safe = if reserved {
-        renamed = format!("_{safe}");
-        renamed.as_str()
+        .trim_start_matches(|c: char| c == '.' || c.is_whitespace())
+        .trim_end_matches(|c: char| c == '.' || c.is_whitespace());
+    let mut safe = if safe.is_empty() {
+        "attachment".to_owned()
     } else {
-        safe
+        safe.to_owned()
     };
-    let (stem, ext) = match safe.rfind('.') {
-        Some(at) if at > 0 => (&safe[..at], &safe[at..]),
-        _ => (safe, ""),
+    // Windows' device names, with or without an extension, and with spaces
+    // before it, aren't files.
+    let device = safe
+        .split('.')
+        .next()
+        .unwrap_or("")
+        .trim_end()
+        .to_uppercase();
+    let numbered = |prefix: &str| {
+        device.strip_prefix(prefix).is_some_and(|n| {
+            matches!(
+                n,
+                "0" | "1"
+                    | "2"
+                    | "3"
+                    | "4"
+                    | "5"
+                    | "6"
+                    | "7"
+                    | "8"
+                    | "9"
+                    | "\u{B9}"
+                    | "\u{B2}"
+                    | "\u{B3}"
+            )
+        })
     };
-    let mut path = dir.join(safe);
-    let mut n = 1;
-    while path.exists() {
-        path = dir.join(format!("{stem} ({n}){ext}"));
-        n += 1;
+    if matches!(
+        device.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) || numbered("COM")
+        || numbered("LPT")
+    {
+        safe.insert(0, '_');
     }
-    path
+    // At most 200 bytes, which leaves room for " (n)" within the usual
+    // 255: the stem shortens, at a character's edge, and the extension stays.
+    const MOST: usize = 200;
+    if safe.len() > MOST {
+        let (stem, ext) = match safe.rfind('.') {
+            Some(at) if at > 0 && safe.len() - at <= 16 => (&safe[..at], &safe[at..]),
+            _ => (safe.as_str(), ""),
+        };
+        let mut end = MOST - ext.len();
+        while !stem.is_char_boundary(end) {
+            end -= 1;
+        }
+        safe = format!("{}{ext}", &stem[..end]);
+    }
+    safe
 }
 
 #[cfg(test)]
 mod attachment_tests {
-    use super::free_path;
+    use super::{create_free, mark_downloaded, safe_name};
 
-    #[test]
-    fn a_saved_file_never_replaces_another_or_leaves_its_folder() {
+    fn new_dir() -> std::path::PathBuf {
         let dir =
             std::env::temp_dir().join(format!("pb-free-path-{}", uuid::Uuid::new_v4().simple()));
         std::fs::create_dir_all(&dir).unwrap();
-        assert_eq!(free_path(&dir, "codes.txt"), dir.join("codes.txt"));
-        std::fs::write(dir.join("codes.txt"), "x").unwrap();
-        assert_eq!(free_path(&dir, "codes.txt"), dir.join("codes (1).txt"));
-        std::fs::write(dir.join("codes (1).txt"), "x").unwrap();
-        assert_eq!(free_path(&dir, "codes.txt"), dir.join("codes (2).txt"));
-        assert_eq!(
-            free_path(&dir, "../../etc/passwd"),
-            dir.join("_.._etc_passwd")
-        );
-        assert_eq!(free_path(&dir, ".hidden"), dir.join("hidden"));
-        assert_eq!(free_path(&dir, ""), dir.join("attachment"));
-        assert_eq!(free_path(&dir, "nul.txt"), dir.join("_nul.txt"));
-        assert_eq!(free_path(&dir, "COM1"), dir.join("_COM1"));
-        assert_eq!(free_path(&dir, "notes. "), dir.join("notes"));
-        assert_eq!(free_path(&dir, "console.txt"), dir.join("console.txt"));
+        dir
+    }
+
+    #[test]
+    fn a_saved_file_never_replaces_another_or_leaves_its_folder() {
+        let dir = new_dir();
+        let made = |name: &str| create_free(&dir, name).unwrap().0;
+        assert_eq!(made("codes.txt"), dir.join("codes.txt"));
+        assert_eq!(made("codes.txt"), dir.join("codes (1).txt"));
+        assert_eq!(made("codes.txt"), dir.join("codes (2).txt"));
+        assert_eq!(made("../../etc/passwd"), dir.join("_.._etc_passwd"));
+        assert_eq!(made(""), dir.join("attachment"));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_in_the_folder_is_never_written_through() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = new_dir();
+        let outside = dir.join("outside");
+        std::fs::create_dir_all(dir.join("downloads")).unwrap();
+        let downloads = dir.join("downloads");
+        // A dangling link, and one to a file that's there.
+        std::os::unix::fs::symlink(&outside, downloads.join("codes.txt")).unwrap();
+        std::fs::write(dir.join("kept.txt"), "kept").unwrap();
+        std::os::unix::fs::symlink(dir.join("kept.txt"), downloads.join("notes.txt")).unwrap();
+        let (path, _) = create_free(&downloads, "codes.txt").unwrap();
+        assert_eq!(path, downloads.join("codes (1).txt"));
+        assert!(!outside.exists());
+        let (path, _) = create_free(&downloads, "notes.txt").unwrap();
+        assert_eq!(path, downloads.join("notes (1).txt"));
+        assert_eq!(
+            std::fs::read_to_string(dir.join("kept.txt")).unwrap(),
+            "kept"
+        );
+        // Only the person can read what's saved.
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// macOS asks before opening an app or script saved from an attachment.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_saved_file_is_marked_as_downloaded() {
+        let dir = new_dir();
+        let (path, _) = create_free(&dir, "tool.command").unwrap();
+        mark_downloaded(&path);
+        let marked = std::process::Command::new("xattr")
+            .args(["-p", "com.apple.quarantine"])
+            .arg(&path)
+            .output()
+            .unwrap();
+        assert!(String::from_utf8_lossy(&marked.stdout).contains(";PassBundle;"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn names_are_made_safe() {
+        assert_eq!(safe_name(".hidden"), "hidden");
+        assert_eq!(safe_name(" .bashrc"), "bashrc");
+        assert_eq!(safe_name("notes. "), "notes");
+        assert_eq!(safe_name("nul.txt"), "_nul.txt");
+        assert_eq!(safe_name("COM1"), "_COM1");
+        assert_eq!(safe_name("CON .txt"), "_CON .txt");
+        assert_eq!(safe_name("com\u{B9}.txt"), "_com\u{B9}.txt");
+        assert_eq!(safe_name("CONIN$"), "_CONIN$");
+        assert_eq!(safe_name("console.txt"), "console.txt");
+        assert_eq!(safe_name("invoice\u{202E}fdp.exe"), "invoice_fdp.exe");
+        assert_eq!(safe_name("a\u{200B}b.txt"), "a_b.txt");
+        let long = format!("{}.pdf", "\u{e9}".repeat(150));
+        let short = safe_name(&long);
+        assert!(short.len() <= 200 && short.ends_with(".pdf"), "{short}");
+        assert!(short.starts_with('\u{e9}'));
     }
 }

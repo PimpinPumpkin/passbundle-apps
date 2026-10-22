@@ -196,9 +196,14 @@ impl EncString {
 /// Opens an attachment's file (docs/core.md, "Attachments"): upstream's
 /// file format, the type byte 2, the IV, the MAC over the IV and ciphertext,
 /// then the ciphertext. The MAC is checked first, in constant time, as for
-/// strings, and older or unknown formats are refused the same way.
-pub fn decrypt_file(file: &[u8], key: &SymmetricKey) -> Result<Zeroizing<Vec<u8>>> {
-    let Some((&kind, rest)) = file.split_first() else {
+/// strings, and older or unknown formats are refused the same way. It
+/// decrypts in place, in the downloaded file's own buffer, so a large file
+/// needs its size in memory once, not three times.
+pub fn decrypt_file(file: Vec<u8>, key: &SymmetricKey) -> Result<Zeroizing<Vec<u8>>> {
+    const HEAD: usize = 1 + 16 + 32;
+    // Zeroized however this ends, since it holds plaintext once decrypted.
+    let mut file = Zeroizing::new(file);
+    let Some(&kind) = file.first() else {
         return Err(Error::Damaged("an empty file"));
     };
     match kind {
@@ -208,20 +213,25 @@ pub fn decrypt_file(file: &[u8], key: &SymmetricKey) -> Result<Zeroizing<Vec<u8>
         3..=6 => return Err(Error::Refused("it isn't a file's format")),
         _ => return Err(Error::NewerApp),
     }
-    if rest.len() < 16 + 32 + 16 {
+    if file.len() < HEAD + 16 {
         return Err(Error::Damaged("a file too short to be one"));
     }
-    let (iv, rest) = rest.split_at(16);
-    let (mac, data) = rest.split_at(32);
-    if data.len() % 16 != 0 {
+    if !(file.len() - HEAD).is_multiple_of(16) {
         return Err(Error::Damaged("a ciphertext of the wrong length"));
     }
-    EncString::Aes {
-        iv: iv.try_into().expect("16 bytes"),
-        data: data.to_vec(),
-        mac: mac.try_into().expect("32 bytes"),
-    }
-    .decrypt(key)
+    let iv: [u8; 16] = file[1..17].try_into().expect("16 bytes");
+    key.mac_of(&iv, &file[HEAD..])
+        .verify_slice(&file[17..HEAD])
+        .map_err(|_| Error::Refused("its integrity check failed"))?;
+    let plain = Aes256CbcDec::new(&key.enc.into(), &iv.into())
+        .decrypt_padded_mut::<Pkcs7>(&mut file[HEAD..])
+        .map_err(|_| Error::Damaged("bad padding"))?
+        .len();
+    // The plaintext moves to the front of the same buffer; zeroizing it
+    // later clears all of its capacity.
+    file.copy_within(HEAD..HEAD + plain, 0);
+    file.truncate(plain);
+    Ok(file)
 }
 
 impl fmt::Display for EncString {

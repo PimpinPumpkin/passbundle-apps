@@ -1080,13 +1080,15 @@ class _ItemPaneState extends State<ItemPane> {
             '${a['name']}${a['size'] == null ? '' : ' · ${fileSize(a['size'] as num)}'}',
             style: const TextStyle(fontSize: 15),
           ),
+          // One whose name or key doesn't open is listed, but not saved.
           actions: [
-            IconButton(
-              tooltip: 'Save ${a['name']}',
-              icon: const Icon(Icons.download_rounded, size: 20),
-              onPressed: () =>
-                  saveAttachment(a['id'] as String, a['name'] as String),
-            ),
+            if (a['opens'] != false)
+              IconButton(
+                tooltip: 'Save ${a['name']}',
+                icon: const Icon(Icons.download_rounded, size: 20),
+                onPressed: () =>
+                    saveAttachment(a['id'] as String, a['name'] as String),
+              ),
           ],
         ),
       );

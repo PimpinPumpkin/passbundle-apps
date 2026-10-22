@@ -414,7 +414,9 @@ fn an_attachment_downloads_and_opens() {
     // Its own format: the type byte, IV, MAC, and the ciphertext.
     assert_eq!(file[0], 2);
     assert_eq!(
-        decrypt_file(&file, &attachment.key).unwrap().as_slice(),
+        decrypt_file(file, attachment.key.as_ref().unwrap())
+            .unwrap()
+            .as_slice(),
         &contents[..]
     );
 }
