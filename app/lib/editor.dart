@@ -81,7 +81,23 @@ class _ItemEditorState extends State<ItemEditor> {
   final notes = TextEditingController();
   final uris = <TextEditingController>[];
   final fields = <_Field>[];
-  bool note = false;
+
+  /// login, note, card, or identity.
+  String kind = 'login';
+  bool get note => kind == 'note';
+
+  // A card's details, by upstream's names; the number and code are secrets.
+  final card = {
+    for (final k in ['cardholderName', 'number', 'expYear', 'code'])
+      k: TextEditingController(),
+  };
+  String? brand;
+  String? expMonth;
+
+  // An identity's details, by upstream's names.
+  final identity = {
+    for (final k in _identityParts.keys) k: TextEditingController(),
+  };
   bool favorite = false;
   bool hidden = true;
   String? folderId;
@@ -99,7 +115,25 @@ class _ItemEditorState extends State<ItemEditor> {
     final item = id == null ? null : widget.core.item(id);
     if (id != null && item != null) {
       final reveal = widget.core.reveal;
-      note = item['kind'] == 'note';
+      kind = item['kind'] as String;
+      final cardDetails = item['card'] as Map<String, dynamic>?;
+      if (cardDetails != null) {
+        card['cardholderName']!.text =
+            (cardDetails['cardholderName'] ?? '') as String;
+        card['expYear']!.text = (cardDetails['expYear'] ?? '') as String;
+        card['number']!.text = reveal(id, 'cardNumber') ?? '';
+        card['code']!.text = reveal(id, 'cardCode') ?? '';
+        brand = cardDetails['brand'] as String?;
+        expMonth = cardDetails['expMonth'] as String?;
+      }
+      final identityDetails = item['identity'] as Map<String, dynamic>?;
+      if (identityDetails != null) {
+        for (final part in _identityParts.keys) {
+          identity[part]!.text = _identitySecrets.contains(part)
+              ? reveal(id, part) ?? ''
+              : (identityDetails[part] ?? '') as String;
+        }
+      }
       name.text = item['name'] as String;
       username.text = (item['username'] ?? '') as String;
       password.text = reveal(id, 'password') ?? '';
@@ -145,7 +179,7 @@ class _ItemEditorState extends State<ItemEditor> {
       final uri = (prefill['uri'] ?? '') as String;
       if (uri.isNotEmpty) uris.add(TextEditingController(text: uri));
     }
-    if (uris.isEmpty && !note) uris.add(TextEditingController());
+    if (uris.isEmpty && kind == 'login') uris.add(TextEditingController());
   }
 
   List<Map<String, dynamic>> get organizations =>
@@ -166,6 +200,16 @@ class _ItemEditorState extends State<ItemEditor> {
     });
     final draft = {
       'note': note,
+      if (kind == 'card')
+        'card': {
+          for (final e in card.entries) e.key: e.value.text.trim(),
+          'brand': brand,
+          'expMonth': expMonth,
+        },
+      if (kind == 'identity')
+        'identity': {
+          for (final e in identity.entries) e.key: e.value.text.trim(),
+        },
       'name': name.text.trim(),
       'username': username.text.trim(),
       'password': password.text,
@@ -197,6 +241,106 @@ class _ItemEditorState extends State<ItemEditor> {
       });
     }
   }
+
+  /// A text field for a detail; secrets are hidden until shown.
+  Widget _detail(
+    TextEditingController controller,
+    String label, {
+    bool secret = false,
+    TextInputType? keyboard,
+  }) => TextField(
+    controller: controller,
+    obscureText: secret && hidden,
+    keyboardType: keyboard,
+    decoration: InputDecoration(
+      labelText: label,
+      suffixIcon: secret
+          ? IconButton(
+              tooltip: hidden ? 'Show' : 'Hide',
+              icon: Icon(
+                hidden
+                    ? Icons.visibility_outlined
+                    : Icons.visibility_off_outlined,
+              ),
+              onPressed: () => setState(() => hidden = !hidden),
+            )
+          : null,
+    ),
+  );
+
+  List<Widget> _cardFields(Widget Function([double]) gap) => [
+    gap(),
+    _detail(card['cardholderName']!, 'Cardholder name'),
+    gap(),
+    DropdownButtonFormField<String?>(
+      initialValue: brand,
+      decoration: const InputDecoration(labelText: 'Brand'),
+      items: [
+        const DropdownMenuItem(value: null, child: Text('None')),
+        for (final b in {..._brands, ?brand})
+          DropdownMenuItem(value: b, child: Text(b)),
+      ],
+      onChanged: (v) => setState(() => brand = v),
+    ),
+    gap(),
+    _detail(
+      card['number']!,
+      'Number',
+      secret: true,
+      keyboard: TextInputType.number,
+    ),
+    gap(),
+    Row(
+      children: [
+        Expanded(
+          child: DropdownButtonFormField<String?>(
+            initialValue: expMonth,
+            decoration: const InputDecoration(labelText: 'Expiration month'),
+            items: [
+              const DropdownMenuItem(value: null, child: Text('None')),
+              for (var m = 1; m <= 12; m++)
+                DropdownMenuItem(
+                  value: '$m',
+                  child: Text(m.toString().padLeft(2, '0')),
+                ),
+            ],
+            onChanged: (v) => setState(() => expMonth = v),
+          ),
+        ),
+        const SizedBox(width: 12),
+        Expanded(
+          child: _detail(
+            card['expYear']!,
+            'Expiration year',
+            keyboard: TextInputType.number,
+          ),
+        ),
+      ],
+    ),
+    gap(),
+    _detail(
+      card['code']!,
+      'Security code',
+      secret: true,
+      keyboard: TextInputType.number,
+    ),
+  ];
+
+  List<Widget> _identityFields(Widget Function([double]) gap) => [
+    for (final part in _identityParts.entries) ...[
+      gap(),
+      _detail(
+        identity[part.key]!,
+        part.value,
+        secret: _identitySecrets.contains(part.key),
+        keyboard: switch (part.key) {
+          'email' => TextInputType.emailAddress,
+          'phone' => TextInputType.phone,
+          _ => null,
+        },
+      ),
+    ],
+  ];
 
   @override
   Widget build(BuildContext context) {
@@ -235,21 +379,21 @@ class _ItemEditorState extends State<ItemEditor> {
             gap(),
           ],
           if (!editing) ...[
-            SegmentedButton<bool>(
+            SegmentedButton<String>(
+              showSelectedIcon: false,
               segments: const [
-                ButtonSegment(
-                  value: false,
-                  label: Text('Login'),
-                  icon: Icon(Icons.key_rounded),
-                ),
-                ButtonSegment(
-                  value: true,
-                  label: Text('Note'),
-                  icon: Icon(Icons.sticky_note_2_outlined),
-                ),
+                ButtonSegment(value: 'login', label: Text('Login')),
+                ButtonSegment(value: 'note', label: Text('Note')),
+                ButtonSegment(value: 'card', label: Text('Card')),
+                ButtonSegment(value: 'identity', label: Text('Identity')),
               ],
-              selected: {note},
-              onSelectionChanged: (s) => setState(() => note = s.first),
+              selected: {kind},
+              onSelectionChanged: (s) => setState(() {
+                kind = s.first;
+                if (kind == 'login' && uris.isEmpty) {
+                  uris.add(TextEditingController());
+                }
+              }),
             ),
             gap(16),
           ],
@@ -258,7 +402,9 @@ class _ItemEditorState extends State<ItemEditor> {
             autofocus: !editing,
             decoration: const InputDecoration(labelText: 'Name'),
           ),
-          if (!note) ...[
+          if (kind == 'card') ..._cardFields(gap),
+          if (kind == 'identity') ..._identityFields(gap),
+          if (kind == 'login') ...[
             gap(),
             TextField(
               controller: username,
@@ -469,3 +615,42 @@ class _ItemEditorState extends State<ItemEditor> {
     );
   }
 }
+
+/// Card brands, as upstream's apps name them.
+const _brands = [
+  'Visa',
+  'Mastercard',
+  'Amex',
+  'Discover',
+  'Diners Club',
+  'JCB',
+  'Maestro',
+  'UnionPay',
+  'RuPay',
+  'Other',
+];
+
+/// An identity's details, by upstream's names, with what the editor calls them.
+const _identityParts = {
+  'title': 'Title',
+  'firstName': 'First name',
+  'middleName': 'Middle name',
+  'lastName': 'Last name',
+  'username': 'Username',
+  'company': 'Company',
+  'email': 'Email',
+  'phone': 'Phone',
+  'address1': 'Address',
+  'address2': 'Address line 2',
+  'address3': 'Address line 3',
+  'city': 'City or town',
+  'state': 'State or province',
+  'postalCode': 'Postal code',
+  'country': 'Country',
+  'ssn': 'Social Security number',
+  'passportNumber': 'Passport number',
+  'licenseNumber': 'License number',
+};
+
+/// The identity details that are secrets, revealed into the editor.
+const _identitySecrets = {'ssn', 'passportNumber', 'licenseNumber'};

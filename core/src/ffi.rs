@@ -23,7 +23,9 @@ use crate::generator;
 use crate::secrets::{MemorySecretStore, OsSecretStore, SecretStore};
 use crate::store::Store;
 use crate::totp::Totp;
-use crate::vault::{Field, Item, ItemDraft, ItemKind, Vault, EXPIRES_FIELD};
+use crate::vault::{
+    Card, Field, Identity, Item, ItemDraft, ItemKind, Vault, EXPIRES_FIELD, SECRET_DETAILS,
+};
 
 static APP: Mutex<Option<App>> = Mutex::new(None);
 /// The OS said the computer is going to sleep while a slow call had the app:
@@ -168,7 +170,11 @@ fn summary(vault: &Vault, item: &Item) -> Value {
         "id": item.id,
         "kind": kind(item.kind),
         "name": item.name,
-        "subtitle": item.username.clone().or_else(|| item.uris.first().cloned()).unwrap_or_default(),
+        "subtitle": item.card.as_ref().map(|c| c.summary())
+            .or_else(|| item.identity.as_ref().map(|i| i.full_name()))
+            .or_else(|| item.username.clone())
+            .or_else(|| item.uris.first().cloned())
+            .unwrap_or_default(),
         "website": item.uris.first(),
         "favorite": item.favorite,
         "folderId": item.folder_id,
@@ -723,8 +729,48 @@ pub unsafe extern "C" fn pb_item(id: *const c_char) -> *mut c_char {
             .iter()
             .find(|f| f.name == EXPIRES_FIELD)
             .map(|f| f.value.as_str()));
-        // The app edits logins and notes; the web vault edits the rest.
-        view["editable"] = json!(matches!(item.kind, ItemKind::Login | ItemKind::SecureNote));
+        // A card's and an identity's plain details, and which secrets they have.
+        if let Some(card) = &item.card {
+            view["card"] = json!({
+                "cardholderName": card.cardholder_name,
+                "brand": card.brand,
+                "expiration": card.expiration(),
+                "expMonth": card.exp_month,
+                "expYear": card.exp_year,
+                "hasNumber": card.number.as_ref().is_some_and(|n| !n.is_empty()),
+                "hasCode": card.code.as_ref().is_some_and(|c| !c.is_empty()),
+            });
+        }
+        if let Some(identity) = &item.identity {
+            let has = |s: &Option<Zeroizing<String>>| s.as_ref().is_some_and(|s| !s.is_empty());
+            view["identity"] = json!({
+                "fullName": Some(identity.full_name()).filter(|n| !n.is_empty()),
+                "title": identity.title,
+                "firstName": identity.first_name,
+                "middleName": identity.middle_name,
+                "lastName": identity.last_name,
+                "address1": identity.address1,
+                "address2": identity.address2,
+                "address3": identity.address3,
+                "city": identity.city,
+                "state": identity.state,
+                "postalCode": identity.postal_code,
+                "country": identity.country,
+                "company": identity.company,
+                "email": identity.email,
+                "phone": identity.phone,
+                "username": identity.username,
+                "address": identity.address(),
+                "hasSsn": has(&identity.ssn),
+                "hasPassportNumber": has(&identity.passport_number),
+                "hasLicenseNumber": has(&identity.license_number),
+            });
+        }
+        // The app edits logins, notes, cards, and identities; the web vault edits SSH keys.
+        view["editable"] = json!(matches!(
+            item.kind,
+            ItemKind::Login | ItemKind::SecureNote | ItemKind::Card | ItemKind::Identity
+        ));
         view
     })
 }
@@ -745,6 +791,10 @@ pub unsafe extern "C" fn pb_reveal(id: *const c_char, what: *const c_char) -> *m
             "password" => item.password.as_ref().map(|p| p.as_str()),
             "notes" => item.notes.as_ref().map(|n| n.as_str()),
             "totp" => item.totp.as_ref().map(|t| t.as_str()),
+            // A card's or an identity's secrets.
+            what if SECRET_DETAILS.contains(&what) => {
+                return json!(item.detail(what).as_deref().map(String::as_str));
+            }
             other => other
                 .strip_prefix("field:")
                 .and_then(|i| i.parse::<usize>().ok())
@@ -815,8 +865,45 @@ pub unsafe extern "C" fn pb_save(id: *const c_char, draft: *const c_char) -> *mu
         };
         let string = |key: &str| d[key].as_str().filter(|s| !s.is_empty()).map(str::to_owned);
         let secret = |key: &str| string(key).map(Zeroizing::new);
+        // A card's or an identity's details, by upstream's names.
+        let part = |kind: &str, key: &str| {
+            d[kind][key]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+        };
+        let card = d["card"].is_object().then(|| Card {
+            cardholder_name: part("card", "cardholderName"),
+            brand: part("card", "brand"),
+            exp_month: part("card", "expMonth"),
+            exp_year: part("card", "expYear"),
+            number: part("card", "number").map(Zeroizing::new),
+            code: part("card", "code").map(Zeroizing::new),
+        });
+        let identity = d["identity"].is_object().then(|| Identity {
+            title: part("identity", "title"),
+            first_name: part("identity", "firstName"),
+            middle_name: part("identity", "middleName"),
+            last_name: part("identity", "lastName"),
+            address1: part("identity", "address1"),
+            address2: part("identity", "address2"),
+            address3: part("identity", "address3"),
+            city: part("identity", "city"),
+            state: part("identity", "state"),
+            postal_code: part("identity", "postalCode"),
+            country: part("identity", "country"),
+            company: part("identity", "company"),
+            email: part("identity", "email"),
+            phone: part("identity", "phone"),
+            username: part("identity", "username"),
+            ssn: part("identity", "ssn").map(Zeroizing::new),
+            passport_number: part("identity", "passportNumber").map(Zeroizing::new),
+            license_number: part("identity", "licenseNumber").map(Zeroizing::new),
+        });
         let draft = ItemDraft {
             note: d["note"].as_bool().unwrap_or(false),
+            card,
+            identity,
             name: string("name").unwrap_or_default(),
             notes: secret("notes"),
             username: string("username"),

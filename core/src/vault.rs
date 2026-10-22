@@ -81,9 +81,43 @@ pub struct CipherData {
     pub reprompt: Option<u8>,
     pub password_history: Option<serde_json::Value>,
     pub secure_note: Option<serde_json::Value>,
-    pub card: Option<serde_json::Value>,
-    pub identity: Option<serde_json::Value>,
     pub ssh_key: Option<serde_json::Value>,
+    pub card: Option<CardData>,
+    pub identity: Option<IdentityData>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CardData {
+    pub cardholder_name: Option<String>,
+    pub brand: Option<String>,
+    pub number: Option<String>,
+    pub exp_month: Option<String>,
+    pub exp_year: Option<String>,
+    pub code: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IdentityData {
+    pub title: Option<String>,
+    pub first_name: Option<String>,
+    pub middle_name: Option<String>,
+    pub last_name: Option<String>,
+    pub address1: Option<String>,
+    pub address2: Option<String>,
+    pub address3: Option<String>,
+    pub city: Option<String>,
+    pub state: Option<String>,
+    pub postal_code: Option<String>,
+    pub country: Option<String>,
+    pub company: Option<String>,
+    pub email: Option<String>,
+    pub phone: Option<String>,
+    pub ssn: Option<String>,
+    pub username: Option<String>,
+    pub passport_number: Option<String>,
+    pub license_number: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -199,8 +233,188 @@ pub struct Item {
     pub fields: Vec<Field>,
     /// The server's revision, which an edit names so it can't overwrite a newer one.
     pub revision_date: Option<String>,
+    /// A card's details, for a card.
+    pub card: Option<Card>,
+    /// An identity's details, for an identity.
+    pub identity: Option<Identity>,
     /// What an edit keeps that the app doesn't show or change.
     pub kept: Kept,
+}
+
+/// A card's or an identity's values the app copies or reveals, by name:
+/// the secrets ("cardNumber", "cardCode", "ssn", "passportNumber",
+/// "licenseNumber"), and the plain ones (`PLAIN_DETAILS`).
+pub const SECRET_DETAILS: [&str; 5] = [
+    "cardNumber",
+    "cardCode",
+    "ssn",
+    "passportNumber",
+    "licenseNumber",
+];
+pub const PLAIN_DETAILS: [&str; 8] = [
+    "cardholderName",
+    "expiration",
+    "fullName",
+    "company",
+    "email",
+    "phone",
+    "identityUsername",
+    "address",
+];
+
+impl Item {
+    /// One of a card's or an identity's values (`SECRET_DETAILS`,
+    /// `PLAIN_DETAILS`); None if it hasn't that one.
+    pub fn detail(&self, what: &str) -> Option<Zeroizing<String>> {
+        let text = |t: &Option<String>| t.clone().filter(|t| !t.is_empty()).map(Zeroizing::new);
+        let secret = |t: &Option<Zeroizing<String>>| {
+            t.as_ref()
+                .filter(|t| !t.is_empty())
+                .map(|t| Zeroizing::new(t.as_str().to_owned()))
+        };
+        if let Some(card) = &self.card {
+            return match what {
+                "cardNumber" => secret(&card.number),
+                "cardCode" => secret(&card.code),
+                "cardholderName" => text(&card.cardholder_name),
+                "expiration" => card.expiration().map(Zeroizing::new),
+                _ => None,
+            };
+        }
+        let id = self.identity.as_ref()?;
+        match what {
+            "ssn" => secret(&id.ssn),
+            "passportNumber" => secret(&id.passport_number),
+            "licenseNumber" => secret(&id.license_number),
+            "fullName" => Some(id.full_name())
+                .filter(|n| !n.is_empty())
+                .map(Zeroizing::new),
+            "company" => text(&id.company),
+            "email" => text(&id.email),
+            "phone" => text(&id.phone),
+            "identityUsername" => text(&id.username),
+            "address" => id.address().map(Zeroizing::new),
+            _ => None,
+        }
+    }
+}
+
+/// A card's details (docs/core.md, "Items"). The number and the security
+/// code are secrets, like a password.
+#[derive(Clone, Default)]
+pub struct Card {
+    pub cardholder_name: Option<String>,
+    pub brand: Option<String>,
+    pub exp_month: Option<String>,
+    pub exp_year: Option<String>,
+    pub number: Option<Zeroizing<String>>,
+    pub code: Option<Zeroizing<String>>,
+}
+
+impl Card {
+    /// "Visa, *1111": the brand and the number's last 4 digits, as lists
+    /// show a card. A number of 4 digits or fewer shows none of them.
+    pub fn summary(&self) -> String {
+        let last4: Option<String> = self.number.as_ref().and_then(|n| {
+            let digits: Vec<char> = n.chars().filter(char::is_ascii_digit).collect();
+            (digits.len() > 4).then(|| digits[digits.len() - 4..].iter().collect())
+        });
+        match (self.brand.as_deref().filter(|b| !b.is_empty()), last4) {
+            (Some(brand), Some(last4)) => format!("{brand}, *{last4}"),
+            (Some(brand), None) => brand.to_owned(),
+            (None, Some(last4)) => format!("*{last4}"),
+            (None, None) => String::new(),
+        }
+    }
+
+    /// "07/2029", or what there is of it.
+    pub fn expiration(&self) -> Option<String> {
+        let month = self
+            .exp_month
+            .as_deref()
+            .filter(|m| !m.trim().is_empty())
+            .map(|m| format!("{:0>2}", m.trim()));
+        match (
+            month,
+            self.exp_year.as_deref().filter(|y| !y.trim().is_empty()),
+        ) {
+            (Some(m), Some(y)) => Some(format!("{m}/{y}")),
+            (Some(m), None) => Some(m),
+            (None, Some(y)) => Some(y.to_owned()),
+            (None, None) => None,
+        }
+    }
+}
+
+/// An identity's details (docs/core.md, "Items"). The Social Security,
+/// passport, and license numbers are secrets, like a password.
+#[derive(Clone, Default)]
+pub struct Identity {
+    pub title: Option<String>,
+    pub first_name: Option<String>,
+    pub middle_name: Option<String>,
+    pub last_name: Option<String>,
+    pub address1: Option<String>,
+    pub address2: Option<String>,
+    pub address3: Option<String>,
+    pub city: Option<String>,
+    pub state: Option<String>,
+    pub postal_code: Option<String>,
+    pub country: Option<String>,
+    pub company: Option<String>,
+    pub email: Option<String>,
+    pub phone: Option<String>,
+    pub username: Option<String>,
+    pub ssn: Option<Zeroizing<String>>,
+    pub passport_number: Option<Zeroizing<String>>,
+    pub license_number: Option<Zeroizing<String>>,
+}
+
+impl Identity {
+    /// "Ms Ana María López": the name, as lists show an identity.
+    pub fn full_name(&self) -> String {
+        [
+            &self.title,
+            &self.first_name,
+            &self.middle_name,
+            &self.last_name,
+        ]
+        .iter()
+        .filter_map(|p| p.as_deref())
+        .filter(|p| !p.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+    }
+
+    /// The address, a line each: the street lines, then "City, State
+    /// Postal code", then the country.
+    pub fn address(&self) -> Option<String> {
+        let place = [&self.city, &self.state]
+            .iter()
+            .filter_map(|p| p.as_deref())
+            .filter(|p| !p.is_empty())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let place = [Some(place.as_str()), self.postal_code.as_deref()]
+            .iter()
+            .flatten()
+            .filter(|p| !p.is_empty())
+            .copied()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let lines: Vec<&str> = [
+            self.address1.as_deref(),
+            self.address2.as_deref(),
+            self.address3.as_deref(),
+            Some(place.as_str()),
+            self.country.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|l| !l.is_empty())
+        .collect();
+        (!lines.is_empty()).then(|| lines.join("\n"))
+    }
 }
 
 /// What editing an item keeps that the app doesn't show or change
@@ -272,8 +486,12 @@ fn iso8601(secs: u64, millis: u32) -> String {
 /// An item as the person edits it, before it's encrypted.
 #[derive(Default)]
 pub struct ItemDraft {
-    /// Login or secure note.
+    /// A secure note; else a login, unless it's a card or an identity.
     pub note: bool,
+    /// A card's details, for a card.
+    pub card: Option<Card>,
+    /// An identity's details, for an identity.
+    pub identity: Option<Identity>,
     pub name: String,
     pub notes: Option<Zeroizing<String>>,
     pub username: Option<String>,
@@ -287,6 +505,19 @@ pub struct ItemDraft {
 }
 
 impl ItemDraft {
+    /// What kind of item it makes.
+    pub fn kind(&self) -> ItemKind {
+        if self.card.is_some() {
+            ItemKind::Card
+        } else if self.identity.is_some() {
+            ItemKind::Identity
+        } else if self.note {
+            ItemKind::SecureNote
+        } else {
+            ItemKind::Login
+        }
+    }
+
     /// A draft of an opened item, to edit.
     pub fn of(item: &Item) -> ItemDraft {
         let copy = |z: &Option<Zeroizing<String>>| {
@@ -294,6 +525,8 @@ impl ItemDraft {
         };
         ItemDraft {
             note: item.kind == ItemKind::SecureNote,
+            card: item.card.clone(),
+            identity: item.identity.clone(),
             name: item.name.clone(),
             notes: copy(&item.notes),
             username: item.username.clone(),
@@ -475,13 +708,16 @@ impl Vault {
     ) -> Result<serde_json::Value> {
         use serde_json::json;
         if let Some(item) = editing {
-            if !matches!(item.kind, ItemKind::Login | ItemKind::SecureNote) {
+            if !matches!(
+                item.kind,
+                ItemKind::Login | ItemKind::SecureNote | ItemKind::Card | ItemKind::Identity
+            ) {
                 return Err(Error::Refused(
-                    "the app edits logins and notes; edit cards, identities, and SSH keys in the web vault",
+                    "the app edits logins, notes, cards, and identities; edit SSH keys in the web vault",
                 ));
             }
-            if (item.kind == ItemKind::SecureNote) != draft.note {
-                return Err(Error::Refused("a login stays a login, and a note a note"));
+            if item.kind != draft.kind() {
+                return Err(Error::Refused("an item stays the kind it is"));
             }
             if item.organization_id != draft.organization_id {
                 return Err(Error::Refused(
@@ -511,7 +747,7 @@ impl Vault {
         if let Some(item) = editing {
             let old = item.password.as_deref().map(String::as_str).unwrap_or("");
             let new = draft.password.as_deref().map(String::as_str).unwrap_or("");
-            if !draft.note && !old.is_empty() && old != new {
+            if draft.kind() == ItemKind::Login && !old.is_empty() && old != new {
                 password_changed = true;
                 history.insert(0, json!({ "password": enc(old), "lastUsedDate": now }));
             }
@@ -566,7 +802,12 @@ impl Vault {
         }
 
         let mut body = json!({
-            "type": if draft.note { 2 } else { 1 },
+            "type": match draft.kind() {
+                ItemKind::SecureNote => 2,
+                ItemKind::Card => 3,
+                ItemKind::Identity => 4,
+                _ => 1,
+            },
             "organizationId": draft.organization_id,
             "folderId": draft.folder_id,
             "name": enc(&draft.name),
@@ -579,7 +820,40 @@ impl Vault {
             "encryptedFor": self.user_id,
             "lastKnownRevisionDate": editing.and_then(|i| i.revision_date.clone()),
         });
-        if draft.note {
+        let secret =
+            |text: &Option<Zeroizing<String>>| enc_opt(text.as_deref().map(String::as_str));
+        let plain = |text: &Option<String>| enc_opt(text.as_deref());
+        if let Some(card) = &draft.card {
+            body["card"] = json!({
+                "cardholderName": plain(&card.cardholder_name),
+                "brand": plain(&card.brand),
+                "number": secret(&card.number),
+                "expMonth": plain(&card.exp_month),
+                "expYear": plain(&card.exp_year),
+                "code": secret(&card.code),
+            });
+        } else if let Some(id) = &draft.identity {
+            body["identity"] = json!({
+                "title": plain(&id.title),
+                "firstName": plain(&id.first_name),
+                "middleName": plain(&id.middle_name),
+                "lastName": plain(&id.last_name),
+                "address1": plain(&id.address1),
+                "address2": plain(&id.address2),
+                "address3": plain(&id.address3),
+                "city": plain(&id.city),
+                "state": plain(&id.state),
+                "postalCode": plain(&id.postal_code),
+                "country": plain(&id.country),
+                "company": plain(&id.company),
+                "email": plain(&id.email),
+                "phone": plain(&id.phone),
+                "ssn": secret(&id.ssn),
+                "username": plain(&id.username),
+                "passportNumber": secret(&id.passport_number),
+                "licenseNumber": secret(&id.license_number),
+            });
+        } else if draft.note {
             body["secureNote"] = kept
                 .and_then(|k| k.secure_note.clone())
                 .unwrap_or_else(|| json!({ "type": 0 }));
@@ -631,12 +905,28 @@ impl Vault {
             .iter()
             .filter(|i| !i.deleted)
             .filter(|i| {
-                let haystack = format!(
+                let mut haystack = format!(
                     "{} {} {}",
                     i.name.to_lowercase(),
                     i.username.as_deref().unwrap_or("").to_lowercase(),
                     i.uris.join(" ").to_lowercase()
                 );
+                // A card by its holder and brand; an identity by its name,
+                // company, email, and username. Never by a secret.
+                if let Some(card) = &i.card {
+                    for part in [&card.cardholder_name, &card.brand].into_iter().flatten() {
+                        haystack.push(' ');
+                        haystack.push_str(&part.to_lowercase());
+                    }
+                }
+                if let Some(id) = &i.identity {
+                    haystack.push(' ');
+                    haystack.push_str(&id.full_name().to_lowercase());
+                    for part in [&id.company, &id.email, &id.username].into_iter().flatten() {
+                        haystack.push(' ');
+                        haystack.push_str(&part.to_lowercase());
+                    }
+                }
                 words.iter().all(|w| haystack.contains(w.as_str()))
             })
             .collect()
@@ -689,6 +979,42 @@ impl Keyring {
             });
             field_kinds.push((f.kind, f.linked_id.clone()));
         }
+        let open_plain =
+            |text: &Option<String>| -> Result<Option<String>> { Ok(plain(open_text(text, &key)?)) };
+        let card = match &c.card {
+            Some(d) if ItemKind::from(c.kind) == ItemKind::Card => Some(Card {
+                cardholder_name: open_plain(&d.cardholder_name)?,
+                brand: open_plain(&d.brand)?,
+                exp_month: open_plain(&d.exp_month)?,
+                exp_year: open_plain(&d.exp_year)?,
+                number: open_text(&d.number, &key)?,
+                code: open_text(&d.code, &key)?,
+            }),
+            _ => None,
+        };
+        let identity = match &c.identity {
+            Some(d) if ItemKind::from(c.kind) == ItemKind::Identity => Some(Identity {
+                title: open_plain(&d.title)?,
+                first_name: open_plain(&d.first_name)?,
+                middle_name: open_plain(&d.middle_name)?,
+                last_name: open_plain(&d.last_name)?,
+                address1: open_plain(&d.address1)?,
+                address2: open_plain(&d.address2)?,
+                address3: open_plain(&d.address3)?,
+                city: open_plain(&d.city)?,
+                state: open_plain(&d.state)?,
+                postal_code: open_plain(&d.postal_code)?,
+                country: open_plain(&d.country)?,
+                company: open_plain(&d.company)?,
+                email: open_plain(&d.email)?,
+                phone: open_plain(&d.phone)?,
+                username: open_plain(&d.username)?,
+                ssn: open_text(&d.ssn, &key)?,
+                passport_number: open_text(&d.passport_number, &key)?,
+                license_number: open_text(&d.license_number, &key)?,
+            }),
+            _ => None,
+        };
         let login = c.login.as_ref();
         let kept = Kept {
             key: c.key.clone(),
@@ -723,6 +1049,8 @@ impl Keyring {
             totp,
             fields,
             revision_date: c.revision_date.clone(),
+            card,
+            identity,
             kept,
         })
     }
@@ -738,5 +1066,56 @@ mod tests {
         assert_eq!(iso8601(951_782_400, 5), "2000-02-29T00:00:00.005Z");
         assert_eq!(iso8601(1_798_675_199, 999), "2026-12-30T23:59:59.999Z");
         assert!(now_iso8601().starts_with("20") && now_iso8601().ends_with('Z'));
+    }
+
+    #[test]
+    fn cards_and_identities_read_as_lists_and_views_show_them() {
+        let card = Card {
+            brand: Some("Visa".into()),
+            number: Some(Zeroizing::new("4111 1111 1111 1234".into())),
+            exp_month: Some("7".into()),
+            exp_year: Some("2029".into()),
+            ..Card::default()
+        };
+        assert_eq!(card.summary(), "Visa, *1234");
+        assert_eq!(card.expiration().as_deref(), Some("07/2029"));
+        // Too short to show any of it; empty parts are left out.
+        let bare = Card {
+            brand: Some(String::new()),
+            number: Some(Zeroizing::new("1234".into())),
+            exp_month: Some(String::new()),
+            exp_year: Some("2029".into()),
+            ..Card::default()
+        };
+        assert_eq!(bare.summary(), "");
+        assert_eq!(bare.expiration().as_deref(), Some("2029"));
+        assert_eq!(Card::default().summary(), "");
+        assert_eq!(Card::default().expiration(), None);
+
+        let identity = Identity {
+            first_name: Some("Ana".into()),
+            last_name: Some("López".into()),
+            address1: Some("1 Example Street".into()),
+            city: Some("Springfield".into()),
+            state: Some("IL".into()),
+            postal_code: Some("62701".into()),
+            country: Some("US".into()),
+            ..Identity::default()
+        };
+        assert_eq!(identity.full_name(), "Ana López");
+        assert_eq!(
+            identity.address().as_deref(),
+            Some("1 Example Street\nSpringfield, IL 62701\nUS")
+        );
+        assert_eq!(Identity::default().address(), None);
+        assert_eq!(
+            Identity {
+                postal_code: Some("62701".into()),
+                ..Identity::default()
+            }
+            .address()
+            .as_deref(),
+            Some("62701")
+        );
     }
 }

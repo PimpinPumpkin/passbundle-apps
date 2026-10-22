@@ -220,7 +220,10 @@ fn the_app_turns_it_on_unlocks_with_it_and_signing_out_turns_it_off() {
     agent.answers(&[true]);
     assert!(app.unlock_with_biometric().unwrap());
     assert!(matches!(app.state(), State::Unlocked { .. }));
-    assert_eq!(app.vault().unwrap().items.len(), 4);
+    assert_eq!(
+        app.vault().unwrap().items.len(),
+        v["opened"]["items"].as_object().unwrap().len()
+    );
 
     app.sign_out();
     assert_eq!(

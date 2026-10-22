@@ -78,6 +78,14 @@ class _MarkPainter extends CustomPainter {
   bool shouldRepaint(_MarkPainter old) => old.color != color;
 }
 
+/// The kinds of item shown by an icon rather than their name's first letter.
+const _icons = {
+  'note': Icons.sticky_note_2_outlined,
+  'card': Icons.credit_card_rounded,
+  'identity': Icons.badge_outlined,
+  'sshKey': Icons.key_rounded,
+};
+
 class Avatar extends StatelessWidget {
   const Avatar({
     super.key,
@@ -101,9 +109,9 @@ class Avatar extends StatelessWidget {
         borderRadius: BorderRadius.circular(size * 0.28),
       ),
       alignment: Alignment.center,
-      child: kind == 'note'
+      child: _icons.containsKey(kind)
           ? Icon(
-              Icons.sticky_note_2_outlined,
+              _icons[kind],
               size: size * 0.5,
               color: scheme.onPrimaryContainer,
             )

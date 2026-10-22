@@ -149,6 +149,53 @@ fn assert_opens_as_the_vectors_say(vault: &Vault, v: &Value) {
                 }
             }
             2 => assert_eq!(item.kind, ItemKind::SecureNote),
+            3 => {
+                assert_eq!(item.kind, ItemKind::Card);
+                let card = item.card.as_ref().expect("a card's details");
+                let want = &want["card"];
+                assert_eq!(
+                    card.cardholder_name.as_deref(),
+                    want["cardholderName"].as_str()
+                );
+                assert_eq!(card.brand.as_deref(), want["brand"].as_str());
+                assert_eq!(card.exp_month.as_deref(), want["expMonth"].as_str());
+                assert_eq!(card.exp_year.as_deref(), want["expYear"].as_str());
+                assert_eq!(text(&card.number).as_deref(), want["number"].as_str());
+                assert_eq!(text(&card.code).as_deref(), want["code"].as_str());
+            }
+            4 => {
+                assert_eq!(item.kind, ItemKind::Identity);
+                let id = item.identity.as_ref().expect("an identity's details");
+                let want = &want["identity"];
+                for (seen, key) in [
+                    (&id.title, "title"),
+                    (&id.first_name, "firstName"),
+                    (&id.middle_name, "middleName"),
+                    (&id.last_name, "lastName"),
+                    (&id.address1, "address1"),
+                    (&id.address2, "address2"),
+                    (&id.address3, "address3"),
+                    (&id.city, "city"),
+                    (&id.state, "state"),
+                    (&id.postal_code, "postalCode"),
+                    (&id.country, "country"),
+                    (&id.company, "company"),
+                    (&id.email, "email"),
+                    (&id.phone, "phone"),
+                    (&id.username, "username"),
+                ] {
+                    assert_eq!(seen.as_deref(), want[key].as_str(), "{key}");
+                }
+                assert_eq!(text(&id.ssn).as_deref(), want["ssn"].as_str());
+                assert_eq!(
+                    text(&id.passport_number).as_deref(),
+                    want["passportNumber"].as_str()
+                );
+                assert_eq!(
+                    text(&id.license_number).as_deref(),
+                    want["licenseNumber"].as_str()
+                );
+            }
             other => panic!("unexpected item type {other}"),
         }
     }
@@ -210,7 +257,7 @@ fn an_item_that_doesnt_open_is_damaged_and_the_rest_still_open() {
     .unwrap();
     assert_eq!(vault.damaged.len(), 1);
     assert_eq!(vault.damaged[0].id, v["ids"]["personal"].as_str().unwrap());
-    assert_eq!(vault.items.len(), 3);
+    assert_eq!(vault.items.len(), 5);
 }
 
 #[test]
@@ -246,7 +293,7 @@ fn makes_one_time_codes_and_refuses_secrets_it_cant_use() {
 }
 
 #[test]
-fn search_matches_every_word_in_names_usernames_and_websites() {
+fn search_matches_every_word_in_names_usernames_websites_and_details() {
     let v = vectors();
     let sync = Sync::from_json(&v["sync"].to_string()).unwrap();
     let vault = Vault::unlock(
@@ -265,6 +312,20 @@ fn search_matches_every_word_in_names_usernames_and_websites() {
     assert_eq!(names("mail"), ["Example Mail"]);
     assert_eq!(names("BACKUP example"), ["Backup service"]);
     assert_eq!(names("office wi-fi"), ["Office Wi-Fi"]);
-    assert_eq!(names("").len(), 4);
+    assert_eq!(names("").len(), 6);
     assert!(names("nothing like this").is_empty());
+    // A card by its holder and brand, an identity by its name and email;
+    // never by a secret.
+    assert_eq!(names("visa"), ["Everyday card"]);
+    assert_eq!(names("ana lopez visa"), ["Everyday card"]);
+    assert_eq!(
+        names("ana lopez"),
+        ["Ana at home", "Everyday card", "Example Mail"]
+    );
+    assert_eq!(names("maría"), ["Ana at home"]);
+    assert_eq!(
+        names("ana.lopez@example.test"),
+        ["Ana at home", "Example Mail"]
+    );
+    assert!(names("4111").is_empty() && names("123-45").is_empty());
 }
