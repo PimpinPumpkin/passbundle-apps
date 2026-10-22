@@ -243,6 +243,9 @@ void main() {
     await tester.tap(find.byTooltip('Settings'));
     await pumpUntil(tester, find.text('Lock when the phone locks'));
     expect(find.text('Away from PassBundle'), findsOneWidget);
+    // Settings scrolls on a small screen, as CI's emulator has.
+    await tester.ensureVisible(find.text('5 minutes'));
+    await tester.pump(const Duration(milliseconds: 300));
     await tester.tap(find.text('5 minutes'));
     await pumpUntil(tester, find.text('Immediately'));
     await tester.tap(find.text('Immediately').last);
