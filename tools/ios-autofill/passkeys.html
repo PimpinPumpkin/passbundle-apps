@@ -2,8 +2,10 @@
 <!-- A website that makes a passkey and signs in with it, for
      tools/ios-autofill-test.sh: PassBundle answers through iOS's AutoFill in
      Safari, and this page checks what comes back as a site would (its own
-     challenge and origin, the site's ID, and the signature with the passkey's
-     public key), then says how it went. -->
+     challenge and origin, the site's ID, someone present and verified, the
+     account, and the signature with the passkey's public key), then says how
+     it went. It signs in twice: as a site that names no credential, and as
+     one that names this passkey. -->
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Passkeys</title>
@@ -14,10 +16,13 @@
 <h1>Passkeys</h1>
 <button id="make">Make a passkey</button>
 <button id="sign-in">Sign in with a passkey</button>
+<button id="sign-in-named">Sign in naming the passkey</button>
 <p id="result"></p>
 <script>
   const rpId = location.hostname;
   const user = "phone-passkey@example.test";
+  // PassBundle's apps' AAGUID (docs/core.md, "Passkeys").
+  const aaguid = "09c5ee5f084548e6aef4c7c443317de5";
   let made = null;
 
   const random = (n) => crypto.getRandomValues(new Uint8Array(n));
@@ -36,6 +41,15 @@
     if (data.type !== type) throw new Error(`client data type ${data.type}`);
     if (data.origin !== location.origin) throw new Error(`client data origin ${data.origin}`);
     if (data.challenge !== base64url(challenge)) throw new Error("not this page's challenge");
+  }
+
+  // Authenticator data as a site checks it: its own ID, someone present, and
+  // verified (PassBundle always has the person unlock).
+  async function checkData(data) {
+    const siteHash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(rpId));
+    if (!same(data.slice(0, 32), siteHash)) throw new Error("another site's ID");
+    if (!(data[32] & 0x01)) throw new Error("no one present");
+    if (!(data[32] & 0x04)) throw new Error("no one verified");
   }
 
   // An ECDSA signature, DER (SEQUENCE of r and s), as WebCrypto takes it: r and s, 32 bytes each.
@@ -60,39 +74,48 @@
   document.getElementById("make").addEventListener("click", async () => {
     try {
       const challenge = random(32);
+      const handle = random(16);
       const credential = await navigator.credentials.create({
         publicKey: {
           rp: { id: rpId, name: "Phone Example" },
-          user: { id: random(16), name: user, displayName: "Phone" },
+          user: { id: handle, name: user, displayName: "Phone" },
           challenge,
           pubKeyCredParams: [{ type: "public-key", alg: -7 }],
-          authenticatorSelection: { residentKey: "required", userVerification: "preferred" },
+          authenticatorSelection: { residentKey: "required", userVerification: "required" },
           attestation: "none",
         },
       });
       checkClientData(credential.response.clientDataJSON, "webauthn.create", challenge);
+      const data = new Uint8Array(credential.response.getAuthenticatorData());
+      await checkData(data);
+      // Made by PassBundle, unless the browser left its maker out (as it may
+      // with no attestation asked for).
+      const maker = [...data.slice(37, 53)].map((b) => b.toString(16).padStart(2, "0")).join("");
+      if (maker !== aaguid && /[^0]/.test(maker)) throw new Error(`made by ${maker}`);
       const key = await crypto.subtle.importKey(
         "spki", credential.response.getPublicKey(), { name: "ECDSA", namedCurve: "P-256" }, false, ["verify"]);
-      made = { id: credential.rawId, key };
+      made = { id: credential.rawId, key, handle };
       show(`Made a passkey for ${user}`);
     } catch (e) {
       show(`Couldn't make a passkey: ${e.name}: ${e.message}`);
     }
   });
 
-  document.getElementById("sign-in").addEventListener("click", async () => {
+  // Signs in: naming no credential (the passkey found by itself), or naming
+  // the one made here.
+  async function signIn(named, done) {
     try {
       const challenge = random(32);
+      const allowCredentials = named && made ? [{ type: "public-key", id: made.id }] : [];
       const credential = await navigator.credentials.get({
-        publicKey: { challenge, rpId, userVerification: "preferred" },
+        publicKey: { challenge, rpId, allowCredentials, userVerification: "required" },
       });
       const response = credential.response;
       checkClientData(response.clientDataJSON, "webauthn.get", challenge);
       if (!made || !same(credential.rawId, made.id)) throw new Error("not the passkey made here");
+      if (!response.userHandle || !same(response.userHandle, made.handle)) throw new Error("another account");
       const data = new Uint8Array(response.authenticatorData);
-      const siteHash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(rpId));
-      if (!same(data.slice(0, 32), siteHash)) throw new Error("another site's ID");
-      if (!(data[32] & 0x01)) throw new Error("no one present");
+      await checkData(data);
       const clientHash = new Uint8Array(await crypto.subtle.digest("SHA-256", response.clientDataJSON));
       const signed = new Uint8Array(data.length + 32);
       signed.set(data);
@@ -100,9 +123,14 @@
       const good = await crypto.subtle.verify(
         { name: "ECDSA", hash: "SHA-256" }, made.key, derToRaw(new Uint8Array(response.signature)), signed);
       if (!good) throw new Error("a signature the passkey's public key doesn't verify");
-      show(`Signed in with the passkey for ${user}`);
+      show(done);
     } catch (e) {
       show(`Couldn't sign in: ${e.name}: ${e.message}`);
     }
-  });
+  }
+
+  document.getElementById("sign-in").addEventListener("click", () =>
+    signIn(false, `Signed in with the passkey for ${user}`));
+  document.getElementById("sign-in-named").addEventListener("click", () =>
+    signIn(true, `Signed in again, naming the passkey, for ${user}`));
 </script>

@@ -13,8 +13,8 @@
 #      unlocks and fills; signing in shows who signed in;
 #   5. on a page of the same site that makes a passkey, iOS saves it in
 #      PassBundle (the extension unlocks, and saves it once told to), and
-#      signing in with it gives a signature the page checks with its public
-#      key.
+#      signing in with it, naming it and not, gives answers the page checks
+#      as a site would, the signature with its public key.
 #
 # The two halves talk through files in the App Group folder, which this
 # reaches from the Mac. CI only: it maps phone.example.test to this Mac in

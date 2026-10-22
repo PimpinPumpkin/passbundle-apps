@@ -13,7 +13,7 @@ class CredentialProviderViewController: ASCredentialProviderViewController {
 
   override func viewDidLoad() {
     super.viewDidLoad()
-    provider.finish = { [weak self] answer in
+    provider.onFinish = { [weak self] answer in
       // Nothing decrypted stays behind in this process.
       _ = Shared.answer(pb_lock())
       guard let context = self?.extensionContext else { return }
@@ -87,14 +87,19 @@ class CredentialProviderViewController: ASCredentialProviderViewController {
     else {
       return provider.finish(.refused(.failed))
     }
+    // ES256 is the only kind the core makes: a site that doesn't take it is
+    // told so before anyone unlocks.
+    guard request.supportedAlgorithms.contains(ASCOSEAlgorithmIdentifier.ES256) else {
+      return provider.finish(.refused(.failed))
+    }
+    // iOS 17 doesn't give the site's own list of the credentials it has.
     var excluded: [Data] = []
     if #available(iOS 18.0, *) {
       excluded = request.excludedCredentials?.map(\.credentialID) ?? []
     }
     provider.making = Provider.PasskeyMaking(
       rpId: identity.relyingPartyIdentifier, userName: identity.userName, userHandle: identity.userHandle,
-      clientDataHash: request.clientDataHash,
-      es256: request.supportedAlgorithms.contains(ASCOSEAlgorithmIdentifier.ES256), excluded: excluded)
+      clientDataHash: request.clientDataHash, excluded: excluded)
     provider.start(domains: [], picked: nil)
   }
 }
@@ -103,6 +108,8 @@ class CredentialProviderViewController: ASCredentialProviderViewController {
 final class Provider: ObservableObject {
   enum Screen {
     case opening
+    /// The core saving a passkey or signing, over the network maybe.
+    case working
     case locked
     case logins
     /// A login that asks for the master password again, before it fills or
@@ -144,8 +151,6 @@ final class Provider: ObservableObject {
     let userName: String
     let userHandle: Data
     let clientDataHash: Data
-    /// Whether the site takes ES256, the only kind the core makes.
-    let es256: Bool
     let excluded: [Data]
   }
 
@@ -159,7 +164,10 @@ final class Provider: ObservableObject {
   @Published var note: String?
   /// "Face ID" or "Touch ID", when the user key is kept for it.
   @Published var biometric: String?
-  var finish: (Answer) -> Void = { _ in }
+  /// What ends the extension (the view controller's).
+  var onFinish: (Answer) -> Void = { _ in }
+  /// Ended: nothing answers iOS twice, or after Cancel.
+  private(set) var finished = false
   var signIn: PasskeySignIn?
   var making: PasskeyMaking?
 
@@ -168,6 +176,20 @@ final class Provider: ObservableObject {
   /// Whether the person proved who they are in this request: unlocking, or
   /// the master password for a login that asks for it.
   private var verified = false
+
+  /// Whether the core is saving or signing: Cancel waits for it.
+  var working: Bool {
+    if case .working = screen { return true }
+    return false
+  }
+
+  /// Ends the extension with the answer, once: a core call that comes back
+  /// after Cancel, or after another answer, does nothing more.
+  func finish(_ answer: Answer) {
+    guard !finished else { return }
+    finished = true
+    onFinish(answer)
+  }
 
   /// The domain a service identifier names (a website's, or its address's host).
   static func domain(_ service: ASCredentialServiceIdentifier) -> String? {
@@ -189,6 +211,8 @@ final class Provider: ObservableObject {
       return
     }
     var state = (Shared.answer(pb_open(dir, false)) as? [String: Any])?["state"] as? String
+    // pb_open starts every request with the vault locked; were it ever open
+    // here, a passkey would still have the person unlock first.
     if state == "unlocked" && (signIn != nil || making != nil) {
       _ = Shared.answer(pb_lock())
       state = "locked"
@@ -340,10 +364,11 @@ final class Provider: ObservableObject {
       screen = .reprompt(id)
       return
     }
-    screen = .opening
+    screen = .working
     let hash = Shared.base64url(signIn.clientDataHash)
     let verified = self.verified ? "true" : "false"
-    // The core may save the passkey's raised counter first: off the main thread.
+    // The core may save the passkey's raised counter first: off the main
+    // thread, with Cancel hidden until it's back.
     DispatchQueue.global(qos: .userInitiated).async {
       let answer = Shared.answer(pb_passkey_assert(id, signIn.rpId, hash, verified)) as? [String: Any]
       DispatchQueue.main.async { self.signedIn(answer, signIn) }
@@ -351,6 +376,7 @@ final class Provider: ObservableObject {
   }
 
   private func signedIn(_ answer: [String: Any]?, _ signIn: PasskeySignIn) {
+    guard !finished else { return }
     guard answer?["ok"] as? Bool == true,
       let data = (answer?["authenticatorData"] as? String).flatMap(Shared.fromBase64url),
       let signature = (answer?["signature"] as? String).flatMap(Shared.fromBase64url),
@@ -371,11 +397,7 @@ final class Provider: ObservableObject {
   /// Saves the new passkey, in a new login for the site: the core makes it
   /// and saves it before iOS hears of it.
   func save() {
-    guard let making else { return }
-    guard making.es256 else {
-      note = "This site doesn't take the kind of passkey PassBundle makes."
-      return
-    }
+    guard let making, !finished else { return }
     let request: [String: Any] = [
       "rpId": making.rpId,
       "userHandle": Shared.base64url(making.userHandle),
@@ -387,7 +409,9 @@ final class Provider: ObservableObject {
     guard let body = try? JSONSerialization.data(withJSONObject: request),
       let json = String(data: body, encoding: .utf8)
     else { return }
-    screen = .opening
+    // Saved over the network: off the main thread, with Cancel hidden
+    // until it's back, so the site never misses a passkey the vault kept.
+    screen = .working
     DispatchQueue.global(qos: .userInitiated).async {
       let answer = Shared.answer(pb_passkey_create(json)) as? [String: Any]
       DispatchQueue.main.async { self.made(answer, making) }
@@ -395,6 +419,7 @@ final class Provider: ObservableObject {
   }
 
   private func made(_ answer: [String: Any]?, _ making: PasskeyMaking) {
+    guard !finished else { return }
     guard answer?["ok"] as? Bool == true,
       let item = answer?["itemId"] as? String,
       let credential = (answer?["credentialId"] as? String).flatMap(Shared.fromBase64url),
@@ -408,21 +433,22 @@ final class Provider: ObservableObject {
       screen = .saving
       return
     }
-    // iOS suggests it from now on, as it would after the app's next sync.
+    let made = Answer.made(
+      ASPasskeyRegistrationCredential(
+        relyingParty: making.rpId, clientDataHash: making.clientDataHash, credentialID: credential,
+        attestationObject: attestation))
+    // iOS suggests it from now on, as it would after the app's next sync:
+    // answered once iOS has it, before the extension goes away.
     let identity = ASPasskeyCredentialIdentity(
       relyingPartyIdentifier: making.rpId, userName: making.userName, credentialID: credential,
       userHandle: making.userHandle, recordIdentifier: item)
     let store = ASCredentialIdentityStore.shared
+    let answer = { DispatchQueue.main.async { self.finish(made) } }
     store.getState { state in
-      guard state.isEnabled, state.supportsIncrementalUpdates else { return }
+      guard state.isEnabled, state.supportsIncrementalUpdates else { return answer() }
       let identities: [any ASCredentialIdentity] = [identity]
-      store.saveCredentialIdentities(identities, completion: nil)
+      store.saveCredentialIdentities(identities) { _, _ in answer() }
     }
-    finish(
-      .made(
-        ASPasskeyRegistrationCredential(
-          relyingParty: making.rpId, clientDataHash: making.clientDataHash, credentialID: credential,
-          attestationObject: attestation)))
   }
 }
 
@@ -438,7 +464,7 @@ struct ProviderView: View {
     NavigationStack {
       Group {
         switch provider.screen {
-        case .opening:
+        case .opening, .working:
           ProgressView()
         case .locked:
           unlock
@@ -456,7 +482,10 @@ struct ProviderView: View {
       .navigationBarTitleDisplayMode(.inline)
       .toolbar {
         ToolbarItem(placement: .cancellationAction) {
-          Button("Cancel") { provider.finish(.refused(.userCanceled)) }
+          // Not while the core is saving or signing: it answers first.
+          if !provider.working {
+            Button("Cancel") { provider.finish(.refused(.userCanceled)) }
+          }
         }
       }
     }

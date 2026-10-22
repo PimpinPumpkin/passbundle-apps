@@ -73,8 +73,9 @@ final class AutoFillUITests: XCTestCase {
   /// Safari, already on the passkeys page: making a passkey goes through
   /// iOS's sheet to PassBundle, which unlocks (debug builds' stand-in for
   /// Face ID says yes) and saves it once told to; signing in with it goes
-  /// through iOS's sheet again, and the page checks the signature with the
-  /// passkey's public key.
+  /// through iOS's sheet again, as a site that names no credential and then
+  /// as one that names this one, and the page checks each answer as a site
+  /// would, the signature with the passkey's public key.
   func testPasskeysInSafari() throws {
     let safari = XCUIApplication(bundleIdentifier: "com.apple.mobilesafari")
     let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
@@ -88,6 +89,10 @@ final class AutoFillUITests: XCTestCase {
     safari.webViews.buttons["Sign in with a passkey"].tap()
     through(
       until: "Signed in with the passkey for phone-passkey@example.test", in: safari, also: springboard,
+      tapping: ["Continue", "Sign In", "phone-passkey@example.test"])
+    safari.webViews.buttons["Sign in naming the passkey"].tap()
+    through(
+      until: "Signed in again, naming the passkey, for phone-passkey@example.test", in: safari, also: springboard,
       tapping: ["Continue", "Sign In", "phone-passkey@example.test"])
   }
 

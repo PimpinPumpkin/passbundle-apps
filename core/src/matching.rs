@@ -147,7 +147,8 @@ impl Vault {
 pub struct PasskeySuggestion<'a> {
     pub id: &'a str,
     pub rp_id: &'a str,
-    /// The account's name on the site, or the login's name without one.
+    /// The account's name on the site, or the site's ID without one (never
+    /// the login's own name, which iOS would show with it).
     pub user_name: &'a str,
     pub credential_id: Vec<u8>,
     /// Empty when none is stored.
@@ -174,7 +175,7 @@ pub fn passkey_suggested(item: &Item) -> Option<PasskeySuggestion<'_>> {
             .user_name
             .as_deref()
             .filter(|u| !u.is_empty())
-            .unwrap_or(&item.name),
+            .unwrap_or(&passkey.rp_id),
         credential_id,
         user_handle,
     })
