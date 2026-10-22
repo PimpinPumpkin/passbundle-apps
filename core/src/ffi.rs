@@ -76,6 +76,38 @@ fn with_app_waiting(call: impl FnOnce(&mut App) -> Value + Send) -> *mut c_char 
     }))
 }
 
+/// An attachment: the app says where its file is (checking the item may be
+/// used), then the download, opening it, and `then` happen without the app,
+/// so a long download doesn't hold up its other calls (locking, the screens'
+/// reads). On a thread of the core's own, as `with_app_waiting`.
+fn attachment_then(
+    id: &str,
+    attachment_id: &str,
+    then: impl FnOnce(crate::app::AttachmentFile) -> Value + Send,
+) -> Value {
+    std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                let mut to_fetch = None;
+                let asked = app_value(|app| match app.attachment_to_fetch(id, attachment_id) {
+                    Ok(file) => {
+                        to_fetch = Some(file);
+                        json!({ "ok": true })
+                    }
+                    Err(e) => failed(e),
+                });
+                match to_fetch {
+                    Some(file) => catch_unwind(AssertUnwindSafe(|| then(file))).unwrap_or_else(
+                        |_| json!({ "ok": false, "error": "The core stopped unexpectedly." }),
+                    ),
+                    None => asked,
+                }
+            })
+            .join()
+            .unwrap_or_else(|_| json!({ "ok": false, "error": "The core stopped unexpectedly." }))
+    })
+}
+
 /// `with_app`, but None instead of waiting while a slow call (a sync, say) has the app.
 fn with_app_now(call: impl FnOnce(&mut App) -> Value) -> Option<*mut c_char> {
     let guard = match APP.try_lock() {
@@ -757,6 +789,13 @@ pub unsafe extern "C" fn pb_item(id: *const c_char) -> *mut c_char {
                 "hasCode": card.code.as_ref().is_some_and(|c| !c.is_empty()),
             });
         }
+        view["attachments"] = item
+            .attachments
+            .iter()
+            .map(
+                |a| json!({ "id": a.id, "name": a.name, "size": a.size, "opens": a.key.is_some() }),
+            )
+            .collect();
         if let Some(key) = &item.ssh_key {
             view["sshKey"] = json!({
                 "publicKey": key.public_key,
@@ -796,6 +835,52 @@ pub unsafe extern "C" fn pb_item(id: *const c_char) -> *mut c_char {
         ));
         view
     })
+}
+
+/// Saves one of an item's attachments to the Downloads folder (docs/core.md,
+/// "Attachments"): `{ok, path}`, or the words to show.
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_save_attachment(
+    id: *const c_char,
+    attachment_id: *const c_char,
+) -> *mut c_char {
+    let (id, attachment_id) = (text(id), text(attachment_id));
+    out(attachment_then(&id, &attachment_id, |file| {
+        match file.save() {
+            Ok(path) => json!({ "ok": true, "path": path.to_string_lossy() }),
+            Err(e) => failed(e),
+        }
+    }))
+}
+
+/// Saves one of an item's attachments in `dir` (an iPhone's Documents folder,
+/// which Files shows): `{ok, path}`, or the words to show.
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_save_attachment_in(
+    id: *const c_char,
+    attachment_id: *const c_char,
+    dir: *const c_char,
+) -> *mut c_char {
+    let (id, attachment_id, dir) = (text(id), text(attachment_id), text(dir));
+    out(attachment_then(&id, &attachment_id, |file| {
+        match file.save_in(std::path::Path::new(&dir)) {
+            Ok(path) => json!({ "ok": true, "path": path.to_string_lossy() }),
+            Err(e) => failed(e),
+        }
+    }))
+}
+
+/// Writes an attachment into a file Android opened for it (android.rs):
+/// `{ok}`, or the words to show. Slow: off the main thread.
+#[cfg(target_os = "android")]
+pub(crate) fn write_attachment_to(id: &str, attachment_id: &str, fd: i32) -> Value {
+    attachment_then(id, attachment_id, |file| done(file.write_to(fd)))
 }
 
 /// Checks the master password for an item that asks for it again (docs/core.md,

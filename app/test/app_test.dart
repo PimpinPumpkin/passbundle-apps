@@ -400,6 +400,31 @@ void main() {
   );
 
   testWidgets(
+    'an item lists its attachments, and saving one needs the server',
+    (tester) async {
+      setSize(tester, const Size(1280, 800));
+      openSample();
+      await tester.pumpWidget(const PassBundleApp());
+      await tester.enterText(find.byType(TextField), samplePassword);
+      await tester.tap(find.text('Unlock'));
+      await pumpUntil(tester, find.text('Example Mail'));
+      await pumpUntil(
+        tester,
+        find.textContaining('Sign in again to get changes'),
+      );
+      await tester.tap(find.text('Example Mail'));
+      await tester.pump();
+      expect(find.text('recovery-codes.txt · 36 bytes'), findsOneWidget);
+      // The sample has no server: downloading it says so.
+      await tester.tap(find.byTooltip('Save recovery-codes.txt'));
+      await pumpUntil(
+        tester,
+        find.text('You\'ve been signed out. Sign in again.'),
+      );
+    },
+  );
+
+  testWidgets(
     'on a phone-width window, a header has the theme and Lock, and an item opens on its own page',
     (tester) async {
       setSize(tester, const Size(390, 844));

@@ -723,6 +723,24 @@ class _ItemPaneState extends State<ItemPane> {
     return true;
   }
 
+  /// Downloads, opens, and saves an attachment to Downloads, through the core.
+  Future<void> saveAttachment(String attachmentId, String name) async {
+    if (asksAgain()) {
+      setState(() {});
+      return;
+    }
+    final answer = await whileBusy(
+      () => Core.saveAttachment(widget.id, attachmentId, name),
+    );
+    if (!mounted) return;
+    showMessage(
+      context,
+      answer.ok
+          ? 'Saved to ${answer.body['path']}'
+          : answer.error ?? 'Couldn\'t save that.',
+    );
+  }
+
   /// Through the core, so the value never passes through Dart; secrets clear after 30 seconds.
   Future<void> copy(String label, String what, {bool secret = true}) async {
     if (asksAgain()) {
@@ -1051,6 +1069,30 @@ class _ItemPaneState extends State<ItemPane> {
               ),
       );
     }
+    // Attachments: saved to Downloads, or to Files on an iPhone.
+    for (final a
+        in ((item['attachments'] as List?) ?? const [])
+            .cast<Map<String, dynamic>>()) {
+      rows.add(
+        row(
+          'Attachment',
+          Text(
+            '${a['name']}${a['size'] == null ? '' : ' · ${fileSize(a['size'] as num)}'}',
+            style: const TextStyle(fontSize: 15),
+          ),
+          // One whose name or key doesn't open is listed, but not saved.
+          actions: [
+            if (a['opens'] != false)
+              IconButton(
+                tooltip: 'Save ${a['name']}',
+                icon: const Icon(Icons.download_rounded, size: 20),
+                onPressed: () =>
+                    saveAttachment(a['id'] as String, a['name'] as String),
+              ),
+          ],
+        ),
+      );
+    }
     final expires = item['expires'] as String?;
     if (expires != null && expires.isNotEmpty) {
       rows.add(
@@ -1222,4 +1264,11 @@ class _MasterPasswordDialogState extends State<_MasterPasswordDialog> {
       WorkingButton(label: 'Continue', working: working, onPressed: confirm),
     ],
   );
+}
+
+/// A file's size for people: "37 bytes", "1.2 KB", "3.4 MB".
+String fileSize(num bytes) {
+  if (bytes < 1000) return '${bytes.toInt()} bytes';
+  if (bytes < 1000 * 1000) return '${(bytes / 1000).toStringAsFixed(1)} KB';
+  return '${(bytes / (1000 * 1000)).toStringAsFixed(1)} MB';
 }

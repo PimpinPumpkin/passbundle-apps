@@ -84,6 +84,18 @@ pub struct CipherData {
     pub ssh_key: Option<SshKeyData>,
     pub card: Option<CardData>,
     pub identity: Option<IdentityData>,
+    #[serde(default)]
+    pub attachments: Option<Vec<AttachmentData>>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentData {
+    pub id: String,
+    pub file_name: Option<String>,
+    pub key: Option<String>,
+    /// Bytes, as a number or a string of one.
+    pub size: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -247,8 +259,24 @@ pub struct Item {
     pub identity: Option<Identity>,
     /// An SSH key's, for an SSH key.
     pub ssh_key: Option<SshKey>,
+    /// Its attachments (docs/core.md, "Attachments"), each with its file's key.
+    pub attachments: Vec<Attachment>,
     /// What an edit keeps that the app doesn't show or change.
     pub kept: Kept,
+}
+
+/// What an attachment whose name or key doesn't open is called.
+pub const CANT_OPEN_ATTACHMENT: &str = "An attachment that can't be opened";
+
+/// An attachment: its file's name and size, and the key its file opens with.
+/// The file itself stays on the server until someone saves it. One whose
+/// name or key doesn't open is still listed, with no key, so the rest of its
+/// item still opens.
+pub struct Attachment {
+    pub id: String,
+    pub name: String,
+    pub size: Option<u64>,
+    pub key: Option<SymmetricKey>,
 }
 
 /// An SSH key (docs/core.md, "Items"): its public key and fingerprint, and
@@ -1051,6 +1079,29 @@ impl Keyring {
             }),
             _ => None,
         };
+        // A file with no key of its own (very old ones) is under the item's key.
+        let mut attachments = Vec::new();
+        for a in c.attachments.iter().flatten() {
+            let name = open_plain(&a.file_name).ok().flatten();
+            let file_key = match &a.key {
+                Some(wrapped) => EncString::parse(wrapped)
+                    .and_then(|k| k.decrypt_key(&key))
+                    .ok(),
+                None => Some(key.clone()),
+            };
+            let opens = name.is_some() && file_key.is_some();
+            attachments.push(Attachment {
+                id: a.id.clone(),
+                name: name
+                    .filter(|_| opens)
+                    .unwrap_or_else(|| CANT_OPEN_ATTACHMENT.to_owned()),
+                size: a.size.as_ref().and_then(|s| {
+                    s.as_u64()
+                        .or_else(|| s.as_str().and_then(|t| t.parse().ok()))
+                }),
+                key: file_key.filter(|_| opens),
+            });
+        }
         let ssh_key = match &c.ssh_key {
             Some(d) if ItemKind::from(c.kind) == ItemKind::SshKey => Some(SshKey {
                 public_key: open_plain(&d.public_key)?,
@@ -1119,6 +1170,7 @@ impl Keyring {
             card,
             identity,
             ssh_key,
+            attachments,
             kept,
         })
     }

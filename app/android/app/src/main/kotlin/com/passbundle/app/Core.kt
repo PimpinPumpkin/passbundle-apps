@@ -26,6 +26,9 @@ object Core {
     /** Opens the core on the app's own folder unless it's open (autofill can start the app without its screens). */
     @JvmStatic external fun openIfClosed(dir: String)
 
+    /** Writes an attachment into a file Android opened for it: {"ok": true}, or the words to show. Slow: off the main thread. */
+    @JvmStatic external fun writeAttachmentTo(id: String, attachmentId: String, fd: Int): String?
+
     /** The logins for an app or a page, as JSON: names and usernames only (Responses.kt). */
     @JvmStatic external fun fillable(packageName: String, webDomain: String): String?
 

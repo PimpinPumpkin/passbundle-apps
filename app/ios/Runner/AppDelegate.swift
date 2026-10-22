@@ -58,6 +58,31 @@ import UniformTypeIdentifiers
       case "biometricRemove":
         Biometric.remove()
         result(["ok": true])
+      // An attachment, into the app's Documents folder, which Files shows
+      // (On My iPhone, PassBundle). The core writes it there itself.
+      case "saveAttachment":
+        let arguments = call.arguments as? [String: Any]
+        guard let id = arguments?["id"] as? String, let attachment = arguments?["attachmentId"] as? String,
+          let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+        else {
+          result(["ok": false, "error": "Couldn't save that."])
+          return
+        }
+        DispatchQueue.global(qos: .userInitiated).async {
+          var answer: [String: Any] = ["ok": false, "error": "Couldn't save that."]
+          if let text = pb_save_attachment_in(id, attachment, documents.path) {
+            defer { pb_free(text) }
+            if let parsed = try? JSONSerialization.jsonObject(with: Data(bytes: text, count: strlen(text)))
+              as? [String: Any]
+            {
+              answer = parsed
+              if let path = parsed["path"] as? String {
+                answer["path"] = "Files, On My iPhone, PassBundle, " + (path as NSString).lastPathComponent
+              }
+            }
+          }
+          DispatchQueue.main.async { result(answer) }
+        }
       default:
         result(FlutterMethodNotImplemented)
       }

@@ -35,6 +35,8 @@ fn new_email(prefix: &str) -> String {
     )
 }
 
+#[path = "support/attachment.rs"]
+mod attachment;
 #[path = "support/sign_up.rs"]
 mod support;
 
@@ -367,4 +369,54 @@ fn the_app_keeps_the_vault_locks_unlocks_offline_and_signs_out() {
         }
     );
     let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Attachments (docs/core.md, "Attachments"): a file uploaded the way
+/// upstream's apps upload one (its own key, and its key and name under the
+/// item's), then downloaded by the core, its MAC checked, and opened.
+#[test]
+fn an_attachment_downloads_and_opens() {
+    use passbundle_core::crypto::decrypt_file;
+    let Some(server) = server() else { return };
+    let url = std::env::var("PB_TEST_SERVER").unwrap();
+    let email = new_email("attachment");
+    sign_up(&server, &email);
+    let mut session = sign_in(&server, &email);
+    let vault = open(&server, &mut session);
+    let draft = ItemDraft {
+        name: "Has a file".into(),
+        username: Some("ana".into()),
+        ..ItemDraft::default()
+    };
+    let saved = server
+        .save_item(
+            &mut session,
+            None,
+            vault.encrypt_item(&draft, None).unwrap(),
+            &[],
+        )
+        .unwrap();
+    let id = saved["id"].as_str().unwrap().to_owned();
+
+    let contents = b"Recovery codes: 1234-5678".to_vec();
+    let attachment_id =
+        attachment::upload(&server, &url, &mut session, &id, "codes.txt", &contents);
+
+    // The core lists it with the item, downloads it, and opens it.
+    let vault = open(&server, &mut session);
+    let item = vault.item(&id).unwrap();
+    assert_eq!(item.attachments.len(), 1);
+    let attachment = &item.attachments[0];
+    assert_eq!(attachment.name, "codes.txt");
+    let file = server
+        .attachment(&mut session, &id, &attachment_id)
+        .unwrap();
+    // Its own format: the type byte, IV, MAC, and the ciphertext.
+    assert_eq!(file[0], 2);
+    assert_eq!(
+        decrypt_file(file, attachment.key.as_ref().unwrap())
+            .unwrap()
+            .as_slice(),
+        &contents[..]
+    );
 }

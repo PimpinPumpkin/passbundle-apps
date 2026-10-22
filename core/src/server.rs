@@ -114,6 +114,51 @@ struct TokenResponse {
     key: Option<String>,
 }
 
+/// The largest attachment file upstream's servers take: 500 MB before
+/// encryption, so a little more as stored (the server allows 501 MiB).
+const MAX_ATTACHMENT: u64 = 501 * 1024 * 1024 + 1;
+
+/// How long an attachment's download may take once it starts: 500 MB at
+/// about 2.5 Mbit/s.
+const ATTACHMENT_TIME: Duration = Duration::from_secs(30 * 60);
+
+/// An attachment's file to fetch (`Server::attachment_download`).
+pub struct Download {
+    agent: Agent,
+    url: String,
+}
+
+impl Download {
+    /// The file, still encrypted, up to the largest upstream takes. The
+    /// whole download may take up to half an hour, not the 30 seconds other
+    /// calls get; connecting and the server's first answer still get those.
+    pub fn fetch(&self) -> Result<Vec<u8>> {
+        let mut response = self
+            .agent
+            .get(&self.url)
+            .config()
+            .timeout_global(None)
+            .timeout_connect(Some(Duration::from_secs(30)))
+            .timeout_recv_response(Some(Duration::from_secs(30)))
+            .timeout_recv_body(Some(ATTACHMENT_TIME))
+            .build()
+            .call()
+            .map_err(|e| Error::Network(e.to_string()))?;
+        let status = response.status().as_u16();
+        if !(200..300).contains(&status) {
+            return Err(Error::Server(format!(
+                "the file couldn't be downloaded ({status})"
+            )));
+        }
+        response
+            .body_mut()
+            .with_config()
+            .limit(MAX_ATTACHMENT)
+            .read_to_vec()
+            .map_err(|e| Error::Network(e.to_string()))
+    }
+}
+
 pub struct Server {
     base: String,
     agent: Agent,
@@ -459,6 +504,50 @@ impl Server {
             ),
             None => self.call(session, "POST", "/api/ciphers", Some(encrypted)),
         }
+    }
+
+    /// An attachment's file, as the server stores it (still encrypted).
+    pub fn attachment(
+        &self,
+        session: &mut Session,
+        cipher_id: &str,
+        attachment_id: &str,
+    ) -> Result<Vec<u8>> {
+        self.attachment_download(session, cipher_id, attachment_id)?
+            .fetch()
+    }
+
+    /// Where an attachment's file is: the server says, and it's fetched from
+    /// there without the session's token, only from the server's own address
+    /// or over HTTPS. Fetching it needs nothing else of the server or the
+    /// session, so it can happen while the app does other things.
+    pub fn attachment_download(
+        &self,
+        session: &mut Session,
+        cipher_id: &str,
+        attachment_id: &str,
+    ) -> Result<Download> {
+        let answer = self.call(
+            session,
+            "GET",
+            &format!("/api/ciphers/{cipher_id}/attachment/{attachment_id}"),
+            None,
+        )?;
+        let url = answer["url"]
+            .as_str()
+            .ok_or_else(|| Error::Malformed("an attachment answer with no address".into()))?;
+        let url = if url.starts_with('/') {
+            self.url(url)
+        } else {
+            url.to_owned()
+        };
+        if !(url.starts_with(&format!("{}/", self.base)) || url.starts_with("https://")) {
+            return Err(Error::Refused("an attachment's address that isn't secure"));
+        }
+        Ok(Download {
+            agent: self.agent.clone(),
+            url,
+        })
     }
 
     /// Moves an item to the trash.
