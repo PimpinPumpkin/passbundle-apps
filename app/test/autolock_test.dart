@@ -15,6 +15,7 @@ Future<void> unlockSample(WidgetTester tester) async {
   tester.view.physicalSize = const Size(1280, 800);
   tester.view.devicePixelRatio = 1;
   addTearDown(tester.view.reset);
+  // Each test turns "when the computer sleeps" on itself, right where it's about it.
   openSample();
   await tester.pumpWidget(const PassBundleApp());
   await tester.enterText(find.byType(TextField), samplePassword);
@@ -51,6 +52,7 @@ void main() {
   ) async {
     await unlockSample(tester);
     await openSettings(tester);
+    Core().setPreferences({'lockAfterMinutes': 15, 'lockOnSleep': true});
     await computerSleeps(tester);
     expect(find.text('Unlock PassBundle'), findsOneWidget);
     expect(find.text('Lock after'), findsNothing);
@@ -91,6 +93,11 @@ void main() {
     await tester.pumpAndSettle();
     expect(Core().preferences()['lockAfterMinutes'], isNull);
 
+    // On, then off again at once: no time passes for the app's check, which
+    // would lock on a test machine whose screen is locked.
+    await tester.tap(find.text('Lock when the computer sleeps'));
+    await tester.pump();
+    expect(Core().preferences()['lockOnSleep'], isTrue);
     await tester.tap(find.text('Lock when the computer sleeps'));
     await tester.pumpAndSettle();
     expect(Core().preferences()['lockOnSleep'], isFalse);

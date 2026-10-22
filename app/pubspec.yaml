@@ -14,6 +14,9 @@ dependencies:
 dev_dependencies:
   flutter_test:
     sdk: flutter
+  # The app's tests on a phone or emulator (integration_test/, tools/android-app-test.sh).
+  integration_test:
+    sdk: flutter
   flutter_lints: ^6.0.0
 
 flutter:

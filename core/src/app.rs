@@ -234,28 +234,46 @@ impl App {
     /// the person cancelled. A key that no longer opens the vault (the account's
     /// keys changed) turns it off, and the master password is needed.
     pub fn unlock_with_biometric(&mut self) -> Result<bool> {
-        let text = self.store.sync().ok_or(Error::SignedOut)?;
         let mut agent = self.agent()?;
         let Some(key): Option<SymmetricKey> = agent.unlock()? else {
             return Ok(false);
         };
+        match self.unlock_with_key(key) {
+            Err(Error::Refused(why)) => {
+                let _ = agent.remove();
+                Err(Error::Refused(why))
+            }
+            other => other.map(|()| true),
+        }
+    }
+
+    /// Opens the kept vault with a user key the OS kept for biometric unlock
+    /// (the desktop agent's, or a phone's Keystore or Keychain), without the
+    /// KDF. A key that no longer opens it (the account's keys changed) is
+    /// refused, and the caller turns that unlock off.
+    pub fn unlock_with_key(&mut self, key: SymmetricKey) -> Result<()> {
+        let text = self.store.sync().ok_or(Error::SignedOut)?;
         match Vault::open(&Sync::from_json(&text)?, key) {
             Ok(vault) => {
                 self.opened(vault);
-                Ok(true)
+                Ok(())
             }
-            Err(Error::Refused(_)) | Err(Error::Damaged(_)) => {
-                let _ = agent.remove();
-                Err(Error::Refused(
-                    "that unlock is out of date; use your master password, then turn it on again",
-                ))
-            }
+            Err(Error::Refused(_)) | Err(Error::Damaged(_)) => Err(Error::Refused(
+                "that unlock is out of date; use your master password, then turn it on again",
+            )),
             Err(e) => Err(e),
         }
     }
 
-    /// Turns it off (for the extension too: it's one enrollment).
+    /// Turns it off (for the extension too: it's one enrollment). On Android
+    /// the app's own Keystore key and the user key it sealed go instead.
     pub fn remove_biometric(&self) -> Result<()> {
+        #[cfg(target_os = "android")]
+        {
+            crate::android::remove_biometric();
+            Ok(())
+        }
+        #[cfg(not(target_os = "android"))]
         self.agent()?.remove()
     }
 
@@ -323,6 +341,16 @@ impl App {
         Some(reason)
     }
 
+    /// The app left the screen (a phone's app switcher or home): locks if the
+    /// person chose "Immediately". Returns whether it locked.
+    pub fn left(&mut self) -> bool {
+        if self.vault.is_none() || !self.preferences.immediately() {
+            return false;
+        }
+        self.lock();
+        true
+    }
+
     /// The OS says the computer is about to sleep: locks if the person chose
     /// that. Returns whether it locked.
     pub fn sleeping(&mut self) -> bool {
@@ -381,13 +409,24 @@ impl App {
     /// Copies one of an item's values: "username", "password", "totp" (the
     /// current code), "notes", or "field:<index>". Secrets clear after 30 seconds.
     pub fn copy(&self, id: &str, what: &str) -> Result<()> {
+        if what == "username" {
+            return clipboard::copy_text(&self.value(id, what)?);
+        }
+        clipboard::copy_secret(&self.value(id, what)?, clipboard::CLEAR_AFTER)
+    }
+
+    /// The value `copy` copies. On phones the app's native piece puts it on
+    /// the clipboard itself (docs/phones.md, "Copying").
+    pub fn value(&self, id: &str, what: &str) -> Result<zeroize::Zeroizing<String>> {
         let item = self
             .vault
             .as_ref()
             .and_then(|v| v.item(id))
             .ok_or(Error::Damaged("no such item"))?;
         if what == "username" {
-            return clipboard::copy_text(item.username.as_deref().unwrap_or_default());
+            return Ok(zeroize::Zeroizing::new(
+                item.username.clone().unwrap_or_default(),
+            ));
         }
         let secret = match what {
             "password" => item.password.as_ref().map(|p| p.as_str().to_owned()),
@@ -412,6 +451,6 @@ impl App {
         }
         .map(zeroize::Zeroizing::new)
         .ok_or(Error::Damaged("nothing to copy"))?;
-        clipboard::copy_secret(&secret, clipboard::CLEAR_AFTER)
+        Ok(secret)
     }
 }

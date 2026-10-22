@@ -37,6 +37,8 @@ dirs = "6"
 hkdf = "0.12"
 hmac = "0.12"
 pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
+# The Public Suffix List, for which logins fill on a website (src/matching.rs).
+psl = "2"
 rand = "0.8"
 rsa = { version = "0.9", default-features = false, features = ["std", "u64_digit"] }
 serde = { version = "1", features = ["derive"] }
@@ -55,6 +57,12 @@ arboard = { version = "3", default-features = false }
 # keeps the refresh token with the Keystore instead (docs/phones.md).
 [target.'cfg(not(target_os = "android"))'.dependencies]
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
+
+# The Android app's native calls (src/android.rs), and Android's own
+# certificate checks, which need the app's context.
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.22"
+rustls-platform-verifier = "0.7"
 
 # SHA-256 in the chip's own instructions on ARM (Apple silicon, phones): PBKDF2
 # takes a sixth of the time (46 ms instead of 288 on an M1 Pro). x86 uses its

@@ -29,6 +29,8 @@ static APP: Mutex<Option<App>> = Mutex::new(None);
 /// The OS said the computer is going to sleep while a slow call had the app:
 /// the app hears it as soon as that call is done.
 static SLEEP_NOTICE: AtomicBool = AtomicBool::new(false);
+/// The same for the app leaving the screen (a phone's "Immediately").
+static LEFT_NOTICE: AtomicBool = AtomicBool::new(false);
 
 fn text(ptr: *const c_char) -> String {
     if ptr.is_null() {
@@ -48,11 +50,28 @@ fn out(value: Value) -> *mut c_char {
 
 /// Runs a call on the app, turning a panic into an error instead of unwinding into Dart.
 fn with_app(call: impl FnOnce(&mut App) -> Value) -> *mut c_char {
-    out(catch_unwind(AssertUnwindSafe(|| {
+    out(app_value(call))
+}
+
+fn app_value(call: impl FnOnce(&mut App) -> Value) -> Value {
+    catch_unwind(AssertUnwindSafe(|| {
         let guard = APP.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         on_app(guard, call)
     }))
-    .unwrap_or_else(|_| json!({ "ok": false, "error": "The core stopped unexpectedly." })))
+    .unwrap_or_else(|_| json!({ "ok": false, "error": "The core stopped unexpectedly." }))
+}
+
+/// `with_app`, for calls that wait on the network or the desktop agent's
+/// socket: run on a thread of the core's own. Dart signals the threads that
+/// run Dart (its profiler, in debug builds), and a signal arriving in a
+/// blocking read or connect ends it with "Interrupted system call".
+fn with_app_waiting(call: impl FnOnce(&mut App) -> Value + Send) -> *mut c_char {
+    out(std::thread::scope(|scope| {
+        scope
+            .spawn(|| app_value(call))
+            .join()
+            .unwrap_or_else(|_| json!({ "ok": false, "error": "The core stopped unexpectedly." }))
+    }))
 }
 
 /// `with_app`, but None instead of waiting while a slow call (a sync, say) has the app.
@@ -69,23 +88,32 @@ fn with_app_now(call: impl FnOnce(&mut App) -> Value) -> Option<*mut c_char> {
 }
 
 fn on_app(mut guard: MutexGuard<'_, Option<App>>, call: impl FnOnce(&mut App) -> Value) -> Value {
-    let app = guard.get_or_insert_with(|| App::open(Store::new(Store::default_dir()), secrets()));
-    if SLEEP_NOTICE.swap(false, Ordering::SeqCst) {
-        app.sleeping();
-    }
+    let app = guard.get_or_insert_with(|| {
+        let dir = Store::default_dir();
+        App::open(Store::new(&dir), secrets(&dir))
+    });
+    notices(app);
     let value = call(app);
-    if SLEEP_NOTICE.swap(false, Ordering::SeqCst) {
-        app.sleeping();
-    }
+    notices(app);
     value
 }
 
-fn secrets() -> Box<dyn SecretStore> {
+/// What the OS said while a slow call had the app.
+fn notices(app: &mut App) {
+    if SLEEP_NOTICE.swap(false, Ordering::SeqCst) {
+        app.sleeping();
+    }
+    if LEFT_NOTICE.swap(false, Ordering::SeqCst) {
+        app.left();
+    }
+}
+
+fn secrets(dir: &std::path::Path) -> Box<dyn SecretStore> {
     // Tests and CI keep the refresh token in memory, never in the OS's store.
     if std::env::var("PB_SECRETS").as_deref() == Ok("memory") {
         Box::new(MemorySecretStore::default())
     } else {
-        Box::new(OsSecretStore)
+        Box::new(OsSecretStore::new(dir))
     }
 }
 
@@ -161,7 +189,7 @@ pub unsafe extern "C" fn pb_open(dir: *const c_char, memory_secrets: bool) -> *m
     let secrets: Box<dyn SecretStore> = if memory_secrets {
         Box::new(MemorySecretStore::default())
     } else {
-        Box::new(OsSecretStore)
+        Box::new(OsSecretStore::new(std::path::Path::new(&dir)))
     };
     *APP.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) =
         Some(App::open(Store::new(dir), secrets));
@@ -206,7 +234,7 @@ fn method() -> &'static str {
 /// running), with the method's name.
 #[no_mangle]
 pub extern "C" fn pb_biometric_status() -> *mut c_char {
-    with_app(|app| {
+    with_app_waiting(|app| {
         let status = match app.biometric_status() {
             Ok(Status::SetUp) => "setUp",
             Ok(Status::NotSetUp) => "notSetUp",
@@ -231,7 +259,7 @@ pub extern "C" fn pb_start_agent() -> *mut c_char {
 /// Turns it on (the agent asks); `on` says whether the person agreed.
 #[no_mangle]
 pub extern "C" fn pb_biometric_enroll() -> *mut c_char {
-    with_app(|app| match app.enroll_biometric() {
+    with_app_waiting(|app| match app.enroll_biometric() {
         Ok(on) => json!({ "ok": true, "on": on }),
         Err(e) => failed(e),
     })
@@ -240,7 +268,7 @@ pub extern "C" fn pb_biometric_enroll() -> *mut c_char {
 /// Unlocks with it (the agent asks); `unlocked` is false if the person cancelled.
 #[no_mangle]
 pub extern "C" fn pb_biometric_unlock() -> *mut c_char {
-    with_app(|app| match app.unlock_with_biometric() {
+    with_app_waiting(|app| match app.unlock_with_biometric() {
         Ok(unlocked) => json!({ "ok": true, "unlocked": unlocked }),
         Err(e) => failed(e),
     })
@@ -249,7 +277,7 @@ pub extern "C" fn pb_biometric_unlock() -> *mut c_char {
 /// Turns it off, for the browser extension too.
 #[no_mangle]
 pub extern "C" fn pb_biometric_remove() -> *mut c_char {
-    with_app(|app| done(app.remove_biometric()))
+    with_app_waiting(|app| done(app.remove_biometric()))
 }
 
 #[no_mangle]
@@ -272,7 +300,7 @@ pub unsafe extern "C" fn pb_sign_in(
     password: *const c_char,
 ) -> *mut c_char {
     let (server, email, password) = (text(server), text(email), Zeroizing::new(text(password)));
-    with_app(|app| step(app.sign_in(&server, &email, &password)))
+    with_app_waiting(|app| step(app.sign_in(&server, &email, &password)))
 }
 
 /// # Safety
@@ -284,12 +312,12 @@ pub unsafe extern "C" fn pb_finish_sign_in(
     remember: bool,
 ) -> *mut c_char {
     let code = text(code);
-    with_app(|app| step(app.finish_sign_in(provider, &code, remember)))
+    with_app_waiting(|app| step(app.finish_sign_in(provider, &code, remember)))
 }
 
 #[no_mangle]
 pub extern "C" fn pb_send_email_code() -> *mut c_char {
-    with_app(|app| done(app.send_email_code()))
+    with_app_waiting(|app| done(app.send_email_code()))
 }
 
 /// # Safety
@@ -308,7 +336,7 @@ pub unsafe extern "C" fn pb_unlock(password: *const c_char) -> *mut c_char {
 
 #[no_mangle]
 pub extern "C" fn pb_sync() -> *mut c_char {
-    with_app(|app| done(app.sync()))
+    with_app_waiting(|app| done(app.sync()))
 }
 
 #[no_mangle]
@@ -317,6 +345,96 @@ pub extern "C" fn pb_lock() -> *mut c_char {
         app.lock();
         state(app)
     })
+}
+
+/// An item's value for the clipboard, for the Android app's native piece
+/// (android.rs). None while locked, while a slow call has the app, or if
+/// there's nothing to copy.
+#[cfg(target_os = "android")]
+pub(crate) fn value_for_copy(id: &str, what: &str) -> Option<Zeroizing<String>> {
+    let guard = match APP.try_lock() {
+        Ok(guard) => guard,
+        Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        Err(TryLockError::WouldBlock) => return None,
+    };
+    guard.as_ref()?.value(id, what).ok()
+}
+
+/// Opens the core on the Android app's folder, unless it's open already: the
+/// autofill service can start the app's process without its screens.
+#[cfg(target_os = "android")]
+pub(crate) fn open_if_closed(dir: &str) {
+    let mut guard = APP.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if guard.is_none() {
+        let secrets = Box::new(OsSecretStore::new(std::path::Path::new(dir)));
+        *guard = Some(App::open(Store::new(dir), secrets));
+    }
+}
+
+/// The logins for an Android app or the page a browser shows, for its
+/// autofill (android.rs): names and usernames only. `locked` while there's no
+/// open vault, and `busy` while a slow call has the app.
+#[cfg(target_os = "android")]
+pub(crate) fn fillable(package: &str, domain: &str) -> Value {
+    use crate::matching::Target;
+    let guard = match APP.try_lock() {
+        Ok(guard) => guard,
+        Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        Err(TryLockError::WouldBlock) => return json!({ "busy": true }),
+    };
+    let Some(app) = guard.as_ref() else {
+        return json!({ "locked": true, "signedOut": true });
+    };
+    let Some(vault) = app.vault() else {
+        let signed_out = matches!(app.state(), State::SignedOut { .. });
+        return json!({ "locked": true, "signedOut": signed_out });
+    };
+    let target = if domain.is_empty() {
+        Target::App(package)
+    } else {
+        Target::Website(domain)
+    };
+    let items: Vec<Value> = vault
+        .matching(&target)
+        .iter()
+        .map(|i| json!({ "id": i.id, "name": i.name, "username": i.username }))
+        .collect();
+    json!({ "locked": false, "items": items })
+}
+
+/// The unlocked vault's user key, for the Android app to seal for biometric
+/// unlock (android.rs). None while locked or busy.
+#[cfg(target_os = "android")]
+pub(crate) fn user_key_for_biometric() -> Option<Zeroizing<Vec<u8>>> {
+    let guard = match APP.try_lock() {
+        Ok(guard) => guard,
+        Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        Err(TryLockError::WouldBlock) => return None,
+    };
+    Some(Zeroizing::new(
+        guard.as_ref()?.vault()?.user_key().to_bytes().to_vec(),
+    ))
+}
+
+/// Opens the kept vault with the user key the Android app's biometric unlock
+/// opened (android.rs); the error's words otherwise.
+#[cfg(target_os = "android")]
+pub(crate) fn unlock_with_key_for_biometric(key: &[u8]) -> Result<(), String> {
+    let mut guard = match APP.try_lock() {
+        Ok(guard) => guard,
+        Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        Err(TryLockError::WouldBlock) => return Err("PassBundle is busy; try again.".into()),
+    };
+    let app = guard.as_mut().ok_or_else(|| Error::SignedOut.to_string())?;
+    let key = crate::crypto::SymmetricKey::from_bytes(key).map_err(|e| e.to_string())?;
+    match app.unlock_with_key(key) {
+        // Out of date (the account's keys changed): it's turned off.
+        Err(e @ Error::Refused(_)) => {
+            let _ = app.remove_biometric();
+            Err(e.to_string())
+        }
+        other => other.map_err(|e| e.to_string()),
+    }
 }
 
 fn unlocked(app: &App) -> bool {
@@ -366,6 +484,20 @@ pub extern "C" fn pb_tick() -> *mut c_char {
     .unwrap_or_else(|| out(json!({ "busy": true, "locked": false })))
 }
 
+/// The app left the screen (a phone's app switcher or home): locks now if the
+/// person chose "Immediately". `locked` says whether the vault is locked now.
+#[no_mangle]
+pub extern "C" fn pb_left() -> *mut c_char {
+    with_app_now(|app| {
+        app.left();
+        json!({ "busy": false, "locked": !unlocked(app) })
+    })
+    .unwrap_or_else(|| {
+        LEFT_NOTICE.store(true, Ordering::SeqCst);
+        out(json!({ "busy": true, "locked": false }))
+    })
+}
+
 /// The OS says the computer is about to sleep: locks now if the person chose
 /// that, or as soon as a slow call that has the app is done.
 #[no_mangle]
@@ -382,7 +514,7 @@ pub extern "C" fn pb_sleeping() -> *mut c_char {
 
 #[no_mangle]
 pub extern "C" fn pb_sign_out() -> *mut c_char {
-    with_app(|app| {
+    with_app_waiting(|app| {
         app.sign_out();
         state(app)
     })
@@ -548,7 +680,7 @@ pub unsafe extern "C" fn pb_totp(id: *const c_char) -> *mut c_char {
 pub unsafe extern "C" fn pb_save(id: *const c_char, draft: *const c_char) -> *mut c_char {
     let id = text(id);
     let draft_json = Zeroizing::new(text(draft));
-    with_app(|app| {
+    with_app_waiting(|app| {
         let d: Value = match serde_json::from_str(&draft_json) {
             Ok(d) => d,
             Err(e) => {
@@ -613,7 +745,7 @@ pub unsafe extern "C" fn pb_save(id: *const c_char, draft: *const c_char) -> *mu
 #[no_mangle]
 pub unsafe extern "C" fn pb_trash(id: *const c_char) -> *mut c_char {
     let id = text(id);
-    with_app(|app| done(app.trash(&id)))
+    with_app_waiting(|app| done(app.trash(&id)))
 }
 
 /// A new password for the editor (it goes into the field, so the person sees it).

@@ -2,6 +2,8 @@ allprojects {
     repositories {
         google()
         mavenCentral()
+        // The core's certificate checks' Kotlin half, checked (tools/android-core.sh).
+        maven { url = uri(rootDir.resolve("rustls-maven")) }
     }
 }
 

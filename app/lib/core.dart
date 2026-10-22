@@ -8,6 +8,7 @@ import 'dart:io';
 import 'dart:isolate';
 
 import 'package:ffi/ffi.dart';
+import 'package:flutter/services.dart';
 
 typedef _Str0 = Pointer<Utf8> Function();
 typedef _Str1 = Pointer<Utf8> Function(Pointer<Utf8>);
@@ -34,8 +35,13 @@ DynamicLibrary _open() {
   if (Platform.isMacOS) {
     return DynamicLibrary.open('$dir/../Frameworks/libpassbundle_core.dylib');
   }
+  if (Platform.isAndroid) return DynamicLibrary.open('libpassbundle_core.so');
   return DynamicLibrary.process();
 }
+
+/// A phone: biometric unlock is the phone's own, with no desktop agent or
+/// browser extension sharing it.
+final isPhone = Platform.isAndroid || Platform.isIOS;
 
 /// An answer from a call that can fail: ok, or the core's words.
 class Answer {
@@ -97,6 +103,7 @@ class Core {
   late final _used = _lib.lookupFunction<_Str0, _Str0>('pb_used');
   late final _tick = _lib.lookupFunction<_Str0, _Str0>('pb_tick');
   late final _sleeping = _lib.lookupFunction<_Str0, _Str0>('pb_sleeping');
+  late final _left = _lib.lookupFunction<_Str0, _Str0>('pb_left');
   late final _places = _lib.lookupFunction<_Str0, _Str0>('pb_places');
   late final _list = _lib.lookupFunction<_Str1, _Str1>('pb_list');
   late final _item = _lib.lookupFunction<_Str1, _Str1>('pb_item');
@@ -143,9 +150,21 @@ class Core {
 
   String version() => _answer(_version()) as String;
 
-  /// For tests and tools: the app on a folder of its own, the refresh token in memory.
-  Map<String, dynamic> openAt(String dir) =>
-      _with([dir], (p) => _answer(_openAt(p[0], true))) as Map<String, dynamic>;
+  /// The app on a folder of its own: Android's app folder, or a test's, with
+  /// the refresh token in memory for tests and tools.
+  Map<String, dynamic> openAt(String dir, {bool memorySecrets = true}) =>
+      _with([dir], (p) => _answer(_openAt(p[0], memorySecrets)))
+          as Map<String, dynamic>;
+
+  /// What only the phone's own code does (docs/phones.md, "Talking to the OS").
+  static const platform = MethodChannel('passbundle/platform');
+
+  /// Android keeps the vault in the app's own folder, which only Android knows.
+  static Future<void> openOnThisDevice() async {
+    if (!Platform.isAndroid) return;
+    final dir = await platform.invokeMethod<String>('filesDir');
+    Core().openAt(dir!, memorySecrets: false);
+  }
 
   /// "signedOut", "locked", or "unlocked", with "server" and "email".
   Map<String, dynamic> state() => _answer(_state()) as Map<String, dynamic>;
@@ -185,14 +204,23 @@ class Core {
         ], (p) => c._answer(c._save(p[0], p[1]))),
       );
 
-  /// Unlocking with Windows Hello or Touch ID, through the desktop agent:
+  /// Unlocking with Windows Hello or Touch ID, through the desktop agent, or
+  /// on Android with the phone's own biometrics, through the app's Kotlin:
   /// `status` is setUp, notSetUp, unavailable, or noAgent, and `method` its name.
-  static Future<Map<String, dynamic>> biometricStatus() async =>
+  static Future<Map<String, dynamic>> biometricStatus() async {
+    if (Platform.isAndroid) return _onPhone('biometricStatus');
+    return Map<String, dynamic>.from(
+      await Isolate.run(() {
+        final core = Core();
+        return core._answer(core._bioStatus()) as Map;
+      }),
+    );
+  }
+
+  /// A call to the phone's own code (MainActivity.kt), answered as the core would.
+  static Future<Map<String, dynamic>> _onPhone(String method) async =>
       Map<String, dynamic>.from(
-        await Isolate.run(() {
-          final core = Core();
-          return core._answer(core._bioStatus()) as Map;
-        }),
+        (await platform.invokeMethod<Map>(method)) ?? {'ok': false},
       );
 
   /// Starts the desktop agent installed next to the app if it isn't running
@@ -201,16 +229,25 @@ class Core {
       _background((c) => c._answer(c._startAgent()));
 
   /// Turns it on (the agent asks); `on` says whether the person agreed.
-  static Future<Answer> enrollBiometric() =>
-      _background((c) => c._answer(c._bioEnroll()));
+  static Future<Answer> enrollBiometric() async => Platform.isAndroid
+      ? Answer(await _onPhone('biometricEnroll'))
+      : _background((c) => c._answer(c._bioEnroll()));
 
   /// Unlocks with it; `unlocked` is false if the person cancelled.
-  static Future<Answer> unlockWithBiometric() =>
-      _background((c) => c._answer(c._bioUnlock()));
+  static Future<Answer> unlockWithBiometric() async => Platform.isAndroid
+      ? Answer(await _onPhone('biometricUnlock'))
+      : _background((c) => c._answer(c._bioUnlock()));
 
-  /// Turns it off, for the browser extension too.
-  static Future<Answer> removeBiometric() =>
-      _background((c) => c._answer(c._bioRemove()));
+  /// Turns it off, for the browser extension too (on a computer).
+  static Future<Answer> removeBiometric() async => Platform.isAndroid
+      ? Answer(await _onPhone('biometricRemove'))
+      : _background((c) => c._answer(c._bioRemove()));
+
+  /// For the phone tests: debug builds' stand-in for Android's biometric
+  /// prompt, which says yes (Biometric.kt). False in a release build.
+  static Future<bool> useBiometricStandIn(bool on) async =>
+      await platform.invokeMethod<bool>('biometricStandIn', {'on': on}) ??
+      false;
 
   /// For tests: the agent with this home folder and program, instead of the installed one.
   void useAgentHome(String home, String program) =>
@@ -241,6 +278,9 @@ class Core {
   Map<String, dynamic> tick() => _answer(_tick()) as Map<String, dynamic>;
 
   /// The OS says the computer is about to sleep: locks if the person chose that.
+  /// The app left the screen: locks if the person chose "Immediately" (phones).
+  Map<String, dynamic> left() => _answer(_left()) as Map<String, dynamic>;
+
   Map<String, dynamic> sleeping() =>
       _answer(_sleeping()) as Map<String, dynamic>;
 
@@ -258,11 +298,24 @@ class Core {
   String? reveal(String id, String what) =>
       _with([id, what], (p) => _answer(_reveal(p[0], p[1]))) as String?;
 
-  /// Copies without the value passing through Dart; secrets clear after 30 seconds.
-  Answer copy(String id, String what) => Answer(
-    _with([id, what], (p) => _answer(_copy(p[0], p[1])))
-        as Map<String, dynamic>,
-  );
+  /// Copies without the value passing through Dart; secrets clear after 30
+  /// seconds. On Android the app's Kotlin takes it from the core to the clipboard.
+  Future<Answer> copy(String id, String what) async {
+    if (Platform.isAndroid) {
+      final copied = await platform.invokeMethod<bool>('copy', {
+        'id': id,
+        'what': what,
+      });
+      return Answer({
+        'ok': copied == true,
+        if (copied != true) 'error': 'Couldn\'t copy that. Try again.',
+      });
+    }
+    return Answer(
+      _with([id, what], (p) => _answer(_copy(p[0], p[1])))
+          as Map<String, dynamic>,
+    );
+  }
 
   Map<String, dynamic>? totp(String id) =>
       _with([id], (p) => _answer(_totp(p[0]))) as Map<String, dynamic>?;
