@@ -12,7 +12,3 @@ STRIP_STYLE = non-global
 SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) DEBUG
 // The App Group and Keychain group the app shares with its AutoFill extension.
 CODE_SIGN_ENTITLEMENTS = Runner/Runner.entitlements
-// Simulator builds put their entitlements in the code signature, as device
-// builds do, not a section of the binary: the simulator's Settings and
-// AutoFill read them from the signature to offer the AutoFill extension.
-ENTITLEMENTS_DESTINATION[sdk=iphonesimulator*] = Signature
