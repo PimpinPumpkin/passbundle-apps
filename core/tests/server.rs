@@ -13,7 +13,7 @@ use passbundle_core::secrets::MemorySecretStore;
 use passbundle_core::server::{Device, Server, Session, SignIn, TwoFactor};
 use passbundle_core::store::Store;
 use passbundle_core::totp::Totp;
-use passbundle_core::vault::{Field, ItemDraft, Vault};
+use passbundle_core::vault::{Field, ItemDraft, ItemKind, Vault};
 use passbundle_core::Error;
 use serde_json::json;
 use zeroize::Zeroizing;
@@ -634,4 +634,59 @@ fn passkeys_are_made_and_sign_in() {
         .is_err());
     assert_eq!(app.vault().unwrap().items.len(), count);
     let _ = std::fs::remove_dir_all(dir);
+}
+
+/// An SSH key on the server comes through the core's sync: the core says
+/// which client version's format it reads (server::CLIENT_VERSION), and a
+/// server holds SSH keys back from a client that doesn't.
+#[test]
+fn an_ssh_key_comes_through_sync() {
+    let Some(server) = server() else { return };
+    let email = new_email("ssh");
+    sign_up(&server, &email);
+    let mut session = sign_in(&server, &email);
+    let key = session.user_key().clone();
+    let enc = |text: &str| json!(key.encrypt_str(text).to_string());
+    let (sync, _) = server.sync(&mut session).unwrap();
+    // As upstream's apps save one (type 5).
+    server
+        .save_item(
+            &mut session,
+            None,
+            json!({
+                "type": 5,
+                "encryptedFor": sync.profile.id,
+                "name": enc("Deploy key"),
+                "notes": null,
+                "favorite": false,
+                "reprompt": 0,
+                "folderId": null,
+                "organizationId": null,
+                "fields": [],
+                "sshKey": {
+                    "privateKey": enc("-----BEGIN OPENSSH PRIVATE KEY-----\nnot-a-real-key\n-----END OPENSSH PRIVATE KEY-----\n"),
+                    "publicKey": enc("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINotARealKeyNotARealKeyNotARealKey0000 deploy"),
+                    "keyFingerprint": enc("SHA256:not-a-real-fingerprint"),
+                },
+            }),
+            &[],
+        )
+        .unwrap();
+
+    let vault = open(&server, &mut session);
+    let item = vault
+        .items
+        .iter()
+        .find(|i| i.name == "Deploy key")
+        .expect("the SSH key came through sync");
+    assert_eq!(item.kind, ItemKind::SshKey);
+    let ssh = item.ssh_key.as_ref().unwrap();
+    assert_eq!(
+        ssh.fingerprint.as_deref(),
+        Some("SHA256:not-a-real-fingerprint")
+    );
+    assert!(ssh
+        .public_key
+        .as_deref()
+        .is_some_and(|k| k.starts_with("ssh-ed25519 ")));
 }

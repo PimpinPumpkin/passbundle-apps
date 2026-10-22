@@ -220,6 +220,25 @@ pub fn trust_only_for_tests(pem: &[u8]) {
     let _ = TEST_TRUST.set(pem.to_vec());
 }
 
+/// The upstream client version whose vault format the core reads (the web
+/// vault and extension PassBundle ships, passbundle-clients' base), sent with
+/// every call to the server (`Bitwarden-Client-Version`, upstream's wire
+/// name). The server holds back what an older client can't read: a client
+/// that doesn't say gets no SSH keys at all.
+pub const CLIENT_VERSION: &str = "2026.8.0";
+
+/// Says which client version's format the core reads, on every call.
+fn client_version(
+    mut request: ureq::http::Request<ureq::SendBody>,
+    next: ureq::middleware::MiddlewareNext,
+) -> std::result::Result<ureq::http::Response<ureq::Body>, ureq::Error> {
+    request.headers_mut().insert(
+        "Bitwarden-Client-Version",
+        ureq::http::HeaderValue::from_static(CLIENT_VERSION),
+    );
+    next.handle(request)
+}
+
 impl Server {
     pub fn new(url: &str, device: Device) -> Result<Server> {
         #[cfg(feature = "test-trust")]
@@ -256,6 +275,7 @@ impl Server {
             .timeout_global(Some(Duration::from_secs(30)))
             .user_agent(format!("PassBundle/{}", crate::version()))
             .tls_config(TlsConfig::builder().root_certs(roots).build())
+            .middleware(client_version)
             .build()
             .into();
         Ok(Server {
