@@ -928,8 +928,8 @@ pub(crate) fn write_attachment_to(id: &str, attachment_id: &str, fd: i32) -> Val
 
 /// The logins with a passkey for a site (its ID), for a phone's list of
 /// passkeys (docs/phones.md, "Passkeys"): `{locked}`, or `{items: [{id, name,
-/// userName, userDisplayName, credentialId, userHandle, reprompt}]}`, the IDs
-/// in base64url. Never a key.
+/// userName, userDisplayName, credentialId, userHandle, discoverable,
+/// reprompt}]}`, the IDs in base64url. Never a key.
 ///
 /// # Safety
 /// `rp_id` is null or a NUL-terminated UTF-8 string, valid for the call.
@@ -957,6 +957,8 @@ pub(crate) fn passkeys(rp_id: &str) -> Value {
                     "userDisplayName": passkey.user_display_name,
                     "credentialId": base64url(&raw),
                     "userHandle": passkey.user_handle,
+                    // A site that names no credential gets only these.
+                    "discoverable": passkey.discoverable,
                     "reprompt": item.kept.reprompt != 0,
                 }))
             })
