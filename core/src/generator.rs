@@ -32,6 +32,10 @@ pub struct Options {
     pub symbols: bool,
     /// Leave out characters that look alike (0 O, 1 l I).
     pub avoid_ambiguous: bool,
+    /// At least this many digits and symbols, when they're chosen (at least
+    /// one either way). An organization's policy can ask for more.
+    pub min_digits: usize,
+    pub min_symbols: usize,
     /// Passphrases: how many words, and what goes between them.
     pub words: usize,
     pub separator: String,
@@ -51,6 +55,8 @@ impl Default for Options {
             digits: true,
             symbols: true,
             avoid_ambiguous: true,
+            min_digits: 1,
+            min_symbols: 1,
             // EFF's advice: at least six words, about 77 bits.
             words: 6,
             separator: "-".into(),
@@ -74,31 +80,38 @@ pub fn password(options: &Options) -> Result<Zeroizing<String>> {
             .filter(|c| !(options.avoid_ambiguous && ambiguous.contains(*c)))
             .collect()
     };
+    // Each kind chosen, with how many of it the password needs at least.
     let mut classes = Vec::new();
     if options.uppercase {
-        classes.push(pick("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "IO"));
+        classes.push((pick("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "IO"), 1));
     }
     if options.lowercase {
-        classes.push(pick("abcdefghijklmnopqrstuvwxyz", "l"));
+        classes.push((pick("abcdefghijklmnopqrstuvwxyz", "l"), 1));
     }
     if options.digits {
-        classes.push(pick("0123456789", "01"));
+        classes.push((pick("0123456789", "01"), options.min_digits.clamp(1, 9)));
     }
     if options.symbols {
-        classes.push(pick("!@#$%^&*-_=+?", ""));
+        classes.push((pick("!@#$%^&*-_=+?", ""), options.min_symbols.clamp(1, 9)));
     }
     if classes.is_empty() {
         return Err(Error::Refused("choose at least one kind of character"));
     }
-    if !(classes.len()..=128).contains(&options.length) {
+    if !(shortest(options)..=128).contains(&options.length) {
         return Err(Error::Refused(
-            "a password needs a length from the number of kinds chosen to 128",
+            "a password needs a length from what it must include to 128",
         ));
     }
-    let all: Vec<char> = classes.iter().flatten().copied().collect();
+    let all: Vec<char> = classes
+        .iter()
+        .flat_map(|(class, _)| class)
+        .copied()
+        .collect();
     let mut chars: Vec<char> = classes
         .iter()
-        .map(|class| class[OsRng.gen_range(0..class.len())])
+        .flat_map(|(class, at_least)| {
+            (0..*at_least).map(|_| class[OsRng.gen_range(0..class.len())])
+        })
         .collect();
     while chars.len() < options.length {
         chars.push(all[OsRng.gen_range(0..all.len())]);
@@ -107,6 +120,20 @@ pub fn password(options: &Options) -> Result<Zeroizing<String>> {
     let out = Zeroizing::new(chars.iter().collect::<String>());
     zeroize::Zeroize::zeroize(&mut chars);
     Ok(out)
+}
+
+/// The shortest password that has everything the options ask for.
+pub fn shortest(options: &Options) -> usize {
+    [
+        (options.uppercase, 1),
+        (options.lowercase, 1),
+        (options.digits, options.min_digits.clamp(1, 9)),
+        (options.symbols, options.min_symbols.clamp(1, 9)),
+    ]
+    .iter()
+    .filter(|(chosen, _)| *chosen)
+    .map(|(_, at_least)| at_least)
+    .sum()
 }
 
 /// EFF's long word list: 7,776 words, so each word adds about 12.9 bits.
@@ -180,6 +207,44 @@ mod tests {
         assert_ne!(
             password(&Options::default()).unwrap(),
             password(&Options::default()).unwrap()
+        );
+    }
+
+    #[test]
+    fn has_at_least_the_digits_and_symbols_asked_for() {
+        let options = Options {
+            length: 12,
+            min_digits: 4,
+            min_symbols: 3,
+            ..Options::default()
+        };
+        assert_eq!(shortest(&options), 9);
+        for _ in 0..200 {
+            let p = password(&options).unwrap();
+            assert_eq!(p.chars().count(), 12);
+            assert!(
+                p.chars().filter(|c| c.is_ascii_digit()).count() >= 4,
+                "{}",
+                p.as_str()
+            );
+            assert!(
+                p.chars().filter(|c| !c.is_ascii_alphanumeric()).count() >= 3,
+                "{}",
+                p.as_str()
+            );
+        }
+        assert!(password(&Options {
+            length: 8,
+            ..options.clone()
+        })
+        .is_err());
+        // Minimums for a kind left out don't count.
+        assert_eq!(
+            shortest(&Options {
+                digits: false,
+                ..options
+            }),
+            5
         );
     }
 

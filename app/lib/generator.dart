@@ -32,7 +32,10 @@ class GeneratorDialog extends StatefulWidget {
 }
 
 class _GeneratorDialogState extends State<GeneratorDialog> {
-  late final Map<String, dynamic> options = widget.core.generatorOptions();
+  late Map<String, dynamic> options = widget.core.generatorOptions();
+
+  /// What the organizations require, which the choices can't go below.
+  late final Map<String, dynamic> policy = widget.core.generatorPolicy();
   late final separator = TextEditingController(
     text: options['separator'] as String? ?? '-',
   );
@@ -57,7 +60,26 @@ class _GeneratorDialogState extends State<GeneratorDialog> {
     final answer = widget.core.generate(options);
     made = answer.ok ? answer.body['password'] as String? : null;
     error = answer.error;
+    // The choices it used, held to the policy.
+    if (answer.body['options'] is Map) {
+      options = Map<String, dynamic>.from(answer.body['options'] as Map);
+    }
   }
+
+  bool required(String key) => policy[key] == true;
+
+  /// A kind of character the policy requires, itself or by a minimum count.
+  bool forced(String kind) =>
+      required(kind) ||
+      (kind == 'digits' && least('minDigits', 0) > 0) ||
+      (kind == 'symbols' && least('minSymbols', 0) > 0);
+
+  int least(String key, int floor) =>
+      ((policy[key] as num?)?.toInt() ?? 0).clamp(floor, 1 << 20);
+
+  bool get policySet => policy.entries.any(
+    (e) => e.value != null && e.value != false && e.value != 0,
+  );
 
   void choose(String key, Object value) => setState(() {
     options[key] = value;
@@ -67,9 +89,18 @@ class _GeneratorDialogState extends State<GeneratorDialog> {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final length = (options['length'] as num? ?? 20).toInt().clamp(4, 64);
-    final words = (options['words'] as num? ?? 6).toInt().clamp(3, 20);
+    final shortest = least('minLength', 4).clamp(4, 64);
+    final length = (options['length'] as num? ?? 20).toInt().clamp(
+      shortest,
+      64,
+    );
+    final fewestWords = least('minWords', 3).clamp(3, 20);
+    final words = (options['words'] as num? ?? 6).toInt().clamp(
+      fewestWords,
+      20,
+    );
     final kindsOn = _kinds.keys.where((k) => options[k] == true).length;
+    final onlyKind = policy['kind'] as String?;
     return AlertDialog(
       title: const Text('Generator'),
       content: SizedBox(
@@ -80,13 +111,29 @@ class _GeneratorDialogState extends State<GeneratorDialog> {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               SegmentedButton<String>(
-                segments: const [
-                  ButtonSegment(value: 'password', label: Text('Password')),
-                  ButtonSegment(value: 'passphrase', label: Text('Passphrase')),
+                segments: [
+                  ButtonSegment(
+                    value: 'password',
+                    label: const Text('Password'),
+                    enabled: onlyKind == null || onlyKind == 'password',
+                  ),
+                  ButtonSegment(
+                    value: 'passphrase',
+                    label: const Text('Passphrase'),
+                    enabled: onlyKind == null || onlyKind == 'passphrase',
+                  ),
                 ],
                 selected: {passphrase ? 'passphrase' : 'password'},
                 onSelectionChanged: (chosen) => choose('kind', chosen.first),
               ),
+              if (policySet)
+                Padding(
+                  padding: const EdgeInsets.only(top: 12),
+                  child: Text(
+                    'Your organization sets some of these.',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                ),
               const SizedBox(height: 16),
               Container(
                 padding: const EdgeInsets.fromLTRB(14, 6, 6, 6),
@@ -124,7 +171,7 @@ class _GeneratorDialogState extends State<GeneratorDialog> {
                 _Count(
                   label: 'Length',
                   value: length,
-                  min: 4,
+                  min: shortest,
                   max: 64,
                   onChanged: (v) => choose('length', v),
                 ),
@@ -133,8 +180,10 @@ class _GeneratorDialogState extends State<GeneratorDialog> {
                     contentPadding: EdgeInsets.zero,
                     title: Text(kind.value),
                     value: options[kind.key] == true,
-                    // At least one kind stays on.
-                    onChanged: options[kind.key] == true && kindsOn == 1
+                    // At least one kind stays on, and what the policy requires.
+                    onChanged:
+                        options[kind.key] == true &&
+                            (kindsOn == 1 || forced(kind.key))
                         ? null
                         : (on) => choose(kind.key, on),
                   ),
@@ -148,7 +197,7 @@ class _GeneratorDialogState extends State<GeneratorDialog> {
                 _Count(
                   label: 'Words',
                   value: words,
-                  min: 3,
+                  min: fewestWords,
                   max: 20,
                   onChanged: (v) => choose('words', v),
                 ),
@@ -165,13 +214,17 @@ class _GeneratorDialogState extends State<GeneratorDialog> {
                   contentPadding: EdgeInsets.zero,
                   title: const Text('Capitalize'),
                   value: options['capitalize'] == true,
-                  onChanged: (on) => choose('capitalize', on),
+                  onChanged: required('capitalize')
+                      ? null
+                      : (on) => choose('capitalize', on),
                 ),
                 SwitchListTile(
                   contentPadding: EdgeInsets.zero,
                   title: const Text('Include a number'),
                   value: options['includeNumber'] == true,
-                  onChanged: (on) => choose('includeNumber', on),
+                  onChanged: required('includeNumber')
+                      ? null
+                      : (on) => choose('includeNumber', on),
                 ),
               ],
             ],

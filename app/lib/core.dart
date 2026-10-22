@@ -118,6 +118,9 @@ class Core {
   late final _generatorOptions = _lib.lookupFunction<_Str0, _Str0>(
     'pb_generator_options',
   );
+  late final _generatorPolicy = _lib.lookupFunction<_Str0, _Str0>(
+    'pb_generator_policy',
+  );
   late final _free = _lib
       .lookupFunction<
         Void Function(Pointer<Utf8>),
@@ -361,9 +364,17 @@ class Core {
   Map<String, dynamic> generatorOptions() =>
       _answer(_generatorOptions()) as Map<String, dynamic>;
 
-  /// A new password or passphrase for the editor's field: `{ok, password}`,
-  /// or the words to show. Without options, the last choices; the choices
-  /// become the next ones.
+  /// The organizations' "Password generator" policy: `kind` (the only kind
+  /// allowed, or null), `minLength`, `uppercase`, `lowercase`, `digits`,
+  /// `symbols`, `minDigits`, `minSymbols`, `minWords`, `capitalize`, and
+  /// `includeNumber`.
+  Map<String, dynamic> generatorPolicy() =>
+      _answer(_generatorPolicy()) as Map<String, dynamic>;
+
+  /// A new password or passphrase for the editor's field: `{ok, password,
+  /// options}`, with the choices held to the organizations' policy, or the
+  /// words to show. Without options, the last choices; the choices become
+  /// the next ones.
   Answer generate([Map<String, dynamic>? options]) => Answer(
     _with([
       options == null ? 'null' : jsonEncode(options),

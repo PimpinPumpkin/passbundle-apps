@@ -14,6 +14,7 @@ use crate::clipboard;
 use crate::crypto::SymmetricKey;
 use crate::error::{Error, Result};
 use crate::generator;
+use crate::generator_policy::GeneratorPolicy;
 use crate::kdf::normalize_email;
 use crate::lock_policy::LockPolicy;
 use crate::secrets::SecretStore;
@@ -60,6 +61,7 @@ pub struct App {
     preferences: Preferences,
     /// The organizations' "Vault lock" policy, from the kept sync.
     policy: LockPolicy,
+    generator_policy: GeneratorPolicy,
     autolock: AutoLock,
 }
 
@@ -81,6 +83,7 @@ impl App {
             agent: None,
             preferences,
             policy: LockPolicy::default(),
+            generator_policy: GeneratorPolicy::default(),
             autolock: AutoLock::new(Instant::now(), SystemTime::now()),
         }
     }
@@ -201,10 +204,14 @@ impl App {
                 user_key: vault.user_key().clone(),
             });
         self.vault = Some(vault);
-        self.policy = self
-            .store
-            .sync()
-            .map(|text| LockPolicy::from_sync(&text))
+        let kept = self.store.sync();
+        self.policy = kept
+            .as_deref()
+            .map(LockPolicy::from_sync)
+            .unwrap_or_default();
+        self.generator_policy = kept
+            .as_deref()
+            .map(GeneratorPolicy::from_sync)
             .unwrap_or_default();
         self.autolock = AutoLock::new(Instant::now(), SystemTime::now());
     }
@@ -309,6 +316,7 @@ impl App {
         };
         self.store.save_sync(&text)?;
         self.policy = LockPolicy::from_sync(&text);
+        self.generator_policy = GeneratorPolicy::from_sync(&text);
         // The server may have issued a new refresh token.
         self.secrets
             .keep(&settings.server, &settings.email, &session.refresh_token);
@@ -340,16 +348,28 @@ impl App {
         }
     }
 
-    /// The generator's last choices, kept on this device.
+    /// The generator's last choices, kept on this device, held to the
+    /// organizations' policy.
     pub fn generator_options(&self) -> generator::Options {
-        self.store.generator_options()
+        self.generator_policy.apply(&self.store.generator_options())
     }
 
-    /// A new password or passphrase; the choices become the next defaults.
-    pub fn generate(&mut self, options: &generator::Options) -> Result<Zeroizing<String>> {
-        let made = generator::generate(options)?;
-        self.store.save_generator_options(options)?;
-        Ok(made)
+    /// The organizations' "Password generator" policy (docs/core.md, "New passwords").
+    pub fn generator_policy(&self) -> GeneratorPolicy {
+        self.generator_policy
+    }
+
+    /// A new password or passphrase, from the choices held to the policy,
+    /// which become the next choices. Answers what it made, and the choices
+    /// it made it with.
+    pub fn generate(
+        &mut self,
+        options: &generator::Options,
+    ) -> Result<(Zeroizing<String>, generator::Options)> {
+        let held = self.generator_policy.apply(options);
+        let made = generator::generate(&held)?;
+        self.store.save_generator_options(&held)?;
+        Ok((made, held))
     }
 
     pub fn set_preferences(&mut self, preferences: Preferences) -> Result<()> {

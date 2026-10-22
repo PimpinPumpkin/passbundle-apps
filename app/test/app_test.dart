@@ -186,6 +186,78 @@ void main() {
   );
 
   testWidgets(
+    'the generator holds to an organization\'s Password generator policy',
+    (tester) async {
+      setSize(tester, const Size(1280, 800));
+      openSample(
+        policies: [
+          {
+            'id': 'p-generator',
+            'organizationId': 'o',
+            'type': 2,
+            'enabled': true,
+            'data': {
+              'overridePasswordType': 'passphrase',
+              'minNumberWords': 8,
+              'capitalize': true,
+            },
+            'object': 'policy',
+          },
+        ],
+      );
+      await tester.pumpWidget(const PassBundleApp());
+      await tester.enterText(find.byType(TextField), samplePassword);
+      await tester.tap(find.text('Unlock'));
+      await pumpUntil(tester, find.text('Backup service'));
+      // Syncing finishes (it asks to sign in again) before anything settles.
+      await pumpUntil(
+        tester,
+        find.textContaining('Sign in again to get changes'),
+      );
+      await tester.tap(find.text('Backup service'));
+      await tester.pump();
+      await tester.tap(find.byTooltip('Edit'));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byTooltip('Generate a password'));
+      await tester.pumpAndSettle();
+      expect(
+        find.text('Your organization sets some of these.'),
+        findsOneWidget,
+      );
+      // A passphrase only, of at least 8 capitalized words.
+      expect(find.text('Use this passphrase'), findsOneWidget);
+      await tester.tap(
+        find.descendant(
+          of: find.byType(SegmentedButton<String>),
+          matching: find.text('Password'),
+        ),
+        warnIfMissed: false,
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Use this passphrase'), findsOneWidget);
+      await tester.enterText(
+        find.widgetWithText(TextField, 'Between words'),
+        ' ',
+      );
+      await tester.pumpAndSettle();
+      final made = tester
+          .widget<SelectableText>(find.byKey(const Key('generated')))
+          .data!;
+      expect(made.split(' '), hasLength(8));
+      expect(made, matches(RegExp(r'^([A-Z][a-z-]+ ){7}[A-Z][a-z-]+$')));
+      expect(find.text('8'), findsOneWidget);
+      final capitalize = tester.widget<SwitchListTile>(
+        find.widgetWithText(SwitchListTile, 'Capitalize'),
+      );
+      expect(capitalize.value, isTrue);
+      expect(capitalize.onChanged, isNull);
+      await tester.tap(find.text('Cancel').last);
+      await tester.pumpAndSettle();
+    },
+  );
+
+  testWidgets(
     'on a phone-width window, a header has the theme and Lock, and an item opens on its own page',
     (tester) async {
       setSize(tester, const Size(390, 844));
