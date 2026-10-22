@@ -85,6 +85,25 @@ tap() {
   return 1
 }
 
+# A web page's Email field (WebSignInActivity), however this Android's
+# WebView shows it, tapped.
+web_field() {
+  local at
+  for _ in $(seq 30); do
+    at=$(where "id=username")
+    [ -n "$at" ] || at=$(where "^Email$")
+    if [ -n "$at" ]; then
+      # shellcheck disable=SC2086
+      a shell input tap $at
+      return 0
+    fi
+    sleep 1
+  done
+  echo "The page's Email field never showed up." >&2
+  screen | grep -oE '(text|resource-id|content-desc)="[^"]+"' | sort -u | head -40 >&2
+  return 1
+}
+
 # Waits up to 30 seconds for something to be on screen.
 shown() {
   for _ in $(seq 30); do
@@ -151,6 +170,18 @@ shown "^autofill@example.test$"
 tap "id=com.passbundle.autofilltest:id/sign_in"
 shown "^Signed in as autofill@example.test, password 28 characters$"
 echo "Filled: signed in as autofill@example.test, with the 28-character password from the vault."
+
+echo "A sign-in form on a web page in an app's own WebView"
+a shell am force-stop com.passbundle.autofilltest
+a shell am start -W -n com.passbundle.autofilltest/.WebSignInActivity --es site https://elsewhere.test/ > /dev/null
+web_field
+# PassBundle reads the page's form, attributes without values and all: the
+# app's own login, never a website's for a page an app shows.
+shown "^Autofill test app"
+[ -z "$(where '^Bank website')" ] || { echo "A website's login was offered to a page in an app's WebView." >&2; exit 1; }
+[ -n "$(a shell pidof com.passbundle.app | tr -d '\r')" ] || { echo "PassBundle stopped while reading the page." >&2; exit 1; }
+a shell am force-stop com.passbundle.autofilltest
+echo "Offered: the app's own login on a web page in it, and PassBundle kept running."
 
 # Android 10 doesn't pass autofill a web domain an app sets on its own views
 # (there only a WebView gives one), so this screen can't say it's a website
