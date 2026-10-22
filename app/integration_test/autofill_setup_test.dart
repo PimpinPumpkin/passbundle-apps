@@ -147,6 +147,9 @@ void main() {
       await tester.tap(find.byTooltip('Settings'));
       await pumpUntil(tester, find.text('Browsers you trust for autofill'));
       expect(find.text('com.passbundle.autofilltest'), findsOneWidget);
+      // Down Settings as far as it (a small screen shows only the top).
+      await tester.ensureVisible(find.text('Stop trusting'));
+      await tester.pump(const Duration(milliseconds: 400));
       await tester.tap(find.text('Stop trusting'));
       await pumpUntil(tester, find.text('Close'));
       for (var i = 0; i < 50; i++) {
