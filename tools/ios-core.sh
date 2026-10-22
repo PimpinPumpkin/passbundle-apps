@@ -2,8 +2,9 @@
 # Builds the core for iOS (docs/phones.md, "The core on phones"), or builds its
 # tests and runs them on an iOS simulator.
 #
-#   tools/ios-core.sh build   # PassBundleCore.xcframework (iPhones and the simulator) into app/ios/
-#   tools/ios-core.sh test    # the core's tests, on a booted (or newly booted) iPhone simulator
+#   tools/ios-core.sh build       # PassBundleCore.xcframework (iPhones and the simulator) into app/ios/
+#   tools/ios-core.sh test        # the core's tests, on a booted (or newly booted) iPhone simulator
+#   tools/ios-core.sh simulator   # that simulator's id (tools/ios-app-test.sh)
 #
 # Needs Xcode and the Rust targets (rustup target add aarch64-apple-ios
 # aarch64-apple-ios-sim). The app links the core statically: iOS apps can't
@@ -13,6 +14,25 @@ cd "$(dirname "$0")/.."
 
 # iOS 17, the oldest the apps support.
 export IPHONEOS_DEPLOYMENT_TARGET=17.0
+
+# A booted iPhone simulator, or one on the newest iOS, booted now.
+simulator() {
+  local device
+  device=$(xcrun simctl list devices booted -j | python3 -c 'import json, sys
+devices = [d for ds in json.load(sys.stdin)["devices"].values() for d in ds if d["name"].startswith("iPhone")]
+print(devices[0]["udid"] if devices else "")')
+  if [ -z "$device" ]; then
+    device=$(xcrun simctl list devices available -j | python3 -c 'import json, sys
+runtimes = json.load(sys.stdin)["devices"]
+ios = sorted((r for r in runtimes if ".iOS-" in r), key=lambda r: [int(p) for p in r.rsplit(".iOS-", 1)[1].split("-")])
+devices = [d for d in runtimes[ios[-1]] if d["name"].startswith("iPhone")] if ios else []
+print(devices[0]["udid"] if devices else "")')
+    [ -n "$device" ] || { echo "No iPhone simulator." >&2; exit 1; }
+    xcrun simctl boot "$device" > /dev/null
+    xcrun simctl bootstatus "$device" > /dev/null
+  fi
+  echo "$device"
+}
 
 command=${1:-build}
 case "$command" in
@@ -39,20 +59,7 @@ for line in sys.stdin:
     m = json.loads(line)
     if m.get("reason") == "compiler-artifact" and m.get("executable") and m["profile"]["test"]:
         print(m["executable"])')
-    # A booted iPhone simulator, or the newest one, booted now.
-    device=$(xcrun simctl list devices booted -j | python3 -c 'import json, sys
-devices = [d for ds in json.load(sys.stdin)["devices"].values() for d in ds if d["name"].startswith("iPhone")]
-print(devices[0]["udid"] if devices else "")')
-    if [ -z "$device" ]; then
-      device=$(xcrun simctl list devices available -j | python3 -c 'import json, sys
-runtimes = json.load(sys.stdin)["devices"]
-ios = sorted((r for r in runtimes if ".iOS-" in r), key=lambda r: [int(p) for p in r.rsplit(".iOS-", 1)[1].split("-")])
-devices = [d for d in runtimes[ios[-1]] if d["name"].startswith("iPhone")] if ios else []
-print(devices[0]["udid"] if devices else "")')
-      [ -n "$device" ] || { echo "No iPhone simulator." >&2; exit 1; }
-      xcrun simctl boot "$device"
-      xcrun simctl bootstatus "$device" > /dev/null
-    fi
+    device=$(simulator)
     xcrun simctl getenv "$device" SIMULATOR_RUNTIME_VERSION 2> /dev/null | sed 's/^/iOS /' || true
     failed=0
     for program in $programs; do
@@ -64,8 +71,11 @@ print(devices[0]["udid"] if devices else "")')
     done
     exit $failed
     ;;
+  simulator)
+    simulator
+    ;;
   *)
-    echo "Usage: $0 build | test" >&2
+    echo "Usage: $0 build | test | simulator" >&2
     exit 1
     ;;
 esac

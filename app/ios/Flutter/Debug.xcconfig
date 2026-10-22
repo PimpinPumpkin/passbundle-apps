@@ -1,1 +1,12 @@
 #include "Generated.xcconfig"
+
+// The core, linked in whole so Dart finds its functions in the process
+// (DynamicLibrary.process()), with what it uses of iOS. tools/ios-core.sh
+// builds it.
+OTHER_LDFLAGS[sdk=iphoneos*] = $(inherited) -force_load $(PROJECT_DIR)/PassBundleCore.xcframework/ios-arm64/libpassbundle_core.a -framework Security -framework CoreFoundation
+OTHER_LDFLAGS[sdk=iphonesimulator*] = $(inherited) -force_load $(PROJECT_DIR)/PassBundleCore.xcframework/ios-arm64-simulator/libpassbundle_core.a -framework Security -framework CoreFoundation
+// Release builds keep the names of the core's functions, which Dart looks up.
+STRIP_STYLE = non-global
+// Debug builds only: Swift's `#if DEBUG`, for the tests' stand-in for the
+// Face ID prompt (AppDelegate.swift). Release builds never have it.
+SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) DEBUG

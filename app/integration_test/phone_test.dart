@@ -1,9 +1,10 @@
-// The app on a real Android phone or emulator (docs/phones.md, "Order and
-// tests"), with the real core: it opens the vault kept in the app's own
-// folder, unlocks it, copies a password straight from the core to the
-// clipboard through Kotlin, locks, and checks certificates with Android's own
-// verifier. Run it with tools/android-app-test.sh, which makes fixtures.g.dart
-// (the sample vault and a throwaway self-signed certificate).
+// The app on a real phone, an Android emulator, or an iPhone simulator
+// (docs/phones.md, "Order and tests"), with the real core: it opens the vault
+// kept in the app's own folder, unlocks it, copies a password straight from
+// the core to the clipboard through the app's Kotlin or Swift, locks, and
+// checks certificates with the OS's own verifier. Run it with
+// tools/android-app-test.sh or tools/ios-app-test.sh, which make
+// fixtures.g.dart (the sample vault and a throwaway self-signed certificate).
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -78,7 +79,8 @@ void main() {
 
       // Back to the list, where the header has Lock.
       await tester.pageBack();
-      await pumpUntil(tester, find.byTooltip('Lock'));
+      // Past the way back (iOS's is slower), where Lock can be tapped.
+      await pumpUntil(tester, find.byTooltip('Lock').hitTestable());
       await tester.tap(find.byTooltip('Lock'));
       await pumpUntil(tester, find.text('Unlock PassBundle'));
       expect(find.text('Backup service'), findsNothing);
@@ -127,7 +129,7 @@ void main() {
   );
 
   testWidgets(
-    'signs in to a real server, and the Keystore keeps the session across a restart',
+    'signs in to a real server, and the Keystore or Keychain keeps the session across a restart',
     (tester) async {
       // From nothing kept on the phone.
       final dir = (await Core.platform.invokeMethod<String>('filesDir'))!;
@@ -148,13 +150,18 @@ void main() {
       await tester.tap(find.text('Sign in'));
       await pumpUntil(tester, find.text('Saved before the phone signed in'));
 
-      // Kept sealed by the Keystore: one file, of the IV, ciphertext, and tag,
-      // not the token (which is printable base64) as text.
-      final tokens = Directory('$dir/tokens').listSync();
-      expect(tokens, hasLength(1));
-      final sealed = (tokens.single as File).readAsBytesSync();
-      expect(sealed.length, greaterThan(12 + 16));
-      expect(sealed.any((b) => b < 0x20 || b > 0x7e), isTrue);
+      if (Platform.isAndroid) {
+        // Kept sealed by the Keystore: one file, of the IV, ciphertext, and
+        // tag, not the token (which is printable base64) as text.
+        final tokens = Directory('$dir/tokens').listSync();
+        expect(tokens, hasLength(1));
+        final sealed = (tokens.single as File).readAsBytesSync();
+        expect(sealed.length, greaterThan(12 + 16));
+        expect(sealed.any((b) => b < 0x20 || b > 0x7e), isTrue);
+      } else {
+        // In the Keychain, never in the app's folder.
+        expect(Directory('$dir/tokens').existsSync(), isFalse);
+      }
 
       // A restart: the core opens again from only what's kept. The vault
       // unlocks, and it syncs with the kept session, without signing in.
@@ -173,7 +180,7 @@ void main() {
   testWidgets(
     'turns on biometric unlock, unlocks with it, and signing out turns it off',
     (tester) async {
-      // Debug builds' stand-in for Android's prompt says yes; the real
+      // Debug builds' stand-in for the phone's prompt says yes; the real
       // prompt is checked by hand on a real phone (docs/phones.md).
       expect(await Core.useBiometricStandIn(true), isTrue);
       addTearDown(() => Core.useBiometricStandIn(false));
@@ -206,7 +213,11 @@ void main() {
               w.value,
         ),
       );
-      expect(File('$dir/biometric.sealed').existsSync(), isTrue);
+      // Sealed by the Keystore in the app's folder, or in the Keychain.
+      if (Platform.isAndroid) {
+        expect(File('$dir/biometric.sealed').existsSync(), isTrue);
+      }
+      expect((await Core.biometricStatus())['status'], 'setUp');
       await tester.tap(find.text('Close'));
       await tester.pump(const Duration(milliseconds: 400));
 
@@ -223,7 +234,9 @@ void main() {
       await pumpUntil(tester, find.text('Sign out?'));
       await tester.tap(find.widgetWithText(FilledButton, 'Sign out'));
       await pumpUntil(tester, find.text('Sign in to PassBundle'));
-      expect(File('$dir/biometric.sealed').existsSync(), isFalse);
+      if (Platform.isAndroid) {
+        expect(File('$dir/biometric.sealed').existsSync(), isFalse);
+      }
       expect((await Core.biometricStatus())['status'], 'notSetUp');
     },
   );

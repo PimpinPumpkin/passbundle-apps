@@ -282,7 +282,12 @@ impl App {
             crate::android::remove_biometric();
             Ok(())
         }
-        #[cfg(not(target_os = "android"))]
+        #[cfg(all(target_os = "ios", feature = "ffi"))]
+        {
+            crate::ffi::remove_biometric();
+            Ok(())
+        }
+        #[cfg(not(any(target_os = "android", all(target_os = "ios", feature = "ffi"))))]
         self.agent()?.remove()
     }
 
