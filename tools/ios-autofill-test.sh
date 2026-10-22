@@ -112,8 +112,22 @@ for root in json.load(sys.stdin).get("testNodes", []):
   return 1
 }
 
+echo "iOS's credential providers, as PlugInKit has them:"
+providers() {
+  xcrun simctl spawn "$device" pluginkit -m -A -v -p com.apple.authentication-services-credential-provider-ui 2>&1 | sed 's/^/  /' || true
+}
+providers
+
 echo "PassBundle on for AutoFill, in Settings"
-ui_test testTurnOnInSettings
+settings_failed=0
+if ! ui_test testTurnOnInSettings; then
+  # Turned on as Settings would (PlugInKit's election), so the steps after
+  # still run and say what they find; the job fails at the end anyway.
+  settings_failed=1
+  echo "Settings didn't turn PassBundle on; turning it on through PlugInKit to go on." >&2
+  xcrun simctl spawn "$device" pluginkit -e use -i com.passbundle.app.autofill || true
+  providers
+fi
 touch "$(folder)/autofill-enabled"
 reached autofill-suggested "iOS never took PassBundle's suggestions."
 
@@ -126,3 +140,4 @@ echo "Filled: signed in as phone@example.test, with the 25-character password fr
 touch "$(folder)/autofill-done"
 wait "$setup"
 tail -3 "$setup_log"
+[ "$settings_failed" = 0 ] || { echo "Settings didn't offer PassBundle for AutoFill (above)." >&2; exit 1; }
