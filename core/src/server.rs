@@ -550,6 +550,37 @@ impl Server {
         })
     }
 
+    /// Makes a folder; `name` is already encrypted. Answers its id.
+    pub fn create_folder(&self, session: &mut Session, name: &str) -> Result<String> {
+        let answer = self.call(
+            session,
+            "POST",
+            "/api/folders",
+            Some(json!({ "name": name })),
+        )?;
+        answer["id"]
+            .as_str()
+            .map(str::to_owned)
+            .ok_or_else(|| Error::Malformed("a folder answer with no id".into()))
+    }
+
+    /// Renames a folder; `name` is already encrypted.
+    pub fn rename_folder(&self, session: &mut Session, id: &str, name: &str) -> Result<()> {
+        self.call(
+            session,
+            "PUT",
+            &format!("/api/folders/{id}"),
+            Some(json!({ "name": name })),
+        )
+        .map(|_| ())
+    }
+
+    /// Deletes a folder; its items stay, in no folder.
+    pub fn delete_folder(&self, session: &mut Session, id: &str) -> Result<()> {
+        self.call(session, "DELETE", &format!("/api/folders/{id}"), None)
+            .map(|_| ())
+    }
+
     /// Moves an item to the trash.
     pub fn trash_item(&self, session: &mut Session, id: &str) -> Result<()> {
         self.call(session, "PUT", &format!("/api/ciphers/{id}/delete"), None)

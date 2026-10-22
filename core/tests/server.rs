@@ -420,3 +420,51 @@ fn an_attachment_downloads_and_opens() {
         &contents[..]
     );
 }
+
+/// Folders: made, renamed, and deleted through the app, which syncs after
+/// each; an item in a deleted folder stays, in no folder.
+#[test]
+fn folders_are_made_renamed_and_deleted() {
+    let Some(server) = server() else { return };
+    let url = std::env::var("PB_TEST_SERVER").unwrap();
+    let email = new_email("folders");
+    sign_up(&server, &email);
+    let dir =
+        std::env::temp_dir().join(format!("pb-core-folders-{}", uuid::Uuid::new_v4().simple()));
+    let mut app = App::open(Store::new(&dir), Box::new(MemorySecretStore::default()));
+    app.sign_in(&url, &email, PASSWORD).unwrap();
+
+    assert_eq!(
+        app.create_folder("   ").err(),
+        Some(Error::Refused("a folder needs a name"))
+    );
+    let id = app.create_folder("  Work ").unwrap();
+    assert_eq!(
+        app.vault().unwrap().folders.get(&id).map(String::as_str),
+        Some("Work")
+    );
+    app.save(
+        None,
+        &ItemDraft {
+            name: "Filed".into(),
+            folder_id: Some(id.clone()),
+            ..ItemDraft::default()
+        },
+        &[],
+    )
+    .unwrap();
+
+    app.rename_folder(&id, "Clients").unwrap();
+    assert_eq!(
+        app.vault().unwrap().folders.get(&id).map(String::as_str),
+        Some("Clients")
+    );
+    assert!(app.rename_folder("no-such-folder", "X").is_err());
+
+    app.delete_folder(&id).unwrap();
+    let vault = app.vault().unwrap();
+    assert!(vault.folders.is_empty());
+    let item = vault.items.iter().find(|i| i.name == "Filed").unwrap();
+    assert_eq!(item.folder_id, None);
+    let _ = std::fs::remove_dir_all(dir);
+}
