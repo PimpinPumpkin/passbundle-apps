@@ -193,6 +193,37 @@ impl EncString {
     }
 }
 
+/// Opens an attachment's file (docs/core.md, "Attachments"): upstream's
+/// file format, the type byte 2, the IV, the MAC over the IV and ciphertext,
+/// then the ciphertext. The MAC is checked first, in constant time, as for
+/// strings, and older or unknown formats are refused the same way.
+pub fn decrypt_file(file: &[u8], key: &SymmetricKey) -> Result<Zeroizing<Vec<u8>>> {
+    let Some((&kind, rest)) = file.split_first() else {
+        return Err(Error::Damaged("an empty file"));
+    };
+    match kind {
+        2 => {}
+        0 => return Err(Error::Refused("it's an old format with no integrity check")),
+        1 => return Err(Error::Refused("it's an old format with a 128-bit key")),
+        3..=6 => return Err(Error::Refused("it isn't a file's format")),
+        _ => return Err(Error::NewerApp),
+    }
+    if rest.len() < 16 + 32 + 16 {
+        return Err(Error::Damaged("a file too short to be one"));
+    }
+    let (iv, rest) = rest.split_at(16);
+    let (mac, data) = rest.split_at(32);
+    if data.len() % 16 != 0 {
+        return Err(Error::Damaged("a ciphertext of the wrong length"));
+    }
+    EncString::Aes {
+        iv: iv.try_into().expect("16 bytes"),
+        data: data.to_vec(),
+        mac: mac.try_into().expect("32 bytes"),
+    }
+    .decrypt(key)
+}
+
 impl fmt::Display for EncString {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

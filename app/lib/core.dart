@@ -94,6 +94,9 @@ class Core {
     'pb_send_email_code',
   );
   late final _unlock = _lib.lookupFunction<_Str1, _Str1>('pb_unlock');
+  late final _saveAttachment = _lib.lookupFunction<_Str2, _Str2>(
+    'pb_save_attachment',
+  );
   late final _confirmMasterPassword = _lib.lookupFunction<_Str2, _Str2>(
     'pb_confirm_master_password',
   );
@@ -219,6 +222,16 @@ class Core {
   static Future<Answer> unlock(String password) => _background(
     (c) => c._with([password], (p) => c._answer(c._unlock(p[0]))),
   );
+
+  /// Downloads one of an item's attachments, opens it, and saves it to the
+  /// Downloads folder (docs/core.md, "Attachments"): `{ok, path}`.
+  static Future<Answer> saveAttachment(String id, String attachmentId) =>
+      _background(
+        (c) => c._with([
+          id,
+          attachmentId,
+        ], (p) => c._answer(c._saveAttachment(p[0], p[1]))),
+      );
 
   /// The master password, for an item that asks for it again (docs/core.md,
   /// "Asking for the master password again"): then its secrets may be used.

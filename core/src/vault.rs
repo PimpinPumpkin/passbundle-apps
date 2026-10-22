@@ -84,6 +84,18 @@ pub struct CipherData {
     pub ssh_key: Option<SshKeyData>,
     pub card: Option<CardData>,
     pub identity: Option<IdentityData>,
+    #[serde(default)]
+    pub attachments: Option<Vec<AttachmentData>>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentData {
+    pub id: String,
+    pub file_name: Option<String>,
+    pub key: Option<String>,
+    /// Bytes, as a number or a string of one.
+    pub size: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -247,8 +259,19 @@ pub struct Item {
     pub identity: Option<Identity>,
     /// An SSH key's, for an SSH key.
     pub ssh_key: Option<SshKey>,
+    /// Its attachments (docs/core.md, "Attachments"), each with its file's key.
+    pub attachments: Vec<Attachment>,
     /// What an edit keeps that the app doesn't show or change.
     pub kept: Kept,
+}
+
+/// An attachment: its file's name and size, and the key its file opens with.
+/// The file itself stays on the server until someone saves it.
+pub struct Attachment {
+    pub id: String,
+    pub name: String,
+    pub size: Option<u64>,
+    pub key: SymmetricKey,
 }
 
 /// An SSH key (docs/core.md, "Items"): its public key and fingerprint, and
@@ -1051,6 +1074,22 @@ impl Keyring {
             }),
             _ => None,
         };
+        // A file with no key of its own (very old ones) is under the item's key.
+        let mut attachments = Vec::new();
+        for a in c.attachments.iter().flatten() {
+            attachments.push(Attachment {
+                id: a.id.clone(),
+                name: open_plain(&a.file_name)?.unwrap_or_default(),
+                size: a.size.as_ref().and_then(|s| {
+                    s.as_u64()
+                        .or_else(|| s.as_str().and_then(|t| t.parse().ok()))
+                }),
+                key: match &a.key {
+                    Some(wrapped) => EncString::parse(wrapped)?.decrypt_key(&key)?,
+                    None => key.clone(),
+                },
+            });
+        }
         let ssh_key = match &c.ssh_key {
             Some(d) if ItemKind::from(c.kind) == ItemKind::SshKey => Some(SshKey {
                 public_key: open_plain(&d.public_key)?,
@@ -1119,6 +1158,7 @@ impl Keyring {
             card,
             identity,
             ssh_key,
+            attachments,
             kept,
         })
     }

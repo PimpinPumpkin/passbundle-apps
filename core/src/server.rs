@@ -114,6 +114,9 @@ struct TokenResponse {
     key: Option<String>,
 }
 
+/// The largest attachment upstream's servers take: 500 MB.
+const MAX_ATTACHMENT: u64 = 500 * 1024 * 1024;
+
 pub struct Server {
     base: String,
     agent: Agent,
@@ -459,6 +462,51 @@ impl Server {
             ),
             None => self.call(session, "POST", "/api/ciphers", Some(encrypted)),
         }
+    }
+
+    /// An attachment's file, as the server stores it (still encrypted): the
+    /// server says where it is, and it's fetched from there without the
+    /// session's token. Only from the server's own address, or over HTTPS.
+    pub fn attachment(
+        &self,
+        session: &mut Session,
+        cipher_id: &str,
+        attachment_id: &str,
+    ) -> Result<Vec<u8>> {
+        let answer = self.call(
+            session,
+            "GET",
+            &format!("/api/ciphers/{cipher_id}/attachment/{attachment_id}"),
+            None,
+        )?;
+        let url = answer["url"]
+            .as_str()
+            .ok_or_else(|| Error::Malformed("an attachment answer with no address".into()))?;
+        let url = if url.starts_with('/') {
+            self.url(url)
+        } else {
+            url.to_owned()
+        };
+        if !(url.starts_with(&format!("{}/", self.base)) || url.starts_with("https://")) {
+            return Err(Error::Refused("an attachment's address that isn't secure"));
+        }
+        let mut response = self
+            .agent
+            .get(&url)
+            .call()
+            .map_err(|e| Error::Network(e.to_string()))?;
+        let status = response.status().as_u16();
+        if !(200..300).contains(&status) {
+            return Err(Error::Server(format!(
+                "the file couldn't be downloaded ({status})"
+            )));
+        }
+        response
+            .body_mut()
+            .with_config()
+            .limit(MAX_ATTACHMENT)
+            .read_to_vec()
+            .map_err(|e| Error::Network(e.to_string()))
     }
 
     /// Moves an item to the trash.

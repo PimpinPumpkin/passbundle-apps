@@ -489,6 +489,45 @@ impl App {
         item.kept.reprompt == 0 || self.reprompted.as_deref() == Some(item.id.as_str())
     }
 
+    /// An attachment's file, downloaded and opened (docs/core.md,
+    /// "Attachments"): its name and contents, in memory.
+    pub fn attachment(
+        &mut self,
+        id: &str,
+        attachment_id: &str,
+    ) -> Result<(String, Zeroizing<Vec<u8>>)> {
+        let vault = self.vault.as_ref().ok_or(Error::SignedOut)?;
+        let item = vault.item(id).ok_or(Error::Damaged("no such item"))?;
+        if !self.may_use(item) {
+            return Err(Error::MasterPasswordFirst);
+        }
+        let attachment = item
+            .attachments
+            .iter()
+            .find(|a| a.id == attachment_id)
+            .ok_or(Error::Damaged("no such attachment"))?;
+        let (name, key) = (attachment.name.clone(), attachment.key.clone());
+        let (Some(server), Some(session)) = (&self.server, self.session.as_mut()) else {
+            return Err(Error::SignedOut);
+        };
+        let file = server.attachment(session, id, attachment_id)?;
+        Ok((name, crate::crypto::decrypt_file(&file, &key)?))
+    }
+
+    /// Saves an attachment to the Downloads folder (the home folder if
+    /// there's none), next to anything of the same name rather than over
+    /// it; answers where.
+    pub fn save_attachment(&mut self, id: &str, attachment_id: &str) -> Result<PathBuf> {
+        let (name, contents) = self.attachment(id, attachment_id)?;
+        let dir = dirs::download_dir()
+            .or_else(dirs::home_dir)
+            .ok_or(Error::Damaged("no folder to save to"))?;
+        let path = free_path(&dir, &name);
+        std::fs::write(&path, contents.as_slice())
+            .map_err(|_| Error::Damaged("the file couldn't be written"))?;
+        Ok(path)
+    }
+
     /// Saves an item, new (no id) or edited, then syncs.
     pub fn save(
         &mut self,
@@ -573,5 +612,57 @@ impl App {
         .map(zeroize::Zeroizing::new)
         .ok_or(Error::Damaged("nothing to copy"))?;
         Ok(secret)
+    }
+}
+
+/// A path in `dir` for a file named `name` that doesn't exist yet: the name
+/// itself, made safe for a file name, then "name (1).ext", and so on.
+fn free_path(dir: &std::path::Path, name: &str) -> PathBuf {
+    let safe: String = name
+        .chars()
+        .map(|c| {
+            if "/\\:*?\"<>|".contains(c) || c.is_control() {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    let safe = safe.trim_start_matches('.').trim();
+    let safe = if safe.is_empty() { "attachment" } else { safe };
+    let (stem, ext) = match safe.rfind('.') {
+        Some(at) if at > 0 => (&safe[..at], &safe[at..]),
+        _ => (safe, ""),
+    };
+    let mut path = dir.join(safe);
+    let mut n = 1;
+    while path.exists() {
+        path = dir.join(format!("{stem} ({n}){ext}"));
+        n += 1;
+    }
+    path
+}
+
+#[cfg(test)]
+mod attachment_tests {
+    use super::free_path;
+
+    #[test]
+    fn a_saved_file_never_replaces_another_or_leaves_its_folder() {
+        let dir =
+            std::env::temp_dir().join(format!("pb-free-path-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(free_path(&dir, "codes.txt"), dir.join("codes.txt"));
+        std::fs::write(dir.join("codes.txt"), "x").unwrap();
+        assert_eq!(free_path(&dir, "codes.txt"), dir.join("codes (1).txt"));
+        std::fs::write(dir.join("codes (1).txt"), "x").unwrap();
+        assert_eq!(free_path(&dir, "codes.txt"), dir.join("codes (2).txt"));
+        assert_eq!(
+            free_path(&dir, "../../etc/passwd"),
+            dir.join("_.._etc_passwd")
+        );
+        assert_eq!(free_path(&dir, ".hidden"), dir.join("hidden"));
+        assert_eq!(free_path(&dir, ""), dir.join("attachment"));
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

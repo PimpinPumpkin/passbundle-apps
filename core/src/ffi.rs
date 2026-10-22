@@ -757,6 +757,11 @@ pub unsafe extern "C" fn pb_item(id: *const c_char) -> *mut c_char {
                 "hasCode": card.code.as_ref().is_some_and(|c| !c.is_empty()),
             });
         }
+        view["attachments"] = item
+            .attachments
+            .iter()
+            .map(|a| json!({ "id": a.id, "name": a.name, "size": a.size }))
+            .collect();
         if let Some(key) = &item.ssh_key {
             view["sshKey"] = json!({
                 "publicKey": key.public_key,
@@ -795,6 +800,23 @@ pub unsafe extern "C" fn pb_item(id: *const c_char) -> *mut c_char {
             ItemKind::Login | ItemKind::SecureNote | ItemKind::Card | ItemKind::Identity
         ));
         view
+    })
+}
+
+/// Saves one of an item's attachments to the Downloads folder (docs/core.md,
+/// "Attachments"): `{ok, path}`, or the words to show.
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_save_attachment(
+    id: *const c_char,
+    attachment_id: *const c_char,
+) -> *mut c_char {
+    let (id, attachment_id) = (text(id), text(attachment_id));
+    with_app_waiting(|app| match app.save_attachment(&id, &attachment_id) {
+        Ok(path) => json!({ "ok": true, "path": path.to_string_lossy() }),
+        Err(e) => failed(e),
     })
 }
 

@@ -212,6 +212,63 @@ fn assert_opens_as_the_vectors_say(vault: &Vault, v: &Value) {
     }
 }
 
+/// Attachments: each item's files' names and sizes, and each file opens with
+/// its own key; a changed file is refused.
+#[test]
+fn attachments_open_and_a_changed_file_is_refused() {
+    use crate::crypto::decrypt_file;
+    let v = vectors();
+    let sync = Sync::from_json(&v["sync"].to_string()).unwrap();
+    let vault = Vault::unlock(
+        &sync,
+        &prelogin(&v["account"]["pbkdf2"]["prelogin"]),
+        v["account"]["password"].as_str().unwrap(),
+    )
+    .unwrap();
+    let mut seen = 0;
+    for (id, want) in v["opened"]["items"].as_object().unwrap() {
+        let item = vault.item(id).unwrap();
+        let wanted = want["attachments"].as_array().cloned().unwrap_or_default();
+        assert_eq!(item.attachments.len(), wanted.len(), "{id}");
+        for (a, w) in item.attachments.iter().zip(&wanted) {
+            assert_eq!(a.id, w["id"].as_str().unwrap());
+            assert_eq!(a.name, w["fileName"].as_str().unwrap());
+            assert_eq!(a.size, w["size"].as_u64());
+            let file = &v["attachmentFiles"][&a.id];
+            let opened = decrypt_file(&b64(&file["encrypted"]), &a.key).unwrap();
+            assert_eq!(opened.as_slice(), b64(&file["plain"]).as_slice());
+            seen += 1;
+        }
+    }
+    assert_eq!(seen, 2);
+    for r in v["attachmentRefused"].as_array().unwrap() {
+        let id = r["id"].as_str().unwrap();
+        let key = &vault
+            .items
+            .iter()
+            .flat_map(|i| &i.attachments)
+            .find(|a| a.id == id)
+            .unwrap()
+            .key;
+        assert!(
+            decrypt_file(&b64(&r["encrypted"]), key).is_err(),
+            "{}",
+            r["why"]
+        );
+    }
+    // Not a file at all, or another format.
+    let key = &vault
+        .items
+        .iter()
+        .flat_map(|i| &i.attachments)
+        .next()
+        .unwrap()
+        .key;
+    assert!(decrypt_file(&[], key).is_err());
+    assert!(decrypt_file(&[2; 40], key).is_err());
+    assert!(decrypt_file(&[0; 80], key).is_err());
+}
+
 #[test]
 fn unlocks_the_sample_sync_with_the_master_password() {
     let v = vectors();
