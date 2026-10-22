@@ -15,14 +15,23 @@ final class AutoFillUITests: XCTestCase {
     let settings = XCUIApplication(bundleIdentifier: "com.apple.Preferences")
     settings.terminate()
     settings.launch()
-    // Searching finds the page wherever this iOS keeps it.
-    let search = settings.searchFields.firstMatch
-    XCTAssertTrue(search.waitForExistence(timeout: 20), "Settings has no search field:\n\(settings.debugDescription)")
-    search.tap()
-    search.typeText("AutoFill")
-    let page = settings.staticTexts.matching(NSPredicate(format: "label BEGINSWITH 'AutoFill'")).firstMatch
-    XCTAssertTrue(page.waitForExistence(timeout: 20), "Settings didn't find AutoFill:\n\(settings.debugDescription)")
-    page.tap()
+    // General, then AutoFill & Passwords in it (where iOS 18 and later keep
+    // it). Not Settings' search: a new simulator's has nothing indexed yet.
+    let general = settings.buttons["com.apple.settings.general"]
+    XCTAssertTrue(general.waitForExistence(timeout: 20), "Settings has no General:\n\(settings.debugDescription)")
+    general.tap()
+    let autoFillRow = NSPredicate(format: "label BEGINSWITH 'AutoFill'")
+    let page = settings.buttons.matching(autoFillRow).firstMatch
+    let pageText = settings.staticTexts.matching(autoFillRow).firstMatch
+    // General's page in place first, then down it as far as the row.
+    _ = page.waitForExistence(timeout: 10) || pageText.waitForExistence(timeout: 1)
+    for _ in 0..<6 where !(page.exists && page.isHittable) && !(pageText.exists && pageText.isHittable) {
+      settings.swipeUp()
+    }
+    XCTAssertTrue(
+      page.waitForExistence(timeout: 5) || pageText.exists,
+      "General has no AutoFill & Passwords:\n\(settings.debugDescription)")
+    (page.exists ? page : pageText).tap()
     // AutoFill itself on, where this iOS has a switch for it, so the
     // providers show.
     let autoFill = settings.switches.matching(NSPredicate(format: "label BEGINSWITH 'AutoFill Passwords'")).firstMatch
