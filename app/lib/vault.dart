@@ -844,6 +844,8 @@ class _ItemPaneState extends State<ItemPane> {
     final fields = (item['fields'] as List).cast<Map<String, dynamic>>();
     for (var i = 0; i < fields.length; i++) {
       final f = fields[i];
+      // Our own data (fill rules, an expiration date) isn't a custom field.
+      if (f['reserved'] == true) continue;
       rows.add(
         f['hidden'] == true
             ? secretRow(f['name'] as String, 'field:$i')
@@ -861,6 +863,12 @@ class _ItemPaneState extends State<ItemPane> {
                   ),
                 ],
               ),
+      );
+    }
+    final expires = item['expires'] as String?;
+    if (expires != null && expires.isNotEmpty) {
+      rows.add(
+        row('Expires', Text(expires, style: const TextStyle(fontSize: 15))),
       );
     }
     if (item['hasNotes'] == true) {
@@ -919,11 +927,13 @@ class _ItemPaneState extends State<ItemPane> {
                 Icons.star_rounded,
                 color: Theme.of(context).colorScheme.primary,
               ),
-            IconButton(
-              tooltip: 'Edit',
-              icon: const Icon(Icons.edit_outlined),
-              onPressed: widget.onEdit,
-            ),
+            // Cards, identities, and SSH keys are the web vault's to edit, for now.
+            if (item['editable'] != false)
+              IconButton(
+                tooltip: 'Edit',
+                icon: const Icon(Icons.edit_outlined),
+                onPressed: widget.onEdit,
+              ),
             IconButton(
               tooltip: 'Move to trash',
               icon: const Icon(Icons.delete_outline_rounded),

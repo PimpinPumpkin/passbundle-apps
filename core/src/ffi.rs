@@ -23,7 +23,7 @@ use crate::generator;
 use crate::secrets::{MemorySecretStore, OsSecretStore, SecretStore};
 use crate::store::Store;
 use crate::totp::Totp;
-use crate::vault::{Field, Item, ItemDraft, ItemKind, Vault};
+use crate::vault::{Field, Item, ItemDraft, ItemKind, Vault, EXPIRES_FIELD};
 
 static APP: Mutex<Option<App>> = Mutex::new(None);
 /// The OS said the computer is going to sleep while a slow call had the app:
@@ -611,11 +611,21 @@ pub unsafe extern "C" fn pb_item(id: *const c_char) -> *mut c_char {
         view["hasPassword"] = json!(item.password.is_some());
         view["hasTotp"] = json!(item.totp.is_some());
         view["hasNotes"] = json!(item.notes.is_some());
+        // Each field's upstream type: 0 text, 1 hidden, 2 yes or no, 3 linked.
         view["fields"] = item
             .fields
             .iter()
-            .map(|f| json!({ "name": f.name, "hidden": f.hidden, "value": if f.hidden { None } else { Some(f.value.as_str()) } }))
+            .zip(&item.kept.field_kinds)
+            .map(|(f, (kind, _))| json!({ "name": f.name, "hidden": f.hidden, "type": kind, "reserved": f.reserved(), "editable": f.edited_by_the_app(*kind), "value": if f.hidden || f.reserved() { None } else { Some(f.value.as_str()) } }))
             .collect();
+        // The expiration date the web vault or the extension set, if any.
+        view["expires"] = json!(item
+            .fields
+            .iter()
+            .find(|f| f.name == EXPIRES_FIELD)
+            .map(|f| f.value.as_str()));
+        // The app edits logins and notes; the web vault edits the rest.
+        view["editable"] = json!(matches!(item.kind, ItemKind::Login | ItemKind::SecureNote));
         view
     })
 }
