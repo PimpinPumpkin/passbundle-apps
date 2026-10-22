@@ -135,14 +135,22 @@ providers() {
 providers
 
 echo "PassBundle on for AutoFill, in Settings"
-# The simulator's Settings doesn't offer a provider from an app that's only
-# signed ad hoc, as CI's builds are, though PlugInKit has it (above): then
-# it's turned on as Settings would (PlugInKit's election), and Settings is
-# checked by hand on an iPhone at each release (docs/phones.md).
+# iOS's AutoFill entitlement has to be allowed by a provisioning profile,
+# which needs an Apple Developer account. Settings doesn't offer a provider
+# from an app signed ad hoc, as CI's builds are for now, though PlugInKit has
+# it (above), and turning it on through PlugInKit doesn't make iOS ask it for
+# logins. So for an ad hoc build this stops here, with what it could check:
+# the extension built with its entitlements and the core (ios-app-test.sh),
+# registered with iOS, and the app signed in with Face ID unlock on. Signed
+# builds go on to Safari. See docs/phones.md, "Testing".
 if ! ui_test testTurnOnInSettings; then
-  echo "Settings didn't offer PassBundle; turning it on through PlugInKit." >&2
-  xcrun simctl spawn "$device" pluginkit -e use -i com.passbundle.app.autofill
-  providers
+  app=$(xcrun simctl get_app_container "$device" com.passbundle.app)
+  if codesign -dv "$app" 2>&1 | grep -q '^Signature=adhoc'; then
+    echo "Settings doesn't offer PassBundle to an app signed ad hoc; filling in Safari runs once builds are signed." >&2
+    exit 0
+  fi
+  echo "Settings didn't offer PassBundle, though this build is signed." >&2
+  exit 1
 fi
 touch "$(folder)/autofill-enabled"
 reached autofill-suggested "iOS never took PassBundle's suggestions."
