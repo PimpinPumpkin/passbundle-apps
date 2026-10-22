@@ -919,11 +919,13 @@ class _ItemPaneState extends State<ItemPane> {
                 Icons.star_rounded,
                 color: Theme.of(context).colorScheme.primary,
               ),
-            IconButton(
-              tooltip: 'Edit',
-              icon: const Icon(Icons.edit_outlined),
-              onPressed: widget.onEdit,
-            ),
+            // Cards, identities, and SSH keys are the web vault's to edit, for now.
+            if (item['editable'] != false)
+              IconButton(
+                tooltip: 'Edit',
+                icon: const Icon(Icons.edit_outlined),
+                onPressed: widget.onEdit,
+              ),
             IconButton(
               tooltip: 'Move to trash',
               icon: const Icon(Icons.delete_outline_rounded),

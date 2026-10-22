@@ -611,11 +611,15 @@ pub unsafe extern "C" fn pb_item(id: *const c_char) -> *mut c_char {
         view["hasPassword"] = json!(item.password.is_some());
         view["hasTotp"] = json!(item.totp.is_some());
         view["hasNotes"] = json!(item.notes.is_some());
+        // Each field's upstream type: 0 text, 1 hidden, 2 yes or no, 3 linked.
         view["fields"] = item
             .fields
             .iter()
-            .map(|f| json!({ "name": f.name, "hidden": f.hidden, "value": if f.hidden { None } else { Some(f.value.as_str()) } }))
+            .zip(&item.kept.field_kinds)
+            .map(|(f, (kind, _))| json!({ "name": f.name, "hidden": f.hidden, "type": kind, "value": if f.hidden { None } else { Some(f.value.as_str()) } }))
             .collect();
+        // The app edits logins and notes; the web vault edits the rest.
+        view["editable"] = json!(matches!(item.kind, ItemKind::Login | ItemKind::SecureNote));
         view
     })
 }
