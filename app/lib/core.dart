@@ -94,6 +94,9 @@ class Core {
     'pb_send_email_code',
   );
   late final _unlock = _lib.lookupFunction<_Str1, _Str1>('pb_unlock');
+  late final _confirmMasterPassword = _lib.lookupFunction<_Str2, _Str2>(
+    'pb_confirm_master_password',
+  );
   late final _sync = _lib.lookupFunction<_Str0, _Str0>('pb_sync');
   late final _lock = _lib.lookupFunction<_Str0, _Str0>('pb_lock');
   late final _signOut = _lib.lookupFunction<_Str0, _Str0>('pb_sign_out');
@@ -216,6 +219,16 @@ class Core {
   static Future<Answer> unlock(String password) => _background(
     (c) => c._with([password], (p) => c._answer(c._unlock(p[0]))),
   );
+
+  /// The master password, for an item that asks for it again (docs/core.md,
+  /// "Asking for the master password again"): then its secrets may be used.
+  static Future<Answer> confirmMasterPassword(String id, String password) =>
+      _background(
+        (c) => c._with([
+          id,
+          password,
+        ], (p) => c._answer(c._confirmMasterPassword(p[0], p[1]))),
+      );
 
   static Future<Answer> sync() => _background((c) => c._answer(c._sync()));
 

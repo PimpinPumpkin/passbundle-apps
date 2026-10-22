@@ -32,19 +32,27 @@ String openEmpty({bool lockOnSleep = false}) {
 }
 
 /// The core on a new folder holding the sample vault (test/sample): locked.
-/// With `policies`, its kept sync has them, as the server sends them.
+/// With `policies`, its kept sync has them, as the server sends them; the
+/// items in `asking` ask for the master password again, as the web vault sets it.
 String openSample({
   bool lockOnSleep = false,
   List<Map<String, dynamic>>? policies,
+  Set<String> asking = const {},
 }) {
   final dir = Directory.systemTemp.createTempSync('pb-app-test-').path;
   for (final name in ['settings.json', 'sync.json']) {
     File('test/sample/$name').copySync('$dir/$name');
   }
-  if (policies != null) {
+  if (policies != null || asking.isNotEmpty) {
     final sync = File('$dir/sync.json');
     final json = jsonDecode(sync.readAsStringSync()) as Map<String, dynamic>;
-    sync.writeAsStringSync(jsonEncode({...json, 'policies': policies}));
+    for (final cipher
+        in (json['ciphers'] as List).cast<Map<String, dynamic>>()) {
+      if (asking.contains(cipher['id'])) cipher['reprompt'] = 1;
+    }
+    sync.writeAsStringSync(
+      jsonEncode({...json, 'policies': policies ?? json['policies']}),
+    );
   }
   Core().openAt(dir);
   machineDoesntLock(lockOnSleep);

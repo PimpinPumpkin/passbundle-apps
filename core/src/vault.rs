@@ -595,19 +595,24 @@ impl Vault {
     /// prelogin gave (checked first), then the user key, the private key,
     /// organization keys, folders, collections, and items.
     pub fn unlock(sync: &Sync, prelogin: &Prelogin, password: &str) -> Result<Vault> {
-        let kdf = Kdf::from_prelogin(prelogin)?;
-        let master_key = MasterKey::derive(password, &sync.profile.email, &kdf)?;
-        let protected = EncString::parse(
-            sync.profile
-                .key
-                .as_deref()
-                .ok_or(Error::Malformed("a profile with no key".into()))?,
-        )?;
-        let user = match protected.decrypt_key(&master_key.stretch()) {
-            Err(Error::Refused(_)) => return Err(Error::WrongPassword),
-            other => other?,
-        };
-        Vault::open(sync, user)
+        Vault::open(sync, user_key_from_password(sync, prelogin, password)?)
+    }
+
+    /// Whether `password` is this account's master password, checked the
+    /// way unlocking checks it (docs/core.md, "Asking for the master password
+    /// again"): it must open the kept protected user key to the key this
+    /// vault is open with. Nothing is kept or sent.
+    pub fn is_master_password(
+        &self,
+        sync: &Sync,
+        prelogin: &Prelogin,
+        password: &str,
+    ) -> Result<bool> {
+        match user_key_from_password(sync, prelogin, password) {
+            Ok(user) => Ok(user == self.keys.user),
+            Err(Error::WrongPassword) => Ok(false),
+            Err(e) => Err(e),
+        }
     }
 
     /// Opens a sync with the user key itself (after unlocking another way).
@@ -930,6 +935,28 @@ impl Vault {
                 words.iter().all(|w| haystack.contains(w.as_str()))
             })
             .collect()
+    }
+}
+
+/// The user key the master password opens: the master key from the KDF
+/// the prelogin gave (checked first), stretched, opening the profile's
+/// protected user key. A wrong password is `WrongPassword`.
+fn user_key_from_password(
+    sync: &Sync,
+    prelogin: &Prelogin,
+    password: &str,
+) -> Result<SymmetricKey> {
+    let kdf = Kdf::from_prelogin(prelogin)?;
+    let master_key = MasterKey::derive(password, &sync.profile.email, &kdf)?;
+    let protected = EncString::parse(
+        sync.profile
+            .key
+            .as_deref()
+            .ok_or(Error::Malformed("a profile with no key".into()))?,
+    )?;
+    match protected.decrypt_key(&master_key.stretch()) {
+        Err(Error::Refused(_)) => Err(Error::WrongPassword),
+        other => other,
     }
 }
 

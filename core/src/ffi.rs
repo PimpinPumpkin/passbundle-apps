@@ -507,9 +507,16 @@ pub(crate) fn fillable(package: &str, domain: &str) -> Value {
     let items: Vec<Value> = vault
         .matching(&target)
         .iter()
-        .map(|i| json!({ "id": i.id, "name": i.name, "username": i.username }))
+        .map(|i| json!({ "id": i.id, "name": i.name, "username": i.username, "reprompt": i.kept.reprompt != 0 }))
         .collect();
     json!({ "locked": false, "items": items })
+}
+
+/// The master password, for a login that asks for it again before Android's
+/// autofill fills it (android.rs): `{ok}`, or the words to show.
+#[cfg(target_os = "android")]
+pub(crate) fn confirm_master_password(id: &str, password: &str) -> Value {
+    app_value(|app| done(app.confirm_master_password(id, password)))
 }
 
 /// The unlocked vault's user key, for the phone app to seal for biometric
@@ -710,6 +717,14 @@ pub unsafe extern "C" fn pb_item(id: *const c_char) -> *mut c_char {
             return Value::Null;
         };
         let mut view = summary(vault, item);
+        // An item that asks for the master password shows its name until
+        // it's given, as upstream's apps do.
+        view["reprompt"] = json!(item.kept.reprompt != 0);
+        view["mayUse"] = json!(app.may_use(item));
+        if !app.may_use(item) {
+            return view;
+        }
+        view["grant"] = json!(app.grant());
         view["username"] = json!(item.username);
         view["uris"] = json!(item.uris);
         view["collectionIds"] = json!(item.collection_ids);
@@ -775,6 +790,21 @@ pub unsafe extern "C" fn pb_item(id: *const c_char) -> *mut c_char {
     })
 }
 
+/// Checks the master password for an item that asks for it again (docs/core.md,
+/// "Asking for the master password again"): `{ok}`, or the words to show.
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_confirm_master_password(
+    id: *const c_char,
+    password: *const c_char,
+) -> *mut c_char {
+    let id = text(id);
+    let password = Zeroizing::new(text(password));
+    with_app_waiting(|app| done(app.confirm_master_password(&id, &password)))
+}
+
 /// A secret, while the person reveals it or edits the item: "password",
 /// "notes", "totp" (the secret itself, for the editor), or "field:<index>".
 ///
@@ -787,6 +817,9 @@ pub unsafe extern "C" fn pb_reveal(id: *const c_char, what: *const c_char) -> *m
         let Some(item) = app.vault().and_then(|v| v.item(&id)) else {
             return Value::Null;
         };
+        if !app.may_use(item) {
+            return Value::Null;
+        }
         let secret = match what.as_str() {
             "password" => item.password.as_ref().map(|p| p.as_str()),
             "notes" => item.notes.as_ref().map(|n| n.as_str()),
@@ -827,6 +860,7 @@ pub unsafe extern "C" fn pb_totp(id: *const c_char) -> *mut c_char {
         let Some(secret) = app
             .vault()
             .and_then(|v| v.item(&id))
+            .filter(|i| app.may_use(i))
             .and_then(|i| i.totp.as_ref())
         else {
             return Value::Null;
@@ -942,6 +976,16 @@ pub unsafe extern "C" fn pb_save(id: *const c_char, draft: *const c_char) -> *mu
             .collect();
         if draft.organization_id.is_some() && collections.is_empty() {
             return failed(Error::Refused("an organization's item needs a collection"));
+        }
+        // An item that asks for the master password saves only from an
+        // editor opened while it was given (its `grant`), whose fields hold
+        // the item's secrets rather than blanks.
+        let asks = app
+            .vault()
+            .and_then(|v| v.item(&id))
+            .is_some_and(|item| item.kept.reprompt != 0);
+        if asks && d["grant"].as_u64() != Some(app.grant()) {
+            return failed(Error::MasterPasswordFirst);
         }
         done(app.save(
             Some(id.as_str()).filter(|i| !i.is_empty()),

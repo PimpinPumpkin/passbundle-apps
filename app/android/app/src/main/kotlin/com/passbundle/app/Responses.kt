@@ -26,13 +26,14 @@ object Responses {
         }
 
     /** FillActivity, to unlock or to fill one login, for these fields. */
-    fun pending(context: Context, fields: Fields, mode: String, item: String? = null) =
+    fun pending(context: Context, fields: Fields, mode: String, item: String? = null, asks: Boolean = false) =
         PendingIntent.getActivity(
             context,
             ++requests,
             fields.into(Intent(context, FillActivity::class.java))
                 .putExtra(FillActivity.MODE, mode)
-                .putExtra(FillActivity.ITEM, item),
+                .putExtra(FillActivity.ITEM, item)
+                .putExtra(FillActivity.ASKS, asks),
             // Mutable: Android adds the screen's structure when it starts it.
             PendingIntent.FLAG_CANCEL_CURRENT or PendingIntent.FLAG_MUTABLE,
         ).intentSender
@@ -81,7 +82,7 @@ object Responses {
                 @Suppress("DEPRECATION")
                 dataset.setValue(field, null)
             }
-            dataset.setAuthentication(pending(context, fields, FillActivity.FILL, id))
+            dataset.setAuthentication(pending(context, fields, FillActivity.FILL, id, item.optBoolean("reprompt")))
             response.addDataset(dataset.build())
         }
         return response.build()

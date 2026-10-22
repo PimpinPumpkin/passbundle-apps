@@ -99,6 +99,7 @@ class _ItemEditorState extends State<ItemEditor> {
     for (final k in _identityParts.keys) k: TextEditingController(),
   };
   bool favorite = false;
+  num? grant;
   bool hidden = true;
   String? folderId;
   String? organizationId;
@@ -113,6 +114,9 @@ class _ItemEditorState extends State<ItemEditor> {
     super.initState();
     final id = widget.id;
     final item = id == null ? null : widget.core.item(id);
+    // For an item that asks for the master password: the giving it was
+    // opened under, which saving hands back (core/src/ffi.rs, pb_save).
+    grant = item?['grant'] as num?;
     if (id != null && item != null) {
       final reveal = widget.core.reveal;
       kind = item['kind'] as String;
@@ -229,6 +233,7 @@ class _ItemEditorState extends State<ItemEditor> {
       'organizationId': organizationId,
       'collectionIds': [?collectionId],
       'favorite': favorite,
+      'grant': ?grant,
     };
     final answer = await whileBusy(() => Core.save(widget.id, draft));
     if (!mounted) return;

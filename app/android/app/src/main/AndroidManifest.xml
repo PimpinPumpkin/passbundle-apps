@@ -45,6 +45,7 @@
         <!-- Fills a picked login, or unlocks first; no screen of its own (FillActivity.kt). -->
         <activity
             android:name=".FillActivity"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|uiMode|keyboard|keyboardHidden"
             android:exported="false"
             android:excludeFromRecents="true"
             android:taskAffinity=""

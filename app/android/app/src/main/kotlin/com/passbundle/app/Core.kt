@@ -28,4 +28,7 @@ object Core {
 
     /** The logins for an app or a page, as JSON: names and usernames only (Responses.kt). */
     @JvmStatic external fun fillable(packageName: String, webDomain: String): String?
+
+    /** The master password, for a login that asks for it again: {"ok": true}, or the words to show. Slow: off the main thread. */
+    @JvmStatic external fun confirmMasterPassword(id: String, password: String): String?
 }
