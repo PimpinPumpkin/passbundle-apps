@@ -149,25 +149,30 @@ tap "id=com.passbundle.autofilltest:id/sign_in"
 shown "^Signed in as autofill@example.test, password 28 characters$"
 echo "Filled: signed in as autofill@example.test, with the 28-character password from the vault."
 
-echo "A screen that says it's a website, in an app that isn't a known browser"
-a shell am force-stop com.passbundle.autofilltest
-a shell am start -W -n com.passbundle.autofilltest/.ClaimsWebsiteActivity > /dev/null
-tap "id=com.passbundle.autofilltest:id/username"
-# The app's own login, and an offer to trust it as a browser; never the website's.
-shown "^Autofill test app"
-shown "^Trust Autofill test as a browser first"
-[ -z "$(where '^Bank website')" ] || { echo "The website's login was offered to an app that isn't a browser." >&2; exit 1; }
-# Trusted, in PassBundle's own dialog: then the website's login fills.
-tap "^Trust Autofill test as a browser first"
-shown "^Trust Autofill test as a browser\?"
-# Trust can't be tapped for its first moment.
-sleep 2
-tap "^(Trust|TRUST)$"
-tap "^Bank website"
-shown "^bank@example.test$"
-tap "id=com.passbundle.autofilltest:id/sign_in"
-shown "^Signed in as bank@example.test, password 24 characters$"
-echo "Filled: the website's login only once the app was trusted as a browser."
+# Android 10 doesn't pass autofill a web domain an app sets on its own views
+# (there only a WebView gives one), so this screen can't say it's a website
+# there: it runs from Android 11 (CI's Android 14 emulator).
+if [ "$(a shell getprop ro.build.version.sdk | tr -d '\r')" -ge 30 ]; then
+  echo "A screen that says it's a website, in an app that isn't a known browser"
+  a shell am force-stop com.passbundle.autofilltest
+  a shell am start -W -n com.passbundle.autofilltest/.ClaimsWebsiteActivity > /dev/null
+  tap "id=com.passbundle.autofilltest:id/username"
+  # The app's own login, and an offer to trust it as a browser; never the website's.
+  shown "^Autofill test app"
+  shown "^Trust Autofill test as a browser first"
+  [ -z "$(where '^Bank website')" ] || { echo "The website's login was offered to an app that isn't a browser." >&2; exit 1; }
+  # Trusted, in PassBundle's own dialog: then the website's login fills.
+  tap "^Trust Autofill test as a browser first"
+  shown "^Trust Autofill test as a browser\?"
+  # Trust can't be tapped for its first moment.
+  sleep 2
+  tap "^(Trust|TRUST)$"
+  tap "^Bank website"
+  shown "^bank@example.test$"
+  tap "id=com.passbundle.autofilltest:id/sign_in"
+  shown "^Signed in as bank@example.test, password 24 characters$"
+  echo "Filled: the website's login only once the app was trusted as a browser."
+fi
 
 # Signs in to the test app with something typed, as someone would (Android
 # offers to save only what changed after its autofill started): the username,
