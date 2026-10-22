@@ -70,10 +70,22 @@ reached() {
 }
 reached autofill-ready "The app's half never got ready."
 
-# One of AutoFillUITests' tests, in Settings or Safari.
+# One of AutoFillUITests' tests, in Settings or Safari. Failing, it prints
+# why, with what was on screen (xcodebuild's quiet output leaves that out).
 ui_test() {
+  local result="$work/$1.xcresult"
   (cd app/ios && xcodebuild test -project Runner.xcodeproj -scheme AutoFillUITests -destination "id=$device" \
-    -only-testing:"AutoFillUITests/AutoFillUITests/$1" -quiet)
+    -only-testing:"AutoFillUITests/AutoFillUITests/$1" -resultBundlePath "$result" -quiet) && return 0
+  xcrun xcresulttool get test-results tests --path "$result" --format json 2> /dev/null \
+    | python3 -I -c 'import json, sys
+def walk(node):
+    for child in node.get("children", []):
+        if child.get("nodeType") == "Failure Message":
+            print(child.get("name", ""))
+        walk(child)
+for root in json.load(sys.stdin).get("testNodes", []):
+    walk(root)' >&2 || xcrun xcresulttool get test-results summary --path "$result" >&2 || true
+  return 1
 }
 
 echo "PassBundle on for AutoFill, in Settings"
