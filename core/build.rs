@@ -30,9 +30,10 @@ fn main() {
     fs::write(
         out,
         format!(
-            "pub const NAME: &str = {:?};\npub const DOMAIN: &str = {:?};\n",
+            "pub const NAME: &str = {:?};\npub const DOMAIN: &str = {:?};\n/// PassBundle's own server: where people sign in unless they host their own.\npub const SERVER: &str = {:?};\n",
             text("/name"),
-            text("/domain")
+            text("/domain"),
+            text("/urls/webVault")
         ),
     )
     .unwrap();

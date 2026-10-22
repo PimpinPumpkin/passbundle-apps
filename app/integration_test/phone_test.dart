@@ -95,6 +95,7 @@ void main() {
         await pumpUntil(tester, find.text('Sign out?'));
         await tester.tap(find.widgetWithText(FilledButton, 'Sign out'));
         await pumpUntil(tester, find.text('Sign in to PassBundle'));
+        // The sample vault's server isn't PassBundle's, so its field shows.
         await tester.enterText(
           find.widgetWithText(TextField, 'Server'),
           'https://localhost:${server.port}',
@@ -136,6 +137,8 @@ void main() {
       await Core.openOnThisDevice();
       await tester.pumpWidget(PassBundleApp(key: UniqueKey()));
       await pumpUntil(tester, find.text('Sign in to PassBundle'));
+      await tester.tap(find.text('Self-hosted?'));
+      await tester.pump();
       await tester.enterText(find.widgetWithText(TextField, 'Server'), server);
       await tester.enterText(find.widgetWithText(TextField, 'Email'), email);
       await tester.enterText(

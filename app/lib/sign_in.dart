@@ -1,6 +1,8 @@
-// Signing in to a PassBundle server (with two-step login), and unlocking the
-// vault kept on this device. The master password goes to the core and the
-// field is cleared at once (docs/core.md, "Memory").
+// Signing in (with two-step login), and unlocking the vault kept on this
+// device. The master password goes to the core and the field is cleared at
+// once (docs/core.md, "Memory"). People sign in to PassBundle's own server
+// without being asked; a server an organization set by policy is used and
+// shown; and someone hosting their own types it in, behind "Self-hosted?".
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -32,7 +34,18 @@ class SignInScreen extends StatefulWidget {
 }
 
 class _SignInScreenState extends State<SignInScreen> {
-  late final server = TextEditingController(text: widget.server ?? '');
+  final servers = Core().servers();
+  late final ours = servers['ours'] as String;
+  late final managed = servers['managed'] as String?;
+
+  /// Someone's own server: shown when they ask, or when they signed in to one before.
+  late bool selfHosted =
+      managed == null && widget.server != null && widget.server != ours;
+  late final server = TextEditingController(
+    text: selfHosted ? widget.server : '',
+  );
+
+  String get signInTo => managed ?? (selfHosted ? server.text.trim() : ours);
   late final email = TextEditingController(text: widget.email ?? '');
   final password = TextEditingController();
   final code = TextEditingController();
@@ -55,7 +68,7 @@ class _SignInScreenState extends State<SignInScreen> {
       error = null;
     });
     final answer = await whileBusy(
-      () => Core.signIn(server.text.trim(), email.text.trim(), typed),
+      () => Core.signIn(signInTo, email.text.trim(), typed),
     );
     if (!mounted) return;
     if (answer.ok && answer.body['step'] == 'twoFactor') {
@@ -116,17 +129,25 @@ class _SignInScreenState extends State<SignInScreen> {
     if (step != null) return _secondStep(context, step);
     return Centered(
       children: [
-        heading(context, 'Sign in to PassBundle', null),
-        TextField(
-          controller: server,
-          enabled: !working,
-          keyboardType: TextInputType.url,
-          decoration: const InputDecoration(
-            labelText: 'Server',
-            hintText: 'https://vault.example.com',
-          ),
+        heading(
+          context,
+          'Sign in to PassBundle',
+          managed == null
+              ? null
+              : 'Your organization\'s server: ${Uri.tryParse(managed!)?.host ?? managed}',
         ),
-        const SizedBox(height: 12),
+        if (selfHosted) ...[
+          TextField(
+            controller: server,
+            enabled: !working,
+            keyboardType: TextInputType.url,
+            decoration: const InputDecoration(
+              labelText: 'Server',
+              hintText: 'https://vault.example.com',
+            ),
+          ),
+          const SizedBox(height: 12),
+        ],
         TextField(
           controller: email,
           enabled: !working,
@@ -157,6 +178,17 @@ class _SignInScreenState extends State<SignInScreen> {
         ),
         const SizedBox(height: 16),
         WorkingButton(label: 'Sign in', working: working, onPressed: signIn),
+        if (managed == null) ...[
+          const SizedBox(height: 8),
+          TextButton(
+            onPressed: working
+                ? null
+                : () => setState(() => selfHosted = !selfHosted),
+            child: Text(
+              selfHosted ? 'Use PassBundle\'s server' : 'Self-hosted?',
+            ),
+          ),
+        ],
         if (widget.onCancel != null) ...[
           const SizedBox(height: 8),
           TextButton(

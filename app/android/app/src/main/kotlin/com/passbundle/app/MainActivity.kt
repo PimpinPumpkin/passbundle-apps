@@ -51,6 +51,14 @@ class MainActivity : FlutterActivity() {
                 when (call.method) {
                     // Where the core keeps the vault: this app's private files.
                     "filesDir" -> result.success(filesDir.absolutePath)
+                    // The server an organization's MDM set (app_restrictions.xml), if any.
+                    "managedServer" ->
+                        result.success(
+                            getSystemService(android.content.RestrictionsManager::class.java)
+                                ?.applicationRestrictions
+                                ?.getString("server_url")
+                                ?.takeIf { it.isNotBlank() },
+                        )
                     "copy" -> {
                         val id = call.argument<String>("id")
                         val what = call.argument<String>("what")

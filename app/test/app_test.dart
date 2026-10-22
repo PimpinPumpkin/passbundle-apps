@@ -24,6 +24,10 @@ void main() {
       openEmpty();
       await tester.pumpWidget(const PassBundleApp());
       expect(find.text('Sign in to PassBundle'), findsOneWidget);
+      // PassBundle's own server unless someone hosts their own.
+      expect(find.widgetWithText(TextField, 'Server'), findsNothing);
+      await tester.tap(find.text('Self-hosted?'));
+      await tester.pump();
       await tester.enterText(
         find.widgetWithText(TextField, 'Server'),
         'http://127.0.0.1:9',
@@ -57,6 +61,26 @@ void main() {
         tester,
         find.textContaining('only talks to servers over HTTPS'),
       );
+    },
+  );
+
+  testWidgets(
+    'signing in asks for a server only for someone hosting their own',
+    (tester) async {
+      setSize(tester, const Size(1280, 800));
+      openEmpty();
+      await tester.pumpWidget(const PassBundleApp());
+      expect(find.text('Sign in to PassBundle'), findsOneWidget);
+      expect(find.widgetWithText(TextField, 'Server'), findsNothing);
+      expect(find.widgetWithText(TextField, 'Email'), findsOneWidget);
+      await tester.tap(find.text('Self-hosted?'));
+      await tester.pump();
+      expect(find.widgetWithText(TextField, 'Server'), findsOneWidget);
+      await tester.tap(find.text('Use PassBundle\'s server'));
+      await tester.pump();
+      expect(find.widgetWithText(TextField, 'Server'), findsNothing);
+      // No organization set one by policy on this machine.
+      expect(find.textContaining('Your organization\'s server'), findsNothing);
     },
   );
 
