@@ -583,6 +583,99 @@ impl App {
         self.sync()
     }
 
+    /// The logins with a passkey for a site (by its ID), that the core can
+    /// sign with, for a phone's list of passkeys (docs/phones.md, "Passkeys").
+    pub fn passkeys_for(&self, rp_id: &str) -> Vec<&Item> {
+        let Some(vault) = self.vault.as_ref() else {
+            return Vec::new();
+        };
+        vault
+            .items
+            .iter()
+            .filter(|i| !i.deleted)
+            .filter(|i| {
+                i.passkey
+                    .as_ref()
+                    .is_some_and(|p| p.usable && p.rp_id == rp_id)
+            })
+            .collect()
+    }
+
+    /// Signs in to a site with a login's passkey (docs/core.md, "Passkeys"):
+    /// the authenticator data and the signature over it and the client data
+    /// hash. `user_verified` says the person proved who they are in this
+    /// sign-in. A login that asks for the master password asks first (and
+    /// giving it counts as proof). A passkey that counts its uses has its
+    /// counter raised and the login saved before it signs; offline, it's
+    /// refused.
+    pub fn passkey_assert(
+        &mut self,
+        id: &str,
+        rp_id: &str,
+        client_data_hash: &[u8; 32],
+        user_verified: bool,
+    ) -> Result<PasskeyAssertion> {
+        use crate::passkey::{authenticator_data, credential_id, flags};
+        let vault = self.vault.as_ref().ok_or(Error::SignedOut)?;
+        let item = vault.item(id).ok_or(Error::Damaged("no such item"))?;
+        if !self.may_use(item) {
+            return Err(Error::MasterPasswordFirst);
+        }
+        let verified = user_verified || item.kept.reprompt != 0;
+        let passkey = item
+            .passkey
+            .as_ref()
+            .ok_or(Error::Damaged("a login with no passkey"))?;
+        if passkey.rp_id != rp_id {
+            return Err(Error::Refused("it's a passkey for another site"));
+        }
+        let key = passkey.key()?;
+        let raw_id = credential_id(&passkey.credential_id)?;
+        let user_handle = match &passkey.user_handle {
+            Some(handle) => {
+                use base64::Engine;
+                base64::engine::general_purpose::URL_SAFE_NO_PAD
+                    .decode(handle.trim_end_matches('='))
+                    .map_err(|_| Error::Damaged("a passkey's user handle that isn't base64url"))?
+            }
+            None => Vec::new(),
+        };
+        let mut counter = passkey.counter;
+        if counter > 0 {
+            counter = counter
+                .checked_add(1)
+                .ok_or(Error::Refused("a passkey's counter is at its end"))?;
+            let stored = item
+                .kept
+                .fido2_credentials
+                .as_ref()
+                .ok_or(Error::Damaged("a login with no passkey"))?;
+            let body = vault.encrypt_item_with(
+                &ItemDraft::of(item),
+                Some(item),
+                Some(passkey.with_counter(stored, counter)),
+            )?;
+            let collection_ids = item.collection_ids.clone();
+            let (Some(server), Some(session)) = (&self.server, self.session.as_mut()) else {
+                return Err(Error::SignedOut);
+            };
+            server.save_item(session, Some(id), body, &collection_ids)?;
+            self.sync()?;
+        }
+        let mut set = flags::USER_PRESENT | flags::BACKUP_ELIGIBLE | flags::BACKED_UP;
+        if verified {
+            set |= flags::USER_VERIFIED;
+        }
+        let authenticator_data = authenticator_data(rp_id, set, counter, None);
+        let signature = key.sign(&authenticator_data, client_data_hash);
+        Ok(PasskeyAssertion {
+            authenticator_data,
+            signature,
+            credential_id: raw_id,
+            user_handle,
+        })
+    }
+
     pub fn trash(&mut self, id: &str) -> Result<()> {
         let (Some(server), Some(session)) = (&self.server, self.session.as_mut()) else {
             return Err(Error::SignedOut);
@@ -645,6 +738,15 @@ impl App {
         .ok_or(Error::Damaged("nothing to copy"))?;
         Ok(secret)
     }
+}
+
+/// What signing in with a passkey answers (WebAuthn's assertion), for the
+/// OS to hand the site.
+pub struct PasskeyAssertion {
+    pub authenticator_data: Vec<u8>,
+    pub signature: Vec<u8>,
+    pub credential_id: Vec<u8>,
+    pub user_handle: Vec<u8>,
 }
 
 /// An attachment to fetch, open, and save (`App::attachment_to_fetch`),

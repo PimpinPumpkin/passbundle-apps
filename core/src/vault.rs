@@ -261,8 +261,107 @@ pub struct Item {
     pub ssh_key: Option<SshKey>,
     /// Its attachments (docs/core.md, "Attachments"), each with its file's key.
     pub attachments: Vec<Attachment>,
+    /// A login's passkey, if it has one (docs/core.md, "Passkeys").
+    pub passkey: Option<Passkey>,
     /// What an edit keeps that the app doesn't show or change.
     pub kept: Kept,
+}
+
+/// A login's passkey (docs/core.md, "Passkeys"): upstream's first
+/// `fido2Credentials` entry, what lists and signing need. Its private key
+/// stays encrypted until it signs (`Passkey::key`). One whose values don't
+/// open is left out, and the rest of its login still opens.
+pub struct Passkey {
+    /// As stored: a UUID, or `b64.` and the ID in base64url.
+    pub credential_id: String,
+    pub rp_id: String,
+    pub rp_name: Option<String>,
+    /// The site's ID for the account, base64url, as stored.
+    pub user_handle: Option<String>,
+    pub user_name: Option<String>,
+    pub user_display_name: Option<String>,
+    pub counter: u32,
+    pub discoverable: bool,
+    pub creation_date: Option<String>,
+    /// ES256 (ECDSA on P-256), the only kind the core signs with.
+    pub usable: bool,
+    key_value: Option<EncString>,
+    item_key: SymmetricKey,
+}
+
+impl Passkey {
+    /// Its private key, decrypted only now.
+    pub fn key(&self) -> Result<crate::passkey::Key> {
+        if !self.usable {
+            return Err(Error::Refused("it's a passkey that isn't ES256 (P-256)"));
+        }
+        let stored = self
+            .key_value
+            .as_ref()
+            .ok_or(Error::Damaged("a passkey with no key"))?
+            .decrypt_string(&self.item_key)?;
+        crate::passkey::Key::from_stored(&stored)
+    }
+
+    /// The stored credentials with this one's counter set to `counter`,
+    /// encrypted under the item's key, for saving.
+    pub fn with_counter(&self, stored: &serde_json::Value, counter: u32) -> serde_json::Value {
+        let mut stored = stored.clone();
+        if let Some(first) = stored.get_mut(0) {
+            first["counter"] = serde_json::Value::String(
+                self.item_key.encrypt_str(&counter.to_string()).to_string(),
+            );
+        }
+        stored
+    }
+
+    /// Opens the first credential of `stored`, upstream's encrypted
+    /// `fido2Credentials`; None if there's none or it doesn't open.
+    fn open(stored: Option<&serde_json::Value>, key: &SymmetricKey) -> Option<Passkey> {
+        let first = stored?.as_array()?.first()?;
+        let text = |name: &str| -> Option<Option<String>> {
+            match first.get(name).and_then(|v| v.as_str()) {
+                None => Some(None),
+                Some(raw) => EncString::parse(raw)
+                    .and_then(|e| e.decrypt_string(key))
+                    .ok()
+                    .map(|v| Some(v.as_str().to_owned())),
+            }
+        };
+        let credential_id = text("credentialId")??;
+        let rp_id = text("rpId")??;
+        let kind = (text("keyType")?, text("keyAlgorithm")?, text("keyCurve")?);
+        let usable = kind
+            == (
+                Some("public-key".to_owned()),
+                Some("ECDSA".to_owned()),
+                Some("P-256".to_owned()),
+            );
+        let counter = match text("counter")? {
+            None => 0,
+            Some(n) => n.trim().parse().ok()?,
+        };
+        Some(Passkey {
+            credential_id,
+            rp_id,
+            rp_name: text("rpName")?,
+            user_handle: text("userHandle")?,
+            user_name: text("userName")?,
+            user_display_name: text("userDisplayName")?,
+            counter,
+            discoverable: text("discoverable")?.is_some_and(|d| d.eq_ignore_ascii_case("true")),
+            creation_date: first
+                .get("creationDate")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned),
+            usable,
+            key_value: match first.get("keyValue").and_then(|v| v.as_str()) {
+                None => None,
+                Some(raw) => Some(EncString::parse(raw).ok()?),
+            },
+            item_key: key.clone(),
+        })
+    }
 }
 
 /// What an attachment whose name or key doesn't open is called.
@@ -771,6 +870,17 @@ impl Vault {
         draft: &ItemDraft,
         editing: Option<&Item>,
     ) -> Result<serde_json::Value> {
+        self.encrypt_item_with(draft, editing, None)
+    }
+
+    /// `encrypt_item`, with the login's passkeys (`fido2Credentials`, already
+    /// encrypted) in place of the ones it has: a passkey's raised counter.
+    pub fn encrypt_item_with(
+        &self,
+        draft: &ItemDraft,
+        editing: Option<&Item>,
+        passkeys: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value> {
         use serde_json::json;
         if let Some(item) = editing {
             if !matches!(
@@ -937,7 +1047,7 @@ impl Vault {
                     "uriChecksum": enc(&uri_checksum(u)),
                     "match": editing.and_then(|i| i.uris.iter().position(|kept| kept == u).and_then(|at| i.uri_matches.get(at).copied().flatten())),
                 })).collect::<Vec<_>>(),
-                "fido2Credentials": kept.and_then(|k| k.fido2_credentials.clone()),
+                "fido2Credentials": passkeys.or_else(|| kept.and_then(|k| k.fido2_credentials.clone())),
                 "autofillOnPageLoad": kept.and_then(|k| k.autofill_on_page_load),
                 "passwordRevisionDate": if password_changed {
                     Some(now.clone())
@@ -1134,6 +1244,9 @@ impl Keyring {
             _ => None,
         };
         let login = c.login.as_ref();
+        let passkey = login
+            .filter(|_| ItemKind::from(c.kind) == ItemKind::Login)
+            .and_then(|l| Passkey::open(l.fido2_credentials.as_ref(), &key));
         let kept = Kept {
             key: c.key.clone(),
             item_key: c.key.as_ref().map(|_| key.clone()),
@@ -1171,6 +1284,7 @@ impl Keyring {
             identity,
             ssh_key,
             attachments,
+            passkey,
             kept,
         })
     }

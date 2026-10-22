@@ -1093,6 +1093,21 @@ class _ItemPaneState extends State<ItemPane> {
         ),
       );
     }
+    // A login's passkey: who it's for and when it was made, never its key.
+    final passkey = item['passkey'] as Map<String, dynamic>?;
+    if (passkey != null) {
+      final site = passkey['rpName'] as String? ?? passkey['rpId'] as String;
+      final created = madeOn(passkey['created'] as String?);
+      rows.add(
+        row(
+          'Passkey',
+          Text(
+            created == null ? 'For $site' : 'For $site · created $created',
+            style: const TextStyle(fontSize: 15),
+          ),
+        ),
+      );
+    }
     final expires = item['expires'] as String?;
     if (expires != null && expires.isNotEmpty) {
       rows.add(
@@ -1271,4 +1286,25 @@ String fileSize(num bytes) {
   if (bytes < 1000) return '${bytes.toInt()} bytes';
   if (bytes < 1000 * 1000) return '${(bytes / 1000).toStringAsFixed(1)} KB';
   return '${(bytes / (1000 * 1000)).toStringAsFixed(1)} MB';
+}
+
+/// A date the server gave (ISO 8601) as people read it: "October 20, 2026".
+String? madeOn(String? iso) {
+  final at = iso == null ? null : DateTime.tryParse(iso)?.toLocal();
+  if (at == null) return null;
+  const months = [
+    'January',
+    'February',
+    'March',
+    'April',
+    'May',
+    'June',
+    'July',
+    'August',
+    'September',
+    'October',
+    'November',
+    'December',
+  ];
+  return '${months[at.month - 1]} ${at.day}, ${at.year}';
 }
