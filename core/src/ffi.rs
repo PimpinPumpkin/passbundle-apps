@@ -152,7 +152,13 @@ fn secrets(dir: &std::path::Path) -> Box<dyn SecretStore> {
 }
 
 fn failed(e: Error) -> Value {
-    json!({ "ok": false, "error": e.to_string(), "signedOut": e == Error::SignedOut })
+    json!({
+        "ok": false,
+        "error": e.to_string(),
+        "signedOut": e == Error::SignedOut,
+        // Making an account got to the server: signing in is what's left.
+        "accountMade": matches!(e, Error::AccountMade { .. }),
+    })
 }
 
 fn done(result: crate::Result<()>) -> Value {
@@ -367,15 +373,25 @@ pub unsafe extern "C" fn pb_sign_up(
     let (password, hint) = (Zeroizing::new(text(password)), Zeroizing::new(text(hint)));
     let given = |t: &str| Some(t.to_owned()).filter(|t| !t.trim().is_empty());
     let (name, hint) = (given(&name), given(&hint).map(Zeroizing::new));
-    with_app_waiting(|app| {
-        step(app.sign_up(
-            &server,
+    // The slow part (the master key, an RSA key pair) away from the app, so
+    // nothing else waits on it; a server address that can't be used first.
+    let made = crate::server::Server::new(
+        &server,
+        crate::server::Device::this_one(&crate::server::Device::new_identifier()),
+    )
+    .and_then(|_| {
+        crate::signup::NewAccount::make(
             &email,
             name.as_deref(),
             &password,
             hint.as_deref().map(|h| h.as_str()),
-        ))
-    })
+        )
+    });
+    let account = match made {
+        Ok(account) => account,
+        Err(e) => return out(failed(e)),
+    };
+    with_app_waiting(|app| step(app.register(&server, &account, &password)))
 }
 
 /// # Safety

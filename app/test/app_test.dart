@@ -110,7 +110,7 @@ void main() {
       await passwords(
         'correct horse battery',
         'correct horse battery',
-        'it\'s correct horse battery',
+        'it\'s Correct Horse Battery',
       );
       expect(
         find.text('The hint can\'t give away your master password.'),

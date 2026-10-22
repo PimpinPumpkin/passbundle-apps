@@ -7,6 +7,7 @@
 
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::{json, Value};
+use zeroize::Zeroizing;
 
 use crate::crypto::{EncString, PrivateKey, SymmetricKey};
 use crate::error::{Error, Result};
@@ -25,7 +26,8 @@ pub struct NewAccount {
     pub email: String,
     pub name: Option<String>,
     pub hint: Option<String>,
-    pub login_hash: String,
+    /// What signing in sends: the server's credential, wiped when dropped.
+    pub login_hash: Zeroizing<String>,
     pub kdf: Kdf,
     /// The user key, sealed with the stretched master key.
     pub user_key: EncString,
@@ -86,7 +88,7 @@ impl NewAccount {
             email: normalize_email(email),
             name: text(name),
             hint: text(hint),
-            login_hash: master.login_hash(password),
+            login_hash: Zeroizing::new(master.login_hash(password)),
             kdf: *kdf,
             user_key: sealed_user_key,
             public_key: private.public_key_der(),
@@ -108,7 +110,7 @@ impl NewAccount {
         json!({
             "email": self.email,
             "emailVerificationToken": token,
-            "masterPasswordHash": self.login_hash,
+            "masterPasswordHash": self.login_hash.as_str(),
             "masterPasswordHint": self.hint,
             "userSymmetricKey": self.user_key.to_string(),
             "userAsymmetricKeys": {
@@ -136,7 +138,9 @@ fn check(email: &str, password: &str, hint: Option<&str>) -> Result<()> {
             "a master password needs at least 12 characters",
         ));
     }
-    if hint.is_some_and(|h| h.trim() == password || h.contains(password)) {
+    // Case and spaces aside: "Correct Horse Battery" gives away "correct horse battery".
+    let said = |t: &str| t.trim().to_lowercase();
+    if hint.is_some_and(|h| said(h).contains(&said(password))) {
         return Err(Error::Refused(
             "the hint can't give away the master password",
         ));
@@ -168,6 +172,12 @@ mod tests {
         .is_err());
         assert!(check(
             "ana@example.test",
+            "Long Enough Password",
+            Some("long enough PASSWORD ")
+        )
+        .is_err());
+        assert!(check(
+            "ana@example.test",
             "long enough password",
             Some("the usual")
         )
@@ -189,7 +199,7 @@ mod tests {
         let master =
             MasterKey::derive("correct horse battery staple", "ana@example.test", &KDF).unwrap();
         assert_eq!(
-            account.login_hash,
+            *account.login_hash,
             master.login_hash("correct horse battery staple")
         );
         let user_key = account.user_key.decrypt_key(&master.stretch()).unwrap();

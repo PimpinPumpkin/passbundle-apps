@@ -638,8 +638,6 @@ impl Server {
         self.call(session, method, path, body)
     }
 
-    /// For tests and setup: an unauthenticated POST.
-    #[doc(hidden)]
     /// Makes the account on the server (docs/core.md, "Making an account"),
     /// as upstream's apps do: asks for a token for the email, then sends the
     /// account with it. A server that emails the token instead (it checks
@@ -653,7 +651,23 @@ impl Server {
                 "receiveMarketingEmails": false,
             }),
         )?;
-        let Some(token) = token.as_str().filter(|t| !t.is_empty()) else {
+        // A token is a JWT: three base64url parts. Anything else (a web page
+        // at a wrong address, say) isn't one, and nothing more is sent.
+        let jwt = |t: &&str| {
+            let parts: Vec<&str> = t.split('.').collect();
+            parts.len() == 3
+                && parts.iter().all(|p| {
+                    !p.is_empty()
+                        && p.bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+                })
+        };
+        if token.as_str().is_some_and(|t| !t.is_empty() && !jwt(&t)) {
+            return Err(Error::Malformed(
+                "not a token where the server should give one (is the address right?)".into(),
+            ));
+        }
+        let Some(token) = token.as_str().filter(jwt) else {
             return Err(Error::Refused(
                 "this server finishes new accounts by email, so open the link it sent, then sign in here",
             ));
@@ -661,10 +675,20 @@ impl Server {
         self.raw_post(
             "/identity/accounts/register/finish",
             account.finish_body(token),
-        )?;
+        )
+        // Sent, but no answer: it may be there.
+        .map_err(|e| match e {
+            Error::Network(_) => Error::AccountMade {
+                sure: false,
+                why: Box::new(e),
+            },
+            e => e,
+        })?;
         Ok(())
     }
 
+    /// For tests and setup: an unauthenticated POST.
+    #[doc(hidden)]
     pub fn raw_post(&self, path: &str, body: Value) -> Result<Value> {
         let (status, body) = Self::answer(self.agent.post(self.url(path)).send_json(body))?;
         Self::checked(status, body)

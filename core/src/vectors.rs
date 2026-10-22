@@ -555,7 +555,7 @@ fn a_new_account_is_made_as_the_vectors_say() {
     .unwrap();
     assert_eq!(made.email, account["salt"].as_str().unwrap());
     assert_eq!(
-        made.login_hash,
+        *made.login_hash,
         account["pbkdf2"]["loginHash"].as_str().unwrap()
     );
     assert_eq!(
@@ -583,7 +583,7 @@ fn a_new_account_is_made_as_the_vectors_say() {
     )
     .unwrap();
     assert_eq!(
-        made.login_hash,
+        *made.login_hash,
         account["argon2id"]["loginHash"].as_str().unwrap()
     );
     assert_eq!(

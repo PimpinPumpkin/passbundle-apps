@@ -78,6 +78,11 @@ class _SignInScreenState extends State<SignInScreen> {
       () => Core.signIn(signInTo, email.text.trim(), typed),
     );
     if (!mounted) return;
+    signedIn(answer);
+  }
+
+  /// Where signing in got to: the vault, two-step login, or why not.
+  void signedIn(Answer answer) {
     if (answer.ok && answer.body['step'] == 'twoFactor') {
       final offered = (answer.body['providers'] as List).cast<int>();
       final usable = offered.where((p) => p == 0 || p == 1).toList();
@@ -103,6 +108,7 @@ class _SignInScreenState extends State<SignInScreen> {
   /// passwords are checked here first, then go to the core, and the fields
   /// don't keep them.
   Future<void> createAccount() async {
+    if (working) return;
     final typed = password.text;
     final again = confirm.text;
     String? wrong;
@@ -112,7 +118,8 @@ class _SignInScreenState extends State<SignInScreen> {
       wrong = 'Use at least 12 characters.';
     } else if (typed != again) {
       wrong = 'The two master passwords don\'t match.';
-    } else if (hint.text.trim().isNotEmpty && hint.text.contains(typed)) {
+    } else if (hint.text.trim().isNotEmpty &&
+        hint.text.trim().toLowerCase().contains(typed.trim().toLowerCase())) {
       wrong = 'The hint can\'t give away your master password.';
     }
     if (wrong != null) {
@@ -135,14 +142,16 @@ class _SignInScreenState extends State<SignInScreen> {
       ),
     );
     if (!mounted) return;
-    if (answer.ok) {
-      widget.onSignedIn();
-    } else {
+    if (answer.body['accountMade'] == true) {
+      // The account is there: signing in is what's left, with the same email.
       setState(() {
+        creating = false;
         working = false;
         error = answer.error;
       });
+      return;
     }
+    signedIn(answer);
   }
 
   Future<void> sendEmail() async {
@@ -214,6 +223,9 @@ class _SignInScreenState extends State<SignInScreen> {
           controller: password,
           obscureText: hidden,
           enabled: !working,
+          enableSuggestions: false,
+          autocorrect: false,
+          enableIMEPersonalizedLearning: false,
           onSubmitted: (_) => signIn(),
           decoration: InputDecoration(
             labelText: 'Master password',
@@ -321,7 +333,9 @@ class _SignInScreenState extends State<SignInScreen> {
         controller: password,
         obscureText: hidden,
         enabled: !working,
-        autofillHints: const [AutofillHints.newPassword],
+        enableSuggestions: false,
+        autocorrect: false,
+        enableIMEPersonalizedLearning: false,
         decoration: InputDecoration(
           labelText: 'Master password',
           helperText: 'At least 12 characters',
@@ -333,6 +347,9 @@ class _SignInScreenState extends State<SignInScreen> {
         controller: confirm,
         obscureText: hidden,
         enabled: !working,
+        enableSuggestions: false,
+        autocorrect: false,
+        enableIMEPersonalizedLearning: false,
         decoration: const InputDecoration(labelText: 'Master password again'),
       ),
       const SizedBox(height: 12),
@@ -547,6 +564,9 @@ class _UnlockScreenState extends State<UnlockScreen> {
         obscureText: hidden,
         autofocus: true,
         enabled: !working,
+        enableSuggestions: false,
+        autocorrect: false,
+        enableIMEPersonalizedLearning: false,
         onSubmitted: (_) => unlock(),
         decoration: InputDecoration(
           labelText: 'Master password',
