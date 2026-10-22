@@ -23,6 +23,12 @@ final class AutoFillUITests: XCTestCase {
     let page = settings.staticTexts.matching(NSPredicate(format: "label BEGINSWITH 'AutoFill'")).firstMatch
     XCTAssertTrue(page.waitForExistence(timeout: 20), "Settings didn't find AutoFill")
     page.tap()
+    // AutoFill itself on, where this iOS has a switch for it, so the
+    // providers show.
+    let autoFill = settings.switches.matching(NSPredicate(format: "label BEGINSWITH 'AutoFill Passwords'")).firstMatch
+    if autoFill.waitForExistence(timeout: 5), autoFill.value as? String != "1" {
+      autoFill.tap()
+    }
     let passBundle = settings.switches["PassBundle"]
     XCTAssertTrue(passBundle.waitForExistence(timeout: 20), "PassBundle isn't offered for AutoFill")
     if passBundle.value as? String != "1" {
