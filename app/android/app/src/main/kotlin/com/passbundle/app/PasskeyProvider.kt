@@ -4,6 +4,7 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.os.CancellationSignal
+import android.net.Uri
 import android.os.OutcomeReceiver
 import androidx.credentials.exceptions.ClearCredentialException
 import androidx.credentials.exceptions.CreateCredentialException
@@ -22,6 +23,7 @@ import androidx.credentials.provider.CredentialProviderService
 import androidx.credentials.provider.ProviderClearCredentialStateRequest
 import androidx.credentials.provider.PublicKeyCredentialEntry
 import org.json.JSONObject
+import java.util.UUID
 
 /**
  * PassBundle as Android's passkey provider (docs/phones.md, "Passkeys"),
@@ -41,7 +43,7 @@ class PasskeyProvider : CredentialProviderService() {
         Thread {
             Core.init(applicationContext)
             Core.openIfClosed(filesDir.absolutePath)
-            callback.onResult(entries(this, request) ?: BeginGetCredentialResponse())
+            callback.onResult(runCatching { entries(this, request) }.getOrNull() ?: BeginGetCredentialResponse())
         }.start()
     }
 
@@ -70,13 +72,17 @@ class PasskeyProvider : CredentialProviderService() {
     }
 
     companion object {
-        private var requests = 0
-
+        /**
+         * Each entry's PendingIntent is its own: a unique address (Android
+         * tells PendingIntents apart by it, not by their extras), so one
+         * can't stand in for another and sign in as another account.
+         */
         fun pending(context: Context, mode: String, item: String? = null): PendingIntent =
             PendingIntent.getActivity(
                 context,
-                ++requests,
+                0,
                 Intent(context, PasskeyActivity::class.java)
+                    .setData(Uri.parse("passbundle://passkey/$mode/${UUID.randomUUID()}"))
                     .putExtra(PasskeyActivity.MODE, mode)
                     .putExtra(PasskeyActivity.ITEM, item),
                 // Mutable: Android adds the request when it starts it.
@@ -95,14 +101,17 @@ class PasskeyProvider : CredentialProviderService() {
             var locked = false
             for (option in request.beginGetCredentialOptions.filterIsInstance<BeginGetPublicKeyCredentialOption>()) {
                 val rpId = runCatching { JSONObject(option.requestJson).getString("rpId") }.getOrNull() ?: continue
-                Passkeys.caller(context, info, rpId) ?: continue
+                // What PassBundle has first: locked, it offers to unlock (the
+                // unlock checks the caller); without passkeys for the site,
+                // nothing is fetched for it.
                 val answer = JSONObject(Core.passkeys(rpId) ?: continue)
                 if (answer.optBoolean("locked")) {
                     locked = true
                     continue
                 }
+                val items = answer.optJSONArray("items")?.takeIf { it.length() > 0 } ?: continue
+                Passkeys.caller(context, info, rpId) ?: continue
                 val allowed = allowedIds(option.requestJson)
-                val items = answer.optJSONArray("items") ?: continue
                 for (i in 0 until items.length()) {
                     val item = items.getJSONObject(i)
                     if (allowed != null && item.getString("credentialId") !in allowed) continue

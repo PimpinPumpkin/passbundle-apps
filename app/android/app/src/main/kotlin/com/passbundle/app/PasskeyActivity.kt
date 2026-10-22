@@ -3,6 +3,7 @@ package com.passbundle.app
 import android.app.Activity
 import android.app.AlertDialog
 import android.content.Intent
+import android.os.Build
 import android.os.Bundle
 import android.text.InputType
 import android.view.WindowManager
@@ -18,6 +19,8 @@ import androidx.credentials.exceptions.CreateCredentialCancellationException
 import androidx.credentials.exceptions.CreateCredentialUnknownException
 import androidx.credentials.exceptions.GetCredentialCancellationException
 import androidx.credentials.exceptions.GetCredentialUnknownException
+import androidx.credentials.exceptions.domerrors.InvalidStateError
+import androidx.credentials.exceptions.publickeycredential.CreatePublicKeyCredentialDomException
 import androidx.credentials.provider.BeginGetCredentialResponse
 import androidx.credentials.provider.PendingIntentHandler
 import org.json.JSONArray
@@ -103,8 +106,9 @@ class PasskeyActivity : Activity() {
                 if (verified == null) return@prove failGet(null)
                 val clientData = if (caller.browser && option.clientDataHash != null) null else Passkeys.clientData("webauthn.get", challenge, caller)
                 val hash = clientData?.let(Passkeys::sha256) ?: option.clientDataHash!!
-                background({ JSONObject(Core.passkeyAssert(item, rpId, Passkeys.base64url(hash), verified) ?: "{}") }) { answer ->
-                    if (!answer.optBoolean("ok")) return@background failGet(answer.optString("error", "PassBundle couldn't sign in with it."))
+                background({ JSONObject(Core.passkeyAssert(item, rpId, Passkeys.base64url(hash), verified) ?: "{}") }) { result ->
+                        val answer = result ?: JSONObject()
+if (!answer.optBoolean("ok")) return@background failGet(answer.optString("error", "PassBundle couldn't sign in with it."))
                     val credentialId = answer.getString("credentialId")
                     val credential =
                         JSONObject()
@@ -118,7 +122,7 @@ class PasskeyActivity : Activity() {
                                     .put("clientDataJSON", Passkeys.base64url(clientData ?: PLACEHOLDER))
                                     .put("authenticatorData", answer.getString("authenticatorData"))
                                     .put("signature", answer.getString("signature"))
-                                    .put("userHandle", answer.getString("userHandle")),
+                                    .apply { answer.optString("userHandle").takeIf { it.isNotEmpty() }?.let { put("userHandle", it) } },
                             ).put("clientExtensionResults", JSONObject())
                     val result = Intent()
                     PendingIntentHandler.setGetCredentialResponse(result, GetCredentialResponse(PublicKeyCredential(credential.toString())))
@@ -150,7 +154,8 @@ class PasskeyActivity : Activity() {
         val user = json.optJSONObject("user") ?: return failCreate("PassBundle couldn't read the site's request.")
         val rpId = rp.optString("id").ifEmpty { return failCreate("PassBundle couldn't read the site's request.") }
         val algorithms = json.optJSONArray("pubKeyCredParams") ?: JSONArray()
-        if ((0 until algorithms.length()).none { algorithms.optJSONObject(it)?.optInt("alg") == -7 }) {
+        // None listed means ES256 and RS256 (WebAuthn's default).
+        if (algorithms.length() > 0 && (0 until algorithms.length()).none { algorithms.optJSONObject(it)?.optInt("alg") == -7 }) {
             return failCreate("That site doesn't take the kind of passkey PassBundle makes.")
         }
         val selection = json.optJSONObject("authenticatorSelection")
@@ -158,9 +163,14 @@ class PasskeyActivity : Activity() {
         val site = rp.optString("name").ifEmpty { rpId }
         background({ Passkeys.caller(this, request.callingAppInfo, rpId) }) { caller ->
             if (caller == null) return@background failCreate("That site doesn't let this app save its passkeys.")
-            AlertDialog.Builder(this)
+            val dialog = AlertDialog.Builder(this)
                 .setTitle("Save a passkey in PassBundle?")
-                .setMessage("For $site${if (userName.isEmpty()) "" else " ($userName)"}, in a new login.")
+                // The site's ID, which the passkey is bound to, first: the name is
+                // whatever the site says it is.
+                .setMessage(
+                    "For $rpId${if (site == rpId) "" else " (says it's $site)"}" +
+                        "${if (userName.isEmpty()) "" else ", as $userName"}, in a new login.",
+                )
                 .setPositiveButton("Save") { _, _ ->
                     prove(null, selection?.optString("userVerification", "preferred") ?: "preferred") { verified ->
                         if (verified == null) return@prove failCreate(null)
@@ -177,7 +187,9 @@ class PasskeyActivity : Activity() {
                                 .put("userVerified", verified)
                                 .put("discoverable", true)
                                 .put("exclude", JSONArray((0 until exclude.length()).mapNotNull { exclude.optJSONObject(it)?.optString("id") }))
-                        background({ JSONObject(Core.passkeyCreate(made.toString()) ?: "{}") }) { answer ->
+                        background({ JSONObject(Core.passkeyCreate(made.toString()) ?: "{}") }) { result ->
+                                val answer = result ?: JSONObject()
+if (answer.optBoolean("excluded")) return@background failCreateExcluded()
                             if (!answer.optBoolean("ok")) return@background failCreate(answer.optString("error", "PassBundle couldn't save the passkey."))
                             val credentialId = answer.getString("credentialId")
                             val credential =
@@ -204,8 +216,38 @@ class PasskeyActivity : Activity() {
                     }
                 }.setNegativeButton("Cancel") { _, _ -> failCreate(null) }
                 .setOnCancelListener { failCreate(null) }
-                .show()
+                .create()
+            guard(dialog)
+            dialog.show()
         }
+    }
+
+    /**
+     * A dialog that asks for something, made hard to trick: touches through
+     * anything drawn over it don't count, overlays are hidden (Android 12 and
+     * later), and its first button waits a moment, so a tap meant for the
+     * other app doesn't land on it.
+     */
+    private fun guard(dialog: AlertDialog) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) window.setHideOverlayWindows(true)
+        dialog.setOnShowListener {
+            dialog.window?.decorView?.filterTouchesWhenObscured = true
+            for (which in listOf(AlertDialog.BUTTON_POSITIVE, AlertDialog.BUTTON_NEGATIVE)) {
+                dialog.getButton(which)?.filterTouchesWhenObscured = true
+            }
+            val yes = dialog.getButton(AlertDialog.BUTTON_POSITIVE)
+            yes?.isEnabled = false
+            yes?.postDelayed({ yes.isEnabled = true }, 1000)
+        }
+    }
+
+    /** The site already has this account's passkey in PassBundle: WebAuthn's InvalidStateError, so it can say so. */
+    private fun failCreateExcluded() {
+        Toast.makeText(this, "PassBundle already has a passkey for this account on this site.", Toast.LENGTH_LONG).show()
+        val result = Intent()
+        PendingIntentHandler.setCreateCredentialException(result, CreatePublicKeyCredentialDomException(InvalidStateError()))
+        setResult(RESULT_OK, result)
+        finish()
     }
 
     private fun failCreate(words: String?) {
@@ -228,6 +270,18 @@ class PasskeyActivity : Activity() {
      * requires it or prefers it. `done(verified)`, null if they cancelled.
      */
     private fun prove(reprompt: String?, wanted: String, done: (Boolean?) -> Unit) {
+        // Locked (making one, say): unlocking is the proof, and it's needed anyway.
+        if (JSONObject(Core.passkeys("") ?: "{}").optBoolean("locked")) {
+            if (Biometric.status(this) != "setUp") {
+                startActivity(Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                Toast.makeText(this, "Unlock PassBundle, then try again.", Toast.LENGTH_LONG).show()
+                return done(null)
+            }
+            return Biometric.unlock(this) { unlocked, error ->
+                error?.let { Toast.makeText(this, it, Toast.LENGTH_LONG).show() }
+                done(if (unlocked) true else null)
+            }
+        }
         if (reprompt != null) return masterPassword("This login asks for your master password.", reprompt, done)
         if (wanted == "discouraged") return done(false)
         if (Biometric.status(this) == "setUp") {
@@ -258,7 +312,8 @@ class PasskeyActivity : Activity() {
             password.text.clear()
             background({
                 JSONObject((if (item != null) Core.confirmMasterPassword(item, typed) else Core.checkMasterPassword(typed)) ?: "{}")
-            }) { answer ->
+            }) { result ->
+                val answer = result ?: JSONObject()
                 if (answer.optBoolean("ok")) return@background done(true)
                 Toast.makeText(this, answer.optString("error", "That master password isn't right."), Toast.LENGTH_LONG).show()
                 done(null)
@@ -280,6 +335,7 @@ class PasskeyActivity : Activity() {
             true
         }
         dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE)
+        guard(dialog)
         dialog.show()
         password.requestFocus()
     }
@@ -290,9 +346,10 @@ class PasskeyActivity : Activity() {
     }
 
     /** Runs slow work (the network, the KDF) off the main thread, then `then` on it, unless the person left. */
-    private fun <T> background(work: () -> T, then: (T) -> Unit) {
+    private fun <T> background(work: () -> T, then: (T?) -> Unit) {
         Thread {
-            val result = work()
+            // Anything going wrong ends as nothing, which every caller refuses.
+            val result = runCatching(work).getOrNull()
             runOnUiThread { if (!isFinishing && !isDestroyed) then(result) }
         }.start()
     }

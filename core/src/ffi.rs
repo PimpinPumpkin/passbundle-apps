@@ -990,7 +990,8 @@ pub(crate) fn passkey_assert(
                 "authenticatorData": base64url(&a.authenticator_data),
                 "signature": base64url(&a.signature),
                 "credentialId": base64url(&a.credential_id),
-                "userHandle": base64url(&a.user_handle),
+                // None stored: left out, as WebAuthn has it, rather than empty.
+                "userHandle": (!a.user_handle.is_empty()).then(|| base64url(&a.user_handle)),
             }),
             Err(e) => failed(e),
         },
@@ -1066,7 +1067,13 @@ pub(crate) fn passkey_create(request: &str) -> Value {
                 "authenticatorData": base64url(&made.authenticator_data),
                 "publicKey": base64url(&made.public_key),
             }),
-            Err(e) => failed(e),
+            Err(e) => {
+                // The site's own "already registered" (InvalidStateError).
+                let excluded = e == Error::Refused(crate::app::ALREADY_HAS_PASSKEY);
+                let mut answer = failed(e);
+                answer["excluded"] = json!(excluded);
+                answer
+            }
         }
     })
 }

@@ -40,7 +40,8 @@ object Passkeys {
         // An app signed by several keys has no one origin.
         if (signers.size != 1) return null
         val hash = MessageDigest.getInstance("SHA-256").digest(signers[0].toByteArray())
-        val allowed = Core.appMayUsePasskeys(rpId, info.packageName, hash, testStatements(context, rpId))
+        // Anything going wrong (a site's file is anyone's text) means no.
+        val allowed = runCatching { Core.appMayUsePasskeys(rpId, info.packageName, hash, testStatements(context, rpId)) }.getOrDefault(false)
         return if (allowed) Caller("android:apk-key-hash:${base64url(hash)}", false, info.packageName) else null
     }
 

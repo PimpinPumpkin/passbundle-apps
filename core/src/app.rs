@@ -633,7 +633,11 @@ impl App {
         if !self.may_use(item) {
             return Err(Error::MasterPasswordFirst);
         }
-        let verified = user_verified || item.kept.reprompt != 0;
+        if item.deleted {
+            return Err(Error::Refused("that login is in the trash"));
+        }
+        // Proof is what the caller just asked for, never an earlier grant.
+        let verified = user_verified;
         let passkey = item
             .passkey
             .as_ref()
@@ -644,12 +648,8 @@ impl App {
         let key = passkey.key()?;
         let raw_id = credential_id(&passkey.credential_id)?;
         let user_handle = match &passkey.user_handle {
-            Some(handle) => {
-                use base64::Engine;
-                base64::engine::general_purpose::URL_SAFE_NO_PAD
-                    .decode(handle.trim_end_matches('='))
-                    .map_err(|_| Error::Damaged("a passkey's user handle that isn't base64url"))?
-            }
+            Some(handle) => crate::passkey::base64_either(handle)
+                .ok_or(Error::Damaged("a passkey's user handle that isn't base64"))?,
             None => Vec::new(),
         };
         let mut counter = passkey.counter;
@@ -672,7 +672,10 @@ impl App {
                 return Err(Error::SignedOut);
             };
             server.save_item(session, Some(id), body, &collection_ids)?;
-            self.sync()?;
+            // Saved: a sync that fails now only leaves this device behind, and
+            // the next use is refused by the server's revision check rather
+            // than reusing a counter.
+            let _ = self.sync();
         }
         let mut set = flags::USER_PRESENT | flags::BACKUP_ELIGIBLE | flags::BACKED_UP;
         if verified {
@@ -708,9 +711,7 @@ impl App {
             })
         });
         if excluded {
-            return Err(Error::Refused(
-                "PassBundle already has a passkey for this account on this site",
-            ));
+            return Err(Error::Refused(ALREADY_HAS_PASSKEY));
         }
         let editing = match new.login {
             Some(id) => {
@@ -727,12 +728,10 @@ impl App {
         };
         let mut draft = match editing {
             Some(item) => ItemDraft::of(item),
+            // Named after the site's ID, which the passkey is bound to, not
+            // the name the site gives itself, which any site can make up.
             None => ItemDraft {
-                name: new
-                    .rp_name
-                    .filter(|n| !n.trim().is_empty())
-                    .unwrap_or(new.rp_id)
-                    .to_owned(),
+                name: new.rp_id.to_owned(),
                 uris: vec![format!("https://{}", new.rp_id)],
                 ..ItemDraft::default()
             },
@@ -767,22 +766,16 @@ impl App {
         let (Some(server), Some(session)) = (&self.server, self.session.as_mut()) else {
             return Err(Error::SignedOut);
         };
-        server.save_item(session, new.login, body, &collection_ids)?;
-        self.sync()?;
-        let item_id = self
-            .vault
-            .as_ref()
-            .and_then(|v| {
-                v.items.iter().find(|i| {
-                    i.passkey
-                        .as_ref()
-                        .is_some_and(|p| p.credential_id == stored_id)
-                })
-            })
-            .map(|i| i.id.clone())
-            .ok_or(Error::Damaged(
-                "the passkey didn't come back from the server",
-            ))?;
+        let saved = server.save_item(session, new.login, body, &collection_ids)?;
+        let item_id = match new.login {
+            Some(id) => id.to_owned(),
+            None => saved["id"]
+                .as_str()
+                .map(str::to_owned)
+                .ok_or(Error::Damaged("the server didn't say which login it saved"))?,
+        };
+        // Saved: the site gets its answer even if this sync fails.
+        let _ = self.sync();
         let mut set = flags::USER_PRESENT | flags::BACKUP_ELIGIBLE | flags::BACKED_UP;
         if new.user_verified {
             set |= flags::USER_VERIFIED;
@@ -868,6 +861,11 @@ impl App {
         Ok(secret)
     }
 }
+
+/// Why making a passkey was refused when the site already has one of its
+/// credentials in the vault (WebAuthn's InvalidStateError).
+pub const ALREADY_HAS_PASSKEY: &str =
+    "PassBundle already has a passkey for this account on this site";
 
 /// A passkey to make (`App::passkey_create`): what the site asked for.
 pub struct NewPasskey<'a> {

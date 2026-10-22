@@ -49,6 +49,11 @@ pub fn allows(statements: &str, package: &str, certificate: &[u8; 32]) -> bool {
 
 /// A fingerprint as asset links write it ("AB:CD:..."), as bytes.
 fn fingerprint(text: &str) -> Option<[u8; 32]> {
+    // Hex digits and colons only, checked before slicing by byte: anything
+    // else (a site's file is anyone's text) is no fingerprint.
+    if !text.bytes().all(|b| b.is_ascii_hexdigit() || b == b':') {
+        return None;
+    }
     let hex: String = text.chars().filter(|c| *c != ':').collect();
     if hex.len() != 64 {
         return None;
@@ -63,9 +68,16 @@ fn fingerprint(text: &str) -> Option<[u8; 32]> {
 /// A site's ID that can be fetched as a host: letters, digits, hyphens, and
 /// dots, nothing that could change the address.
 fn host(rp_id: &str) -> Result<&str> {
+    let labels: Vec<&str> = rp_id.split('.').collect();
+    // A domain: lower case, two labels or more, and not an address.
     let ok = !rp_id.is_empty()
         && rp_id.len() <= 253
-        && rp_id.split('.').all(|label| {
+        && labels.len() >= 2
+        && !labels
+            .last()
+            .is_some_and(|tld| tld.bytes().all(|b| b.is_ascii_digit()))
+        && !rp_id.bytes().any(|b| b.is_ascii_uppercase())
+        && labels.iter().all(|label| {
             !label.is_empty()
                 && label.len() <= 63
                 && label
@@ -116,15 +128,18 @@ pub fn fetch(rp_id: &str) -> Result<String> {
 
 /// Whether the site lets this app use its passkeys, from what was fetched in
 /// the last day or by fetching now. `statements` stands in for fetching (the
-/// tests, and debug builds pointing a test site at a file).
+/// tests, and debug builds pointing a test site at a file), and isn't kept.
 pub fn check(
     rp_id: &str,
     package: &str,
     certificate: &[u8; 32],
     statements: Option<&str>,
 ) -> Result<bool> {
-    let key = (rp_id.to_owned(), package.to_owned(), *certificate);
-    if statements.is_none() {
+    if let Some(given) = statements {
+        return Ok(allows(given, package, certificate));
+    }
+    let key = (host(rp_id)?.to_owned(), package.to_owned(), *certificate);
+    {
         let kept = KEPT.lock().unwrap_or_else(|p| p.into_inner());
         if let Some((answer, at)) = kept.as_ref().and_then(|k| k.get(&key)) {
             if at.elapsed() < KEPT_FOR {
@@ -132,11 +147,7 @@ pub fn check(
             }
         }
     }
-    let fetched = match statements {
-        Some(given) => given.to_owned(),
-        None => fetch(rp_id)?,
-    };
-    let answer = allows(&fetched, package, certificate);
+    let answer = allows(&fetch(rp_id)?, package, certificate);
     KEPT.lock()
         .unwrap_or_else(|p| p.into_inner())
         .get_or_insert_with(HashMap::new)
@@ -206,16 +217,28 @@ mod tests {
             "evil.test:8443",
             "-a.test",
             "a..test",
+            "localhost",
+            "10.0.0.1",
+            "Example.test",
         ] {
             assert!(host(bad).is_err(), "{bad}");
         }
     }
 
     #[test]
-    fn an_answer_is_kept_for_the_site_app_and_key() {
+    fn statements_given_are_read_but_not_kept() {
         let named = statements(RELATION, "com.example.kept", &colons(&CERT));
         assert!(check("kept.example.test", "com.example.kept", &CERT, Some(&named)).unwrap());
-        // Kept: no fetch (which would fail for this name) the second time.
-        assert!(check("kept.example.test", "com.example.kept", &CERT, None).unwrap());
+        // Not kept: asking without them fetches (which fails for this name).
+        assert!(check("kept.example.test", "com.example.kept", &CERT, None).is_err());
+    }
+
+    #[test]
+    fn a_fingerprint_that_isnt_hex_is_none_not_a_crash() {
+        let odd = format!("{}\u{e9}A", "A".repeat(61));
+        assert!(fingerprint(&odd).is_none());
+        assert!(fingerprint(&format!("+{}", "A".repeat(63))).is_none());
+        let named = statements(RELATION, "com.example.app", &odd);
+        assert!(!allows(&named, "com.example.app", &CERT));
     }
 }

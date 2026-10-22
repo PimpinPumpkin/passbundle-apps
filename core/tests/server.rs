@@ -476,7 +476,8 @@ fn passkeys_are_made_and_sign_in() {
 
     // Saved in a new login for the site, with the account's name.
     let item = app.vault().unwrap().item(&made.item_id).unwrap();
-    assert_eq!(item.name, "Passkeys Example");
+    // Named after the site's ID, not the name it gives itself.
+    assert_eq!(item.name, "passkeys.example.test");
     assert_eq!(item.username.as_deref(), Some("ana@passkeys.example.test"));
     assert_eq!(item.uris, vec!["https://passkeys.example.test".to_owned()]);
     assert_eq!(app.passkeys_for("passkeys.example.test").len(), 1);

@@ -266,7 +266,8 @@ if [ "$(a shell getprop ro.build.version.sdk | tr -d '\r')" -ge 34 ]; then
   a shell am start -W -n com.passbundle.autofilltest/.PasskeySiteActivity > /dev/null
   tap "id=com.passbundle.autofilltest:id/make_passkey"
   through "^Save a passkey in PassBundle\?"
-  sleep 1
+  # Save can't be tapped for its first moment.
+  sleep 2
   tap "^(Save|SAVE)$"
   shown "^Made a passkey for passkeys.example.test$"
   echo "Made: Credential Manager has a passkey from PassBundle, attested for the test app."
