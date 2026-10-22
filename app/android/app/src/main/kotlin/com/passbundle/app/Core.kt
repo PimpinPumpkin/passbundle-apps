@@ -34,4 +34,23 @@ object Core {
 
     /** The master password, for a login that asks for it again: {"ok": true}, or the words to show. Slow: off the main thread. */
     @JvmStatic external fun confirmMasterPassword(id: String, password: String): String?
+
+    /** The master password as proof the person is who they are, for a passkey: {"ok": true}, or the words. Slow. */
+    @JvmStatic external fun checkMasterPassword(password: String): String?
+
+    /** The logins with a passkey for a site (its ID), as JSON: names and IDs, never a key (PasskeyProvider.kt). */
+    @JvmStatic external fun passkeys(rpId: String): String?
+
+    /** Signs in with a login's passkey, the client data hash in base64url: JSON (ffi.rs). Slow: off the main thread. */
+    @JvmStatic external fun passkeyAssert(id: String, rpId: String, clientDataHash: String, userVerified: Boolean): String?
+
+    /** Makes a passkey from the request as JSON, answering JSON (ffi.rs). Slow, it's saved first: off the main thread. */
+    @JvmStatic external fun passkeyCreate(request: String): String?
+
+    /**
+     * Whether a site's Digital Asset Links let an app (package and its signing
+     * certificate's SHA-256) use its passkeys; `statements` stands in for
+     * fetching them (debug builds' test site). Slow: off the main thread.
+     */
+    @JvmStatic external fun appMayUsePasskeys(rpId: String, packageName: String, certificate: ByteArray, statements: String?): Boolean
 }

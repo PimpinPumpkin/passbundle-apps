@@ -20,5 +20,9 @@
                 <data android:scheme="https" />
             </intent-filter>
         </activity>
+        <!-- A site's sign-in with passkeys, through Android's Credential Manager. -->
+        <activity
+            android:name=".PasskeySiteActivity"
+            android:exported="true" />
     </application>
 </manifest>
