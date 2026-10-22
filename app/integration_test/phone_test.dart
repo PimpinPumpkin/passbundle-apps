@@ -37,6 +37,24 @@ Future<void> pumpUntil(
   throw TestFailure('Never showed up: $finder\nOn screen: $shown');
 }
 
+/// Taps something once the screen has stopped moving under it: it can be
+/// hit, and it's in the same place for a few frames (a keyboard closing
+/// moves the screen after a field is typed in, and a tap mid-move misses).
+Future<void> tapWhenStill(WidgetTester tester, Finder finder) async {
+  Offset? last;
+  var still = 0;
+  final end = DateTime.now().add(const Duration(seconds: 30));
+  while (still < 3 && DateTime.now().isBefore(end)) {
+    await tester.pump(const Duration(milliseconds: 100));
+    final found = finder.hitTestable().evaluate();
+    final at = found.isEmpty ? null : tester.getCenter(finder);
+    still = at != null && at == last ? still + 1 : 0;
+    last = at;
+  }
+  if (still < 3) throw TestFailure('Never held still: $finder');
+  await tester.tap(finder);
+}
+
 // A real server the phone reaches (tools/android-app-test.sh, with
 // PB_TEST_SERVER), and an account on it with one login.
 const server = String.fromEnvironment('PB_TEST_SERVER');
@@ -110,9 +128,10 @@ void main() {
           find.widgetWithText(TextField, 'Master password'),
           'anything',
         );
-        // Past the sign-out dialog's way out, where Sign in can be tapped.
-        await pumpUntil(tester, find.text('Sign in').hitTestable());
-        await tester.tap(find.text('Sign in'));
+        // The keyboard away, and past the sign-out dialog's way out, where
+        // Sign in can be tapped.
+        FocusManager.instance.primaryFocus?.unfocus();
+        await tapWhenStill(tester, find.text('Sign in'));
         await pumpUntil(tester, find.textContaining('certificate'));
         expect(
           find.textContaining('Couldn\'t reach the server'),
@@ -149,7 +168,8 @@ void main() {
         find.widgetWithText(TextField, 'Master password'),
         password,
       );
-      await tester.tap(find.text('Sign in'));
+      FocusManager.instance.primaryFocus?.unfocus();
+      await tapWhenStill(tester, find.text('Sign in'));
       await pumpUntil(tester, find.text('Saved before the phone signed in'));
       if (Platform.isIOS) {
         // Kept where the AutoFill extension reads it too, and iOS may suggest
