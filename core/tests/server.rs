@@ -35,6 +35,8 @@ fn new_email(prefix: &str) -> String {
     )
 }
 
+#[path = "support/attachment.rs"]
+mod attachment;
 #[path = "support/sign_up.rs"]
 mod support;
 
@@ -374,7 +376,7 @@ fn the_app_keeps_the_vault_locks_unlocks_offline_and_signs_out() {
 /// item's), then downloaded by the core, its MAC checked, and opened.
 #[test]
 fn an_attachment_downloads_and_opens() {
-    use passbundle_core::crypto::{decrypt_file, EncString};
+    use passbundle_core::crypto::decrypt_file;
     let Some(server) = server() else { return };
     let url = std::env::var("PB_TEST_SERVER").unwrap();
     let email = new_email("attachment");
@@ -396,53 +398,9 @@ fn an_attachment_downloads_and_opens() {
         .unwrap();
     let id = saved["id"].as_str().unwrap().to_owned();
 
-    // The file, encrypted with a key of its own, as upstream's apps do.
-    let user_key = session.user_key().clone();
-    let file_key = SymmetricKey::generate();
     let contents = b"Recovery codes: 1234-5678".to_vec();
-    let EncString::Aes { iv, data, mac } = file_key.encrypt(&contents) else {
-        unreachable!()
-    };
-    let mut blob = vec![2u8];
-    blob.extend_from_slice(&iv);
-    blob.extend_from_slice(&mac);
-    blob.extend_from_slice(&data);
-    let file_name = user_key.encrypt_str("codes.txt").to_string();
-    let started = server
-        .raw(
-            &mut session,
-            "POST",
-            &format!("/api/ciphers/{id}/attachment/v2"),
-            Some(json!({
-                "key": user_key.encrypt(&file_key.to_bytes()).to_string(),
-                "fileName": file_name,
-                "fileSize": blob.len(),
-                "adminRequest": false,
-            })),
-        )
-        .unwrap();
-    let attachment_id = started["attachmentId"].as_str().unwrap().to_owned();
-    // The file itself, as a form upload.
-    let boundary = "pb-test-boundary";
-    let mut body = format!(
-        "--{boundary}\r\nContent-Disposition: form-data; name=\"data\"; filename=\"{file_name}\"\r\nContent-Type: application/octet-stream\r\n\r\n"
-    )
-    .into_bytes();
-    body.extend_from_slice(&blob);
-    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
-    let upload = ureq::post(&format!(
-        "{url}/api/ciphers/{id}/attachment/{attachment_id}"
-    ))
-    .header(
-        "Authorization",
-        &format!("Bearer {}", session.access_token.as_str()),
-    )
-    .header(
-        "Content-Type",
-        &format!("multipart/form-data; boundary={boundary}"),
-    )
-    .send(&body[..]);
-    assert!(upload.is_ok(), "{upload:?}");
+    let attachment_id =
+        attachment::upload(&server, &url, &mut session, &id, "codes.txt", &contents);
 
     // The core lists it with the item, downloads it, and opens it.
     let vault = open(&server, &mut session);
@@ -453,7 +411,8 @@ fn an_attachment_downloads_and_opens() {
     let file = server
         .attachment(&mut session, &id, &attachment_id)
         .unwrap();
-    assert_eq!(file, blob);
+    // Its own format: the type byte, IV, MAC, and the ciphertext.
+    assert_eq!(file[0], 2);
     assert_eq!(
         decrypt_file(&file, &attachment.key).unwrap().as_slice(),
         &contents[..]

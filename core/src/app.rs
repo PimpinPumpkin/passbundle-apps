@@ -518,14 +518,45 @@ impl App {
     /// there's none), next to anything of the same name rather than over
     /// it; answers where.
     pub fn save_attachment(&mut self, id: &str, attachment_id: &str) -> Result<PathBuf> {
-        let (name, contents) = self.attachment(id, attachment_id)?;
         let dir = dirs::download_dir()
             .or_else(dirs::home_dir)
             .ok_or(Error::Damaged("no folder to save to"))?;
-        let path = free_path(&dir, &name);
+        self.save_attachment_in(id, attachment_id, &dir)
+    }
+
+    /// Saves an attachment in `dir` (an iPhone's Documents folder, which
+    /// Files shows), the same way.
+    pub fn save_attachment_in(
+        &mut self,
+        id: &str,
+        attachment_id: &str,
+        dir: &std::path::Path,
+    ) -> Result<PathBuf> {
+        let (name, contents) = self.attachment(id, attachment_id)?;
+        let path = free_path(dir, &name);
         std::fs::write(&path, contents.as_slice())
             .map_err(|_| Error::Damaged("the file couldn't be written"))?;
         Ok(path)
+    }
+
+    /// Writes an attachment into a file the OS opened for it (Android's
+    /// Downloads, through MediaStore), so it never passes through Java.
+    #[cfg(unix)]
+    pub fn write_attachment_to(
+        &mut self,
+        id: &str,
+        attachment_id: &str,
+        fd: std::os::fd::RawFd,
+    ) -> Result<()> {
+        use std::io::Write;
+        use std::os::fd::FromRawFd;
+        let (_, contents) = self.attachment(id, attachment_id)?;
+        // SAFETY: `fd` is an open, writable file the caller owns and closes;
+        // ManuallyDrop keeps this from closing it too.
+        let mut file = std::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(fd) });
+        file.write_all(contents.as_slice())
+            .and_then(|()| file.flush())
+            .map_err(|_| Error::Damaged("the file couldn't be written"))
     }
 
     /// Saves an item, new (no id) or edited, then syncs.

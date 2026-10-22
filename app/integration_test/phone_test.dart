@@ -163,6 +163,20 @@ void main() {
         expect(Directory('$dir/tokens').existsSync(), isFalse);
       }
 
+      // Its attachment saves to the phone's own Downloads (Android) or Files
+      // (iPhone): the core downloads it, opens it, and writes it there itself.
+      await tester.tap(find.text('Saved before the phone signed in'));
+      await pumpUntil(tester, find.byTooltip('Save notes.txt'));
+      await tester.tap(find.byTooltip('Save notes.txt'));
+      await pumpUntil(
+        tester,
+        find.textContaining(
+          Platform.isAndroid
+              ? 'Saved to Downloads/notes'
+              : 'Saved to Files, On My iPhone, PassBundle, notes',
+        ),
+      );
+
       // A restart: the core opens again from only what's kept. The vault
       // unlocks, and it syncs with the kept session, without signing in.
       await Core.openOnThisDevice();

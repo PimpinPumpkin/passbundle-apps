@@ -149,6 +149,30 @@ pub fn fillable<'caller>(
         .resolve::<ThrowRuntimeExAndDefault>()
 }
 
+/// Writes one of an item's attachments into a file Android opened for it
+/// (Downloads, through MediaStore; docs/core.md, "Attachments"): `{ok}`, or
+/// the words to show, as JSON. Slow (the download): off the main thread.
+#[cfg(feature = "ffi")]
+#[jni_mangle("com.passbundle.app.Core")]
+pub fn writeAttachmentTo<'caller>(
+    mut unowned_env: EnvUnowned<'caller>,
+    _class: JClass<'caller>,
+    id: JString<'caller>,
+    attachment_id: JString<'caller>,
+    fd: jni::sys::jint,
+) -> jstring {
+    unowned_env
+        .with_env(|env| -> JniResult<jstring> {
+            let answer = crate::ffi::write_attachment_to(
+                &id.try_to_string(env)?,
+                &attachment_id.try_to_string(env)?,
+                fd,
+            );
+            Ok(env.new_string(answer.to_string())?.into_raw())
+        })
+        .resolve::<ThrowRuntimeExAndDefault>()
+}
+
 /// The master password, for a login that asks for it again before it fills
 /// (docs/core.md, "Asking for the master password again"): `{ok}`, or the
 /// words to show, as JSON. Slow (the KDF): call it off the main thread.

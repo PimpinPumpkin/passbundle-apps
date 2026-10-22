@@ -416,7 +416,7 @@ void main() {
       await tester.pump();
       expect(find.text('recovery-codes.txt · 36 bytes'), findsOneWidget);
       // The sample has no server: downloading it says so.
-      await tester.tap(find.byTooltip('Save recovery-codes.txt to Downloads'));
+      await tester.tap(find.byTooltip('Save recovery-codes.txt'));
       await pumpUntil(
         tester,
         find.text('You\'ve been signed out. Sign in again.'),

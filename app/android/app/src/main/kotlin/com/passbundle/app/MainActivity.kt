@@ -83,6 +83,17 @@ class MainActivity : FlutterActivity() {
                         Biometric.remove()
                         result.success(mapOf("ok" to true))
                     }
+                    // An attachment, into Downloads (Attachments.kt).
+                    "saveAttachment" -> {
+                        val id = call.argument<String>("id")
+                        val attachment = call.argument<String>("attachmentId")
+                        val name = call.argument<String>("name")
+                        if (id == null || attachment == null || name == null) {
+                            result.success(mapOf("ok" to false, "error" to "Couldn't save that."))
+                        } else {
+                            Attachments.saveToDownloads(this, id, attachment, name) { answer -> result.success(answer) }
+                        }
+                    }
                     else -> result.notImplemented()
                 }
             }

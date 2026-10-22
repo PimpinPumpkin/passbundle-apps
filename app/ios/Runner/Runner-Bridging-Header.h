@@ -18,4 +18,6 @@ void pb_free_secret(uint8_t *bytes, size_t len);
 uint8_t *pb_user_key(size_t *len);
 char *pb_unlock_with_key(const uint8_t *key, size_t len);
 void pb_set_remove_biometric(void (*remove)(void));
+// Saves an attachment in `dir` (the app's Documents folder): {"ok", "path"} or the words to show.
+char *pb_save_attachment_in(const char *id, const char *attachment_id, const char *dir);
 void pb_free(char *ptr);

@@ -820,6 +820,33 @@ pub unsafe extern "C" fn pb_save_attachment(
     })
 }
 
+/// Saves one of an item's attachments in `dir` (an iPhone's Documents folder,
+/// which Files shows): `{ok, path}`, or the words to show.
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_save_attachment_in(
+    id: *const c_char,
+    attachment_id: *const c_char,
+    dir: *const c_char,
+) -> *mut c_char {
+    let (id, attachment_id, dir) = (text(id), text(attachment_id), text(dir));
+    with_app_waiting(|app| {
+        match app.save_attachment_in(&id, &attachment_id, std::path::Path::new(&dir)) {
+            Ok(path) => json!({ "ok": true, "path": path.to_string_lossy() }),
+            Err(e) => failed(e),
+        }
+    })
+}
+
+/// Writes an attachment into a file Android opened for it (android.rs):
+/// `{ok}`, or the words to show. Slow: off the main thread.
+#[cfg(target_os = "android")]
+pub(crate) fn write_attachment_to(id: &str, attachment_id: &str, fd: i32) -> Value {
+    app_value(|app| done(app.write_attachment_to(id, attachment_id, fd)))
+}
+
 /// Checks the master password for an item that asks for it again (docs/core.md,
 /// "Asking for the master password again"): `{ok}`, or the words to show.
 ///

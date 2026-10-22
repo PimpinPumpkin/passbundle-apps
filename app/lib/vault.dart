@@ -724,13 +724,13 @@ class _ItemPaneState extends State<ItemPane> {
   }
 
   /// Downloads, opens, and saves an attachment to Downloads, through the core.
-  Future<void> saveAttachment(String attachmentId) async {
+  Future<void> saveAttachment(String attachmentId, String name) async {
     if (asksAgain()) {
       setState(() {});
       return;
     }
     final answer = await whileBusy(
-      () => Core.saveAttachment(widget.id, attachmentId),
+      () => Core.saveAttachment(widget.id, attachmentId, name),
     );
     if (!mounted) return;
     showMessage(
@@ -1069,7 +1069,7 @@ class _ItemPaneState extends State<ItemPane> {
               ),
       );
     }
-    // Attachments: saved to Downloads on a computer; phones list them for now.
+    // Attachments: saved to Downloads, or to Files on an iPhone.
     for (final a
         in ((item['attachments'] as List?) ?? const [])
             .cast<Map<String, dynamic>>()) {
@@ -1081,12 +1081,12 @@ class _ItemPaneState extends State<ItemPane> {
             style: const TextStyle(fontSize: 15),
           ),
           actions: [
-            if (!isPhone)
-              IconButton(
-                tooltip: 'Save ${a['name']} to Downloads',
-                icon: const Icon(Icons.download_rounded, size: 20),
-                onPressed: () => saveAttachment(a['id'] as String),
-              ),
+            IconButton(
+              tooltip: 'Save ${a['name']}',
+              icon: const Icon(Icons.download_rounded, size: 20),
+              onPressed: () =>
+                  saveAttachment(a['id'] as String, a['name'] as String),
+            ),
           ],
         ),
       );

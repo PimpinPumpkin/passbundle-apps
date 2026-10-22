@@ -1,10 +1,13 @@
-//! A throwaway account on a test server, with two logins in its vault, for
+//! A throwaway account on a test server, with two logins in its vault (the
+//! first with an attachment), for
 //! tests that sign in from elsewhere (the phone app's test,
 //! tools/android-app-test.sh). Signs up as an app would, then saves the item
 //! through the core.
 //!
 //!   cargo run --example test_account -- <server> <email> <password>
 
+#[path = "../tests/support/attachment.rs"]
+mod attachment;
 #[path = "../tests/support/sign_up.rs"]
 mod support;
 
@@ -55,6 +58,27 @@ fn main() {
         &[],
     )
     .expect("saving the autofill item");
+    // An attachment on the first login, for the phone's test of saving one.
+    let mut session = match server.sign_in(email, password).expect("signing in") {
+        passbundle_core::server::SignIn::Done(session) => session,
+        _ => panic!("unexpected two-step login"),
+    };
+    let (sync, _) = server.sync(&mut session).expect("syncing");
+    let vault =
+        passbundle_core::vault::Vault::open(&sync, session.user_key().clone()).expect("opening");
+    let first = vault
+        .items
+        .iter()
+        .find(|i| i.name == "Saved before the phone signed in")
+        .expect("the first login");
+    attachment::upload(
+        &server,
+        server_url,
+        &mut session,
+        &first.id,
+        "notes.txt",
+        b"Saved from a phone test.\n",
+    );
     let _ = std::fs::remove_dir_all(dir);
     println!("{email}");
 }
