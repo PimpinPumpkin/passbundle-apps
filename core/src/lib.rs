@@ -10,6 +10,7 @@ pub mod crypto;
 pub mod error;
 pub mod generator;
 pub mod kdf;
+pub mod lock_policy;
 pub mod managed;
 pub mod matching;
 pub mod secrets;

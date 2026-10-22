@@ -98,6 +98,7 @@ class Core {
   late final _lock = _lib.lookupFunction<_Str0, _Str0>('pb_lock');
   late final _signOut = _lib.lookupFunction<_Str0, _Str0>('pb_sign_out');
   late final _preferences = _lib.lookupFunction<_Str0, _Str0>('pb_preferences');
+  late final _lockPolicy = _lib.lookupFunction<_Str0, _Str0>('pb_lock_policy');
   late final _setPreferences = _lib.lookupFunction<_Str1, _Str1>(
     'pb_set_preferences',
   );
@@ -288,6 +289,12 @@ class Core {
   /// closes) and `lockOnSleep` (when the screen locks or the computer sleeps).
   Map<String, dynamic> preferences() =>
       _answer(_preferences()) as Map<String, dynamic>;
+
+  /// The organizations' "Vault lock" policy, which Settings keeps to:
+  /// `maxMinutes` (the longest wait, or null), `immediately`, `onSystemLock`,
+  /// and `signOut`.
+  Map<String, dynamic> lockPolicy() =>
+      _answer(_lockPolicy()) as Map<String, dynamic>;
 
   Answer setPreferences(Map<String, dynamic> preferences) => Answer(
     _with([jsonEncode(preferences)], (p) => _answer(_setPreferences(p[0])))
