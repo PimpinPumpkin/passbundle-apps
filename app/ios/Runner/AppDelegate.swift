@@ -26,6 +26,12 @@ import UniformTypeIdentifiers
       // Where the core keeps the vault: the app's own Application Support folder.
       case "filesDir":
         result(Platform.filesDir())
+      // The server an organization's MDM set (managed app configuration's
+      // `server_url`, as on Android), if any.
+      case "managedServer":
+        let managed = UserDefaults.standard.dictionary(forKey: "com.apple.configuration.managed")
+        let server = (managed?["server_url"] as? String)?.trimmingCharacters(in: .whitespaces)
+        result(server?.isEmpty == false ? server : nil)
       // Copying straight from the core to the pasteboard: the value never passes through Dart.
       case "copy":
         let arguments = call.arguments as? [String: Any]
