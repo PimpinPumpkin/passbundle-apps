@@ -86,7 +86,8 @@ void main() {
       File('$dir/autofill-ready').writeAsStringSync('');
 
       // Once the script has turned PassBundle on for AutoFill, iOS takes the
-      // suggestions: the one login with a website.
+      // suggestions: the logins with a website (the test account's other
+      // tests add more).
       await waitFor(
         tester,
         File('$dir/autofill-enabled'),
@@ -100,7 +101,8 @@ void main() {
         );
         suggested = await Core.suggest();
       }
-      expect(suggested, {'count': 1, 'stored': true});
+      expect(suggested['stored'], isTrue);
+      expect(suggested['count'], greaterThanOrEqualTo(1));
       File('$dir/autofill-suggested').writeAsStringSync('');
 
       // Safari fills from them now; then the script says it's done.
