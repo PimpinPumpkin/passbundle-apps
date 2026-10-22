@@ -23,8 +23,16 @@ open class SignInActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        val domain = claimsDomain
         val username =
-            EditText(this).apply {
+            // Says it's the website on the field itself, which Android always
+            // puts in what autofill sees.
+            object : EditText(this) {
+                override fun onProvideAutofillStructure(structure: ViewStructure, flags: Int) {
+                    super.onProvideAutofillStructure(structure, flags)
+                    domain?.let { structure.setWebDomain(it) }
+                }
+            }.apply {
                 id = R.id.username
                 hint = "Username"
                 setAutofillHints(View.AUTOFILL_HINT_USERNAME)
@@ -49,16 +57,8 @@ open class SignInActivity : Activity() {
                     getSystemService(AutofillManager::class.java)?.commit()
                 }
             }
-        val domain = claimsDomain
         setContentView(
-            object : LinearLayout(this) {
-                override fun onProvideAutofillStructure(structure: ViewStructure, flags: Int) {
-                    super.onProvideAutofillStructure(structure, flags)
-                    domain?.let { structure.setWebDomain(it) }
-                }
-            }.apply {
-                // Android leaves plain layouts out of what autofill sees, unless they say they matter.
-                if (domain != null) importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_YES
+            LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
                 setPadding(48, 160, 48, 48)
                 // Nothing focused at the start, so Android's autofill list opens
