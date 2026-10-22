@@ -19,3 +19,7 @@ uint8_t *pb_user_key(size_t *len);
 char *pb_unlock_with_key(const uint8_t *key, size_t len);
 void pb_set_remove_biometric(void (*remove)(void));
 void pb_free(char *ptr);
+
+// What iOS may suggest above the keyboard: [{id, username, domain}], never a
+// password (free it with pb_free).
+char *pb_suggestions(void);

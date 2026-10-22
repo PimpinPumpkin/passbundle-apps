@@ -9,6 +9,13 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      ios_only:
+        # For working on the iOS app, whose builds and tests only CI's Macs
+        # can run: just the iOS job, in a third of the time.
+        description: Only the iOS job
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -23,6 +30,7 @@ env:
 
 jobs:
   core:
+    if: ${{ !inputs.ios_only }}
     name: Core (${{ matrix.os }})
     strategy:
       fail-fast: false
@@ -70,6 +78,7 @@ jobs:
           cargo test --locked
 
   android:
+    if: ${{ !inputs.ios_only }}
     # The core and the app on Android (docs/phones.md): the core built for
     # phones and the emulator with the NDK, its lints for Android, its tests,
     # and the app's own tests, on an Android 10 emulator (the oldest version
@@ -230,6 +239,8 @@ jobs:
           flutter --disable-analytics
       - name: The app's tests, on an iPhone simulator (unlock, copying through Swift, locking, iOS's certificate checks, signing in with the Keychain keeping the session, and Face ID unlock)
         run: tools/ios-app-test.sh
+      - name: Filling a website's sign-in form in Safari through iOS's AutoFill
+        run: tools/ios-autofill-test.sh
       - name: The server's log
         if: failure()
         run: cat "$RUNNER_TEMP/server/server.log" || true
@@ -239,6 +250,7 @@ jobs:
           path: app/ios/PassBundleCore.xcframework
 
   agent:
+    if: ${{ !inputs.ios_only }}
     # The desktop agent (agent/README.md): the tray app, Windows Hello for the
     # browser extension, and the native-messaging host. Moved here from
     # passbundle-clients, with the checks it had in tier 1.
@@ -332,6 +344,7 @@ jobs:
           retention-days: 3
 
   core-server:
+    if: ${{ !inputs.ios_only }}
     # Real keys against a real PassBundle server (core/tests/server.rs):
     # signing up, signing in, two-step login, sync, saving, and organizations.
     name: Core against a real server
@@ -374,6 +387,7 @@ jobs:
         run: cat "$RUNNER_TEMP/server/server.log" || true
 
   app:
+    if: ${{ !inputs.ios_only }}
     name: App (${{ matrix.platform }})
     needs: core
     strategy:

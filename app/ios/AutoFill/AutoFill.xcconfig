@@ -1,0 +1,21 @@
+// The AutoFill extension (CredentialProviderViewController.swift): the app's
+// version, and the core linked in. Swift calls the core directly, so only
+// what it uses is linked, which keeps the extension under iOS's tight memory
+// limit for it. tools/ios-core.sh builds the core.
+#include "../Flutter/Generated.xcconfig"
+
+OTHER_LDFLAGS[sdk=iphoneos*] = $(inherited) $(PROJECT_DIR)/PassBundleCore.xcframework/ios-arm64/libpassbundle_core.a -framework Security -framework CoreFoundation
+OTHER_LDFLAGS[sdk=iphonesimulator*] = $(inherited) $(PROJECT_DIR)/PassBundleCore.xcframework/ios-arm64-simulator/libpassbundle_core.a -framework Security -framework CoreFoundation
+CODE_SIGN_ENTITLEMENTS = AutoFill/AutoFill.entitlements
+INFOPLIST_FILE = AutoFill/Info.plist
+PRODUCT_BUNDLE_IDENTIFIER = com.passbundle.app.autofill
+PRODUCT_NAME = $(TARGET_NAME)
+SWIFT_OBJC_BRIDGING_HEADER = AutoFill/AutoFill-Bridging-Header.h
+SWIFT_VERSION = 5.0
+IPHONEOS_DEPLOYMENT_TARGET = 17.0
+TARGETED_DEVICE_FAMILY = 1,2
+SKIP_INSTALL = YES
+APPLICATION_EXTENSION_API_ONLY = YES
+LD_RUNPATH_SEARCH_PATHS = $(inherited) @executable_path/Frameworks @executable_path/../../Frameworks
+CURRENT_PROJECT_VERSION = $(FLUTTER_BUILD_NUMBER)
+MARKETING_VERSION = $(FLUTTER_BUILD_NAME)

@@ -36,6 +36,8 @@ fn main() {
             name: "Saved before the phone signed in".into(),
             username: Some("phone@example.test".into()),
             password: Some(Zeroizing::new("not-a-real-password-phone".into())),
+            // A website, for what iOS may suggest above the keyboard.
+            uris: vec!["https://phone.example.test/sign-in".into()],
             ..Default::default()
         },
         &[],

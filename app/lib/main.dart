@@ -121,6 +121,8 @@ class _PassBundleAppState extends State<PassBundleApp> {
       state = core.state();
       signingInAgain = false;
     });
+    // Signed out, iOS forgets what it suggested from the vault.
+    if (state['state'] == 'signedOut') Core.forgetSuggestions();
     watch();
   }
 

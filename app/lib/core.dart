@@ -269,6 +269,21 @@ class Core {
     return save == null ? null : Map<String, dynamic>.from(save);
   }
 
+  /// iOS: gives iOS what it may suggest above the keyboard from the unlocked
+  /// vault, usernames and the domains they're for, never passwords
+  /// (AppDelegate.swift, "Suggestions"): `count`, and whether iOS `stored`
+  /// them (not while PassBundle is off for AutoFill in Settings).
+  static Future<Map<String, dynamic>> suggest() async => Platform.isIOS
+      ? Map<String, dynamic>.from(
+          await platform.invokeMethod<Map>('suggest') ?? const {},
+        )
+      : const {'count': 0, 'stored': false};
+
+  /// iOS: signed out, iOS forgets them.
+  static Future<void> forgetSuggestions() async {
+    if (Platform.isIOS) await platform.invokeMethod<bool>('forgetSuggestions');
+  }
+
   /// For the phone tests: debug builds' stand-in for the phone's biometric
   /// prompt, which says yes (Biometric.kt, AppDelegate.swift). False in a
   /// release build.

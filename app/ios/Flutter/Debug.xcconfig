@@ -10,3 +10,5 @@ STRIP_STYLE = non-global
 // Debug builds only: Swift's `#if DEBUG`, for the tests' stand-in for the
 // Face ID prompt (AppDelegate.swift). Release builds never have it.
 SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) DEBUG
+// The App Group and Keychain group the app shares with its AutoFill extension.
+CODE_SIGN_ENTITLEMENTS = Runner/Runner.entitlements
