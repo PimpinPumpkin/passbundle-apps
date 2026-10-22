@@ -251,3 +251,103 @@ fn refuses_edits_the_app_cant_make_safely() {
     assert!(vault.encrypt_item(&draft, Some(item)).is_err());
     assert!(vault.encrypt_item(&ItemDraft::of(item), Some(item)).is_ok());
 }
+
+#[test]
+fn our_own_fields_stay_out_of_the_editor_and_through_an_edit() {
+    let (mut v, prelogin, password) = sample();
+    let id = v["ids"]["withKey"].as_str().unwrap().to_owned();
+    let item_key = open(&v, &prelogin, &password)
+        .item(&id)
+        .unwrap()
+        .kept
+        .item_key
+        .clone()
+        .unwrap();
+    let enc = |text: &str| serde_json::Value::from(item_key.encrypt_str(text).to_string());
+    let rule = r#"{"v":1,"host":"backup.example.test","field":{"id":"custno"},"fill":{"from":"username"}}"#;
+    let fields = cipher(&mut v, &id)["fields"].as_array_mut().unwrap();
+    fields.push(serde_json::json!({ "name": enc("keykeeper.fill"), "value": enc(rule), "type": 1, "linkedId": null }));
+    fields.push(serde_json::json!({ "name": enc("keykeeper.expires"), "value": enc("2026-11-01"), "type": 0, "linkedId": null }));
+    let vault = open(&v, &prelogin, &password);
+    let item = vault.item(&id).unwrap();
+    assert!(item.fields[1].reserved() && item.fields[2].reserved());
+
+    // The editor has only the person's own "API key" field, and removing it
+    // puts only it in the history.
+    let mut draft = ItemDraft::of(item);
+    assert_eq!(draft.fields.len(), 1);
+    draft.fields.clear();
+    let body = vault.encrypt_item(&draft, Some(item)).unwrap();
+    let kept: Vec<(String, String)> = body["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| {
+            (
+                opened(&item_key, &f["name"]),
+                opened(&item_key, &f["value"]),
+            )
+        })
+        .collect();
+    assert_eq!(
+        kept,
+        [
+            ("keykeeper.fill".to_owned(), rule.to_owned()),
+            ("keykeeper.expires".to_owned(), "2026-11-01".to_owned()),
+        ]
+    );
+    assert_eq!(body["fields"][0]["type"], 1);
+    let history: Vec<String> = body["passwordHistory"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| opened(&item_key, &h["password"]))
+        .collect();
+    assert_eq!(history, ["API key: k-123"]);
+}
+
+#[test]
+fn websites_carry_their_checksums_and_kept_fields_keep_their_places() {
+    use base64::Engine;
+    use sha2::{Digest, Sha256};
+    let (mut v, prelogin, password) = sample();
+    let id = v["ids"]["withKey"].as_str().unwrap().to_owned();
+    let item_key = open(&v, &prelogin, &password)
+        .item(&id)
+        .unwrap()
+        .kept
+        .item_key
+        .clone()
+        .unwrap();
+    let enc = |text: &str| serde_json::Value::from(item_key.encrypt_str(text).to_string());
+    // A yes-or-no field first, before the "API key" field.
+    cipher(&mut v, &id)["fields"]
+        .as_array_mut()
+        .unwrap()
+        .insert(0, serde_json::json!({ "name": enc("Remember me"), "value": enc("true"), "type": 2, "linkedId": null }));
+    let vault = open(&v, &prelogin, &password);
+    let item = vault.item(&id).unwrap();
+    let mut draft = ItemDraft::of(item);
+    draft.uris.push("https://new.example.test/".into());
+    let body = vault.encrypt_item(&draft, Some(item)).unwrap();
+
+    // Upstream's apps show an item with its own key only websites whose
+    // checksum, base64 of the address's SHA-256, matches.
+    for uri in body["login"]["uris"].as_array().unwrap() {
+        let address = opened(&item_key, &uri["uri"]);
+        let checksum =
+            base64::engine::general_purpose::STANDARD.encode(Sha256::digest(address.as_bytes()));
+        assert_eq!(
+            opened(&item_key, &uri["uriChecksum"]),
+            checksum,
+            "{address}"
+        );
+    }
+    let names: Vec<String> = body["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| opened(&item_key, &f["name"]))
+        .collect();
+    assert_eq!(names, ["Remember me", "API key"]);
+}

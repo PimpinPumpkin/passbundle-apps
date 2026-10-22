@@ -156,6 +156,27 @@ pub struct Field {
     pub hidden: bool,
 }
 
+/// Our own data on an item, in custom fields named "keykeeper.<something>":
+/// fill rules, an expiration date, a template marker (DESIGN.md, "Choosing
+/// what fills where"). Never shown or edited as custom fields, and kept by an
+/// edit, as the web vault and the extension do.
+pub const RESERVED_FIELD_PREFIX: &str = "keykeeper.";
+
+/// The expiration date the web vault and the extension set ("YYYY-MM-DD").
+pub const EXPIRES_FIELD: &str = "keykeeper.expires";
+
+impl Field {
+    pub fn reserved(&self) -> bool {
+        self.name.starts_with(RESERVED_FIELD_PREFIX)
+    }
+
+    /// Whether the app's editor edits it: a named text or hidden field of
+    /// the person's own (`kind`, upstream's field type, from `Kept`).
+    pub fn edited_by_the_app(&self, kind: u8) -> bool {
+        kind <= 1 && !self.reserved() && !self.name.is_empty()
+    }
+}
+
 /// An opened item. What lists and search show is plain; the secrets (notes,
 /// password, one-time code secret, hidden fields) stay zeroizing and leave the
 /// core only when revealed or copied (docs/core.md, "Memory").
@@ -206,6 +227,13 @@ pub struct Kept {
     /// Each of `fields`' upstream type (0 text, 1 hidden, 2 yes or no, 3
     /// linked) and what a linked one is linked to.
     pub field_kinds: Vec<(u8, Option<serde_json::Value>)>,
+}
+
+/// A website's checksum, as upstream writes it: base64 of the address's SHA-256.
+fn uri_checksum(uri: &str) -> String {
+    use base64::Engine;
+    use sha2::{Digest, Sha256};
+    base64::engine::general_purpose::STANDARD.encode(Sha256::digest(uri.as_bytes()))
 }
 
 /// Upstream keeps the 5 newest earlier passwords.
@@ -272,12 +300,13 @@ impl ItemDraft {
             password: copy(&item.password),
             totp: copy(&item.totp),
             uris: item.uris.clone(),
-            // The fields the editor edits: text and hidden ones (Kept).
+            // The fields the editor edits: the person's own text and hidden
+            // ones (Kept).
             fields: item
                 .fields
                 .iter()
                 .zip(&item.kept.field_kinds)
-                .filter(|(_, (kind, _))| *kind <= 1)
+                .filter(|(f, (kind, _))| f.edited_by_the_app(*kind))
                 .map(|(f, _)| Field {
                     name: f.name.clone(),
                     value: Zeroizing::new(f.value.as_str().to_owned()),
@@ -487,7 +516,11 @@ impl Vault {
                 history.insert(0, json!({ "password": enc(old), "lastUsedDate": now }));
             }
             for (field, (kind, _)) in item.fields.iter().zip(&item.kept.field_kinds) {
-                if *kind != 1 || field.name.is_empty() || field.value.is_empty() {
+                if *kind != 1
+                    || !field.edited_by_the_app(*kind)
+                    || field.name.is_empty()
+                    || field.value.is_empty()
+                {
                     continue;
                 }
                 let still = draft.fields.iter().any(|f| {
@@ -513,16 +546,21 @@ impl Vault {
                 })
             })
             .collect();
-        // Yes-or-no and linked fields, which the editor doesn't edit, stay.
+        // Yes-or-no and linked fields, and our own data, which the editor
+        // doesn't edit, stay, each where it was among the item's fields.
         if let Some(item) = editing {
-            for (field, (kind, linked)) in item.fields.iter().zip(&item.kept.field_kinds) {
-                if *kind == 2 || *kind == 3 {
-                    fields.push(json!({
-                        "name": enc_opt(Some(field.name.as_str())),
-                        "value": enc_opt(Some(field.value.as_str())),
-                        "type": kind,
-                        "linkedId": linked,
-                    }));
+            let kinds = &item.kept.field_kinds;
+            for (at, (field, (kind, linked))) in item.fields.iter().zip(kinds).enumerate() {
+                if !field.edited_by_the_app(*kind) {
+                    fields.insert(
+                        at.min(fields.len()),
+                        json!({
+                            "name": enc_opt(Some(field.name.as_str())),
+                            "value": enc_opt(Some(field.value.as_str())),
+                            "type": kind,
+                            "linkedId": linked,
+                        }),
+                    );
                 }
             }
         }
@@ -552,8 +590,12 @@ impl Vault {
                 "totp": enc_opt(draft.totp.as_deref().map(String::as_str)),
                 // A website kept from the item being edited keeps how it's matched,
                 // which the web vault can set and this app doesn't show.
+                // Each with its checksum, as upstream's apps write it: an
+                // item with its own key shows only websites whose checksum
+                // matches, so a server can't swap one in.
                 "uris": draft.uris.iter().map(|u| json!({
                     "uri": enc(u),
+                    "uriChecksum": enc(&uri_checksum(u)),
                     "match": editing.and_then(|i| i.uris.iter().position(|kept| kept == u).and_then(|at| i.uri_matches.get(at).copied().flatten())),
                 })).collect::<Vec<_>>(),
                 "fido2Credentials": kept.and_then(|k| k.fido2_credentials.clone()),

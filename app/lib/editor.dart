@@ -112,8 +112,10 @@ class _ItemEditorState extends State<ItemEditor> {
       final itemFields = (item['fields'] as List).cast<Map<String, dynamic>>();
       for (var i = 0; i < itemFields.length; i++) {
         final f = itemFields[i];
-        // Yes-or-no and linked fields are the web vault's to edit; saving keeps them.
-        if (((f['type'] as num?) ?? 0) > 1) continue;
+        // Yes-or-no, linked, and nameless fields are the web vault's to
+        // edit, and our own data (fill rules, an expiration date) isn't a
+        // custom field; saving keeps them (core/src/vault.rs, Kept).
+        if (f['editable'] == false) continue;
         final hidden = f['hidden'] == true;
         fields.add(
           _Field(

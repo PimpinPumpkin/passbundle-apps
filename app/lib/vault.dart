@@ -844,6 +844,8 @@ class _ItemPaneState extends State<ItemPane> {
     final fields = (item['fields'] as List).cast<Map<String, dynamic>>();
     for (var i = 0; i < fields.length; i++) {
       final f = fields[i];
+      // Our own data (fill rules, an expiration date) isn't a custom field.
+      if (f['reserved'] == true) continue;
       rows.add(
         f['hidden'] == true
             ? secretRow(f['name'] as String, 'field:$i')
@@ -861,6 +863,12 @@ class _ItemPaneState extends State<ItemPane> {
                   ),
                 ],
               ),
+      );
+    }
+    final expires = item['expires'] as String?;
+    if (expires != null && expires.isNotEmpty) {
+      rows.add(
+        row('Expires', Text(expires, style: const TextStyle(fontSize: 15))),
       );
     }
     if (item['hasNotes'] == true) {
