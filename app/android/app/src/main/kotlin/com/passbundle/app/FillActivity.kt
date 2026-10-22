@@ -20,6 +20,8 @@ import org.json.JSONObject
  * Android's biometric prompt, or opens PassBundle to unlock with the master
  * password. A login that asks for the master password again asks for it in
  * a dialog here first (docs/core.md, "Asking for the master password again").
+ * An app that isn't a browser PassBundle knows asks here, in PassBundle's own
+ * dialog, before its web domain counts (Browsers.kt).
  */
 class FillActivity : Activity() {
     companion object {
@@ -28,6 +30,7 @@ class FillActivity : Activity() {
         const val ASKS = "com.passbundle.app.asks"
         const val FILL = "fill"
         const val UNLOCK = "unlock"
+        const val TRUST = "trust"
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -39,6 +42,7 @@ class FillActivity : Activity() {
         when (intent.getStringExtra(MODE)) {
             FILL -> fill(fields, intent.getStringExtra(ITEM), intent.getBooleanExtra(ASKS, false))
             UNLOCK -> unlock(fields)
+            TRUST -> trust(fields)
             else -> finishWith(null)
         }
     }
@@ -93,6 +97,30 @@ class FillActivity : Activity() {
                 }
             }
         }.start()
+    }
+
+    /** Trusts the app as a browser, if the person says so; then its page's logins. */
+    private fun trust(fields: Fields) {
+        val domain = fields.webDomain ?: return finishWith(null)
+        val app = Browsers.label(this, fields.packageName)
+        AlertDialog.Builder(this)
+            .setTitle("Trust $app as a browser?")
+            .setMessage(
+                "$app (${fields.packageName}) says this page is $domain. PassBundle fills a website's logins " +
+                    "only in browsers, because any other app can say it's any website.\n\n" +
+                    "Trust it only if it's a web browser you use.",
+            )
+            .setPositiveButton("Trust") { _, _ ->
+                if (Browsers.trust(this, fields.packageName)) {
+                    finishWith(Responses.forFields(this, fields))
+                } else {
+                    Toast.makeText(this, "Couldn't trust $app.", Toast.LENGTH_LONG).show()
+                    finishWith(null)
+                }
+            }
+            .setNegativeButton("Cancel") { _, _ -> finishWith(null) }
+            .setOnCancelListener { finishWith(null) }
+            .show()
     }
 
     private fun unlock(fields: Fields) {
