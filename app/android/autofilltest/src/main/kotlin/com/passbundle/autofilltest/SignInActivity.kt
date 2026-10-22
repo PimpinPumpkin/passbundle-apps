@@ -46,6 +46,10 @@ class SignInActivity : Activity() {
             LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
                 setPadding(48, 160, 48, 48)
+                // Nothing focused at the start, so Android's autofill list opens
+                // when the test taps the username, as for someone, not before.
+                isFocusableInTouchMode = true
+                requestFocus()
                 addView(username)
                 addView(password)
                 addView(signIn)
