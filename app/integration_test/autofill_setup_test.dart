@@ -72,9 +72,10 @@ void main() {
     expect(File('$dir/biometric.sealed').existsSync(), isTrue);
 
     // The script fills the other app now, then leaves this file (run-as).
+    // It learns this half is ready from a file too: the test runner may hold
+    // printed lines back until the test ends.
     final done = File('$dir/autofill-done');
-    // ignore: avoid_print
-    print('PB-AUTOFILL-READY');
+    File('$dir/autofill-ready').writeAsStringSync('');
     final end = DateTime.now().add(const Duration(minutes: 4));
     while (!done.existsSync() && DateTime.now().isBefore(end)) {
       await tester.runAsync(

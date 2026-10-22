@@ -96,7 +96,10 @@ password="correct horse battery staple autofill"
 (cd core && cargo run --locked --quiet --example test_account -- "$PB_TEST_SERVER" "$email" "$password") > /dev/null
 # It waits, installed and locked, while this fills the other app, and ends
 # when this leaves a file in its folder (the test runner uninstalls the app
-# when its tests end).
+# when its tests end). It says it's ready with a file in its folder too, since
+# the test runner can hold what it prints until the test ends.
+marker() { [ "$(a shell run-as com.passbundle.app ls "files/$1" 2> /dev/null | tr -d '\r')" = "files/$1" ]; }
+a shell run-as com.passbundle.app rm -f files/autofill-ready files/autofill-done > /dev/null 2>&1 || true
 setup_log=$(mktemp)
 (cd app && flutter test integration_test/autofill_setup_test.dart -d "$serial" \
   --dart-define="PB_TEST_SERVER=$PB_TEST_SERVER" --dart-define="PB_TEST_EMAIL=$email" \
@@ -104,11 +107,11 @@ setup_log=$(mktemp)
 setup=$!
 trap 'kill "$setup" 2> /dev/null || true' EXIT
 for _ in $(seq 300); do
-  grep -q PB-AUTOFILL-READY "$setup_log" && break
+  marker autofill-ready && break
   kill -0 "$setup" 2> /dev/null || { cat "$setup_log" >&2; echo "The app's half stopped early." >&2; exit 1; }
   sleep 1
 done
-grep -q PB-AUTOFILL-READY "$setup_log" || { cat "$setup_log" >&2; exit 1; }
+marker autofill-ready || { cat "$setup_log" >&2; echo "The app's half never got ready." >&2; exit 1; }
 
 echo "PassBundle as the phone's autofill service"
 a shell settings put secure autofill_service com.passbundle.app/.PassBundleAutofill
