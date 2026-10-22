@@ -127,9 +127,38 @@ void main() {
     );
     File('$dir/autofill-updated').writeAsStringSync('');
 
+    // The script trusted the test app as a browser earlier: Settings lists
+    // it, and stopping trusting it there takes it off.
+    final untrust = File('$dir/autofill-untrust');
+    var end = DateTime.now().add(const Duration(minutes: 2));
+    while (!untrust.existsSync() && DateTime.now().isBefore(end)) {
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(seconds: 1)),
+      );
+    }
+    expect(untrust.existsSync(), isTrue, reason: 'the script never asked');
+    // Back in front: the cover the app shows while it's away fades.
+    await tester.pump(const Duration(seconds: 2));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Settings'));
+    await pumpUntil(tester, find.text('Browsers you trust for autofill'));
+    expect(find.text('com.passbundle.autofilltest'), findsOneWidget);
+    await tester.tap(find.text('Stop trusting'));
+    await pumpUntil(tester, find.text('Close'));
+    for (var i = 0; i < 50; i++) {
+      await tester.pump(const Duration(milliseconds: 100));
+      if (find.text('Browsers you trust for autofill').evaluate().isEmpty) {
+        break;
+      }
+    }
+    expect(find.text('Browsers you trust for autofill'), findsNothing);
+    await tester.tap(find.text('Close'));
+    await tester.pump(const Duration(milliseconds: 400));
+    File('$dir/autofill-untrusted').writeAsStringSync('');
+
     // Then it leaves this file (run-as), and this ends.
     final done = File('$dir/autofill-done');
-    final end = DateTime.now().add(const Duration(minutes: 2));
+    end = DateTime.now().add(const Duration(minutes: 2));
     while (!done.existsSync() && DateTime.now().isBefore(end)) {
       await tester.runAsync(
         () => Future<void>.delayed(const Duration(seconds: 1)),

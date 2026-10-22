@@ -255,6 +255,20 @@ class Core {
 
   /// A call to the phone's own code (MainActivity.kt, AppDelegate.swift),
   /// answered as the core would.
+  /// Browsers the person trusted for Android's autofill (`{package, name}`),
+  /// and stopping: elsewhere there are none.
+  static Future<List<Map<String, String>>> trustedBrowsers() async {
+    if (!Platform.isAndroid) return const [];
+    final list = await platform.invokeMethod<List>('trustedBrowsers') ?? [];
+    return [for (final b in list) Map<String, String>.from(b as Map)];
+  }
+
+  static Future<void> untrustBrowser(String package) async {
+    if (Platform.isAndroid) {
+      await platform.invokeMethod<bool>('untrustBrowser', {'package': package});
+    }
+  }
+
   static Future<Map<String, dynamic>> _onPhone(String method) async =>
       Map<String, dynamic>.from(
         (await platform.invokeMethod<Map>(method)) ?? {'ok': false},

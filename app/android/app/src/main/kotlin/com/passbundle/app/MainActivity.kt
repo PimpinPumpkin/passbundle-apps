@@ -83,6 +83,12 @@ class MainActivity : FlutterActivity() {
                         Biometric.remove()
                         result.success(mapOf("ok" to true))
                     }
+                    // Browsers the person trusted for autofill (Browsers.kt), and stopping.
+                    "trustedBrowsers" -> result.success(Browsers.trusted(this))
+                    "untrustBrowser" -> {
+                        call.argument<String>("package")?.let { Browsers.untrust(this, it) }
+                        result.success(true)
+                    }
                     else -> result.notImplemented()
                 }
             }
