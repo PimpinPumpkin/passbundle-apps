@@ -94,8 +94,13 @@ class _PassBundleAppState extends State<PassBundleApp> {
           refresh();
         }
       },
-      // Back: check at once, before the vault is in front of anyone.
+      // Back: check at once, before the vault is in front of anyone. Android's
+      // autofill may have unlocked the core meanwhile (it runs in this
+      // process), and then the vault shows, if its time isn't up.
       onShow: () {
+        if (state['state'] == 'locked' && core.state()['state'] == 'unlocked') {
+          refresh();
+        }
         if (state['state'] == 'unlocked') tick();
       },
     );

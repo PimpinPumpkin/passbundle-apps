@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.service.autofill.Dataset
 import android.service.autofill.FillResponse
+import android.service.autofill.SaveInfo
 import android.view.autofill.AutofillValue
 import android.widget.RemoteViews
 import org.json.JSONObject
@@ -36,6 +37,17 @@ object Responses {
             PendingIntent.FLAG_CANCEL_CURRENT or PendingIntent.FLAG_MUTABLE,
         ).intentSender
 
+    /** Android offers "Save to PassBundle" for a sign-in with a password (PassBundleAutofill.onSaveRequest). */
+    private fun saveInfo(fields: Fields): SaveInfo? {
+        val password = fields.password ?: return null
+        val types =
+            SaveInfo.SAVE_DATA_TYPE_PASSWORD or
+                (if (fields.username != null) SaveInfo.SAVE_DATA_TYPE_USERNAME else 0)
+        return SaveInfo.Builder(types, arrayOf(password))
+            .apply { fields.username?.let { setOptionalIds(arrayOf(it)) } }
+            .build()
+    }
+
     /** The response for these fields, from what the core says (Core.fillable); null offers nothing. */
     fun forFields(context: Context, fields: Fields): FillResponse? {
         val ids = fields.ids
@@ -43,6 +55,7 @@ object Responses {
         Core.openIfClosed(context.filesDir.absolutePath)
         val answer = JSONObject(Core.fillable(fields.packageName, fields.webDomain ?: "") ?: return null)
         if (answer.optBoolean("busy") || answer.optBoolean("signedOut")) return null
+        val save = saveInfo(fields)
         if (answer.optBoolean("locked")) {
             return FillResponse.Builder()
                 .setAuthentication(
@@ -50,11 +63,14 @@ object Responses {
                     pending(context, fields, FillActivity.UNLOCK),
                     presentation(context, "Unlock PassBundle", "to fill this in"),
                 )
+                .apply { save?.let { setSaveInfo(it) } }
                 .build()
         }
         val items = answer.optJSONArray("items") ?: return null
-        if (items.length() == 0) return null
         val response = FillResponse.Builder()
+        save?.let { response.setSaveInfo(it) }
+        // Nothing to fill: only the offer to save what the person signs in with.
+        if (items.length() == 0) return save?.let { response.build() }
         for (i in 0 until items.length()) {
             val item = items.getJSONObject(i)
             val id = item.getString("id")

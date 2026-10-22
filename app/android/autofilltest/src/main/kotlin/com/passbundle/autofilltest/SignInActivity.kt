@@ -4,6 +4,7 @@ import android.app.Activity
 import android.os.Bundle
 import android.text.InputType
 import android.view.View
+import android.view.autofill.AutofillManager
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
@@ -12,7 +13,8 @@ import android.widget.TextView
 /**
  * A plain sign-in form, as apps have: a username, a password, and a button.
  * Signing in says who signed in and how long the password was (never the
- * password), for the autofill test to read off the screen.
+ * password), for the autofill test to read off the screen, and tells
+ * Android's autofill the sign-in is done, so it offers to save a new one.
  */
 class SignInActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -40,6 +42,7 @@ class SignInActivity : Activity() {
                 text = "Sign in"
                 setOnClickListener {
                     result.text = "Signed in as ${username.text}, password ${password.text.length} characters"
+                    getSystemService(AutofillManager::class.java)?.commit()
                 }
             }
         setContentView(

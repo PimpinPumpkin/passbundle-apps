@@ -9,7 +9,12 @@
 #   2. PassBundle becomes the phone's autofill service;
 #   3. in the test app (app/android/autofilltest), tapping the username offers
 #      "Unlock PassBundle"; picking it unlocks, then offers the login; picking
-#      that fills the form; signing in shows who signed in.
+#      that fills the form; signing in shows who signed in;
+#   4. signing in there with something new, Android offers to save it to
+#      PassBundle; accepting opens PassBundle's editor, filled in, and the
+#      app's half saves it;
+#   5. signing in again with a new password for it, accepting opens that
+#      login, with the new password, and the app's half saves it.
 #
 # Needs an emulator, a test server (PB_TEST_SERVER, tools/test-server.sh), and
 # what tools/android-app-test.sh needs.
@@ -96,10 +101,10 @@ password="correct horse battery staple autofill"
 (cd core && cargo run --locked --quiet --example test_account -- "$PB_TEST_SERVER" "$email" "$password") > /dev/null
 # It waits, installed and locked, while this fills the other app, and ends
 # when this leaves a file in its folder (the test runner uninstalls the app
-# when its tests end). It says it's ready with a file in its folder too, since
-# the test runner can hold what it prints until the test ends.
+# when its tests end). It says how far it got with files in its folder too,
+# since the test runner can hold what it prints until the test ends.
 marker() { [ "$(a shell run-as com.passbundle.app ls "files/$1" 2> /dev/null | tr -d '\r')" = "files/$1" ]; }
-a shell run-as com.passbundle.app rm -f files/autofill-ready files/autofill-done > /dev/null 2>&1 || true
+a shell run-as com.passbundle.app rm -f files/autofill-ready files/autofill-saved files/autofill-updated files/autofill-done > /dev/null 2>&1 || true
 setup_log=$(mktemp)
 (cd app && flutter test integration_test/autofill_setup_test.dart -d "$serial" \
   --dart-define="PB_TEST_SERVER=$PB_TEST_SERVER" --dart-define="PB_TEST_EMAIL=$email" \
@@ -129,6 +134,65 @@ shown "^autofill@example.test$"
 tap "id=com.passbundle.autofilltest:id/sign_in"
 shown "^Signed in as autofill@example.test, password 28 characters$"
 echo "Filled: signed in as autofill@example.test, with the 28-character password from the vault."
+
+# Signs in to the test app with something typed, as someone would (Android
+# offers to save only what changed after its autofill started): the username,
+# Tab to the password, Tab to the button, Enter. Each field opens Android's
+# list, and typing closes it (nothing in it matches), losing what's typed
+# while it closes: one letter, a wait, the rest. Then accepts Android's offer
+# to save it, and opens PassBundle if Android didn't.
+type_in() {
+  sleep 2
+  a shell input text "${1:0:1}"
+  sleep 2
+  a shell input text "${1:1}"
+}
+in_front() { [[ "$(a shell dumpsys activity activities | grep -E 'ResumedActivity[=:]')" == *com.passbundle.app/* ]]; }
+sign_in_and_save() {
+  a shell am force-stop com.passbundle.autofilltest
+  a shell am start -W -n com.passbundle.autofilltest/.SignInActivity > /dev/null
+  tap "id=com.passbundle.autofilltest:id/username"
+  type_in "$1"
+  a shell input keyevent KEYCODE_TAB
+  type_in "$2"
+  a shell input keyevent KEYCODE_TAB
+  a shell input keyevent KEYCODE_ENTER
+  # Android's offer, once the sign-in is done (it covers the test app's
+  # screen), then PassBundle's editor, where the app's half checks every
+  # letter came through and saves it.
+  tap "^(Save|SAVE)$"
+  for _ in $(seq 15); do
+    in_front && break
+    sleep 1
+  done
+  if ! in_front; then
+    # Android 14 before its March 2024 update stops the app opening itself
+    # here; the sign-in waits for the person to open it.
+    [ "$(a shell getprop ro.build.version.sdk | tr -d '\r')" = 34 ] || { echo "PassBundle never opened to save." >&2; exit 1; }
+    echo "Android 14 kept PassBundle from opening itself; opening it, as someone would."
+    a shell am start -n com.passbundle.app/.MainActivity > /dev/null
+  fi
+}
+
+# Waits up to two minutes for the app's half to leave a file.
+reached() {
+  for _ in $(seq 120); do
+    marker "$1" && return 0
+    kill -0 "$setup" 2> /dev/null || break
+    sleep 1
+  done
+  marker "$1" || { cat "$setup_log" >&2; echo "$2" >&2; exit 1; }
+}
+
+echo "Saving a new sign-in"
+sign_in_and_save new@example.test not-a-real-password-new
+reached autofill-saved "PassBundle never saved the new sign-in."
+echo "Saved: the new sign-in is in the vault."
+
+echo "Saving a new password for it"
+sign_in_and_save new@example.test not-a-real-password-changed
+reached autofill-updated "PassBundle never updated the sign-in."
+echo "Updated: the same login has the new password."
 
 # The app's half can end now.
 a shell run-as com.passbundle.app touch files/autofill-done
