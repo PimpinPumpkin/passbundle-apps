@@ -188,8 +188,9 @@ mod unix {
     }
 
     /// The program at the other end of a socket: its process, from the
-    /// socket, and that process's executable.
-    #[cfg(target_os = "macos")]
+    /// socket, and that process's executable. Apple's way on every Apple OS
+    /// (iOS builds it too, though phones have no agent).
+    #[cfg(target_vendor = "apple")]
     pub fn peer_program(stream: &UnixStream) -> Option<std::path::PathBuf> {
         use std::os::{fd::AsRawFd, unix::ffi::OsStringExt};
         let mut pid: libc::pid_t = 0;
@@ -216,7 +217,7 @@ mod unix {
         Some(std::ffi::OsString::from_vec(path).into())
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(target_vendor = "apple"))]
     pub fn peer_program(stream: &UnixStream) -> Option<std::path::PathBuf> {
         use std::os::fd::AsRawFd;
         let mut credentials: libc::ucred = unsafe { std::mem::zeroed() };
