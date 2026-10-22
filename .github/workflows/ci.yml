@@ -163,7 +163,7 @@ jobs:
         run: ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME" tools/android-core.sh test x86_64
       - name: The app's tests, on the emulator (unlock, copying through Kotlin, locking, Android's certificate checks, signing in with the Keystore keeping the session, and biometric unlock)
         run: ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME" ANDROID_SERIAL=emulator-5554 tools/android-app-test.sh
-      - name: Filling another app's sign-in form through Android's autofill
+      - name: Filling another app's sign-in form through Android's autofill, and saving a new one
         run: ANDROID_SERIAL=emulator-5554 tools/android-autofill-test.sh
       - name: The emulator's and the server's logs
         if: failure()

@@ -259,6 +259,14 @@ class Core {
       ? Answer(await _onPhone('biometricRemove'))
       : _background((c) => c._answer(c._bioRemove()));
 
+  /// A sign-in Android's autofill offered to save (name, username, password,
+  /// uri), once; null if there's none. The editor opens with it.
+  static Future<Map<String, dynamic>?> pendingSave() async {
+    if (!Platform.isAndroid) return null;
+    final save = await platform.invokeMethod<Map>('pendingSave');
+    return save == null ? null : Map<String, dynamic>.from(save);
+  }
+
   /// For the phone tests: debug builds' stand-in for Android's biometric
   /// prompt, which says yes (Biometric.kt). False in a release build.
   static Future<bool> useBiometricStandIn(bool on) async =>

@@ -17,8 +17,12 @@ const email = String.fromEnvironment('PB_TEST_EMAIL');
 const password = String.fromEnvironment('PB_TEST_PASSWORD');
 const setUp = bool.fromEnvironment('PB_AUTOFILL_SETUP');
 
-Future<void> pumpUntil(WidgetTester tester, Finder finder) async {
-  final end = DateTime.now().add(const Duration(seconds: 30));
+Future<void> pumpUntil(
+  WidgetTester tester,
+  Finder finder, {
+  Duration timeout = const Duration(seconds: 30),
+}) async {
+  final end = DateTime.now().add(timeout);
   while (DateTime.now().isBefore(end)) {
     await tester.pump(const Duration(milliseconds: 100));
     if (finder.evaluate().isNotEmpty) return;
@@ -73,12 +77,59 @@ void main() {
     await pumpUntil(tester, find.text(unlockWith));
     expect(File('$dir/biometric.sealed').existsSync(), isTrue);
 
-    // The script fills the other app now, then leaves this file (run-as).
-    // It learns this half is ready from a file too: the test runner may hold
-    // printed lines back until the test ends.
-    final done = File('$dir/autofill-done');
+    // The script fills the other app now. Then it signs in there with
+    // something new and accepts Android's offer to save it: this app opens
+    // its editor, filled in, which is saved here. It learns how far this half
+    // got from files (run-as): the test runner may hold printed lines back
+    // until the test ends.
     File('$dir/autofill-ready').writeAsStringSync('');
-    final end = DateTime.now().add(const Duration(minutes: 4));
+    await pumpUntil(
+      tester,
+      find.widgetWithText(TextField, 'new@example.test'),
+      timeout: const Duration(minutes: 6),
+    );
+    expect(
+      find.widgetWithText(TextField, 'not-a-real-password-new'),
+      findsOneWidget,
+    );
+    expect(find.text('New item'), findsOneWidget);
+    await tester.tap(find.text('Save'));
+    await pumpUntil(tester, find.text('Saved'));
+    // Saved for the app it was signed in to (checked in the vault: on a small
+    // screen the editor's website row is below what it builds).
+    final saved = Core()
+        .list('')
+        .where((i) => i['subtitle'] == 'new@example.test');
+    expect(saved, hasLength(1));
+    expect(Core().item(saved.single['id'] as String)!['uris'], [
+      'androidapp://com.passbundle.autofilltest',
+    ]);
+    File('$dir/autofill-saved').writeAsStringSync('');
+
+    // Then a new password for that sign-in: the same login opens, with it.
+    await pumpUntil(
+      tester,
+      find.widgetWithText(TextField, 'not-a-real-password-changed'),
+      timeout: const Duration(minutes: 6),
+    );
+    expect(find.text('Edit item'), findsOneWidget);
+    expect(find.widgetWithText(TextField, 'new@example.test'), findsOneWidget);
+    await tester.tap(find.text('Save'));
+    await pumpUntil(tester, find.text('Saved the changes'));
+    final logins = Core()
+        .list('')
+        .where((i) => i['subtitle'] == 'new@example.test')
+        .toList();
+    expect(logins, hasLength(1));
+    expect(
+      Core().reveal(logins.single['id'] as String, 'password'),
+      'not-a-real-password-changed',
+    );
+    File('$dir/autofill-updated').writeAsStringSync('');
+
+    // Then it leaves this file (run-as), and this ends.
+    final done = File('$dir/autofill-done');
+    final end = DateTime.now().add(const Duration(minutes: 2));
     while (!done.existsSync() && DateTime.now().isBefore(end)) {
       await tester.runAsync(
         () => Future<void>.delayed(const Duration(seconds: 1)),

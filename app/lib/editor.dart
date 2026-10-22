@@ -13,9 +13,15 @@ Future<String?> openEditor(
   required Core core,
   required Map<String, dynamic> places,
   String? id,
+  Map<String, dynamic>? prefill,
   required bool asDialog,
 }) {
-  final editor = ItemEditor(core: core, places: places, id: id);
+  final editor = ItemEditor(
+    core: core,
+    places: places,
+    id: id,
+    prefill: prefill,
+  );
   if (asDialog) {
     return showDialog<String>(
       context: context,
@@ -50,11 +56,17 @@ class ItemEditor extends StatefulWidget {
     required this.core,
     required this.places,
     this.id,
+    this.prefill,
   });
 
   final Core core;
   final Map<String, dynamic> places;
   final String? id;
+
+  /// A new login's name, username, password, and website, already filled in
+  /// (a sign-in Android's autofill offered to save); for an existing login,
+  /// its new password.
+  final Map<String, dynamic>? prefill;
 
   @override
   State<ItemEditor> createState() => _ItemEditorState();
@@ -115,6 +127,18 @@ class _ItemEditorState extends State<ItemEditor> {
       final collections =
           (item['collectionIds'] as List?)?.cast<String>() ?? const [];
       collectionId = collections.isEmpty ? null : collections.first;
+    }
+    final prefill = widget.prefill;
+    // A new password for this login (a sign-in Android's autofill offered to save).
+    if (id != null && item != null && prefill != null) {
+      password.text = (prefill['password'] ?? '') as String;
+    }
+    if (id == null && prefill != null) {
+      name.text = (prefill['name'] ?? '') as String;
+      username.text = (prefill['username'] ?? '') as String;
+      password.text = (prefill['password'] ?? '') as String;
+      final uri = (prefill['uri'] ?? '') as String;
+      if (uri.isNotEmpty) uris.add(TextEditingController(text: uri));
     }
     if (uris.isEmpty && !note) uris.add(TextEditingController());
   }

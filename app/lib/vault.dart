@@ -51,13 +51,40 @@ class VaultScreenState extends State<VaultScreen> {
   bool syncing = false;
   bool signedOut = false;
 
+  /// Coming back to the app: a sign-in autofill offered to save may be
+  /// waiting. Looked for after the next frame, since coming back can lock the
+  /// app first (main.dart), and then it waits for the vault after unlocking.
+  late final AppLifecycleListener lifecycle = AppLifecycleListener(
+    onShow: () {
+      WidgetsBinding.instance.addPostFrameCallback((_) => saveOffered());
+      WidgetsBinding.instance.scheduleFrame();
+    },
+  );
+
   @override
   void initState() {
     super.initState();
     reload();
-    if (widget.syncOnOpen) {
-      WidgetsBinding.instance.addPostFrameCallback((_) => sync());
-    }
+    lifecycle;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (widget.syncOnOpen) sync();
+      saveOffered();
+    });
+  }
+
+  @override
+  void dispose() {
+    lifecycle.dispose();
+    super.dispose();
+  }
+
+  /// A sign-in Android's autofill offered to save: the editor, filled in.
+  Future<void> saveOffered() async {
+    if (!mounted) return;
+    final save = await Core.pendingSave();
+    if (save == null || !mounted) return;
+    // A new password for a login it has comes with that login's id.
+    await edit(save['id'] as String?, save);
   }
 
   /// Reads the vault again from the core (never while a slow call runs).
@@ -94,13 +121,14 @@ class VaultScreenState extends State<VaultScreen> {
       all.where((i) => i['organizationId'] == filterId).toList(),
   };
 
-  Future<void> edit([String? id]) async {
+  Future<void> edit([String? id, Map<String, dynamic>? prefill]) async {
     final wide = MediaQuery.sizeOf(context).width >= 900;
     final saved = await openEditor(
       context,
       core: widget.core,
       places: places,
       id: id,
+      prefill: prefill,
       asDialog: wide,
     );
     if (saved == null || !mounted) return;

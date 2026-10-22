@@ -52,6 +52,21 @@ class Fields(
             return Fields(id(USERNAME), id(PASSWORD), intent.getStringExtra(PACKAGE) ?: "", intent.getStringExtra(DOMAIN))
         }
 
+        /** What's typed in the username and password fields, for saving. */
+        fun values(structure: AssistStructure, fields: Fields): Pair<String?, String?> {
+            var username: String? = null
+            var password: String? = null
+
+            fun visit(node: AssistStructure.ViewNode) {
+                val text = node.autofillValue?.takeIf { it.isText }?.textValue?.toString()
+                if (node.autofillId == fields.username) username = text
+                if (node.autofillId == fields.password) password = text
+                for (i in 0 until node.childCount) visit(node.getChildAt(i))
+            }
+            for (i in 0 until structure.windowNodeCount) visit(structure.getWindowNodeAt(i).rootViewNode)
+            return username to password
+        }
+
         /** The username and password fields: by the app's own hints first, then by what they look like. */
         fun find(structure: AssistStructure): Fields {
             var username: AutofillId? = null
