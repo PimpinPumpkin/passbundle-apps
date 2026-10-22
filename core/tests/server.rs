@@ -690,3 +690,50 @@ fn an_ssh_key_comes_through_sync() {
         .as_deref()
         .is_some_and(|k| k.starts_with("ssh-ed25519 ")));
 }
+
+/// Making an account in the app (docs/core.md, "Making an account"): it signs
+/// in at once, the email as typed counts as the email, another device signs
+/// in with the master password and opens the (empty) vault, and the server
+/// refuses a second account for the same email. A short master password is
+/// refused before anything is sent.
+#[test]
+fn an_account_is_made_in_the_app_and_opens_elsewhere() {
+    let Some(server) = server() else { return };
+    let url = std::env::var("PB_TEST_SERVER").unwrap();
+    let email = new_email("made");
+    let dir = std::env::temp_dir().join(format!("pb-core-made-{}", uuid::Uuid::new_v4().simple()));
+    let mut app = App::open(Store::new(&dir), Box::new(MemorySecretStore::default()));
+
+    assert_eq!(
+        app.sign_up(&url, &email, None, "too short", None).err(),
+        Some(Error::Refused(
+            "a master password needs at least 12 characters"
+        ))
+    );
+    let step = app
+        .sign_up(
+            &url,
+            &format!("  {} ", email.to_uppercase()),
+            Some("Made in the app"),
+            PASSWORD,
+            Some("the usual"),
+        )
+        .unwrap();
+    assert!(matches!(step, Step::Done));
+    assert!(app.vault().unwrap().items.is_empty());
+
+    // Another device: the master password opens the same account.
+    let mut session = sign_in(&server, &email);
+    assert!(open(&server, &mut session).items.is_empty());
+
+    // The same email again.
+    let other_dir =
+        std::env::temp_dir().join(format!("pb-core-made-{}", uuid::Uuid::new_v4().simple()));
+    let mut other = App::open(
+        Store::new(&other_dir),
+        Box::new(MemorySecretStore::default()),
+    );
+    assert!(other.sign_up(&url, &email, None, PASSWORD, None).is_err());
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(other_dir);
+}

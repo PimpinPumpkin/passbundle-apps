@@ -1,8 +1,9 @@
-// Signing in (with two-step login), and unlocking the vault kept on this
-// device. The master password goes to the core and the field is cleared at
-// once (docs/core.md, "Memory"). People sign in to PassBundle's own server
-// without being asked; a server an organization set by policy is used and
-// shown; and someone hosting their own types it in, behind "Self-hosted?".
+// Signing in (with two-step login), making an account, and unlocking the
+// vault kept on this device. The master password goes to the core and the
+// field is cleared at once (docs/core.md, "Memory"). People sign in to
+// PassBundle's own server without being asked; a server an organization set
+// by policy is used and shown; and someone hosting their own types it in,
+// behind "Self-hosted?".
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -54,6 +55,12 @@ class _SignInScreenState extends State<SignInScreen> {
   bool hidden = true;
   bool remember = false;
 
+  /// Making an account instead (docs/core.md, "Making an account").
+  bool creating = false;
+  final name = TextEditingController();
+  final confirm = TextEditingController();
+  final hint = TextEditingController();
+
   /// The second step's methods, once the server asks for one: 0 authenticator, 1 email.
   List<int>? providers;
   int provider = 0;
@@ -83,6 +90,52 @@ class _SignInScreenState extends State<SignInScreen> {
             : null;
       });
     } else if (answer.ok) {
+      widget.onSignedIn();
+    } else {
+      setState(() {
+        working = false;
+        error = answer.error;
+      });
+    }
+  }
+
+  /// Makes the account, then signs in to it, as signing in does. The
+  /// passwords are checked here first, then go to the core, and the fields
+  /// don't keep them.
+  Future<void> createAccount() async {
+    final typed = password.text;
+    final again = confirm.text;
+    String? wrong;
+    if (email.text.trim().isEmpty) {
+      wrong = 'Enter your email address.';
+    } else if (typed.characters.length < 12) {
+      wrong = 'Use at least 12 characters.';
+    } else if (typed != again) {
+      wrong = 'The two master passwords don\'t match.';
+    } else if (hint.text.trim().isNotEmpty && hint.text.contains(typed)) {
+      wrong = 'The hint can\'t give away your master password.';
+    }
+    if (wrong != null) {
+      setState(() => error = wrong);
+      return;
+    }
+    password.clear();
+    confirm.clear();
+    setState(() {
+      working = true;
+      error = null;
+    });
+    final answer = await whileBusy(
+      () => Core.signUp(
+        signInTo,
+        email.text.trim(),
+        name.text.trim(),
+        typed,
+        hint.text.trim(),
+      ),
+    );
+    if (!mounted) return;
+    if (answer.ok) {
       widget.onSignedIn();
     } else {
       setState(() {
@@ -127,6 +180,7 @@ class _SignInScreenState extends State<SignInScreen> {
   Widget build(BuildContext context) {
     final step = providers;
     if (step != null) return _secondStep(context, step);
+    if (creating) return _createAccount(context);
     return Centered(
       children: [
         heading(
@@ -178,6 +232,17 @@ class _SignInScreenState extends State<SignInScreen> {
         ),
         const SizedBox(height: 16),
         WorkingButton(label: 'Sign in', working: working, onPressed: signIn),
+        const SizedBox(height: 8),
+        TextButton(
+          onPressed: working
+              ? null
+              : () => setState(() {
+                  creating = true;
+                  error = null;
+                  password.clear();
+                }),
+          child: const Text('Create account'),
+        ),
         if (managed == null) ...[
           const SizedBox(height: 8),
           TextButton(
@@ -199,6 +264,121 @@ class _SignInScreenState extends State<SignInScreen> {
       ],
     );
   }
+
+  Widget _serverField() => Column(
+    children: [
+      TextField(
+        controller: server,
+        enabled: !working,
+        keyboardType: TextInputType.url,
+        decoration: const InputDecoration(
+          labelText: 'Server',
+          hintText: 'https://vault.example.com',
+        ),
+      ),
+      const SizedBox(height: 12),
+    ],
+  );
+
+  Widget _hideButton() => IconButton(
+    tooltip: hidden ? 'Show' : 'Hide',
+    icon: Icon(
+      hidden ? Icons.visibility_outlined : Icons.visibility_off_outlined,
+    ),
+    onPressed: () => setState(() => hidden = !hidden),
+  );
+
+  /// Making an account: the email (any address the server takes), a name,
+  /// the master password twice, and a hint, on the same server choice as
+  /// signing in.
+  Widget _createAccount(BuildContext context) => Centered(
+    children: [
+      heading(
+        context,
+        'Create a PassBundle account',
+        managed == null
+            ? null
+            : 'Your organization\'s server: ${Uri.tryParse(managed!)?.host ?? managed}',
+      ),
+      if (selfHosted) _serverField(),
+      TextField(
+        controller: email,
+        enabled: !working,
+        keyboardType: TextInputType.emailAddress,
+        autofillHints: const [AutofillHints.email],
+        decoration: const InputDecoration(labelText: 'Email'),
+      ),
+      const SizedBox(height: 12),
+      TextField(
+        controller: name,
+        enabled: !working,
+        textCapitalization: TextCapitalization.words,
+        autofillHints: const [AutofillHints.name],
+        decoration: const InputDecoration(labelText: 'Name (optional)'),
+      ),
+      const SizedBox(height: 12),
+      TextField(
+        controller: password,
+        obscureText: hidden,
+        enabled: !working,
+        autofillHints: const [AutofillHints.newPassword],
+        decoration: InputDecoration(
+          labelText: 'Master password',
+          helperText: 'At least 12 characters',
+          suffixIcon: _hideButton(),
+        ),
+      ),
+      const SizedBox(height: 12),
+      TextField(
+        controller: confirm,
+        obscureText: hidden,
+        enabled: !working,
+        decoration: const InputDecoration(labelText: 'Master password again'),
+      ),
+      const SizedBox(height: 12),
+      TextField(
+        controller: hint,
+        enabled: !working,
+        onSubmitted: (_) => createAccount(),
+        decoration: InputDecoration(
+          labelText: 'Hint (optional)',
+          helperText: 'Something that reminds you, never the password',
+          errorText: error,
+          errorMaxLines: 3,
+        ),
+      ),
+      const SizedBox(height: 12),
+      Text(
+        'Your master password opens your vault, and only you know it: PassBundle can\'t see it or reset it if you forget it.',
+        style: TextStyle(color: context.colors.muted, fontSize: 13),
+      ),
+      const SizedBox(height: 16),
+      WorkingButton(
+        label: 'Create account',
+        working: working,
+        onPressed: createAccount,
+      ),
+      const SizedBox(height: 8),
+      TextButton(
+        onPressed: working
+            ? null
+            : () => setState(() {
+                creating = false;
+                error = null;
+                password.clear();
+                confirm.clear();
+              }),
+        child: const Text('I have an account: sign in'),
+      ),
+      if (managed == null)
+        TextButton(
+          onPressed: working
+              ? null
+              : () => setState(() => selfHosted = !selfHosted),
+          child: Text(selfHosted ? 'Use PassBundle\'s server' : 'Self-hosted?'),
+        ),
+    ],
+  );
 
   Widget _secondStep(BuildContext context, List<int> step) {
     final viaEmail = provider == 1;

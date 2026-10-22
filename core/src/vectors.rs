@@ -526,3 +526,78 @@ fn a_passkey_opens_and_signs_as_the_vectors_say() {
         );
     }
 }
+
+/// Making an account (docs/core.md, "Making an account"): from the vectors'
+/// password, keys, and IVs, the core makes exactly the account the vectors
+/// have, which upstream's crypto opens (docs/vectors/check-core-vectors.mjs),
+/// with each KDF.
+#[test]
+fn a_new_account_is_made_as_the_vectors_say() {
+    use crate::signup::NewAccount;
+    let v = vectors();
+    let account = &v["account"];
+    let user_key = key(&v["keys"]["userKey"]);
+    let private = PrivateKey::from_pkcs8_der(&b64(&v["keys"]["privateKey"])).unwrap();
+    let iv = |start: u8| -> [u8; 16] { std::array::from_fn(|i| start + i as u8) };
+    let password = account["password"].as_str().unwrap();
+    let email = account["emailAsTyped"].as_str().unwrap();
+
+    let made = NewAccount::with(
+        email,
+        None,
+        password,
+        None,
+        &Kdf::from_prelogin(&prelogin(&account["pbkdf2"]["prelogin"])).unwrap(),
+        &user_key,
+        &private,
+        Some((iv(0x80), iv(0xa0))),
+    )
+    .unwrap();
+    assert_eq!(made.email, account["salt"].as_str().unwrap());
+    assert_eq!(
+        made.login_hash,
+        account["pbkdf2"]["loginHash"].as_str().unwrap()
+    );
+    assert_eq!(
+        made.user_key.to_string(),
+        account["pbkdf2"]["protectedUserKey"].as_str().unwrap()
+    );
+    assert_eq!(
+        made.private_key.to_string(),
+        v["keys"]["encryptedPrivateKey"].as_str().unwrap()
+    );
+    assert_eq!(
+        STANDARD.encode(&made.public_key),
+        v["keys"]["publicKey"].as_str().unwrap()
+    );
+
+    let made = NewAccount::with(
+        email,
+        None,
+        password,
+        None,
+        &Kdf::from_prelogin(&prelogin(&account["argon2id"]["prelogin"])).unwrap(),
+        &user_key,
+        &private,
+        Some((iv(0x90), iv(0xa0))),
+    )
+    .unwrap();
+    assert_eq!(
+        made.login_hash,
+        account["argon2id"]["loginHash"].as_str().unwrap()
+    );
+    assert_eq!(
+        made.user_key.to_string(),
+        account["argon2id"]["protectedUserKey"].as_str().unwrap()
+    );
+    let body = made.finish_body("token");
+    assert_eq!(
+        (
+            body["kdf"].as_u64(),
+            body["kdfIterations"].as_u64(),
+            body["kdfMemory"].as_u64(),
+            body["kdfParallelism"].as_u64()
+        ),
+        (Some(1), Some(3), Some(64), Some(4))
+    );
+}

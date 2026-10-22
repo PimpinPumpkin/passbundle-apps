@@ -124,6 +124,27 @@ impl App {
     }
 
     /// Signs in to a server: the vault comes down, is kept, and opens.
+    /// Makes an account on the server (docs/core.md, "Making an account"),
+    /// then signs in to it, as `sign_in`. Slow: the master key twice, and a
+    /// new RSA key pair.
+    pub fn sign_up(
+        &mut self,
+        server_url: &str,
+        email: &str,
+        name: Option<&str>,
+        password: &str,
+        hint: Option<&str>,
+    ) -> Result<Step> {
+        let account = crate::signup::NewAccount::make(email, name, password, hint)?;
+        let identifier = self
+            .settings
+            .as_ref()
+            .map(|s| s.device_identifier.clone())
+            .unwrap_or_else(Device::new_identifier);
+        Server::new(server_url, Device::this_one(&identifier))?.register(&account)?;
+        self.sign_in(server_url, email, password)
+    }
+
     pub fn sign_in(&mut self, server_url: &str, email: &str, password: &str) -> Result<Step> {
         self.lock();
         // One identifier per install, whichever account signs in.

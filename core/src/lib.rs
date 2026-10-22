@@ -18,6 +18,7 @@ pub mod matching;
 pub mod passkey;
 pub mod secrets;
 pub mod server;
+pub mod signup;
 pub mod store;
 pub mod totp;
 pub mod vault;

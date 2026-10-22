@@ -349,6 +349,35 @@ pub unsafe extern "C" fn pb_sign_in(
     with_app_waiting(|app| step(app.sign_in(&server, &email, &password)))
 }
 
+/// Makes an account on the server, then signs in to it (docs/core.md,
+/// "Making an account"): the same answer as `pb_sign_in`. `name` and `hint`
+/// may be empty.
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_sign_up(
+    server: *const c_char,
+    email: *const c_char,
+    name: *const c_char,
+    password: *const c_char,
+    hint: *const c_char,
+) -> *mut c_char {
+    let (server, email, name) = (text(server), text(email), text(name));
+    let (password, hint) = (Zeroizing::new(text(password)), Zeroizing::new(text(hint)));
+    let given = |t: &str| Some(t.to_owned()).filter(|t| !t.trim().is_empty());
+    let (name, hint) = (given(&name), given(&hint).map(Zeroizing::new));
+    with_app_waiting(|app| {
+        step(app.sign_up(
+            &server,
+            &email,
+            name.as_deref(),
+            &password,
+            hint.as_deref().map(|h| h.as_str()),
+        ))
+    })
+}
+
 /// # Safety
 /// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
 #[no_mangle]

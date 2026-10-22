@@ -640,6 +640,31 @@ impl Server {
 
     /// For tests and setup: an unauthenticated POST.
     #[doc(hidden)]
+    /// Makes the account on the server (docs/core.md, "Making an account"),
+    /// as upstream's apps do: asks for a token for the email, then sends the
+    /// account with it. A server that emails the token instead (it checks
+    /// the address) is refused here: the person finishes from that email.
+    pub fn register(&self, account: &crate::signup::NewAccount) -> Result<()> {
+        let token = self.raw_post(
+            "/identity/accounts/register/send-verification-email",
+            json!({
+                "email": account.email,
+                "name": account.name,
+                "receiveMarketingEmails": false,
+            }),
+        )?;
+        let Some(token) = token.as_str().filter(|t| !t.is_empty()) else {
+            return Err(Error::Refused(
+                "this server finishes new accounts by email, so open the link it sent, then sign in here",
+            ));
+        };
+        self.raw_post(
+            "/identity/accounts/register/finish",
+            account.finish_body(token),
+        )?;
+        Ok(())
+    }
+
     pub fn raw_post(&self, path: &str, body: Value) -> Result<Value> {
         let (status, body) = Self::answer(self.agent.post(self.url(path)).send_json(body))?;
         Self::checked(status, body)

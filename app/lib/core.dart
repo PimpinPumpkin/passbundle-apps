@@ -18,6 +18,13 @@ typedef _Str3 = Pointer<Utf8> Function(
   Pointer<Utf8>,
   Pointer<Utf8>,
 );
+typedef _Str5 = Pointer<Utf8> Function(
+  Pointer<Utf8>,
+  Pointer<Utf8>,
+  Pointer<Utf8>,
+  Pointer<Utf8>,
+  Pointer<Utf8>,
+);
 typedef _FinishNative = Pointer<Utf8> Function(Uint8, Pointer<Utf8>, Bool);
 typedef _Finish = Pointer<Utf8> Function(int, Pointer<Utf8>, bool);
 
@@ -87,6 +94,7 @@ class Core {
   late final _state = _lib.lookupFunction<_Str0, _Str0>('pb_state');
   late final _servers = _lib.lookupFunction<_Str0, _Str0>('pb_servers');
   late final _signIn = _lib.lookupFunction<_Str3, _Str3>('pb_sign_in');
+  late final _signUp = _lib.lookupFunction<_Str5, _Str5>('pb_sign_up');
   late final _finish = _lib.lookupFunction<_FinishNative, _Finish>(
     'pb_finish_sign_in',
   );
@@ -215,6 +223,24 @@ class Core {
           password,
         ], (p) => c._answer(c._signIn(p[0], p[1], p[2]))),
       );
+
+  /// Makes an account on the server, then signs in to it (docs/core.md,
+  /// "Making an account"). [name] and [hint] may be empty.
+  static Future<Answer> signUp(
+    String server,
+    String email,
+    String name,
+    String password,
+    String hint,
+  ) => _background(
+    (c) => c._with([
+      server,
+      email,
+      name,
+      password,
+      hint,
+    ], (p) => c._answer(c._signUp(p[0], p[1], p[2], p[3], p[4]))),
+  );
 
   static Future<Answer> finishSignIn(
     int provider,
