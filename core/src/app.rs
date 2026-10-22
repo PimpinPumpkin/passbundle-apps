@@ -859,7 +859,7 @@ fn safe_name(name: &str) -> String {
 
 #[cfg(test)]
 mod attachment_tests {
-    use super::{create_free, mark_downloaded, safe_name};
+    use super::{create_free, safe_name};
 
     fn new_dir() -> std::path::PathBuf {
         let dir =
@@ -911,6 +911,7 @@ mod attachment_tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn a_saved_file_is_marked_as_downloaded() {
+        use super::mark_downloaded;
         let dir = new_dir();
         let (path, _) = create_free(&dir, "tool.command").unwrap();
         mark_downloaded(&path);
