@@ -25,3 +25,4 @@ void pb_free(char *ptr);
 // What iOS may suggest above the keyboard: [{id, username, domain}], never a
 // password (free it with pb_free).
 char *pb_suggestions(void);
+char *pb_passkey_suggestions(void);

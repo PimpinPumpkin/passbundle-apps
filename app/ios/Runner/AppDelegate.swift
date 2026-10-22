@@ -209,16 +209,18 @@ enum Biometric {
   }
 }
 
-/// What iOS suggests above the keyboard (docs/phones.md, "Autofill"): after
-/// each sync the app gives iOS each login's username and the domains it
-/// fills on, never a password. Picking one opens the AutoFill extension.
+/// What iOS suggests above the keyboard and in its passkey sheet
+/// (docs/phones.md, "Autofill" and "Passkeys"): after each sync the app
+/// gives iOS each login's username and the domains it fills on, never a
+/// password, and each passkey's site, account, and IDs, never its key.
+/// Picking one opens the AutoFill extension.
 enum Suggestions {
   /// Gives iOS the unlocked vault's suggestions: `done(count, stored)`, on
   /// the main queue once iOS has them (stored is false while PassBundle is
   /// off for AutoFill in Settings).
   static func update(_ done: @escaping (Int, Bool) -> Void) {
     let found = (Shared.answer(pb_suggestions()) as? [[String: Any]]) ?? []
-    let identities = found.compactMap { s -> ASPasswordCredentialIdentity? in
+    let logins = found.compactMap { s -> ASPasswordCredentialIdentity? in
       guard let id = s["id"] as? String, let user = s["username"] as? String,
         let domain = s["domain"] as? String
       else { return nil }
@@ -226,12 +228,24 @@ enum Suggestions {
         serviceIdentifier: ASCredentialServiceIdentifier(identifier: domain, type: .domain),
         user: user, recordIdentifier: id)
     }
+    let passkeys = ((Shared.answer(pb_passkey_suggestions()) as? [[String: Any]]) ?? []).compactMap {
+      s -> ASPasskeyCredentialIdentity? in
+      guard let id = s["id"] as? String, let rpId = s["rpId"] as? String,
+        let user = s["userName"] as? String,
+        let credential = (s["credentialId"] as? String).flatMap(Shared.fromBase64url),
+        let handle = (s["userHandle"] as? String).flatMap(Shared.fromBase64url)
+      else { return nil }
+      return ASPasskeyCredentialIdentity(
+        relyingPartyIdentifier: rpId, userName: user, credentialID: credential, userHandle: handle,
+        recordIdentifier: id)
+    }
+    let identities: [any ASCredentialIdentity] = logins + passkeys
     let store = ASCredentialIdentityStore.shared
     let answer = { (stored: Bool) in DispatchQueue.main.async { done(identities.count, stored) } }
     // Only while PassBundle is turned on for AutoFill in Settings.
     store.getState { state in
       guard state.isEnabled else { return answer(false) }
-      store.replaceCredentialIdentities(with: identities) { stored, _ in answer(stored) }
+      store.replaceCredentialIdentities(identities) { stored, _ in answer(stored) }
     }
   }
 

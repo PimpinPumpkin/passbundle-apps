@@ -513,6 +513,33 @@ pub extern "C" fn pb_suggestions() -> *mut c_char {
     })
 }
 
+/// The passkeys iOS may suggest in its passkey sheet, for the app to give iOS
+/// after each sync (docs/phones.md, "Passkeys"): `[{id, rpId, userName,
+/// credentialId, userHandle}]`, the IDs in base64url, never a key; none while
+/// locked. Free it with `pb_free`.
+#[cfg(target_os = "ios")]
+#[no_mangle]
+pub extern "C" fn pb_passkey_suggestions() -> *mut c_char {
+    with_app(|app| match app.vault() {
+        Some(vault) => Value::Array(
+            vault
+                .passkey_suggestions()
+                .into_iter()
+                .map(|s| {
+                    json!({
+                        "id": s.id,
+                        "rpId": s.rp_id,
+                        "userName": s.user_name,
+                        "credentialId": base64url(&s.credential_id),
+                        "userHandle": base64url(&s.user_handle),
+                    })
+                })
+                .collect(),
+        ),
+        None => json!([]),
+    })
+}
+
 /// What Swift does when the core turns biometric unlock off (signing out, or
 /// a key that's out of date): it deletes the Keychain item. Swift sets it at
 /// start.

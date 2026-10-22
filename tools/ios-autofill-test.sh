@@ -10,7 +10,11 @@
 #   4. in Safari, on a sign-in page for phone.example.test (served here over
 #      HTTPS, with a throwaway authority the simulator trusts), the email
 #      field offers PassBundle's login; picking it opens the extension, which
-#      unlocks and fills; signing in shows who signed in.
+#      unlocks and fills; signing in shows who signed in;
+#   5. on a page of the same site that makes a passkey, iOS saves it in
+#      PassBundle (the extension unlocks, and saves it once told to), and
+#      signing in with it gives a signature the page checks with its public
+#      key.
 #
 # The two halves talk through files in the App Group folder, which this
 # reaches from the Mac. CI only: it maps phone.example.test to this Mac in
@@ -97,6 +101,11 @@ echo "Filling the sign-in page in Safari"
 xcrun simctl openurl "$device" "https://phone.example.test:$port/"
 ui_test testFillInSafari
 echo "Filled: signed in as phone@example.test, with the 25-character password from the vault."
+
+echo "Making a passkey in Safari, and signing in with it"
+xcrun simctl openurl "$device" "https://phone.example.test:$port/passkeys"
+ui_test testPasskeysInSafari
+echo "Signed in: the page checked the signature with the passkey's public key, for its own challenge and origin."
 
 # The app's half can end now.
 touch "$(folder)/autofill-done"

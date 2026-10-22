@@ -25,4 +25,7 @@ char *pb_unlock_with_key(const uint8_t *key, size_t len);
 // The master password, for a login that asks for it again before it fills:
 // {"ok": true} or the words to show.
 char *pb_confirm_master_password(const char *id, const char *password);
+char *pb_passkeys(const char *rp_id);
+char *pb_passkey_assert(const char *id, const char *rp_id, const char *client_data_hash, const char *user_verified);
+char *pb_passkey_create(const char *request);
 void pb_free(char *ptr);

@@ -96,6 +96,22 @@ enum Shared {
     }
   }
 
+  /// base64url without padding, as WebAuthn and the core write IDs.
+  static func base64url(_ data: Data) -> String {
+    data.base64EncodedString()
+      .replacingOccurrences(of: "+", with: "-")
+      .replacingOccurrences(of: "/", with: "_")
+      .replacingOccurrences(of: "=", with: "")
+  }
+
+  /// base64url, padded or not, read; nil when it isn't.
+  static func fromBase64url(_ text: String) -> Data? {
+    var plain = text.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+    plain = plain.trimmingCharacters(in: CharacterSet(charactersIn: "="))
+    plain += String(repeating: "=", count: (4 - plain.count % 4) % 4)
+    return Data(base64Encoded: plain)
+  }
+
   /// One of the core's calls that answers JSON, read and freed.
   static func answer(_ text: UnsafeMutablePointer<CChar>?) -> Any? {
     guard let text else { return nil }

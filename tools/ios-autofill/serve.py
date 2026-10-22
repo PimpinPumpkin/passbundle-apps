@@ -1,6 +1,7 @@
-"""Serves sign-in.html over HTTPS, for tools/ios-autofill-test.sh: Safari on the
-simulator trusts the certificate because the script adds its throwaway
-authority to the simulator. Usage: serve.py <port> <cert.pem> <key.pem>."""
+"""Serves sign-in.html, and passkeys.html at /passkeys, over HTTPS, for
+tools/ios-autofill-test.sh: Safari on the simulator trusts the certificate
+because the script adds its throwaway authority to the simulator. Usage:
+serve.py <port> <cert.pem> <key.pem>."""
 
 import http.server
 import os
@@ -13,7 +14,7 @@ os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
 class Page(http.server.SimpleHTTPRequestHandler):
     def do_GET(self):
-        self.path = "/sign-in.html"
+        self.path = "/passkeys.html" if self.path.startswith("/passkeys") else "/sign-in.html"
         super().do_GET()
 
     def log_message(self, *args):

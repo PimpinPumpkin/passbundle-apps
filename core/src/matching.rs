@@ -17,7 +17,7 @@
 //!
 //! iOS suggests logins above the keyboard from a list the app gives it of
 //! usernames and the domains they're for, never passwords (`suggestions`), by
-//! the same rules.
+//! the same rules; and passkeys by their site's ID (`passkey_suggestions`).
 
 use std::collections::HashSet;
 use std::net::IpAddr;
@@ -133,6 +133,51 @@ impl Vault {
     pub fn suggestions(&self) -> Vec<Suggestion<'_>> {
         self.items.iter().flat_map(suggested).collect()
     }
+
+    /// The passkeys iOS may suggest (`passkey_suggested`).
+    pub fn passkey_suggestions(&self) -> Vec<PasskeySuggestion<'_>> {
+        self.items.iter().filter_map(passkey_suggested).collect()
+    }
+}
+
+/// A passkey iOS may suggest in its passkey sheet (docs/phones.md,
+/// "Passkeys"): the site's ID, the account's name, and the IDs a site and
+/// iOS know it by. Never its key.
+#[derive(Debug, PartialEq, Eq)]
+pub struct PasskeySuggestion<'a> {
+    pub id: &'a str,
+    pub rp_id: &'a str,
+    /// The account's name on the site, or the login's name without one.
+    pub user_name: &'a str,
+    pub credential_id: Vec<u8>,
+    /// Empty when none is stored.
+    pub user_handle: Vec<u8>,
+}
+
+/// What iOS may suggest of an item's passkey: one the core can sign with,
+/// that a site can find by itself (discoverable), in a login not in the
+/// trash.
+pub fn passkey_suggested(item: &Item) -> Option<PasskeySuggestion<'_>> {
+    let passkey = item.passkey.as_ref()?;
+    if item.deleted || item.kind != ItemKind::Login || !passkey.usable || !passkey.discoverable {
+        return None;
+    }
+    let credential_id = crate::passkey::credential_id(&passkey.credential_id).ok()?;
+    let user_handle = match &passkey.user_handle {
+        Some(handle) => crate::passkey::base64_either(handle)?,
+        None => Vec::new(),
+    };
+    Some(PasskeySuggestion {
+        id: &item.id,
+        rp_id: &passkey.rp_id,
+        user_name: passkey
+            .user_name
+            .as_deref()
+            .filter(|u| !u.is_empty())
+            .unwrap_or(&item.name),
+        credential_id,
+        user_handle,
+    })
 }
 
 /// What iOS may suggest for one item: a login with a username, once for each

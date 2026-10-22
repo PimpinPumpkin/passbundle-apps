@@ -506,6 +506,28 @@ fn a_passkey_opens_and_signs_as_the_vectors_say() {
     }
     assert_eq!(seen, 1);
 
+    // iOS's suggestion of it: never its key.
+    let suggested = vault.passkey_suggestions();
+    assert_eq!(suggested.len(), 1);
+    let (id, want) = v["opened"]["items"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .find(|(_, want)| want.get("passkey").is_some())
+        .unwrap();
+    let want = &want["passkey"];
+    assert_eq!(suggested[0].id, id);
+    assert_eq!(suggested[0].rp_id, want["rpId"].as_str().unwrap());
+    assert_eq!(suggested[0].user_name, want["userName"].as_str().unwrap());
+    assert_eq!(
+        suggested[0].credential_id,
+        credential_id(want["credentialId"].as_str().unwrap()).unwrap()
+    );
+    assert_eq!(
+        suggested[0].user_handle,
+        crate::passkey::base64_either(want["userHandle"].as_str().unwrap()).unwrap()
+    );
+
     for a in v["passkeyAssertions"].as_array().unwrap() {
         let item = vault.item(a["itemId"].as_str().unwrap()).unwrap();
         let passkey = item.passkey.as_ref().unwrap();

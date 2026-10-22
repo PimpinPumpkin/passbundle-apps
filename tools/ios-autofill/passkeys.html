@@ -1,0 +1,108 @@
+<!doctype html>
+<!-- A website that makes a passkey and signs in with it, for
+     tools/ios-autofill-test.sh: PassBundle answers through iOS's AutoFill in
+     Safari, and this page checks what comes back as a site would (its own
+     challenge and origin, the site's ID, and the signature with the passkey's
+     public key), then says how it went. -->
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Passkeys</title>
+<style>
+  body { font: 18px -apple-system, sans-serif; margin: 40px 24px; }
+  button { display: block; width: 100%; box-sizing: border-box; font: inherit; margin: 12px 0; padding: 10px; }
+</style>
+<h1>Passkeys</h1>
+<button id="make">Make a passkey</button>
+<button id="sign-in">Sign in with a passkey</button>
+<p id="result"></p>
+<script>
+  const rpId = location.hostname;
+  const user = "phone-passkey@example.test";
+  let made = null;
+
+  const random = (n) => crypto.getRandomValues(new Uint8Array(n));
+  const show = (text) => { document.getElementById("result").textContent = text; };
+  const same = (a, b) => {
+    a = new Uint8Array(a);
+    b = new Uint8Array(b);
+    return a.length === b.length && a.every((x, i) => x === b[i]);
+  };
+  const base64url = (bytes) =>
+    btoa(String.fromCharCode(...new Uint8Array(bytes))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+
+  // What the browser says it signed for: this page's challenge and origin.
+  function checkClientData(json, type, challenge) {
+    const data = JSON.parse(new TextDecoder().decode(json));
+    if (data.type !== type) throw new Error(`client data type ${data.type}`);
+    if (data.origin !== location.origin) throw new Error(`client data origin ${data.origin}`);
+    if (data.challenge !== base64url(challenge)) throw new Error("not this page's challenge");
+  }
+
+  // An ECDSA signature, DER (SEQUENCE of r and s), as WebCrypto takes it: r and s, 32 bytes each.
+  function derToRaw(der) {
+    let at = 2;
+    const part = () => {
+      if (der[at] !== 2) throw new Error("a signature that isn't DER");
+      const length = der[at + 1];
+      let bytes = der.slice(at + 2, at + 2 + length);
+      at += 2 + length;
+      while (bytes.length > 32 && bytes[0] === 0) bytes = bytes.slice(1);
+      const out = new Uint8Array(32);
+      out.set(bytes, 32 - bytes.length);
+      return out;
+    };
+    const raw = new Uint8Array(64);
+    raw.set(part(), 0);
+    raw.set(part(), 32);
+    return raw;
+  }
+
+  document.getElementById("make").addEventListener("click", async () => {
+    try {
+      const challenge = random(32);
+      const credential = await navigator.credentials.create({
+        publicKey: {
+          rp: { id: rpId, name: "Phone Example" },
+          user: { id: random(16), name: user, displayName: "Phone" },
+          challenge,
+          pubKeyCredParams: [{ type: "public-key", alg: -7 }],
+          authenticatorSelection: { residentKey: "required", userVerification: "preferred" },
+          attestation: "none",
+        },
+      });
+      checkClientData(credential.response.clientDataJSON, "webauthn.create", challenge);
+      const key = await crypto.subtle.importKey(
+        "spki", credential.response.getPublicKey(), { name: "ECDSA", namedCurve: "P-256" }, false, ["verify"]);
+      made = { id: credential.rawId, key };
+      show(`Made a passkey for ${user}`);
+    } catch (e) {
+      show(`Couldn't make a passkey: ${e.name}: ${e.message}`);
+    }
+  });
+
+  document.getElementById("sign-in").addEventListener("click", async () => {
+    try {
+      const challenge = random(32);
+      const credential = await navigator.credentials.get({
+        publicKey: { challenge, rpId, userVerification: "preferred" },
+      });
+      const response = credential.response;
+      checkClientData(response.clientDataJSON, "webauthn.get", challenge);
+      if (!made || !same(credential.rawId, made.id)) throw new Error("not the passkey made here");
+      const data = new Uint8Array(response.authenticatorData);
+      const siteHash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(rpId));
+      if (!same(data.slice(0, 32), siteHash)) throw new Error("another site's ID");
+      if (!(data[32] & 0x01)) throw new Error("no one present");
+      const clientHash = new Uint8Array(await crypto.subtle.digest("SHA-256", response.clientDataJSON));
+      const signed = new Uint8Array(data.length + 32);
+      signed.set(data);
+      signed.set(clientHash, data.length);
+      const good = await crypto.subtle.verify(
+        { name: "ECDSA", hash: "SHA-256" }, made.key, derToRaw(new Uint8Array(response.signature)), signed);
+      if (!good) throw new Error("a signature the passkey's public key doesn't verify");
+      show(`Signed in with the passkey for ${user}`);
+    } catch (e) {
+      show(`Couldn't sign in: ${e.name}: ${e.message}`);
+    }
+  });
+</script>
