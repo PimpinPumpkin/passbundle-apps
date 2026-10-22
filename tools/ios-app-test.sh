@@ -36,10 +36,9 @@ extension="$built/PlugIns/AutoFill.appex"
   || { echo "The extension isn't iOS's credential provider." >&2; exit 1; }
 # Simulator builds keep their entitlements in the binary's __entitlements
 # section, not the signature, so read both.
-entitlements=$(
-  codesign -d --entitlements - --xml "$extension" 2> /dev/null
-  otool -X -s __TEXT __entitlements "$extension/AutoFill" 2> /dev/null | xxd -r -p
-)
+section=$(mktemp)
+segedit "$extension/AutoFill" -extract __TEXT __entitlements "$section" 2> /dev/null || true
+entitlements=$(codesign -d --entitlements - --xml "$extension" 2> /dev/null; cat "$section")
 for needed in com.apple.developer.authentication-services.autofill-credential-provider group.com.passbundle.app com.passbundle.app.shared; do
   grep -q "$needed" <<< "$entitlements" || { echo "The extension is missing $needed." >&2; exit 1; }
 done
