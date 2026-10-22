@@ -193,6 +193,122 @@ pub fn confirmMasterPassword<'caller>(
         .resolve::<ThrowRuntimeExAndDefault>()
 }
 
+/// The logins with a passkey for a site (its ID), as JSON: names and IDs,
+/// never a key (docs/phones.md, "Passkeys").
+#[cfg(feature = "ffi")]
+#[jni_mangle("com.passbundle.app.Core")]
+pub fn passkeys<'caller>(
+    mut unowned_env: EnvUnowned<'caller>,
+    _class: JClass<'caller>,
+    rp_id: JString<'caller>,
+) -> jstring {
+    unowned_env
+        .with_env(|env| -> JniResult<jstring> {
+            let answer = crate::ffi::passkeys(&rp_id.try_to_string(env)?);
+            Ok(env.new_string(answer.to_string())?.into_raw())
+        })
+        .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+/// Signs in to a site with a login's passkey (docs/core.md, "Passkeys"), as
+/// JSON; the client data hash in base64url. Slow when the passkey counts its
+/// uses (it's saved first): off the main thread.
+#[cfg(feature = "ffi")]
+#[jni_mangle("com.passbundle.app.Core")]
+pub fn passkey_assert<'caller>(
+    mut unowned_env: EnvUnowned<'caller>,
+    _class: JClass<'caller>,
+    id: JString<'caller>,
+    rp_id: JString<'caller>,
+    client_data_hash: JString<'caller>,
+    user_verified: jni::sys::jboolean,
+) -> jstring {
+    unowned_env
+        .with_env(|env| -> JniResult<jstring> {
+            let answer = crate::ffi::passkey_assert(
+                &id.try_to_string(env)?,
+                &rp_id.try_to_string(env)?,
+                &client_data_hash.try_to_string(env)?,
+                user_verified,
+            );
+            Ok(env.new_string(answer.to_string())?.into_raw())
+        })
+        .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+/// Makes a passkey for a site (docs/core.md, "Passkeys", "Making one"), from
+/// the request as JSON, answering JSON. Slow (it's saved first): off the main
+/// thread.
+#[cfg(feature = "ffi")]
+#[jni_mangle("com.passbundle.app.Core")]
+pub fn passkey_create<'caller>(
+    mut unowned_env: EnvUnowned<'caller>,
+    _class: JClass<'caller>,
+    request: JString<'caller>,
+) -> jstring {
+    unowned_env
+        .with_env(|env| -> JniResult<jstring> {
+            let answer = crate::ffi::passkey_create(&request.try_to_string(env)?);
+            Ok(env.new_string(answer.to_string())?.into_raw())
+        })
+        .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+/// The master password, as proof the person is who they are when a passkey
+/// signs or is made: `{ok}`, or the words to show, as JSON. Slow (the KDF):
+/// off the main thread.
+#[cfg(feature = "ffi")]
+#[jni_mangle("com.passbundle.app.Core")]
+pub fn check_master_password<'caller>(
+    mut unowned_env: EnvUnowned<'caller>,
+    _class: JClass<'caller>,
+    password: JString<'caller>,
+) -> jstring {
+    unowned_env
+        .with_env(|env| -> JniResult<jstring> {
+            let password = Zeroizing::new(password.try_to_string(env)?);
+            let answer = crate::ffi::check_master_password(&password);
+            Ok(env.new_string(answer.to_string())?.into_raw())
+        })
+        .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+/// Whether a site's Digital Asset Links let an app (its package, and its
+/// signing certificate's SHA-256) use the site's passkeys (asset_links.rs).
+/// `statements` stands in for fetching them (debug builds' test site); null
+/// fetches. False when they can't be read. Slow (the network): off the main
+/// thread.
+#[jni_mangle("com.passbundle.app.Core")]
+pub fn app_may_use_passkeys<'caller>(
+    mut unowned_env: EnvUnowned<'caller>,
+    _class: JClass<'caller>,
+    rp_id: JString<'caller>,
+    package: JString<'caller>,
+    certificate: JByteArray<'caller>,
+    statements: JString<'caller>,
+) -> jni::sys::jboolean {
+    unowned_env
+        .with_env(|env| -> JniResult<bool> {
+            let certificate: [u8; 32] = match env.convert_byte_array(&certificate)?.try_into() {
+                Ok(c) => c,
+                Err(_) => return Ok(false),
+            };
+            let statements = if statements.is_null() {
+                None
+            } else {
+                Some(statements.try_to_string(env)?)
+            };
+            Ok(crate::asset_links::check(
+                &rp_id.try_to_string(env)?,
+                &package.try_to_string(env)?,
+                &certificate,
+                statements.as_deref(),
+            )
+            .unwrap_or(false))
+        })
+        .resolve::<ThrowRuntimeExAndDefault>()
+}
+
 /// Turns biometric unlock off: Kotlin deletes its Keystore key and the user
 /// key it sealed (signing out, or a key that's out of date).
 pub(crate) fn remove_biometric() {

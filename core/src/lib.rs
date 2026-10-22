@@ -4,6 +4,7 @@
 
 pub mod agent;
 pub mod app;
+pub mod asset_links;
 pub mod autolock;
 pub mod clipboard;
 pub mod crypto;
@@ -14,6 +15,7 @@ pub mod kdf;
 pub mod lock_policy;
 pub mod managed;
 pub mod matching;
+pub mod passkey;
 pub mod secrets;
 pub mod server;
 pub mod store;

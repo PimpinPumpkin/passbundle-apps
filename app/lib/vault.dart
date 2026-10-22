@@ -51,6 +51,9 @@ class VaultScreenState extends State<VaultScreen> {
   bool syncing = false;
   bool signedOut = false;
 
+  /// On a phone the sidebar is a drawer, opened from the header.
+  final scaffold = GlobalKey<ScaffoldState>();
+
   /// Coming back to the app: a sign-in autofill offered to save may be
   /// waiting. Looked for after the next frame, since coming back can lock the
   /// app first (main.dart), and then it waits for the vault after unlocking.
@@ -123,6 +126,21 @@ class VaultScreenState extends State<VaultScreen> {
       all.where((i) => i['organizationId'] == filterId).toList(),
   };
 
+  /// What the list shows, by name, for a phone's header.
+  String? get placeName {
+    String? named(String key) => (places[key] as List)
+        .cast<Map<String, dynamic>>()
+        .where((p) => p['id'] == filterId)
+        .map((p) => p['name'] as String)
+        .firstOrNull;
+    return switch (filter) {
+      Filter.all => null,
+      Filter.favorites => 'Favorites',
+      Filter.folder => named('folders'),
+      Filter.organization => named('organizations'),
+    };
+  }
+
   Future<void> edit([String? id, Map<String, dynamic>? prefill]) async {
     final wide = MediaQuery.sizeOf(context).width >= 900;
     // An item that asks for the master password gets it before its editor
@@ -183,6 +201,69 @@ class VaultScreenState extends State<VaultScreen> {
     reload();
   }
 
+  /// Makes a folder, then shows it.
+  Future<void> newFolder() async {
+    final name = await askFolderName(context, 'New folder');
+    if (name == null || !mounted) return;
+    final answer = await whileBusy(() => Core.createFolder(name));
+    if (!mounted) return;
+    reload();
+    if (!answer.ok) {
+      showMessage(context, answer.error ?? 'Couldn\'t make the folder.');
+      return;
+    }
+    setState(() {
+      filter = Filter.folder;
+      filterId = answer.body['id'] as String?;
+    });
+  }
+
+  Future<void> renameFolder(String id, String name) async {
+    final renamed = await askFolderName(context, 'Rename folder', name);
+    if (renamed == null || renamed == name || !mounted) return;
+    final answer = await whileBusy(() => Core.renameFolder(id, renamed));
+    if (!mounted) return;
+    reload();
+    if (!answer.ok) {
+      showMessage(context, answer.error ?? 'Couldn\'t rename the folder.');
+    }
+  }
+
+  /// Deletes a folder; its items stay, in no folder.
+  Future<void> deleteFolder(String id, String name) async {
+    final sure = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('Delete the folder $name?'),
+        content: const Text('Its items stay in your vault, in no folder.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Delete folder'),
+          ),
+        ],
+      ),
+    );
+    if (sure != true || !mounted) return;
+    final answer = await whileBusy(() => Core.deleteFolder(id));
+    if (!mounted) return;
+    reload();
+    if (!answer.ok) {
+      showMessage(context, answer.error ?? 'Couldn\'t delete the folder.');
+      return;
+    }
+    if (filter == Filter.folder && filterId == id) {
+      setState(() {
+        filter = Filter.all;
+        filterId = null;
+      });
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final list = shown;
@@ -202,9 +283,11 @@ class VaultScreenState extends State<VaultScreen> {
       header: wide
           ? null
           : PhoneHeader(
+              title: placeName,
               mode: widget.mode,
               onMode: widget.onMode,
               onLock: widget.onLock,
+              onMenu: () => scaffold.currentState?.openDrawer(),
             ),
       items: list,
       selected: selected,
@@ -239,7 +322,36 @@ class VaultScreenState extends State<VaultScreen> {
       },
     );
 
+    Widget sidebar({double width = 232}) => Sidebar(
+      width: width,
+      email: widget.email,
+      filter: filter,
+      filterId: filterId,
+      places: places,
+      counts: (all.length, all.where((i) => i['favorite'] == true).length),
+      onChoose: (f, [id]) {
+        setState(() {
+          filter = f;
+          filterId = id;
+        });
+        scaffold.currentState?.closeDrawer();
+      },
+      onNewFolder: newFolder,
+      onRenameFolder: renameFolder,
+      onDeleteFolder: deleteFolder,
+      mode: widget.mode,
+      onMode: widget.onMode,
+      onLock: widget.onLock,
+    );
+
     return Scaffold(
+      key: scaffold,
+      drawer: wide
+          ? null
+          : Drawer(
+              backgroundColor: context.colors.sidebar,
+              child: SafeArea(child: sidebar(width: double.infinity)),
+            ),
       body: Column(
         children: [
           if (signedOut)
@@ -258,24 +370,7 @@ class VaultScreenState extends State<VaultScreen> {
           Expanded(
             child: Row(
               children: [
-                if (wide)
-                  Sidebar(
-                    email: widget.email,
-                    filter: filter,
-                    filterId: filterId,
-                    places: places,
-                    counts: (
-                      all.length,
-                      all.where((i) => i['favorite'] == true).length,
-                    ),
-                    onChoose: (f, [id]) => setState(() {
-                      filter = f;
-                      filterId = id;
-                    }),
-                    mode: widget.mode,
-                    onMode: widget.onMode,
-                    onLock: widget.onLock,
-                  ),
+                if (wide) sidebar(),
                 SizedBox(width: wide ? 360 : width, child: listPane),
                 if (wide) const VerticalDivider(width: 1),
                 if (wide)
@@ -309,23 +404,32 @@ void showMessage(BuildContext context, String text) =>
 class Sidebar extends StatelessWidget {
   const Sidebar({
     super.key,
+    this.width = 232,
     required this.email,
     required this.filter,
     required this.filterId,
     required this.places,
     required this.counts,
     required this.onChoose,
+    required this.onNewFolder,
+    required this.onRenameFolder,
+    required this.onDeleteFolder,
     required this.mode,
     required this.onMode,
     required this.onLock,
   });
 
+  /// Its own width beside the list; a phone's drawer gives it the drawer's.
+  final double width;
   final String email;
   final Filter filter;
   final String? filterId;
   final Map<String, dynamic> places;
   final (int, int) counts;
   final void Function(Filter, [String?]) onChoose;
+  final VoidCallback onNewFolder;
+  final void Function(String id, String name) onRenameFolder;
+  final void Function(String id, String name) onDeleteFolder;
   final ThemeMode mode;
   final ValueChanged<ThemeMode> onMode;
   final VoidCallback onLock;
@@ -339,6 +443,7 @@ class Sidebar extends StatelessWidget {
       bool on,
       VoidCallback tap, [
       int? count,
+      Widget? trailing,
     ]) => Padding(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 1),
       child: Material(
@@ -371,6 +476,7 @@ class Sidebar extends StatelessWidget {
                       fontSize: 12,
                     ),
                   ),
+                ?trailing,
               ],
             ),
           ),
@@ -393,7 +499,7 @@ class Sidebar extends StatelessWidget {
     final organizations = (places['organizations'] as List)
         .cast<Map<String, dynamic>>();
     return Container(
-      width: 232,
+      width: width,
       color: c.sidebar,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -432,13 +538,41 @@ class Sidebar extends StatelessWidget {
                   () => onChoose(Filter.favorites),
                   counts.$2,
                 ),
-                if (folders.isNotEmpty) headingText('Folders'),
+                Row(
+                  children: [
+                    Expanded(child: headingText('Folders')),
+                    Padding(
+                      padding: const EdgeInsets.only(top: 12, right: 12),
+                      child: IconButton(
+                        tooltip: 'New folder',
+                        visualDensity: VisualDensity.compact,
+                        iconSize: 18,
+                        color: c.sidebarText.withValues(alpha: 0.7),
+                        onPressed: onNewFolder,
+                        icon: const Icon(Icons.add_rounded),
+                      ),
+                    ),
+                  ],
+                ),
                 for (final f in folders)
                   entry(
                     Icons.folder_outlined,
                     f['name'] as String,
                     filter == Filter.folder && filterId == f['id'],
                     () => onChoose(Filter.folder, f['id'] as String),
+                    null,
+                    FolderMenu(
+                      name: f['name'] as String,
+                      color: c.sidebarText.withValues(alpha: 0.7),
+                      onRename: () => onRenameFolder(
+                        f['id'] as String,
+                        f['name'] as String,
+                      ),
+                      onDelete: () => onDeleteFolder(
+                        f['id'] as String,
+                        f['name'] as String,
+                      ),
+                    ),
                   ),
                 if (organizations.isNotEmpty) headingText('Organizations'),
                 for (final o in organizations)
@@ -491,26 +625,39 @@ class Sidebar extends StatelessWidget {
 class PhoneHeader extends StatelessWidget {
   const PhoneHeader({
     super.key,
+    this.title,
     required this.mode,
     required this.onMode,
     required this.onLock,
+    required this.onMenu,
   });
 
+  /// The folder, organization, or Favorites the list shows; null for all items.
+  final String? title;
   final ThemeMode mode;
   final ValueChanged<ThemeMode> onMode;
   final VoidCallback onLock;
 
+  /// Opens the drawer: all items, favorites, folders, and organizations.
+  final VoidCallback onMenu;
+
   @override
   Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.fromLTRB(20, 16, 8, 0),
+    padding: const EdgeInsets.fromLTRB(8, 16, 8, 0),
     child: Row(
       children: [
-        const Mark(size: 22),
-        const SizedBox(width: 10),
-        const Expanded(
+        IconButton(
+          tooltip: 'Menu',
+          icon: const Icon(Icons.menu_rounded),
+          onPressed: onMenu,
+        ),
+        const SizedBox(width: 4),
+        if (title == null) ...[const Mark(size: 22), const SizedBox(width: 10)],
+        Expanded(
           child: Text(
-            'PassBundle',
-            style: TextStyle(fontWeight: FontWeight.w700, fontSize: 17),
+            title ?? 'PassBundle',
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 17),
           ),
         ),
         ThemeMenu(mode: mode, onMode: onMode),
@@ -1095,6 +1242,21 @@ class _ItemPaneState extends State<ItemPane> {
         ),
       );
     }
+    // A login's passkey: who it's for and when it was made, never its key.
+    final passkey = item['passkey'] as Map<String, dynamic>?;
+    if (passkey != null) {
+      final site = passkey['rpName'] as String? ?? passkey['rpId'] as String;
+      final created = madeOn(passkey['created'] as String?);
+      rows.add(
+        row(
+          'Passkey',
+          Text(
+            created == null ? 'For $site' : 'For $site · created $created',
+            style: const TextStyle(fontSize: 15),
+          ),
+        ),
+      );
+    }
     final expires = item['expires'] as String?;
     if (expires != null && expires.isNotEmpty) {
       rows.add(
@@ -1273,4 +1435,115 @@ String fileSize(num bytes) {
   if (bytes < 1000) return '${bytes.toInt()} bytes';
   if (bytes < 1000 * 1000) return '${(bytes / 1000).toStringAsFixed(1)} KB';
   return '${(bytes / (1000 * 1000)).toStringAsFixed(1)} MB';
+}
+
+/// A folder's Rename and Delete, beside its name in the sidebar.
+class FolderMenu extends StatelessWidget {
+  const FolderMenu({
+    super.key,
+    required this.name,
+    required this.color,
+    required this.onRename,
+    required this.onDelete,
+  });
+
+  final String name;
+  final Color color;
+  final VoidCallback onRename;
+  final VoidCallback onDelete;
+
+  @override
+  Widget build(BuildContext context) => SizedBox(
+    width: 24,
+    height: 20,
+    child: PopupMenuButton<VoidCallback>(
+      tooltip: 'More for $name',
+      padding: EdgeInsets.zero,
+      iconSize: 16,
+      icon: Icon(Icons.more_horiz_rounded, color: color),
+      onSelected: (action) => action(),
+      itemBuilder: (context) => [
+        PopupMenuItem(value: onRename, child: const Text('Rename')),
+        PopupMenuItem(value: onDelete, child: const Text('Delete')),
+      ],
+    ),
+  );
+}
+
+/// A folder's name, asked for: null when cancelled.
+Future<String?> askFolderName(
+  BuildContext context,
+  String title, [
+  String name = '',
+]) => showDialog<String>(
+  context: context,
+  builder: (context) => _FolderNameDialog(title: title, name: name),
+);
+
+class _FolderNameDialog extends StatefulWidget {
+  const _FolderNameDialog({required this.title, required this.name});
+
+  final String title;
+  final String name;
+
+  @override
+  State<_FolderNameDialog> createState() => _FolderNameDialogState();
+}
+
+class _FolderNameDialogState extends State<_FolderNameDialog> {
+  late final field = TextEditingController(text: widget.name);
+
+  @override
+  void dispose() {
+    field.dispose();
+    super.dispose();
+  }
+
+  void done() {
+    final name = field.text.trim();
+    if (name.isNotEmpty) Navigator.pop(context, name);
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    title: Text(widget.title),
+    content: TextField(
+      controller: field,
+      autofocus: true,
+      decoration: const InputDecoration(labelText: 'Name'),
+      onChanged: (_) => setState(() {}),
+      onSubmitted: (_) => done(),
+    ),
+    actions: [
+      TextButton(
+        onPressed: () => Navigator.pop(context),
+        child: const Text('Cancel'),
+      ),
+      FilledButton(
+        onPressed: field.text.trim().isEmpty ? null : done,
+        child: const Text('Save'),
+      ),
+    ],
+  );
+}
+
+/// A date the server gave (ISO 8601) as people read it: "October 20, 2026".
+String? madeOn(String? iso) {
+  final at = iso == null ? null : DateTime.tryParse(iso)?.toLocal();
+  if (at == null) return null;
+  const months = [
+    'January',
+    'February',
+    'March',
+    'April',
+    'May',
+    'June',
+    'July',
+    'August',
+    'September',
+    'October',
+    'November',
+    'December',
+  ];
+  return '${months[at.month - 1]} ${at.day}, ${at.year}';
 }

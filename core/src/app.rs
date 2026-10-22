@@ -476,6 +476,18 @@ impl App {
         Ok(())
     }
 
+    /// Checks the master password as proof the person is who they are (a
+    /// passkey's user verification), without granting anything.
+    pub fn check_master_password(&self, password: &str) -> Result<()> {
+        let settings = self.settings.as_ref().ok_or(Error::SignedOut)?;
+        let text = self.store.sync().ok_or(Error::SignedOut)?;
+        let vault = self.vault.as_ref().ok_or(Error::SignedOut)?;
+        if !vault.is_master_password(&Sync::from_json(&text)?, &settings.prelogin(), password)? {
+            return Err(Error::WrongPassword);
+        }
+        Ok(())
+    }
+
     /// Which giving of the master password is current: the editor of an
     /// item that asks for it hands this back when saving, and a save from
     /// an editor opened under another is refused.
@@ -583,6 +595,256 @@ impl App {
         self.sync()
     }
 
+    /// Makes a folder, its name under the user key, as folders are
+    /// (docs/core.md, "Items"), then syncs. Answers its id.
+    pub fn create_folder(&mut self, name: &str) -> Result<String> {
+        let name = Self::folder_name(name)?;
+        let vault = self.vault.as_ref().ok_or(Error::SignedOut)?;
+        let encrypted = vault.user_key().encrypt_str(&name).to_string();
+        let (Some(server), Some(session)) = (&self.server, self.session.as_mut()) else {
+            return Err(Error::SignedOut);
+        };
+        let id = server.create_folder(session, &encrypted)?;
+        self.sync()?;
+        Ok(id)
+    }
+
+    /// Renames a folder, then syncs.
+    pub fn rename_folder(&mut self, id: &str, name: &str) -> Result<()> {
+        let name = Self::folder_name(name)?;
+        let vault = self.vault.as_ref().ok_or(Error::SignedOut)?;
+        if !vault.folders.contains_key(id) {
+            return Err(Error::Damaged("no such folder"));
+        }
+        let encrypted = vault.user_key().encrypt_str(&name).to_string();
+        let (Some(server), Some(session)) = (&self.server, self.session.as_mut()) else {
+            return Err(Error::SignedOut);
+        };
+        server.rename_folder(session, id, &encrypted)?;
+        self.sync()
+    }
+
+    /// Deletes a folder, then syncs; its items stay, in no folder.
+    pub fn delete_folder(&mut self, id: &str) -> Result<()> {
+        let (Some(server), Some(session)) = (&self.server, self.session.as_mut()) else {
+            return Err(Error::SignedOut);
+        };
+        server.delete_folder(session, id)?;
+        self.sync()
+    }
+
+    /// A folder's name, trimmed; refused when empty.
+    fn folder_name(name: &str) -> Result<String> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(Error::Refused("a folder needs a name"));
+        }
+        Ok(name.to_owned())
+    }
+
+    /// The logins with a passkey for a site (by its ID), that the core can
+    /// sign with, for a phone's list of passkeys (docs/phones.md, "Passkeys").
+    pub fn passkeys_for(&self, rp_id: &str) -> Vec<&Item> {
+        let Some(vault) = self.vault.as_ref() else {
+            return Vec::new();
+        };
+        vault
+            .items
+            .iter()
+            .filter(|i| !i.deleted)
+            .filter(|i| {
+                i.passkey
+                    .as_ref()
+                    .is_some_and(|p| p.usable && p.rp_id == rp_id)
+            })
+            .collect()
+    }
+
+    /// Signs in to a site with a login's passkey (docs/core.md, "Passkeys"):
+    /// the authenticator data and the signature over it and the client data
+    /// hash. `user_verified` says the person proved who they are in this
+    /// sign-in. A login that asks for the master password asks first (and
+    /// giving it counts as proof). A passkey that counts its uses has its
+    /// counter raised and the login saved before it signs; offline, it's
+    /// refused.
+    pub fn passkey_assert(
+        &mut self,
+        id: &str,
+        rp_id: &str,
+        client_data_hash: &[u8; 32],
+        user_verified: bool,
+    ) -> Result<PasskeyAssertion> {
+        use crate::passkey::{authenticator_data, credential_id, flags};
+        let vault = self.vault.as_ref().ok_or(Error::SignedOut)?;
+        let item = vault.item(id).ok_or(Error::Damaged("no such item"))?;
+        if !self.may_use(item) {
+            return Err(Error::MasterPasswordFirst);
+        }
+        if item.deleted {
+            return Err(Error::Refused("that login is in the trash"));
+        }
+        // Proof is what the caller just asked for, never an earlier grant.
+        let verified = user_verified;
+        let passkey = item
+            .passkey
+            .as_ref()
+            .ok_or(Error::Damaged("a login with no passkey"))?;
+        if passkey.rp_id != rp_id {
+            return Err(Error::Refused("it's a passkey for another site"));
+        }
+        let key = passkey.key()?;
+        let raw_id = credential_id(&passkey.credential_id)?;
+        let user_handle = match &passkey.user_handle {
+            Some(handle) => crate::passkey::base64_either(handle)
+                .ok_or(Error::Damaged("a passkey's user handle that isn't base64"))?,
+            None => Vec::new(),
+        };
+        let mut counter = passkey.counter;
+        if counter > 0 {
+            counter = counter
+                .checked_add(1)
+                .ok_or(Error::Refused("a passkey's counter is at its end"))?;
+            let stored = item
+                .kept
+                .fido2_credentials
+                .as_ref()
+                .ok_or(Error::Damaged("a login with no passkey"))?;
+            let body = vault.encrypt_item_with(
+                &ItemDraft::of(item),
+                Some(item),
+                Some(passkey.with_counter(stored, counter)),
+            )?;
+            let collection_ids = item.collection_ids.clone();
+            let (Some(server), Some(session)) = (&self.server, self.session.as_mut()) else {
+                return Err(Error::SignedOut);
+            };
+            server.save_item(session, Some(id), body, &collection_ids)?;
+            // Saved: a sync that fails now only leaves this device behind, and
+            // the next use is refused by the server's revision check rather
+            // than reusing a counter.
+            let _ = self.sync();
+        }
+        let mut set = flags::USER_PRESENT | flags::BACKUP_ELIGIBLE | flags::BACKED_UP;
+        if verified {
+            set |= flags::USER_VERIFIED;
+        }
+        let authenticator_data = authenticator_data(rp_id, set, counter, None);
+        let signature = key.sign(&authenticator_data, client_data_hash);
+        Ok(PasskeyAssertion {
+            authenticator_data,
+            signature,
+            credential_id: raw_id,
+            user_handle,
+        })
+    }
+
+    /// Makes a passkey for a site (docs/core.md, "Passkeys", "Making one"):
+    /// a new ES256 key in upstream's format, saved into the login `new.login`
+    /// names (replacing a passkey it had, and filling in its username if it
+    /// had none) or a new login for the site, before the site hears of it.
+    /// Refused, with nothing made, if the vault already has one of the site's
+    /// `exclude` credentials; offline, it's refused too.
+    pub fn passkey_create(&mut self, new: &NewPasskey<'_>) -> Result<PasskeyMade> {
+        use crate::passkey::{
+            attestation_object, authenticator_data, credential_id, flags, Attested, Key,
+        };
+        use base64::Engine;
+        let b64url = |bytes: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        let vault = self.vault.as_ref().ok_or(Error::SignedOut)?;
+        let excluded = vault.items.iter().filter(|i| !i.deleted).any(|i| {
+            i.passkey.as_ref().is_some_and(|p| {
+                p.rp_id == new.rp_id
+                    && credential_id(&p.credential_id).is_ok_and(|id| new.exclude.contains(&id))
+            })
+        });
+        if excluded {
+            return Err(Error::Refused(ALREADY_HAS_PASSKEY));
+        }
+        let editing = match new.login {
+            Some(id) => {
+                let item = vault.item(id).ok_or(Error::Damaged("no such item"))?;
+                if item.kind != crate::vault::ItemKind::Login {
+                    return Err(Error::Refused("a passkey goes in a login"));
+                }
+                if !self.may_use(item) {
+                    return Err(Error::MasterPasswordFirst);
+                }
+                Some(item)
+            }
+            None => None,
+        };
+        let mut draft = match editing {
+            Some(item) => ItemDraft::of(item),
+            // Named after the site's ID, which the passkey is bound to, not
+            // the name the site gives itself, which any site can make up.
+            None => ItemDraft {
+                name: new.rp_id.to_owned(),
+                uris: vec![format!("https://{}", new.rp_id)],
+                ..ItemDraft::default()
+            },
+        };
+        if draft.username.as_deref().is_none_or(str::is_empty) {
+            draft.username = new.user_name.map(str::to_owned);
+        }
+        let key = Key::generate();
+        let stored_id = crate::passkey::new_credential_id();
+        let raw_id = credential_id(&stored_id)?;
+        let value_key = vault.value_key(&draft, editing)?;
+        let enc = |text: &str| serde_json::Value::String(value_key.encrypt_str(text).to_string());
+        let credential = serde_json::json!([{
+            "credentialId": enc(&stored_id),
+            "keyType": enc("public-key"),
+            "keyAlgorithm": enc("ECDSA"),
+            "keyCurve": enc("P-256"),
+            "keyValue": enc(&key.to_stored()?),
+            "rpId": enc(new.rp_id),
+            "rpName": new.rp_name.map(enc),
+            "userHandle": enc(&b64url(new.user_handle)),
+            "userName": new.user_name.map(enc),
+            "counter": enc("0"),
+            "userDisplayName": new.user_display_name.map(enc),
+            "discoverable": enc(if new.discoverable { "true" } else { "false" }),
+            "creationDate": crate::vault::now_iso8601(),
+        }]);
+        let body = vault.encrypt_item_with(&draft, editing, Some(credential))?;
+        let collection_ids = editing
+            .map(|i| i.collection_ids.clone())
+            .unwrap_or_default();
+        let (Some(server), Some(session)) = (&self.server, self.session.as_mut()) else {
+            return Err(Error::SignedOut);
+        };
+        let saved = server.save_item(session, new.login, body, &collection_ids)?;
+        let item_id = match new.login {
+            Some(id) => id.to_owned(),
+            None => saved["id"]
+                .as_str()
+                .map(str::to_owned)
+                .ok_or(Error::Damaged("the server didn't say which login it saved"))?,
+        };
+        // Saved: the site gets its answer even if this sync fails.
+        let _ = self.sync();
+        let mut set = flags::USER_PRESENT | flags::BACKUP_ELIGIBLE | flags::BACKED_UP;
+        if new.user_verified {
+            set |= flags::USER_VERIFIED;
+        }
+        let authenticator_data = authenticator_data(
+            new.rp_id,
+            set,
+            0,
+            Some(&Attested {
+                credential_id: &raw_id,
+                public: key.public(),
+            }),
+        );
+        Ok(PasskeyMade {
+            attestation_object: attestation_object(&authenticator_data),
+            authenticator_data,
+            public_key: key.public_der()?,
+            credential_id: raw_id,
+            item_id,
+        })
+    }
+
     pub fn trash(&mut self, id: &str) -> Result<()> {
         let (Some(server), Some(session)) = (&self.server, self.session.as_mut()) else {
             return Err(Error::SignedOut);
@@ -645,6 +907,48 @@ impl App {
         .ok_or(Error::Damaged("nothing to copy"))?;
         Ok(secret)
     }
+}
+
+/// Why making a passkey was refused when the site already has one of its
+/// credentials in the vault (WebAuthn's InvalidStateError).
+pub const ALREADY_HAS_PASSKEY: &str =
+    "PassBundle already has a passkey for this account on this site";
+
+/// A passkey to make (`App::passkey_create`): what the site asked for.
+pub struct NewPasskey<'a> {
+    pub rp_id: &'a str,
+    pub rp_name: Option<&'a str>,
+    /// The site's ID for the account.
+    pub user_handle: &'a [u8],
+    pub user_name: Option<&'a str>,
+    pub user_display_name: Option<&'a str>,
+    /// The person proved who they are in this sign-up.
+    pub user_verified: bool,
+    pub discoverable: bool,
+    /// The login it goes in; None for a new login for the site.
+    pub login: Option<&'a str>,
+    /// The site's credentials it already has (`excludeCredentials`), raw.
+    pub exclude: &'a [Vec<u8>],
+}
+
+/// What making a passkey answers (WebAuthn's attestation), for the OS to
+/// hand the site, and the login it went in.
+pub struct PasskeyMade {
+    pub credential_id: Vec<u8>,
+    pub attestation_object: Vec<u8>,
+    pub authenticator_data: Vec<u8>,
+    /// SubjectPublicKeyInfo, DER.
+    pub public_key: Vec<u8>,
+    pub item_id: String,
+}
+
+/// What signing in with a passkey answers (WebAuthn's assertion), for the
+/// OS to hand the site.
+pub struct PasskeyAssertion {
+    pub authenticator_data: Vec<u8>,
+    pub signature: Vec<u8>,
+    pub credential_id: Vec<u8>,
+    pub user_handle: Vec<u8>,
 }
 
 /// An attachment to fetch, open, and save (`App::attachment_to_fetch`),

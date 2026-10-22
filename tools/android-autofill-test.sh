@@ -10,6 +10,10 @@
 #   3. in the test app (app/android/autofilltest), tapping the username offers
 #      "Unlock PassBundle"; picking it unlocks, then offers the login; picking
 #      that fills the form; signing in shows who signed in;
+#   3b. on the test app's screen that says it's a bank's website, only the
+#      app's own login is offered, with an offer to trust the app as a
+#      browser; trusting it in PassBundle's dialog offers the website's login,
+#      which fills;
 #   4. signing in there with something new, Android offers to save it to
 #      PassBundle; accepting opens PassBundle's editor, filled in, and the
 #      app's half saves it;
@@ -89,6 +93,16 @@ shown() {
   return 1
 }
 
+# Every browser on the list is visible to PassBundle (its manifest's <queries>).
+python3 - app/android/app/src/main/assets/browsers.json app/android/app/src/main/AndroidManifest.xml <<'PY'
+import json, re, sys
+listed = {a["info"]["package_name"] for a in json.load(open(sys.argv[1]))["apps"] if a["type"] == "android"}
+queried = set(re.findall(r'<package android:name="([^"]+)"', open(sys.argv[2]).read()))
+missing = sorted(listed - queried)
+if missing:
+    sys.exit(f"Browsers missing from the manifest's <queries>: {', '.join(missing)}")
+PY
+
 echo "The test app"
 (cd app/android && ./gradlew -q :autofilltest:assembleDebug)
 a install -r app/build/autofilltest/outputs/apk/debug/autofilltest-debug.apk > /dev/null
@@ -134,6 +148,31 @@ shown "^autofill@example.test$"
 tap "id=com.passbundle.autofilltest:id/sign_in"
 shown "^Signed in as autofill@example.test, password 28 characters$"
 echo "Filled: signed in as autofill@example.test, with the 28-character password from the vault."
+
+# Android 10 doesn't pass autofill a web domain an app sets on its own views
+# (there only a WebView gives one), so this screen can't say it's a website
+# there: it runs from Android 11 (CI's Android 14 emulator).
+if [ "$(a shell getprop ro.build.version.sdk | tr -d '\r')" -ge 30 ]; then
+  echo "A screen that says it's a website, in an app that isn't a known browser"
+  a shell am force-stop com.passbundle.autofilltest
+  a shell am start -W -n com.passbundle.autofilltest/.ClaimsWebsiteActivity > /dev/null
+  tap "id=com.passbundle.autofilltest:id/username"
+  # The app's own login, and an offer to trust it as a browser; never the website's.
+  shown "^Autofill test app"
+  shown "^Trust Autofill test as a browser first"
+  [ -z "$(where '^Bank website')" ] || { echo "The website's login was offered to an app that isn't a browser." >&2; exit 1; }
+  # Trusted, in PassBundle's own dialog: then the website's login fills.
+  tap "^Trust Autofill test as a browser first"
+  shown "^Trust Autofill test as a browser\?"
+  # Trust can't be tapped for its first moment.
+  sleep 2
+  tap "^(Trust|TRUST)$"
+  tap "^Bank website"
+  shown "^bank@example.test$"
+  tap "id=com.passbundle.autofilltest:id/sign_in"
+  shown "^Signed in as bank@example.test, password 24 characters$"
+  echo "Filled: the website's login only once the app was trusted as a browser."
+fi
 
 # Signs in to the test app with something typed, as someone would (Android
 # offers to save only what changed after its autofill started): the username,
@@ -193,6 +232,55 @@ echo "Saving a new password for it"
 sign_in_and_save new@example.test not-a-real-password-changed
 reached autofill-updated "PassBundle never updated the sign-in."
 echo "Updated: the same login has the new password."
+
+# Passkeys (Android 14 and later): the test app makes one in PassBundle
+# through Android's Credential Manager, then signs in with it, checking what
+# comes back as a site would (PasskeySiteActivity). Android's own sheets come
+# between, which differ by version: step through them by their buttons until
+# PassBundle's dialog or the result shows.
+through() {
+  local want=$1
+  shift
+  for _ in $(seq 40); do
+    [ -n "$(where "$want")" ] && return 0
+    local button
+    for button in "$@" "^(Create|CREATE)$" "^(Continue|CONTINUE)$" "^Sign in$" "^(Use passkey|USE PASSKEY)$" "^PassBundle$" "^(Save|SAVE)$"; do
+      if [ -n "$(where "$button")" ]; then
+        tap "$button"
+        break
+      fi
+    done
+    sleep 1
+  done
+  echo "Never got to: $want" >&2
+  screen | grep -oE '(text|resource-id)="[^"]+"' | sort -u | head -60 >&2
+  return 1
+}
+if [ "$(a shell getprop ro.build.version.sdk | tr -d '\r')" -ge 34 ]; then
+  echo "Passkeys: the test app makes one in PassBundle, then signs in with it"
+  # The test site lets the test app use its passkeys: its asset links, as a
+  # debug build of PassBundle takes them from a file instead of the network.
+  apksigner=$(ls -d "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)
+  cert=$("$apksigner" verify --print-certs app/build/autofilltest/outputs/apk/debug/autofilltest-debug.apk |
+    grep -m1 'SHA-256 digest' | awk '{print $NF}' | tr 'a-f' 'A-F' | sed 's/../&:/g; s/:$//')
+  printf '{"passkeys.example.test":[{"relation":["delegate_permission/common.get_login_creds"],"target":{"namespace":"android_app","package_name":"com.passbundle.autofilltest","sha256_cert_fingerprints":["%s"]}}]}' "$cert" |
+    a exec-in run-as com.passbundle.app sh -c 'cat > files/passkey-test-asset-links.json'
+  a shell settings put secure credential_service com.passbundle.app/com.passbundle.app.PasskeyProvider
+  a shell settings put secure credential_service_primary com.passbundle.app/com.passbundle.app.PasskeyProvider
+  a shell am force-stop com.passbundle.autofilltest
+  a shell am start -W -n com.passbundle.autofilltest/.PasskeySiteActivity > /dev/null
+  tap "id=com.passbundle.autofilltest:id/make_passkey"
+  through "^Save a passkey in PassBundle\?"
+  # Save can't be tapped for its first moment.
+  sleep 2
+  tap "^(Save|SAVE)$"
+  shown "^Made a passkey for passkeys.example.test$"
+  echo "Made: Credential Manager has a passkey from PassBundle, attested for the test app."
+  tap "id=com.passbundle.autofilltest:id/sign_in_passkey"
+  through "^Signed in with a passkey" "^ana@passkeys\.example\.test$"
+  shown "^Signed in with a passkey, signature checked$"
+  echo "Signed in: the signature checks with the passkey's public key, for the test app's origin."
+fi
 
 # The app's half can end now.
 a shell run-as com.passbundle.app touch files/autofill-done

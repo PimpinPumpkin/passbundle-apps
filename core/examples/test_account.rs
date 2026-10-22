@@ -60,6 +60,20 @@ fn main() {
         &[],
     )
     .expect("saving the autofill item");
+    // And a website's login, which the test app's screen that says it's that
+    // website must not get until it's trusted as a browser.
+    app.save(
+        None,
+        &ItemDraft {
+            name: "Bank website".into(),
+            username: Some("bank@example.test".into()),
+            password: Some(Zeroizing::new("not-a-real-password-bank".into())),
+            uris: vec!["https://bank.example.test".into()],
+            ..Default::default()
+        },
+        &[],
+    )
+    .expect("saving the website item");
     // An attachment on the first login, for the phone's test of saving one.
     let mut session = match server.sign_in(email, password).expect("signing in") {
         passbundle_core::server::SignIn::Done(session) => session,

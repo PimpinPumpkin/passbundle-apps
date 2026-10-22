@@ -9,5 +9,20 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <!-- Says it's a bank's website, and opens web links as a browser does. -->
+        <activity
+            android:name=".ClaimsWebsiteActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="https" />
+            </intent-filter>
+        </activity>
+        <!-- A site's sign-in with passkeys, through Android's Credential Manager. -->
+        <activity
+            android:name=".PasskeySiteActivity"
+            android:exported="true" />
     </application>
 </manifest>

@@ -420,3 +420,218 @@ fn an_attachment_downloads_and_opens() {
         &contents[..]
     );
 }
+
+/// Folders: made, renamed, and deleted through the app, which syncs after
+/// each; an item in a deleted folder stays, in no folder.
+#[test]
+fn folders_are_made_renamed_and_deleted() {
+    let Some(server) = server() else { return };
+    let url = std::env::var("PB_TEST_SERVER").unwrap();
+    let email = new_email("folders");
+    sign_up(&server, &email);
+    let dir =
+        std::env::temp_dir().join(format!("pb-core-folders-{}", uuid::Uuid::new_v4().simple()));
+    let mut app = App::open(Store::new(&dir), Box::new(MemorySecretStore::default()));
+    app.sign_in(&url, &email, PASSWORD).unwrap();
+
+    assert_eq!(
+        app.create_folder("   ").err(),
+        Some(Error::Refused("a folder needs a name"))
+    );
+    let id = app.create_folder("  Work ").unwrap();
+    assert_eq!(
+        app.vault().unwrap().folders.get(&id).map(String::as_str),
+        Some("Work")
+    );
+    app.save(
+        None,
+        &ItemDraft {
+            name: "Filed".into(),
+            folder_id: Some(id.clone()),
+            ..ItemDraft::default()
+        },
+        &[],
+    )
+    .unwrap();
+
+    app.rename_folder(&id, "Clients").unwrap();
+    assert_eq!(
+        app.vault().unwrap().folders.get(&id).map(String::as_str),
+        Some("Clients")
+    );
+    assert!(app.rename_folder("no-such-folder", "X").is_err());
+
+    app.delete_folder(&id).unwrap();
+    let vault = app.vault().unwrap();
+    assert!(vault.folders.is_empty());
+    let item = vault.items.iter().find(|i| i.name == "Filed").unwrap();
+    assert_eq!(item.folder_id, None);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Passkeys (docs/core.md, "Passkeys"): one made for a site is saved in a new
+/// login before it's answered, and signing in with it gives a signature its
+/// own public key verifies; one that counts its uses has its counter raised
+/// and saved first; one goes into an existing login too; and a site's
+/// credential the vault already has stops a new one.
+#[test]
+fn passkeys_are_made_and_sign_in() {
+    use p256::ecdsa::signature::Verifier;
+    use p256::ecdsa::{Signature, VerifyingKey};
+    use p256::pkcs8::DecodePublicKey;
+    use passbundle_core::app::NewPasskey;
+    use sha2::{Digest, Sha256};
+
+    let Some(server) = server() else { return };
+    let url = std::env::var("PB_TEST_SERVER").unwrap();
+    let email = new_email("passkeys");
+    sign_up(&server, &email);
+    let dir = std::env::temp_dir().join(format!(
+        "pb-core-passkeys-{}",
+        uuid::Uuid::new_v4().simple()
+    ));
+    let mut app = App::open(Store::new(&dir), Box::new(MemorySecretStore::default()));
+    app.sign_in(&url, &email, PASSWORD).unwrap();
+
+    let hash: [u8; 32] = Sha256::digest(b"client data").into();
+    let made = app
+        .passkey_create(&NewPasskey {
+            rp_id: "passkeys.example.test",
+            rp_name: Some("Passkeys Example"),
+            user_handle: &[7; 16],
+            user_name: Some("ana@passkeys.example.test"),
+            user_display_name: Some("Ana"),
+            user_verified: true,
+            discoverable: true,
+            login: None,
+            exclude: &[],
+        })
+        .unwrap();
+    // The attested credential data names it, and the attestation object carries it.
+    let data = &made.authenticator_data;
+    assert_eq!(
+        &data[..32],
+        Sha256::digest(b"passkeys.example.test").as_slice()
+    );
+    assert_eq!(data[32], 0x5d);
+    assert_eq!(&data[37..53], &passbundle_core::passkey::AAGUID);
+    assert_eq!(&data[55..71], made.credential_id.as_slice());
+    assert!(made
+        .attestation_object
+        .windows(data.len())
+        .any(|w| w == data.as_slice()));
+    let public = VerifyingKey::from_public_key_der(&made.public_key).unwrap();
+
+    // Saved in a new login for the site, with the account's name.
+    let item = app.vault().unwrap().item(&made.item_id).unwrap();
+    // Named after the site's ID, not the name it gives itself.
+    assert_eq!(item.name, "passkeys.example.test");
+    assert_eq!(item.username.as_deref(), Some("ana@passkeys.example.test"));
+    assert_eq!(item.uris, vec!["https://passkeys.example.test".to_owned()]);
+    assert_eq!(app.passkeys_for("passkeys.example.test").len(), 1);
+    assert!(app.passkeys_for("other.example.test").is_empty());
+
+    // Signing in: the signature verifies with its public key.
+    let signed_in = app
+        .passkey_assert(&made.item_id, "passkeys.example.test", &hash, false)
+        .unwrap();
+    assert_eq!(signed_in.credential_id, made.credential_id);
+    assert_eq!(signed_in.user_handle, vec![7; 16]);
+    assert_eq!(signed_in.authenticator_data[32], 0x19);
+    assert_eq!(&signed_in.authenticator_data[33..], &[0, 0, 0, 0]);
+    let mut message = signed_in.authenticator_data.clone();
+    message.extend_from_slice(&hash);
+    let signature = Signature::from_der(&signed_in.signature).unwrap();
+    assert!(public.verify(&message, &signature).is_ok());
+    assert!(app
+        .passkey_assert(&made.item_id, "other.example.test", &hash, false)
+        .is_err());
+
+    // One that counts its uses: raised and saved before it signs.
+    {
+        let vault = app.vault().unwrap();
+        let item = vault.item(&made.item_id).unwrap();
+        let passkey = item.passkey.as_ref().unwrap();
+        let stored = passkey.with_counter(item.kept.fido2_credentials.as_ref().unwrap(), 5);
+        let body = vault
+            .encrypt_item_with(&ItemDraft::of(item), Some(item), Some(stored))
+            .unwrap();
+        // A second session of the same account, as another device would save it.
+        let mut session = sign_in(&server, &email);
+        server
+            .save_item(&mut session, Some(&made.item_id), body, &[])
+            .unwrap();
+    }
+    app.sync().unwrap();
+    let counted = app
+        .passkey_assert(&made.item_id, "passkeys.example.test", &hash, true)
+        .unwrap();
+    assert_eq!(&counted.authenticator_data[33..], &[0, 0, 0, 6]);
+    assert_eq!(
+        app.vault()
+            .unwrap()
+            .item(&made.item_id)
+            .unwrap()
+            .passkey
+            .as_ref()
+            .unwrap()
+            .counter,
+        6
+    );
+
+    // Into an existing login without a username: it gets the account's.
+    app.save(
+        None,
+        &ItemDraft {
+            name: "Shop".into(),
+            uris: vec!["https://shop.example.test".into()],
+            ..ItemDraft::default()
+        },
+        &[],
+    )
+    .unwrap();
+    let shop = app
+        .vault()
+        .unwrap()
+        .items
+        .iter()
+        .find(|i| i.name == "Shop")
+        .unwrap()
+        .id
+        .clone();
+    let into = app
+        .passkey_create(&NewPasskey {
+            rp_id: "shop.example.test",
+            rp_name: Some("Shop"),
+            user_handle: &[9; 8],
+            user_name: Some("ana@shop.example.test"),
+            user_display_name: None,
+            user_verified: false,
+            discoverable: true,
+            login: Some(&shop),
+            exclude: &[],
+        })
+        .unwrap();
+    assert_eq!(into.item_id, shop);
+    let item = app.vault().unwrap().item(&shop).unwrap();
+    assert_eq!(item.username.as_deref(), Some("ana@shop.example.test"));
+    assert_eq!(item.passkey.as_ref().unwrap().rp_id, "shop.example.test");
+
+    // The site already has this one: nothing new is made.
+    let count = app.vault().unwrap().items.len();
+    assert!(app
+        .passkey_create(&NewPasskey {
+            rp_id: "shop.example.test",
+            rp_name: Some("Shop"),
+            user_handle: &[9; 8],
+            user_name: Some("ana@shop.example.test"),
+            user_display_name: None,
+            user_verified: false,
+            discoverable: true,
+            login: None,
+            exclude: std::slice::from_ref(&into.credential_id),
+        })
+        .is_err());
+    assert_eq!(app.vault().unwrap().items.len(), count);
+    let _ = std::fs::remove_dir_all(dir);
+}
