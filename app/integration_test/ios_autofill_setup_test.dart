@@ -82,7 +82,15 @@ void main() {
         File('$dir/autofill-enabled'),
         const Duration(minutes: 4),
       );
-      expect(await Core.suggest(), {'count': 1, 'stored': true});
+      // iOS may take a moment to say AutoFill is on after the switch moves.
+      var suggested = await Core.suggest();
+      for (var i = 0; i < 20 && suggested['stored'] != true; i++) {
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 500)),
+        );
+        suggested = await Core.suggest();
+      }
+      expect(suggested, {'count': 1, 'stored': true});
       File('$dir/autofill-suggested').writeAsStringSync('');
 
       // Safari fills from them now; then the script says it's done.
