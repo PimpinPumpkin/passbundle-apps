@@ -85,6 +85,7 @@ class Core {
     'pb_biometric_remove',
   );
   late final _state = _lib.lookupFunction<_Str0, _Str0>('pb_state');
+  late final _servers = _lib.lookupFunction<_Str0, _Str0>('pb_servers');
   late final _signIn = _lib.lookupFunction<_Str3, _Str3>('pb_sign_in');
   late final _finish = _lib.lookupFunction<_FinishNative, _Finish>(
     'pb_finish_sign_in',
@@ -164,7 +165,22 @@ class Core {
     if (!Platform.isAndroid) return;
     final dir = await platform.invokeMethod<String>('filesDir');
     Core().openAt(dir!, memorySecrets: false);
+    final managed = await platform.invokeMethod<String>('managedServer');
+    _managedOnPhone = managed?.trim().replaceAll(RegExp(r'/+$'), '');
   }
+
+  /// Where to sign in: `ours`, PassBundle's own server, and `managed`, the
+  /// server an organization set by policy, if any (then it's the one).
+  Map<String, dynamic> servers() {
+    final servers = _answer(_servers()) as Map<String, dynamic>;
+    final phone = _managedOnPhone;
+    if (phone != null) servers['managed'] = phone;
+    return servers;
+  }
+
+  /// On Android, the server an organization's MDM set (its managed
+  /// configuration), which only the app's Kotlin can read; read at start.
+  static String? _managedOnPhone;
 
   /// "signedOut", "locked", or "unlocked", with "server" and "email".
   Map<String, dynamic> state() => _answer(_state()) as Map<String, dynamic>;

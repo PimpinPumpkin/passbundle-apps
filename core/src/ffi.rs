@@ -285,6 +285,13 @@ pub extern "C" fn pb_version() -> *mut c_char {
     out(json!(crate::version()))
 }
 
+/// Where to sign in: `ours`, PassBundle's own server, and `managed`, the
+/// server an organization set by policy (managed.rs), which then is the one.
+#[no_mangle]
+pub extern "C" fn pb_servers() -> *mut c_char {
+    out(json!({ "ours": crate::brand::SERVER, "managed": crate::managed::server() }))
+}
+
 /// Signed out, locked, or unlocked, with the server and email.
 #[no_mangle]
 pub extern "C" fn pb_state() -> *mut c_char {

@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="server_url_title">Server</string>
+    <string name="server_url_description">The organization\'s PassBundle server, such as https://vault.example.com. People sign in to it without typing it.</string>
+</resources>

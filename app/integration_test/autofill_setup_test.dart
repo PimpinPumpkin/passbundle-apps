@@ -39,6 +39,8 @@ void main() {
     await Core.openOnThisDevice();
     await tester.pumpWidget(PassBundleApp(key: UniqueKey()));
     await pumpUntil(tester, find.text('Sign in to PassBundle'));
+    await tester.tap(find.text('Self-hosted?'));
+    await tester.pump();
     await tester.enterText(find.widgetWithText(TextField, 'Server'), server);
     await tester.enterText(find.widgetWithText(TextField, 'Email'), email);
     await tester.enterText(
