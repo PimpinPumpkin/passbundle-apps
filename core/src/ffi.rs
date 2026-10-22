@@ -902,13 +902,17 @@ pub(crate) fn write_attachment_to(id: &str, attachment_id: &str, fd: i32) -> Val
 /// `rp_id` is null or a NUL-terminated UTF-8 string, valid for the call.
 #[no_mangle]
 pub unsafe extern "C" fn pb_passkeys(rp_id: *const c_char) -> *mut c_char {
-    let rp_id = text(rp_id);
-    with_app(|app| {
+    out(passkeys(&text(rp_id)))
+}
+
+/// `pb_passkeys`, for Android's JNI too.
+pub(crate) fn passkeys(rp_id: &str) -> Value {
+    app_value(|app| {
         if app.vault().is_none() {
             return json!({ "locked": true });
         }
         let items: Vec<Value> = app
-            .passkeys_for(&rp_id)
+            .passkeys_for(rp_id)
             .into_iter()
             .filter_map(|item| {
                 let passkey = item.passkey.as_ref()?;
@@ -928,6 +932,16 @@ pub unsafe extern "C" fn pb_passkeys(rp_id: *const c_char) -> *mut c_char {
     })
 }
 
+/// Runs a slow call on a thread of the core's own, as `with_app_waiting`.
+fn waiting(call: impl FnOnce() -> Value + Send) -> Value {
+    std::thread::scope(|scope| {
+        scope
+            .spawn(call)
+            .join()
+            .unwrap_or_else(|_| json!({ "ok": false, "error": "The core stopped unexpectedly." }))
+    })
+}
+
 /// Signs in to a site with a login's passkey (docs/core.md, "Passkeys"):
 /// `{ok, authenticatorData, signature, credentialId, userHandle}` in
 /// base64url, or the words to show. `client_data_hash` is base64url (32
@@ -943,24 +957,34 @@ pub unsafe extern "C" fn pb_passkey_assert(
     client_data_hash: *const c_char,
     user_verified: *const c_char,
 ) -> *mut c_char {
-    use base64::Engine;
     let (id, rp_id, hash, verified) = (
         text(id),
         text(rp_id),
         text(client_data_hash),
         text(user_verified),
     );
+    out(waiting(|| {
+        passkey_assert(&id, &rp_id, &hash, verified == "true")
+    }))
+}
+
+/// `pb_passkey_assert`, for Android's JNI too (off the main thread).
+pub(crate) fn passkey_assert(
+    id: &str,
+    rp_id: &str,
+    client_data_hash: &str,
+    user_verified: bool,
+) -> Value {
+    use base64::Engine;
     let hash: Option<[u8; 32]> = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(hash.trim_end_matches('='))
+        .decode(client_data_hash.trim_end_matches('='))
         .ok()
         .and_then(|h| h.try_into().ok());
     let Some(hash) = hash else {
-        return out(failed(Error::Damaged(
-            "a client data hash that isn't 32 bytes",
-        )));
+        return failed(Error::Damaged("a client data hash that isn't 32 bytes"));
     };
-    with_app_waiting(
-        |app| match app.passkey_assert(&id, &rp_id, &hash, verified == "true") {
+    app_value(
+        |app| match app.passkey_assert(id, rp_id, &hash, user_verified) {
             Ok(a) => json!({
                 "ok": true,
                 "authenticatorData": base64url(&a.authenticator_data),
@@ -984,20 +1008,26 @@ pub unsafe extern "C" fn pb_passkey_assert(
 /// `request` is null or a NUL-terminated UTF-8 string, valid for the call.
 #[no_mangle]
 pub unsafe extern "C" fn pb_passkey_create(request: *const c_char) -> *mut c_char {
+    let request = text(request);
+    out(waiting(|| passkey_create(&request)))
+}
+
+/// `pb_passkey_create`, for Android's JNI too (off the main thread).
+pub(crate) fn passkey_create(request: &str) -> Value {
     use base64::Engine;
     let decode = |text: &str| {
         base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(text.trim_end_matches('='))
             .ok()
     };
-    let r: Value = serde_json::from_str(&text(request)).unwrap_or(Value::Null);
+    let r: Value = serde_json::from_str(request).unwrap_or(Value::Null);
     let (Some(rp_id), Some(user_handle)) = (
         r["rpId"].as_str().map(str::to_owned),
         r["userHandle"].as_str().and_then(decode),
     ) else {
-        return out(failed(Error::Damaged(
+        return failed(Error::Damaged(
             "a passkey request without a site or an account",
-        )));
+        ));
     };
     let exclude: Vec<Vec<u8>> = r["exclude"]
         .as_array()
@@ -1016,7 +1046,7 @@ pub unsafe extern "C" fn pb_passkey_create(request: *const c_char) -> *mut c_cha
     );
     let user_verified = r["userVerified"].as_bool() == Some(true);
     let discoverable = r["discoverable"].as_bool() != Some(false);
-    with_app_waiting(|app| {
+    app_value(|app| {
         match app.passkey_create(&crate::app::NewPasskey {
             rp_id: &rp_id,
             rp_name: rp_name.as_deref(),

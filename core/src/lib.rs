@@ -4,6 +4,7 @@
 
 pub mod agent;
 pub mod app;
+pub mod asset_links;
 pub mod autolock;
 pub mod clipboard;
 pub mod crypto;
