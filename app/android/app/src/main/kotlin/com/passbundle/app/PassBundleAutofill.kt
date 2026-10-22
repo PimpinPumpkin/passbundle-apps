@@ -18,10 +18,12 @@ import org.json.JSONObject
 class PassBundleAutofill : AutofillService() {
     override fun onFillRequest(request: FillRequest, cancellationSignal: CancellationSignal, callback: FillCallback) {
         val structure = request.fillContexts.lastOrNull()?.structure ?: return callback.onSuccess(null)
-        val fields = Fields.find(structure)
+        // Whatever an app's screen holds, reading it never stops PassBundle
+        // (and the unlocked vault with it): a screen it can't read gets nothing.
+        val fields = runCatching { Fields.find(structure) }.getOrNull() ?: return callback.onSuccess(null)
         // Never PassBundle's own screens.
         if (fields.packageName == packageName) return callback.onSuccess(null)
-        callback.onSuccess(Responses.forFields(this, fields))
+        callback.onSuccess(runCatching { Responses.forFields(this, fields) }.getOrNull())
     }
 
     companion object {
@@ -70,8 +72,8 @@ class PassBundleAutofill : AutofillService() {
      */
     override fun onSaveRequest(request: SaveRequest, callback: SaveCallback) {
         val structure = request.fillContexts.lastOrNull()?.structure ?: return callback.onSuccess()
-        val fields = Fields.find(structure)
-        val (username, password) = Fields.values(structure, fields)
+        val fields = runCatching { Fields.find(structure) }.getOrNull() ?: return callback.onSuccess()
+        val (username, password) = runCatching { Fields.values(structure, fields) }.getOrNull() ?: return callback.onSuccess()
         if (password.isNullOrEmpty()) return callback.onSuccess()
         // A page's domain only from a browser (Browsers.kt); another app's sign-in is saved for the app.
         val domain = Browsers.domain(fields.webDomain)?.takeIf { Browsers.trusts(this, fields.packageName) }

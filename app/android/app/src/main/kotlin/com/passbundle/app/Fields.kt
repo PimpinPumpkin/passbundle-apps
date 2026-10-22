@@ -81,7 +81,16 @@ class Fields(
                 val id = node.autofillId
                 if (id != null && node.autofillType == View.AUTOFILL_TYPE_TEXT) {
                     val hints = node.autofillHints.orEmpty().map { it.lowercase() }
-                    val html = node.htmlInfo?.attributes.orEmpty().associate { it.first.lowercase() to it.second.lowercase() }
+                    // A web page's attributes, as Chromium gives them: one with no
+                    // value (`required`, say) comes as null.
+                    val html =
+                        node.htmlInfo?.attributes.orEmpty()
+                            .mapNotNull { attribute ->
+                                val name: String? = attribute.first
+                                val value: String? = attribute.second
+                                name?.let { it.lowercase() to value.orEmpty().lowercase() }
+                            }
+                            .toMap()
                     val textClass = (node.inputType and InputType.TYPE_MASK_CLASS) == InputType.TYPE_CLASS_TEXT
                     val variation = node.inputType and InputType.TYPE_MASK_VARIATION
                     val words = listOfNotNull(node.idEntry, node.hint?.toString(), html["name"], html["id"]).joinToString(" ").lowercase()
