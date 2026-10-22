@@ -309,6 +309,45 @@ pub fn app_may_use_passkeys<'caller>(
         .resolve::<ThrowRuntimeExAndDefault>()
 }
 
+/// Whether a site's Digital Asset Links let an app (its package, and its
+/// signing certificate's SHA-256) fill the site's logins through autofill
+/// (asset_links.rs), for a site the app names itself. `statements` stands in
+/// for fetching them (debug builds' test site). With `may_fetch` false only
+/// what was fetched lately counts (no network: the fill's own check); true
+/// may fetch (slow: off the main thread). False when they can't be read.
+#[jni_mangle("com.passbundle.app.Core")]
+pub fn app_linked_to_site<'caller>(
+    mut unowned_env: EnvUnowned<'caller>,
+    _class: JClass<'caller>,
+    site: JString<'caller>,
+    package: JString<'caller>,
+    certificate: JByteArray<'caller>,
+    statements: JString<'caller>,
+    may_fetch: jni::sys::jboolean,
+) -> jni::sys::jboolean {
+    unowned_env
+        .with_env(|env| -> JniResult<bool> {
+            let certificate: [u8; 32] = match env.convert_byte_array(&certificate)?.try_into() {
+                Ok(c) => c,
+                Err(_) => return Ok(false),
+            };
+            let (site, package) = (site.try_to_string(env)?, package.try_to_string(env)?);
+            if !statements.is_null() {
+                let given = statements.try_to_string(env)?;
+                return Ok(crate::asset_links::allows(&given, &package, &certificate));
+            }
+            Ok(if may_fetch {
+                crate::asset_links::check(&site, &package, &certificate, None).unwrap_or(false)
+            } else {
+                crate::asset_links::kept(&site, &package, &certificate)
+                    .ok()
+                    .flatten()
+                    .unwrap_or(false)
+            })
+        })
+        .resolve::<ThrowRuntimeExAndDefault>()
+}
+
 /// Turns biometric unlock off: Kotlin deletes its Keystore key and the user
 /// key it sealed (signing out, or a key that's out of date).
 pub(crate) fn remove_biometric() {

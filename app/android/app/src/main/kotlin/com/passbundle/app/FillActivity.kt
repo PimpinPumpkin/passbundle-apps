@@ -32,6 +32,9 @@ class FillActivity : Activity() {
         const val FILL = "fill"
         const val UNLOCK = "unlock"
         const val TRUST = "trust"
+
+        /** How long the fill's own check waits for checking an app's sites (AppSites.kt). */
+        private const val SITES_WAIT_MS = 2000L
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -50,20 +53,37 @@ class FillActivity : Activity() {
 
     /**
      * Whether the login still fills here, now: the app (and its page, if it's
-     * a browser trusted now) still matches it. Android hands the app being
-     * filled the request to open this, which it could keep and send again
-     * later, so nothing it was once offered fills unless it still would be.
+     * a browser trusted now, or a site that names it) still matches it.
+     * Android hands the app being filled the request to open this, which it
+     * could keep and send again later, so nothing it was once offered fills
+     * unless it still would be. Checking a site may fetch: off the main thread.
      */
     private fun stillMatches(fields: Fields, item: String): Boolean {
         val domain = Browsers.domain(fields.webDomain)?.takeIf { Browsers.trusts(this, fields.packageName) }
-        val answer = runCatching { JSONObject(Core.fillable(fields.packageName, domain ?: "") ?: "{}") }.getOrNull()
-        val items = answer?.optJSONArray("items") ?: return false
-        return (0 until items.length()).any { items.getJSONObject(it).optString("id") == item }
+        val logins = runCatching { Responses.logins(this, fields, domain, SITES_WAIT_MS) }.getOrNull() ?: return false
+        return logins.any { it.optString("id") == item }
     }
 
     private fun fill(fields: Fields, item: String?, asks: Boolean) {
-        if (item == null || !stillMatches(fields, item)) return finishWith(null)
-        if (!asks) return finishWith(Responses.filled(this, fields, item))
+        if (item == null) return finishWith(null)
+        Thread {
+            val matches = runCatching { stillMatches(fields, item) }.getOrDefault(false)
+            runOnUiThread {
+                when {
+                    isFinishing || isDestroyed -> Unit
+                    !matches -> {
+                        Toast.makeText(this, "That login doesn't fill here.", Toast.LENGTH_LONG).show()
+                        finishWith(null)
+                    }
+                    !asks -> finishWith(Responses.filled(this, fields, item))
+                    else -> askMasterPassword(fields, item)
+                }
+            }
+        }.start()
+    }
+
+    /** A login that asks for the master password again: its dialog, then it fills. */
+    private fun askMasterPassword(fields: Fields, item: String) {
         val password = EditText(this).apply {
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
             imeOptions = EditorInfo.IME_ACTION_GO

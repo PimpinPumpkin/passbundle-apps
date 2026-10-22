@@ -53,4 +53,13 @@ object Core {
      * fetching them (debug builds' test site). Slow: off the main thread.
      */
     @JvmStatic external fun appMayUsePasskeys(rpId: String, packageName: String, certificate: ByteArray, statements: String?): Boolean
+
+    /**
+     * Whether a site's Digital Asset Links let an app (package and its signing
+     * certificate's SHA-256) fill the site's logins, for a site the app names
+     * (AppSites.kt); `statements` stands in for fetching them (debug builds'
+     * test site). With `mayFetch` false, only what was checked lately counts;
+     * true may fetch: off the main thread.
+     */
+    @JvmStatic external fun appLinkedToSite(site: String, packageName: String, certificate: ByteArray, statements: String?, mayFetch: Boolean): Boolean
 }

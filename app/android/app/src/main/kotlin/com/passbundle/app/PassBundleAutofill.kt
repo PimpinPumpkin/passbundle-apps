@@ -9,6 +9,8 @@ import android.service.autofill.FillRequest
 import android.service.autofill.SaveCallback
 import android.service.autofill.SaveRequest
 import org.json.JSONObject
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * PassBundle as Android's autofill service (docs/phones.md, "Autofill"). It
@@ -23,10 +25,25 @@ class PassBundleAutofill : AutofillService() {
         val fields = runCatching { Fields.find(structure) }.getOrNull() ?: return callback.onSuccess(null)
         // Never PassBundle's own screens.
         if (fields.packageName == packageName) return callback.onSuccess(null)
-        callback.onSuccess(runCatching { Responses.forFields(this, fields) }.getOrNull())
+        // Checking an app's sites can reach the network: off the main thread,
+        // one request at a time, for a moment at most, well inside Android's
+        // wait for an answer. A request Android cancelled meanwhile is skipped.
+        val cancelled = AtomicBoolean(false)
+        cancellationSignal.setOnCancelListener { cancelled.set(true) }
+        filling.execute {
+            if (cancelled.get()) return@execute
+            val response = runCatching { Responses.forFields(this, fields, SITES_WAIT_MS) }.getOrNull()
+            if (!cancelled.get()) runCatching { callback.onSuccess(response) }
+        }
     }
 
     companion object {
+        /** How long a fill waits for checking the sites an app names (AppSites.kt). */
+        private const val SITES_WAIT_MS = 2000L
+
+        /** Fill requests, one at a time. */
+        private val filling = Executors.newSingleThreadExecutor()
+
         /** How long a sign-in to save waits for the app's screens. */
         private const val SAVE_WAITS_MS = 10 * 60 * 1000L
 
