@@ -72,9 +72,15 @@ jobs:
   android:
     # The core and the app on Android (docs/phones.md): the core built for
     # phones and the emulator with the NDK, its lints for Android, its tests,
-    # and the app's own tests, on an Android 10 emulator (the oldest version
-    # the apps support), signing in to a real server through adb.
-    name: Android
+    # and the app's own tests, signing in to a real server through adb. On
+    # Android 10 (the oldest version the apps support) and Android 14, where
+    # autofill takes a web domain from any view (so the test of an app that
+    # says it's a website runs) and passkey providers exist.
+    name: Android ${{ matrix.api }}
+    strategy:
+      fail-fast: false
+      matrix:
+        api: [29, 34]
     runs-on: ubuntu-24.04
     timeout-minutes: 75
     defaults:
@@ -90,7 +96,7 @@ jobs:
           ref: keykeeper
           path: server
           persist-credentials: false
-      - name: Start an Android 10 emulator, which boots while the rest builds
+      - name: Start the emulator, which boots while the rest builds
         run: |
           # adb, for the steps after.
           echo "$ANDROID_HOME/platform-tools" >> "$GITHUB_PATH"
@@ -106,8 +112,8 @@ jobs:
           tools="$ANDROID_HOME/cmdline-tools/latest/bin"
           # Accepting the licenses ends `yes` with a broken pipe, which isn't a failure.
           (yes || true) | "$tools/sdkmanager" --licenses > /dev/null
-          "$tools/sdkmanager" --install emulator "system-images;android-29;default;x86_64" > /dev/null
-          echo no | "$tools/avdmanager" create avd -n ci -k "system-images;android-29;default;x86_64" --force
+          "$tools/sdkmanager" --install emulator "system-images;android-${{ matrix.api }};default;x86_64" > /dev/null
+          echo no | "$tools/avdmanager" create avd -n ci -k "system-images;android-${{ matrix.api }};default;x86_64" --force
           nohup "$ANDROID_HOME/emulator/emulator" -avd ci -no-window -no-audio -no-boot-anim -no-metrics -gpu swiftshader_indirect -no-snapshot > "$RUNNER_TEMP/emulator.log" 2>&1 &
       - name: Server build dependencies
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential libssl-dev libdbus-1-dev pkg-config
@@ -173,6 +179,7 @@ jobs:
           # Android's own log: autofill, PassBundle, and anything that crashed.
           adb -s emulator-5554 logcat -d -v time | grep -iE 'autofill|passbundle|AndroidRuntime|FATAL' | tail -300 || true
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: matrix.api == 29
         with:
           name: core-android
           path: app/android/app/src/main/jniLibs
