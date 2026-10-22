@@ -122,6 +122,8 @@ mod tests {
 
     fn login(uris: &[(&str, Option<u8>)]) -> Item {
         Item {
+            card: None,
+            identity: None,
             kept: Default::default(),
             id: "id".into(),
             kind: ItemKind::Login,

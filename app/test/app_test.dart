@@ -258,6 +258,51 @@ void main() {
   );
 
   testWidgets(
+    'a card and an identity show their details, with their secrets hidden until revealed',
+    (tester) async {
+      setSize(tester, const Size(1280, 800));
+      openSample();
+      await tester.pumpWidget(const PassBundleApp());
+      await tester.enterText(find.byType(TextField), samplePassword);
+      await tester.tap(find.text('Unlock'));
+      await pumpUntil(tester, find.text('Everyday card'));
+      await pumpUntil(
+        tester,
+        find.textContaining('Sign in again to get changes'),
+      );
+      // Lists show a card by its brand and last 4 digits.
+      expect(find.text('Visa, *1111'), findsOneWidget);
+
+      await tester.tap(find.text('Everyday card'));
+      await tester.pump();
+      expect(find.text('Ana Lopez'), findsOneWidget);
+      expect(find.text('Visa'), findsOneWidget);
+      expect(find.text('07/2029'), findsOneWidget);
+      expect(find.text('4111111111111111'), findsNothing);
+      await tester.tap(find.byTooltip('Reveal').first);
+      await tester.pump();
+      expect(find.text('4111111111111111'), findsOneWidget);
+      expect(find.text('123'), findsNothing);
+      // The web vault edits cards, for now.
+      expect(find.byTooltip('Edit'), findsNothing);
+
+      await tester.tap(find.text('Ana at home'));
+      await tester.pump();
+      expect(find.text('Ms Ana María López'), findsWidgets);
+      expect(find.text('ana.lopez@example.test'), findsWidgets);
+      expect(
+        find.text('1 Example Street\nApartment 2\nSpringfield, IL 62701\nUS'),
+        findsOneWidget,
+      );
+      expect(find.text('123-45-6789'), findsNothing);
+      await tester.tap(find.byTooltip('Reveal').first);
+      await tester.pump();
+      expect(find.text('123-45-6789'), findsOneWidget);
+      expect(find.byTooltip('Edit'), findsNothing);
+    },
+  );
+
+  testWidgets(
     'on a phone-width window, a header has the theme and Lock, and an item opens on its own page',
     (tester) async {
       setSize(tester, const Size(390, 844));

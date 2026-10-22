@@ -841,6 +841,66 @@ class _ItemPaneState extends State<ItemPane> {
         ),
       );
     }
+    // A card's or an identity's details: plain ones copy as they are,
+    // secrets reveal and copy like a password.
+    void plainRow(String label, String? value, String what) {
+      if (value == null || value.isEmpty) return;
+      rows.add(
+        row(
+          label,
+          SelectableText(value, style: const TextStyle(fontSize: 15)),
+          actions: [copyButton(label.toLowerCase(), what, secret: false)],
+        ),
+      );
+    }
+
+    final cardDetails = item['card'] as Map<String, dynamic>?;
+    if (cardDetails != null) {
+      plainRow(
+        'Cardholder name',
+        cardDetails['cardholderName'] as String?,
+        'cardholderName',
+      );
+      final brand = cardDetails['brand'] as String?;
+      if (brand != null && brand.isNotEmpty) {
+        rows.add(
+          row('Brand', Text(brand, style: const TextStyle(fontSize: 15))),
+        );
+      }
+      if (cardDetails['hasNumber'] == true) {
+        rows.add(secretRow('Number', 'cardNumber'));
+      }
+      plainRow(
+        'Expiration',
+        cardDetails['expiration'] as String?,
+        'expiration',
+      );
+      if (cardDetails['hasCode'] == true) {
+        rows.add(secretRow('Security code', 'cardCode'));
+      }
+    }
+    final identityDetails = item['identity'] as Map<String, dynamic>?;
+    if (identityDetails != null) {
+      plainRow('Name', identityDetails['fullName'] as String?, 'fullName');
+      plainRow(
+        'Username',
+        identityDetails['username'] as String?,
+        'identityUsername',
+      );
+      plainRow('Company', identityDetails['company'] as String?, 'company');
+      plainRow('Email', identityDetails['email'] as String?, 'email');
+      plainRow('Phone', identityDetails['phone'] as String?, 'phone');
+      plainRow('Address', identityDetails['address'] as String?, 'address');
+      if (identityDetails['hasSsn'] == true) {
+        rows.add(secretRow('Social Security number', 'ssn'));
+      }
+      if (identityDetails['hasPassportNumber'] == true) {
+        rows.add(secretRow('Passport number', 'passportNumber'));
+      }
+      if (identityDetails['hasLicenseNumber'] == true) {
+        rows.add(secretRow('License number', 'licenseNumber'));
+      }
+    }
     final fields = (item['fields'] as List).cast<Map<String, dynamic>>();
     for (var i = 0; i < fields.length; i++) {
       final f = fields[i];

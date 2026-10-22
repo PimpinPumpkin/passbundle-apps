@@ -471,9 +471,10 @@ impl App {
     }
 
     /// Copies one of an item's values: "username", "password", "totp" (the
-    /// current code), "notes", or "field:<index>". Secrets clear after 30 seconds.
+    /// current code), "notes", "field:<index>", or a card's or an identity's
+    /// (`Item::detail`). Secrets clear after 30 seconds.
     pub fn copy(&self, id: &str, what: &str) -> Result<()> {
-        if what == "username" {
+        if what == "username" || crate::vault::PLAIN_DETAILS.contains(&what) {
             return clipboard::copy_text(&self.value(id, what)?);
         }
         clipboard::copy_secret(&self.value(id, what)?, clipboard::CLEAR_AFTER)
@@ -491,6 +492,9 @@ impl App {
             return Ok(zeroize::Zeroizing::new(
                 item.username.clone().unwrap_or_default(),
             ));
+        }
+        if let Some(detail) = item.detail(what) {
+            return Ok(detail);
         }
         let secret = match what {
             "password" => item.password.as_ref().map(|p| p.as_str().to_owned()),

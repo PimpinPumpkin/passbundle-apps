@@ -23,7 +23,7 @@ use crate::generator;
 use crate::secrets::{MemorySecretStore, OsSecretStore, SecretStore};
 use crate::store::Store;
 use crate::totp::Totp;
-use crate::vault::{Field, Item, ItemDraft, ItemKind, Vault, EXPIRES_FIELD};
+use crate::vault::{Field, Item, ItemDraft, ItemKind, Vault, EXPIRES_FIELD, SECRET_DETAILS};
 
 static APP: Mutex<Option<App>> = Mutex::new(None);
 /// The OS said the computer is going to sleep while a slow call had the app:
@@ -168,7 +168,11 @@ fn summary(vault: &Vault, item: &Item) -> Value {
         "id": item.id,
         "kind": kind(item.kind),
         "name": item.name,
-        "subtitle": item.username.clone().or_else(|| item.uris.first().cloned()).unwrap_or_default(),
+        "subtitle": item.card.as_ref().map(|c| c.summary())
+            .or_else(|| item.identity.as_ref().map(|i| i.full_name()))
+            .or_else(|| item.username.clone())
+            .or_else(|| item.uris.first().cloned())
+            .unwrap_or_default(),
         "website": item.uris.first(),
         "favorite": item.favorite,
         "folderId": item.folder_id,
@@ -624,6 +628,30 @@ pub unsafe extern "C" fn pb_item(id: *const c_char) -> *mut c_char {
             .iter()
             .find(|f| f.name == EXPIRES_FIELD)
             .map(|f| f.value.as_str()));
+        // A card's and an identity's plain details, and which secrets they have.
+        if let Some(card) = &item.card {
+            view["card"] = json!({
+                "cardholderName": card.cardholder_name,
+                "brand": card.brand,
+                "expiration": card.expiration(),
+                "hasNumber": card.number.as_ref().is_some_and(|n| !n.is_empty()),
+                "hasCode": card.code.as_ref().is_some_and(|c| !c.is_empty()),
+            });
+        }
+        if let Some(identity) = &item.identity {
+            let has = |s: &Option<Zeroizing<String>>| s.as_ref().is_some_and(|s| !s.is_empty());
+            view["identity"] = json!({
+                "fullName": Some(identity.full_name()).filter(|n| !n.is_empty()),
+                "company": identity.company,
+                "email": identity.email,
+                "phone": identity.phone,
+                "username": identity.username,
+                "address": identity.address(),
+                "hasSsn": has(&identity.ssn),
+                "hasPassportNumber": has(&identity.passport_number),
+                "hasLicenseNumber": has(&identity.license_number),
+            });
+        }
         // The app edits logins and notes; the web vault edits the rest.
         view["editable"] = json!(matches!(item.kind, ItemKind::Login | ItemKind::SecureNote));
         view
@@ -646,6 +674,10 @@ pub unsafe extern "C" fn pb_reveal(id: *const c_char, what: *const c_char) -> *m
             "password" => item.password.as_ref().map(|p| p.as_str()),
             "notes" => item.notes.as_ref().map(|n| n.as_str()),
             "totp" => item.totp.as_ref().map(|t| t.as_str()),
+            // A card's or an identity's secrets.
+            what if SECRET_DETAILS.contains(&what) => {
+                return json!(item.detail(what).as_deref().map(String::as_str));
+            }
             other => other
                 .strip_prefix("field:")
                 .and_then(|i| i.parse::<usize>().ok())
