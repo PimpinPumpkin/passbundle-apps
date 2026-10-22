@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The websites this app says are its own (PassBundle's AppSites.kt): the
+         test gives PassBundle their asset links, one naming this app back and
+         one naming another key. -->
+    <string name="asset_statements" translatable="false">
+    [{\"include\": \"https://linked.test/.well-known/assetlinks.json\"},
+     {\"include\": \"https://unlinked.test/.well-known/assetlinks.json\"}]
+    </string>
+</resources>

@@ -72,6 +72,36 @@ fn main() {
         &[],
     )
     .expect("saving the website item");
+    // The websites the test app names as its own: one whose asset links name
+    // the app back, whose login the app gets; one whose name another key,
+    // whose login it doesn't. Each its own registrable domain: a site's
+    // logins come by the usual matching rules, so one sharing the bank's
+    // would bring the bank's login too, as it would in a browser there.
+    for (name, username, site) in [
+        (
+            "Linked website",
+            "linked@example.test",
+            "https://linked.test",
+        ),
+        (
+            "Unlinked website",
+            "unlinked@example.test",
+            "https://unlinked.test",
+        ),
+    ] {
+        app.save(
+            None,
+            &ItemDraft {
+                name: name.into(),
+                username: Some(username.into()),
+                password: Some(Zeroizing::new("not-a-real-password-linked".into())),
+                uris: vec![site.into()],
+                ..Default::default()
+            },
+            &[],
+        )
+        .expect("saving a linked website's item");
+    }
     // An attachment on the first login, for the phone's test of saving one.
     let mut session = match server.sign_in(email, password).expect("signing in") {
         passbundle_core::server::SignIn::Done(session) => session,

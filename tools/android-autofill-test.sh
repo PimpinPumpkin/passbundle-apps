@@ -151,6 +151,21 @@ for _ in $(seq 300); do
 done
 marker autofill-ready || { cat "$setup_log" >&2; echo "The app's half never got ready." >&2; exit 1; }
 
+# The test sites' asset links, as a debug build of PassBundle takes them from
+# a file instead of the network: linked.test (sign-ins) and
+# passkeys.example.test (passkeys) name the test app; unlinked.test
+# names another key.
+apksigner=$(ls -d "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)
+cert=$("$apksigner" verify --print-certs app/build/autofilltest/outputs/apk/debug/autofilltest-debug.apk |
+  grep -m1 'SHA-256 digest' | awk '{print $NF}' | tr 'a-f' 'A-F' | sed 's/../&:/g; s/:$//')
+other="AB:CD:${cert#??:??:}"
+[ "$other" != "$cert" ] || other="CD:AB:${cert#??:??:}"
+names() {
+  printf '[{"relation":["delegate_permission/common.get_login_creds"],"target":{"namespace":"android_app","package_name":"com.passbundle.autofilltest","sha256_cert_fingerprints":["%s"]}}]' "$1"
+}
+printf '{"linked.test":%s,"passkeys.example.test":%s,"unlinked.test":%s}' "$(names "$cert")" "$(names "$cert")" "$(names "$other")" |
+  a exec-in run-as com.passbundle.app sh -c 'cat > files/test-asset-links.json'
+
 echo "PassBundle as the phone's autofill service"
 a shell settings put secure autofill_service com.passbundle.app/.PassBundleAutofill
 [ "$(a shell settings get secure autofill_service | tr -d '\r')" = com.passbundle.app/.PassBundleAutofill ]
@@ -176,9 +191,39 @@ web_field
 # app's own login, never a website's for a page an app shows.
 shown "^Autofill test app"
 [ -z "$(where '^Bank website')" ] || { echo "A website's login was offered to a page in an app's WebView." >&2; exit 1; }
+# Nor the logins of the sites that name the app: this page isn't one.
+[ -z "$(where '^Linked website')" ] || { echo "A page in the app's WebView got a linked website's login." >&2; exit 1; }
 [ -n "$(a shell pidof com.passbundle.app | tr -d '\r')" ] || { echo "PassBundle stopped while reading the page." >&2; exit 1; }
 a shell am force-stop com.passbundle.autofilltest
 echo "Offered: the app's own login on a web page in it, and PassBundle kept running."
+
+echo "The test app's own website, when both say so"
+a shell am force-stop com.passbundle.autofilltest
+a shell am start -W -n com.passbundle.autofilltest/.SignInActivity > /dev/null
+tap "id=com.passbundle.autofilltest:id/username"
+# The website whose asset links name the app: offered after the app's own
+# login. The one whose name another key isn't, nor a website the app
+# doesn't name.
+shown "^Autofill test app"
+tap "^Linked website"
+shown "^linked@example.test$"
+tap "id=com.passbundle.autofilltest:id/sign_in"
+shown "^Signed in as linked@example.test, password 26 characters$"
+a shell am force-stop com.passbundle.autofilltest
+a shell am start -W -n com.passbundle.autofilltest/.SignInActivity > /dev/null
+tap "id=com.passbundle.autofilltest:id/username"
+shown "^Linked website"
+[ -z "$(where '^Unlinked website')" ] || { echo "A website whose asset links name another key was offered to the app." >&2; exit 1; }
+[ -z "$(where '^Bank website')" ] || { echo "A website the app doesn't name was offered to it." >&2; exit 1; }
+a shell am force-stop com.passbundle.autofilltest
+echo "Filled: the website that names the app back; never one that doesn't."
+
+echo "The linked website's own page, in the test app's WebView"
+a shell am start -W -n com.passbundle.autofilltest/.WebSignInActivity --es site https://linked.test/ > /dev/null
+web_field
+shown "^Linked website"
+a shell am force-stop com.passbundle.autofilltest
+echo "Offered: a linked website's login on its own page in the app, never on another's."
 
 # Android 10 doesn't pass autofill a web domain an app sets on its own views
 # (there only a WebView gives one), so this screen can't say it's a website
@@ -289,13 +334,7 @@ through() {
 }
 if [ "$(a shell getprop ro.build.version.sdk | tr -d '\r')" -ge 34 ]; then
   echo "Passkeys: the test app makes one in PassBundle, then signs in with it"
-  # The test site lets the test app use its passkeys: its asset links, as a
-  # debug build of PassBundle takes them from a file instead of the network.
-  apksigner=$(ls -d "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)
-  cert=$("$apksigner" verify --print-certs app/build/autofilltest/outputs/apk/debug/autofilltest-debug.apk |
-    grep -m1 'SHA-256 digest' | awk '{print $NF}' | tr 'a-f' 'A-F' | sed 's/../&:/g; s/:$//')
-  printf '{"passkeys.example.test":[{"relation":["delegate_permission/common.get_login_creds"],"target":{"namespace":"android_app","package_name":"com.passbundle.autofilltest","sha256_cert_fingerprints":["%s"]}}]}' "$cert" |
-    a exec-in run-as com.passbundle.app sh -c 'cat > files/passkey-test-asset-links.json'
+  # The test site lets the test app use its passkeys (its asset links, above).
   a shell settings put secure credential_service com.passbundle.app/com.passbundle.app.PasskeyProvider
   a shell settings put secure credential_service_primary com.passbundle.app/com.passbundle.app.PasskeyProvider
   a shell am force-stop com.passbundle.autofilltest

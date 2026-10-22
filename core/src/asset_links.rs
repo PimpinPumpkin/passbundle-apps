@@ -1,10 +1,13 @@
-//! Digital Asset Links (docs/phones.md, "Passkeys"): whether a site lets an
-//! Android app use its passkeys. An app that isn't a browser on Google's
-//! privileged list gets a site's passkeys only if the site's
+//! Digital Asset Links (docs/phones.md, "Passkeys" and "Autofill"): whether a
+//! site lets an Android app use its sign-in credentials. An app that isn't a
+//! browser on Google's privileged list gets a site's passkeys, or its logins
+//! through autofill, only if the site's
 //! `https://<site>/.well-known/assetlinks.json` names that app's package and
 //! signing certificate for `delegate_permission/common.get_login_creds`. The
 //! core fetches it itself: HTTPS only, no redirects (so it's the site's own
-//! answer), at most 64 KB, in 10 seconds. Answers are kept in memory for a day.
+//! answer), at most 64 KB, in 10 seconds. Answers are kept in memory for a
+//! day, and a fetch that failed for two minutes (as a no), so a site that's
+//! down isn't asked again at every sign-in form.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -18,12 +21,16 @@ use crate::error::{Error, Result};
 const RELATION: &str = "delegate_permission/common.get_login_creds";
 const MOST: u64 = 64 * 1024;
 const KEPT_FOR: Duration = Duration::from_secs(24 * 60 * 60);
+const FAILED_KEPT_FOR: Duration = Duration::from_secs(2 * 60);
 
 /// A site, an app's package, and its certificate's SHA-256.
 type Asked = (String, String, [u8; 32]);
 
-/// Answers already fetched, and when.
-static KEPT: Mutex<Option<HashMap<Asked, (bool, Instant)>>> = Mutex::new(None);
+/// An answer, when it was fetched, and for how long it counts.
+type Answer = (bool, Instant, Duration);
+
+/// Answers already fetched.
+static KEPT: Mutex<Option<HashMap<Asked, Answer>>> = Mutex::new(None);
 
 /// Whether a site's statements (an assetlinks.json) let this app, signed with
 /// this certificate (its SHA-256), use the site's sign-in credentials.
@@ -100,7 +107,9 @@ pub fn fetch(rp_id: &str) -> Result<String> {
         .http_status_as_error(false)
         .max_redirects(0)
         .timeout_global(Some(Duration::from_secs(10)))
-        .user_agent(format!("PassBundle/{}", crate::version()))
+        // Not "PassBundle": a site whose file is fetched shouldn't learn
+        // which password manager its visitor uses.
+        .user_agent("assetlinks-fetcher")
         .tls_config(
             TlsConfig::builder()
                 .root_certs(RootCerts::PlatformVerifier)
@@ -126,9 +135,10 @@ pub fn fetch(rp_id: &str) -> Result<String> {
         .map_err(|e| Error::Network(e.to_string()))
 }
 
-/// Whether the site lets this app use its passkeys, from what was fetched in
-/// the last day or by fetching now. `statements` stands in for fetching (the
-/// tests, and debug builds pointing a test site at a file), and isn't kept.
+/// Whether the site lets this app use its sign-in credentials, from what was
+/// fetched lately (`kept`) or by fetching now. `statements` stands in for
+/// fetching (the tests, and debug builds pointing a test site at a file), and
+/// isn't kept.
 pub fn check(
     rp_id: &str,
     package: &str,
@@ -138,21 +148,39 @@ pub fn check(
     if let Some(given) = statements {
         return Ok(allows(given, package, certificate));
     }
-    let key = (host(rp_id)?.to_owned(), package.to_owned(), *certificate);
-    {
-        let kept = KEPT.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some((answer, at)) = kept.as_ref().and_then(|k| k.get(&key)) {
-            if at.elapsed() < KEPT_FOR {
-                return Ok(*answer);
-            }
-        }
+    if let Some(answer) = kept(rp_id, package, certificate)? {
+        return Ok(answer);
     }
-    let answer = allows(&fetch(rp_id)?, package, certificate);
-    KEPT.lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .get_or_insert_with(HashMap::new)
-        .insert(key, (answer, Instant::now()));
+    let key = (host(rp_id)?.to_owned(), package.to_owned(), *certificate);
+    let answer = match fetch(rp_id) {
+        Ok(statements) => allows(&statements, package, certificate),
+        Err(e) => {
+            keep(key, false, FAILED_KEPT_FOR);
+            return Err(e);
+        }
+    };
+    keep(key, answer, KEPT_FOR);
     Ok(answer)
+}
+
+/// What was fetched lately for the site and the app, without fetching: None
+/// when nothing counts now.
+pub fn kept(rp_id: &str, package: &str, certificate: &[u8; 32]) -> Result<Option<bool>> {
+    let key = (host(rp_id)?.to_owned(), package.to_owned(), *certificate);
+    let kept = KEPT.lock().unwrap_or_else(|p| p.into_inner());
+    Ok(kept
+        .as_ref()
+        .and_then(|k| k.get(&key))
+        .filter(|(_, at, lasts)| at.elapsed() < *lasts)
+        .map(|(answer, _, _)| *answer))
+}
+
+/// Keeps an answer, dropping the ones that no longer count.
+fn keep(key: Asked, answer: bool, lasts: Duration) {
+    let mut kept = KEPT.lock().unwrap_or_else(|p| p.into_inner());
+    let kept = kept.get_or_insert_with(HashMap::new);
+    kept.retain(|_, (_, at, lasts)| at.elapsed() < *lasts);
+    kept.insert(key, (answer, Instant::now(), lasts));
 }
 
 #[cfg(test)]
@@ -229,8 +257,23 @@ mod tests {
     fn statements_given_are_read_but_not_kept() {
         let named = statements(RELATION, "com.example.kept", &colons(&CERT));
         assert!(check("kept.example.test", "com.example.kept", &CERT, Some(&named)).unwrap());
+        assert_eq!(
+            kept("kept.example.test", "com.example.kept", &CERT).unwrap(),
+            None
+        );
         // Not kept: asking without them fetches (which fails for this name).
         assert!(check("kept.example.test", "com.example.kept", &CERT, None).is_err());
+        // The failure is kept for a while, as a no, so it isn't fetched again
+        // at once; for this app and site only.
+        assert_eq!(
+            kept("kept.example.test", "com.example.kept", &CERT).unwrap(),
+            Some(false)
+        );
+        assert!(!check("kept.example.test", "com.example.kept", &CERT, None).unwrap());
+        assert_eq!(
+            kept("kept.example.test", "com.example.other", &CERT).unwrap(),
+            None
+        );
     }
 
     #[test]

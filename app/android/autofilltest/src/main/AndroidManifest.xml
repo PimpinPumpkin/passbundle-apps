@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <application android:label="Autofill test">
+        <!-- Its websites, as apps that share sign-ins with them name them. -->
+        <meta-data android:name="asset_statements" android:resource="@string/asset_statements" />
         <activity
             android:name=".SignInActivity"
             android:exported="true">
