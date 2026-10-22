@@ -11,7 +11,7 @@ use zeroize::Zeroizing;
 use crate::agent::{self, Agent};
 use crate::autolock::{AutoLock, Preferences, Readings, Reason};
 use crate::clipboard;
-use crate::crypto::SymmetricKey;
+use crate::crypto::{EncString, SymmetricKey};
 use crate::error::{Error, Result};
 use crate::generator;
 use crate::generator_policy::GeneratorPolicy;
@@ -20,6 +20,7 @@ use crate::lock_policy::LockPolicy;
 use crate::secrets::SecretStore;
 use crate::server::{Device, Download, PendingSignIn, Server, Session, SignIn, TwoFactor};
 use crate::store::{Settings, Store};
+use crate::synced_settings::{self, Known};
 use crate::vault::{Item, ItemDraft, Sync, Vault};
 
 #[derive(Debug, PartialEq, Eq)]
@@ -396,7 +397,69 @@ impl App {
         self.secrets
             .keep(&settings.server, &settings.email, &session.refresh_token);
         self.vault = Some(Vault::open(&sync, session.user_key().clone())?);
+        // A server without them, or one that's gone for a moment, leaves the
+        // generator's settings as they are here.
+        let _ = self.sync_settings();
         Ok(())
+    }
+
+    /// The generator's settings and the server's copy (synced_settings):
+    /// saves a change made here, or takes the server's, or gives the server
+    /// these if it has none this account can read.
+    pub fn sync_settings(&mut self) -> Result<()> {
+        let (Some(server), Some(settings)) = (&self.server, &self.settings) else {
+            return Err(Error::SignedOut);
+        };
+        let Some(session) = self.session.as_mut() else {
+            return Err(Error::SignedOut);
+        };
+        let key = session.user_key().clone();
+        let account = synced_settings::account(&settings.server, &settings.email);
+        let here = self.store.generator_options();
+        let known = self.store.synced_settings();
+        let seen = synced_settings::seen(known.as_ref(), &account);
+        let now = synced_settings::now_ms();
+        let save = |session: &mut Session, doc: serde_json::Map<String, serde_json::Value>| {
+            let data = key.encrypt_str(&synced_settings::text(&doc)).to_string();
+            server.save_settings(session, &data).map(|()| doc)
+        };
+        let ours = |doc| Known {
+            account: account.clone(),
+            settings: doc,
+            generator: here.clone(),
+        };
+        let known = match synced_settings::step(known.as_ref(), &account, &here, now) {
+            synced_settings::Step::Save(doc) => ours(save(session, doc)?),
+            synced_settings::Step::Read => {
+                let remote = server.settings(session)?.and_then(|data| {
+                    let text = EncString::parse(&data).ok()?.decrypt_string(&key).ok()?;
+                    synced_settings::parse(&text)
+                });
+                match (remote, known) {
+                    // None this account can read: this device's.
+                    (None, _) => ours(save(
+                        session,
+                        synced_settings::document(&serde_json::Map::new(), &here, seen, now),
+                    )?),
+                    // Older than one this device has seen: a server handing
+                    // back an old copy. This device's goes back instead.
+                    (Some(doc), Some(k)) if synced_settings::rev_of(&doc) < seen => ours(save(
+                        session,
+                        synced_settings::document(&k.settings, &here, seen, now),
+                    )?),
+                    (Some(doc), _) => {
+                        let taken = synced_settings::take(&doc, &here);
+                        self.store.save_generator_options(&taken)?;
+                        Known {
+                            account,
+                            settings: doc,
+                            generator: taken,
+                        }
+                    }
+                }
+            }
+        };
+        self.store.save_synced_settings(&known)
     }
 
     /// When to lock by itself (docs/core.md, "Locking by itself").

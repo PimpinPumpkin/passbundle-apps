@@ -109,6 +109,9 @@ class Core {
     'pb_confirm_master_password',
   );
   late final _sync = _lib.lookupFunction<_Str0, _Str0>('pb_sync');
+  late final _syncSettings = _lib.lookupFunction<_Str0, _Str0>(
+    'pb_sync_settings',
+  );
   late final _lock = _lib.lookupFunction<_Str0, _Str0>('pb_lock');
   late final _signOut = _lib.lookupFunction<_Str0, _Str0>('pb_sign_out');
   late final _preferences = _lib.lookupFunction<_Str0, _Str0>('pb_preferences');
@@ -292,6 +295,11 @@ class Core {
       );
 
   static Future<Answer> sync() => _background((c) => c._answer(c._sync()));
+
+  /// Saves the generator's settings to the server, so they're the same on
+  /// the person's other devices (core/src/synced_settings.rs).
+  static Future<Answer> syncSettings() =>
+      _background((c) => c._answer(c._syncSettings()));
 
   static Future<Answer> save(String? id, Map<String, dynamic> draft) =>
       _background(
