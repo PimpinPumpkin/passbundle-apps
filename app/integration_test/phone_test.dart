@@ -110,6 +110,8 @@ void main() {
           find.widgetWithText(TextField, 'Master password'),
           'anything',
         );
+        // Past the sign-out dialog's way out, where Sign in can be tapped.
+        await pumpUntil(tester, find.text('Sign in').hitTestable());
         await tester.tap(find.text('Sign in'));
         await pumpUntil(tester, find.textContaining('certificate'));
         expect(
@@ -166,7 +168,8 @@ void main() {
       // Its attachment saves to the phone's own Downloads (Android) or Files
       // (iPhone): the core downloads it, opens it, and writes it there itself.
       await tester.tap(find.text('Saved before the phone signed in'));
-      await pumpUntil(tester, find.byTooltip('Save notes.txt'));
+      // Past the way in (iOS's slides from the right), where Save can be tapped.
+      await pumpUntil(tester, find.byTooltip('Save notes.txt').hitTestable());
       await tester.tap(find.byTooltip('Save notes.txt'));
       await pumpUntil(
         tester,
