@@ -188,8 +188,8 @@ if (!answer.optBoolean("ok")) return@background failGet(answer.optString("error"
                                 .put("discoverable", true)
                                 .put("exclude", JSONArray((0 until exclude.length()).mapNotNull { exclude.optJSONObject(it)?.optString("id") }))
                         background({ JSONObject(Core.passkeyCreate(made.toString()) ?: "{}") }) { result ->
-                                val answer = result ?: JSONObject()
-if (answer.optBoolean("excluded")) return@background failCreateExcluded()
+                            val answer = result ?: JSONObject()
+                            if (answer.optBoolean("excluded")) return@background failCreateExcluded()
                             if (!answer.optBoolean("ok")) return@background failCreate(answer.optString("error", "PassBundle couldn't save the passkey."))
                             val credentialId = answer.getString("credentialId")
                             val credential =
