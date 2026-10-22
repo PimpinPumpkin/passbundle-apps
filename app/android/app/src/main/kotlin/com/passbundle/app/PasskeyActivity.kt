@@ -107,8 +107,8 @@ class PasskeyActivity : Activity() {
                 val clientData = if (caller.browser && option.clientDataHash != null) null else Passkeys.clientData("webauthn.get", challenge, caller)
                 val hash = clientData?.let(Passkeys::sha256) ?: option.clientDataHash!!
                 background({ JSONObject(Core.passkeyAssert(item, rpId, Passkeys.base64url(hash), verified) ?: "{}") }) { result ->
-                        val answer = result ?: JSONObject()
-if (!answer.optBoolean("ok")) return@background failGet(answer.optString("error", "PassBundle couldn't sign in with it."))
+                    val answer = result ?: JSONObject()
+                    if (!answer.optBoolean("ok")) return@background failGet(answer.optString("error", "PassBundle couldn't sign in with it."))
                     val credentialId = answer.getString("credentialId")
                     val credential =
                         JSONObject()
