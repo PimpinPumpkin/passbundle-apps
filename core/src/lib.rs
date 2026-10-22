@@ -14,6 +14,7 @@ pub mod kdf;
 pub mod lock_policy;
 pub mod managed;
 pub mod matching;
+pub mod passkey;
 pub mod secrets;
 pub mod server;
 pub mod store;
