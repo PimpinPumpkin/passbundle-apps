@@ -374,6 +374,32 @@ void main() {
   );
 
   testWidgets(
+    'an SSH key shows its public key and fingerprint, and its private key once revealed',
+    (tester) async {
+      setSize(tester, const Size(1280, 800));
+      openSample();
+      await tester.pumpWidget(const PassBundleApp());
+      await tester.enterText(find.byType(TextField), samplePassword);
+      await tester.tap(find.text('Unlock'));
+      await pumpUntil(tester, find.text('Build server'));
+      await pumpUntil(
+        tester,
+        find.textContaining('Sign in again to get changes'),
+      );
+      await tester.tap(find.text('Build server'));
+      await tester.pump();
+      expect(find.textContaining('ssh-ed25519 '), findsOneWidget);
+      expect(find.textContaining('SHA256:'), findsWidgets);
+      expect(find.textContaining('PRIVATE KEY'), findsNothing);
+      await tester.tap(find.byTooltip('Reveal').first);
+      await tester.pump();
+      expect(find.textContaining('BEGIN OPENSSH PRIVATE KEY'), findsOneWidget);
+      // The web vault edits SSH keys.
+      expect(find.byTooltip('Edit'), findsNothing);
+    },
+  );
+
+  testWidgets(
     'on a phone-width window, a header has the theme and Lock, and an item opens on its own page',
     (tester) async {
       setSize(tester, const Size(390, 844));

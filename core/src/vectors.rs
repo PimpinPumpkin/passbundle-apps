@@ -196,6 +196,17 @@ fn assert_opens_as_the_vectors_say(vault: &Vault, v: &Value) {
                     want["licenseNumber"].as_str()
                 );
             }
+            5 => {
+                assert_eq!(item.kind, ItemKind::SshKey);
+                let key = item.ssh_key.as_ref().expect("an SSH key's details");
+                let want = &want["sshKey"];
+                assert_eq!(key.public_key.as_deref(), want["publicKey"].as_str());
+                assert_eq!(key.fingerprint.as_deref(), want["keyFingerprint"].as_str());
+                assert_eq!(
+                    text(&key.private_key).as_deref(),
+                    want["privateKey"].as_str()
+                );
+            }
             other => panic!("unexpected item type {other}"),
         }
     }
@@ -257,7 +268,7 @@ fn an_item_that_doesnt_open_is_damaged_and_the_rest_still_open() {
     .unwrap();
     assert_eq!(vault.damaged.len(), 1);
     assert_eq!(vault.damaged[0].id, v["ids"]["personal"].as_str().unwrap());
-    assert_eq!(vault.items.len(), 5);
+    assert_eq!(vault.items.len(), 6);
 }
 
 #[test]
@@ -312,7 +323,7 @@ fn search_matches_every_word_in_names_usernames_websites_and_details() {
     assert_eq!(names("mail"), ["Example Mail"]);
     assert_eq!(names("BACKUP example"), ["Backup service"]);
     assert_eq!(names("office wi-fi"), ["Office Wi-Fi"]);
-    assert_eq!(names("").len(), 6);
+    assert_eq!(names("").len(), 7);
     assert!(names("nothing like this").is_empty());
     // A card by its holder and brand, an identity by its name and email;
     // never by a secret.
