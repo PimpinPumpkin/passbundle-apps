@@ -34,6 +34,31 @@ pub enum Kdf {
     },
 }
 
+impl Prelogin {
+    /// What a server's prelogin would say for these settings: for signing in
+    /// right after making an account, with the settings it was made with.
+    pub fn of(kdf: &Kdf) -> Prelogin {
+        match *kdf {
+            Kdf::Pbkdf2 { iterations } => Prelogin {
+                kdf: 0,
+                kdf_iterations: iterations,
+                kdf_memory: None,
+                kdf_parallelism: None,
+            },
+            Kdf::Argon2id {
+                iterations,
+                memory_mib,
+                parallelism,
+            } => Prelogin {
+                kdf: 1,
+                kdf_iterations: iterations,
+                kdf_memory: Some(memory_mib),
+                kdf_parallelism: Some(parallelism),
+            },
+        }
+    }
+}
+
 impl Kdf {
     /// Checks the settings against docs/core.md's bounds: a hacked server could
     /// otherwise ask for weak ones and capture an easy-to-crack login hash.

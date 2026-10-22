@@ -15,7 +15,7 @@ use crate::crypto::SymmetricKey;
 use crate::error::{Error, Result};
 use crate::generator;
 use crate::generator_policy::GeneratorPolicy;
-use crate::kdf::normalize_email;
+use crate::kdf::{normalize_email, Prelogin};
 use crate::lock_policy::LockPolicy;
 use crate::secrets::SecretStore;
 use crate::server::{Device, Download, PendingSignIn, Server, Session, SignIn, TwoFactor};
@@ -123,18 +123,79 @@ impl App {
         self.vault.as_ref()
     }
 
-    /// Signs in to a server: the vault comes down, is kept, and opens.
-    pub fn sign_in(&mut self, server_url: &str, email: &str, password: &str) -> Result<Step> {
-        self.lock();
-        // One identifier per install, whichever account signs in.
-        let identifier = self
-            .settings
+    /// Makes an account on the server (docs/core.md, "Making an account"),
+    /// then signs in to it, as `sign_in`. Slow: the master key twice, and a
+    /// new RSA key pair (`register` takes one made beforehand, away from the
+    /// app).
+    pub fn sign_up(
+        &mut self,
+        server_url: &str,
+        email: &str,
+        name: Option<&str>,
+        password: &str,
+        hint: Option<&str>,
+    ) -> Result<Step> {
+        // A server address that can't be used is refused before the slow part.
+        Server::new(server_url, Device::this_one(&Device::new_identifier()))?;
+        let account = crate::signup::NewAccount::make(email, name, password, hint)?;
+        self.register(server_url, &account, password)
+    }
+
+    /// Sends a new account to the server, then signs in to it with the
+    /// settings it was made with (not what the server says now). Once the
+    /// server has it, a failure says so (`Error::AccountMade`): signing in
+    /// is what's left, not making it again.
+    pub fn register(
+        &mut self,
+        server_url: &str,
+        account: &crate::signup::NewAccount,
+        password: &str,
+    ) -> Result<Step> {
+        let identifier = self.device_identifier();
+        let server = Server::new(server_url, Device::this_one(&identifier))?;
+        server.register(account)?;
+        let prelogin = Prelogin::of(&account.kdf);
+        self.sign_in_as(
+            server_url,
+            server,
+            identifier,
+            &prelogin,
+            &account.email,
+            password,
+        )
+        .map_err(|e| Error::AccountMade {
+            sure: true,
+            why: Box::new(e),
+        })
+    }
+
+    /// One identifier per install, whichever account signs in.
+    fn device_identifier(&self) -> String {
+        self.settings
             .as_ref()
             .map(|s| s.device_identifier.clone())
-            .unwrap_or_else(Device::new_identifier);
+            .unwrap_or_else(Device::new_identifier)
+    }
+
+    /// Signs in to a server: the vault comes down, is kept, and opens.
+    pub fn sign_in(&mut self, server_url: &str, email: &str, password: &str) -> Result<Step> {
+        let identifier = self.device_identifier();
         let server = Server::new(server_url, Device::this_one(&identifier))?;
         let prelogin = server.prelogin(email)?;
-        let signed_in = server.sign_in_with(&prelogin, email, password)?;
+        self.sign_in_as(server_url, server, identifier, &prelogin, email, password)
+    }
+
+    fn sign_in_as(
+        &mut self,
+        server_url: &str,
+        server: Server,
+        identifier: String,
+        prelogin: &Prelogin,
+        email: &str,
+        password: &str,
+    ) -> Result<Step> {
+        self.lock();
+        let signed_in = server.sign_in_with(prelogin, email, password)?;
         self.settings = Some(Settings {
             server: server_url.trim().trim_end_matches('/').to_owned(),
             email: normalize_email(email),

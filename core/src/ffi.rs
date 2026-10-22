@@ -152,7 +152,13 @@ fn secrets(dir: &std::path::Path) -> Box<dyn SecretStore> {
 }
 
 fn failed(e: Error) -> Value {
-    json!({ "ok": false, "error": e.to_string(), "signedOut": e == Error::SignedOut })
+    json!({
+        "ok": false,
+        "error": e.to_string(),
+        "signedOut": e == Error::SignedOut,
+        // Making an account got to the server: signing in is what's left.
+        "accountMade": matches!(e, Error::AccountMade { .. }),
+    })
 }
 
 fn done(result: crate::Result<()>) -> Value {
@@ -347,6 +353,45 @@ pub unsafe extern "C" fn pb_sign_in(
 ) -> *mut c_char {
     let (server, email, password) = (text(server), text(email), Zeroizing::new(text(password)));
     with_app_waiting(|app| step(app.sign_in(&server, &email, &password)))
+}
+
+/// Makes an account on the server, then signs in to it (docs/core.md,
+/// "Making an account"): the same answer as `pb_sign_in`. `name` and `hint`
+/// may be empty.
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_sign_up(
+    server: *const c_char,
+    email: *const c_char,
+    name: *const c_char,
+    password: *const c_char,
+    hint: *const c_char,
+) -> *mut c_char {
+    let (server, email, name) = (text(server), text(email), text(name));
+    let (password, hint) = (Zeroizing::new(text(password)), Zeroizing::new(text(hint)));
+    let given = |t: &str| Some(t.to_owned()).filter(|t| !t.trim().is_empty());
+    let (name, hint) = (given(&name), given(&hint).map(Zeroizing::new));
+    // The slow part (the master key, an RSA key pair) away from the app, so
+    // nothing else waits on it; a server address that can't be used first.
+    let made = crate::server::Server::new(
+        &server,
+        crate::server::Device::this_one(&crate::server::Device::new_identifier()),
+    )
+    .and_then(|_| {
+        crate::signup::NewAccount::make(
+            &email,
+            name.as_deref(),
+            &password,
+            hint.as_deref().map(|h| h.as_str()),
+        )
+    });
+    let account = match made {
+        Ok(account) => account,
+        Err(e) => return out(failed(e)),
+    };
+    with_app_waiting(|app| step(app.register(&server, &account, &password)))
 }
 
 /// # Safety

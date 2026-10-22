@@ -65,6 +65,73 @@ void main() {
   );
 
   testWidgets(
+    'making an account checks the master password here, then goes to the server it would sign in to',
+    (tester) async {
+      setSize(tester, const Size(1280, 800));
+      openEmpty();
+      await tester.pumpWidget(const PassBundleApp());
+      await tester.tap(find.text('Create account'));
+      await tester.pump();
+      expect(find.text('Create a PassBundle account'), findsOneWidget);
+      await tester.tap(find.text('Self-hosted?'));
+      await tester.pump();
+      await tester.enterText(
+        find.widgetWithText(TextField, 'Server'),
+        'http://127.0.0.1:9',
+      );
+      await tester.enterText(
+        find.widgetWithText(TextField, 'Email'),
+        'ana@example.test',
+      );
+      Future<void> passwords(String one, String two, [String hint = '']) async {
+        await tester.enterText(
+          find.widgetWithText(TextField, 'Master password'),
+          one,
+        );
+        await tester.enterText(
+          find.widgetWithText(TextField, 'Master password again'),
+          two,
+        );
+        await tester.enterText(
+          find.widgetWithText(TextField, 'Hint (optional)'),
+          hint,
+        );
+        await tester.tap(find.text('Create account'));
+        await tester.pump();
+      }
+
+      await passwords('too short', 'too short');
+      expect(find.text('Use at least 12 characters.'), findsOneWidget);
+      await passwords('correct horse battery', 'correct horse battery!');
+      expect(
+        find.text('The two master passwords don\'t match.'),
+        findsOneWidget,
+      );
+      await passwords(
+        'correct horse battery',
+        'correct horse battery',
+        'it\'s Correct Horse Battery',
+      );
+      expect(
+        find.text('The hint can\'t give away your master password.'),
+        findsOneWidget,
+      );
+      // Right: the core makes the account's keys, then can't reach the server.
+      await passwords('correct horse battery', 'correct horse battery');
+      await pumpUntil(
+        tester,
+        find.textContaining('Couldn\'t reach the server'),
+      );
+      // The fields don't keep the master password.
+      expect(find.text('correct horse battery'), findsNothing);
+
+      await tester.tap(find.text('I have an account: sign in'));
+      await tester.pump();
+      expect(find.text('Sign in to PassBundle'), findsOneWidget);
+    },
+  );
+
+  testWidgets(
     'signing in asks for a server only for someone hosting their own',
     (tester) async {
       setSize(tester, const Size(1280, 800));
