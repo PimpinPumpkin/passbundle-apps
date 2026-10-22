@@ -254,6 +254,25 @@ pub fn passkey_create<'caller>(
         .resolve::<ThrowRuntimeExAndDefault>()
 }
 
+/// The master password, as proof the person is who they are when a passkey
+/// signs or is made: `{ok}`, or the words to show, as JSON. Slow (the KDF):
+/// off the main thread.
+#[cfg(feature = "ffi")]
+#[jni_mangle("com.passbundle.app.Core")]
+pub fn check_master_password<'caller>(
+    mut unowned_env: EnvUnowned<'caller>,
+    _class: JClass<'caller>,
+    password: JString<'caller>,
+) -> jstring {
+    unowned_env
+        .with_env(|env| -> JniResult<jstring> {
+            let password = Zeroizing::new(password.try_to_string(env)?);
+            let answer = crate::ffi::check_master_password(&password);
+            Ok(env.new_string(answer.to_string())?.into_raw())
+        })
+        .resolve::<ThrowRuntimeExAndDefault>()
+}
+
 /// Whether a site's Digital Asset Links let an app (its package, and its
 /// signing certificate's SHA-256) use the site's passkeys (asset_links.rs).
 /// `statements` stands in for fetching them (debug builds' test site); null

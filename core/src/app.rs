@@ -476,6 +476,18 @@ impl App {
         Ok(())
     }
 
+    /// Checks the master password as proof the person is who they are (a
+    /// passkey's user verification), without granting anything.
+    pub fn check_master_password(&self, password: &str) -> Result<()> {
+        let settings = self.settings.as_ref().ok_or(Error::SignedOut)?;
+        let text = self.store.sync().ok_or(Error::SignedOut)?;
+        let vault = self.vault.as_ref().ok_or(Error::SignedOut)?;
+        if !vault.is_master_password(&Sync::from_json(&text)?, &settings.prelogin(), password)? {
+            return Err(Error::WrongPassword);
+        }
+        Ok(())
+    }
+
     /// Which giving of the master password is current: the editor of an
     /// item that asks for it hands this back when saving, and a save from
     /// an editor opened under another is refused.

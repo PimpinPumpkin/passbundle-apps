@@ -1071,6 +1071,13 @@ pub(crate) fn passkey_create(request: &str) -> Value {
     })
 }
 
+/// The master password as proof the person is who they are, for a passkey
+/// (Android's JNI): `{ok}`, or the words to show. Slow (the KDF).
+#[cfg(target_os = "android")]
+pub(crate) fn check_master_password(password: &str) -> Value {
+    app_value(|app| done(app.check_master_password(password)))
+}
+
 fn base64url(bytes: &[u8]) -> String {
     use base64::Engine;
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)

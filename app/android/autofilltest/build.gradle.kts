@@ -27,3 +27,8 @@ kotlin {
         jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17
     }
 }
+
+dependencies {
+    // Android's Credential Manager, as an app with passkeys uses it.
+    implementation("androidx.credentials:credentials:1.6.0")
+}
