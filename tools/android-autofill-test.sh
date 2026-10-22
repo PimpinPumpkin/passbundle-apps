@@ -233,6 +233,55 @@ sign_in_and_save new@example.test not-a-real-password-changed
 reached autofill-updated "PassBundle never updated the sign-in."
 echo "Updated: the same login has the new password."
 
+# Passkeys (Android 14 and later): the test app makes one in PassBundle
+# through Android's Credential Manager, then signs in with it, checking what
+# comes back as a site would (PasskeySiteActivity). Android's own sheets come
+# between, which differ by version: step through them by their buttons until
+# PassBundle's dialog or the result shows.
+through() {
+  local want=$1
+  shift
+  for _ in $(seq 40); do
+    [ -n "$(where "$want")" ] && return 0
+    local button
+    for button in "$@" "^(Create|CREATE)$" "^(Continue|CONTINUE)$" "^Sign in$" "^(Use passkey|USE PASSKEY)$" "^PassBundle$" "^(Save|SAVE)$"; do
+      if [ -n "$(where "$button")" ]; then
+        tap "$button"
+        break
+      fi
+    done
+    sleep 1
+  done
+  echo "Never got to: $want" >&2
+  screen | grep -oE '(text|resource-id)="[^"]+"' | sort -u | head -60 >&2
+  return 1
+}
+if [ "$(a shell getprop ro.build.version.sdk | tr -d '\r')" -ge 34 ]; then
+  echo "Passkeys: the test app makes one in PassBundle, then signs in with it"
+  # The test site lets the test app use its passkeys: its asset links, as a
+  # debug build of PassBundle takes them from a file instead of the network.
+  apksigner=$(ls -d "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)
+  cert=$("$apksigner" verify --print-certs app/build/autofilltest/outputs/apk/debug/autofilltest-debug.apk |
+    grep -m1 'SHA-256 digest' | awk '{print $NF}' | tr 'a-f' 'A-F' | sed 's/../&:/g; s/:$//')
+  printf '{"passkeys.example.test":[{"relation":["delegate_permission/common.get_login_creds"],"target":{"namespace":"android_app","package_name":"com.passbundle.autofilltest","sha256_cert_fingerprints":["%s"]}}]}' "$cert" |
+    a exec-in run-as com.passbundle.app sh -c 'cat > files/passkey-test-asset-links.json'
+  a shell settings put secure credential_service com.passbundle.app/com.passbundle.app.PasskeyProvider
+  a shell settings put secure credential_service_primary com.passbundle.app/com.passbundle.app.PasskeyProvider
+  a shell am force-stop com.passbundle.autofilltest
+  a shell am start -W -n com.passbundle.autofilltest/.PasskeySiteActivity > /dev/null
+  tap "id=com.passbundle.autofilltest:id/make_passkey"
+  through "^Save a passkey in PassBundle\?"
+  # Save can't be tapped for its first moment.
+  sleep 2
+  tap "^(Save|SAVE)$"
+  shown "^Made a passkey for passkeys.example.test$"
+  echo "Made: Credential Manager has a passkey from PassBundle, attested for the test app."
+  tap "id=com.passbundle.autofilltest:id/sign_in_passkey"
+  through "^Signed in with a passkey" "^ana@passkeys\.example\.test$"
+  shown "^Signed in with a passkey, signature checked$"
+  echo "Signed in: the signature checks with the passkey's public key, for the test app's origin."
+fi
+
 # The app's half can end now.
 a shell run-as com.passbundle.app touch files/autofill-done
 wait "$setup"

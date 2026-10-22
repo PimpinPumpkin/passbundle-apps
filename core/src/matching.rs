@@ -126,6 +126,7 @@ mod tests {
             identity: None,
             ssh_key: None,
             attachments: Vec::new(),
+            passkey: None,
             kept: Default::default(),
             id: "id".into(),
             kind: ItemKind::Login,
