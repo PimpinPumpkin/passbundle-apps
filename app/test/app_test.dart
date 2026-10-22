@@ -136,6 +136,40 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('Edit item'), findsOneWidget);
       expect(find.widgetWithText(TextField, 'Backup service'), findsOneWidget);
+      // The generator: a password, then a passphrase, which it remembers.
+      await tester.tap(find.byTooltip('Generate a password'));
+      await tester.pumpAndSettle();
+      String generated() => tester
+          .widget<SelectableText>(find.byKey(const Key('generated')))
+          .data!;
+      expect(generated(), hasLength(20));
+      await tester.tap(find.text('0-9'));
+      await tester.pumpAndSettle();
+      expect(generated(), hasLength(20));
+      expect(generated(), isNot(matches(RegExp(r'\d'))));
+      await tester.tap(find.text('Passphrase'));
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.widgetWithText(TextField, 'Between words'),
+        ' ',
+      );
+      await tester.tap(find.text('Capitalize'));
+      await tester.pumpAndSettle();
+      final passphrase = generated();
+      expect(passphrase.split(' '), hasLength(6));
+      expect(passphrase, matches(RegExp(r'^([A-Z][a-z-]+ ){5}[A-Z][a-z-]+$')));
+      await tester.tap(find.text('Use this passphrase'));
+      await tester.pumpAndSettle();
+      expect(find.text('Generator'), findsNothing);
+      expect(find.widgetWithText(TextField, passphrase), findsOneWidget);
+      await tester.tap(find.byTooltip('Generate a password'));
+      await tester.pumpAndSettle();
+      expect(find.text('Use this passphrase'), findsOneWidget);
+      expect(generated().split(' '), hasLength(6));
+      await tester.tap(find.text('Cancel').last);
+      await tester.pumpAndSettle();
+      expect(find.widgetWithText(TextField, passphrase), findsOneWidget);
+
       await tester.tap(find.text('Save'));
       await pumpUntil(
         tester,

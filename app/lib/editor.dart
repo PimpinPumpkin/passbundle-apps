@@ -4,6 +4,7 @@
 import 'package:flutter/material.dart';
 
 import 'core.dart';
+import 'generator.dart';
 import 'theme.dart';
 import 'widgets.dart';
 
@@ -280,10 +281,14 @@ class _ItemEditorState extends State<ItemEditor> {
                     IconButton(
                       tooltip: 'Generate a password',
                       icon: const Icon(Icons.casino_outlined),
-                      onPressed: () => setState(() {
-                        password.text = widget.core.generate() ?? password.text;
-                        hidden = false;
-                      }),
+                      onPressed: () async {
+                        final made = await openGenerator(context, widget.core);
+                        if (made == null || !mounted) return;
+                        setState(() {
+                          password.text = made;
+                          hidden = false;
+                        });
+                      },
                     ),
                   ],
                 ),

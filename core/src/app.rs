@@ -6,11 +6,14 @@
 use std::path::PathBuf;
 use std::time::{Instant, SystemTime};
 
+use zeroize::Zeroizing;
+
 use crate::agent::{self, Agent};
 use crate::autolock::{AutoLock, Preferences, Readings, Reason};
 use crate::clipboard;
 use crate::crypto::SymmetricKey;
 use crate::error::{Error, Result};
+use crate::generator;
 use crate::kdf::normalize_email;
 use crate::lock_policy::LockPolicy;
 use crate::secrets::SecretStore;
@@ -335,6 +338,18 @@ impl App {
         } else {
             self.lock();
         }
+    }
+
+    /// The generator's last choices, kept on this device.
+    pub fn generator_options(&self) -> generator::Options {
+        self.store.generator_options()
+    }
+
+    /// A new password or passphrase; the choices become the next defaults.
+    pub fn generate(&mut self, options: &generator::Options) -> Result<Zeroizing<String>> {
+        let made = generator::generate(options)?;
+        self.store.save_generator_options(options)?;
+        Ok(made)
     }
 
     pub fn set_preferences(&mut self, preferences: Preferences) -> Result<()> {

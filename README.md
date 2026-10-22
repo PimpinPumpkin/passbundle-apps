@@ -16,7 +16,7 @@ CI's builds (each run's artifacts) are the whole desktop app: on Windows the app
 Early, and not released.
 - **The core** opens a vault (PBKDF2 and Argon2id accounts, organization keys, item keys) and refuses weak KDF settings and tampered data, checked against the vectors.
 - **On a real server**, the core signs in (with two-step login), syncs, saves, edits, and trashes items. It keeps the vault on the device to unlock offline, with the refresh token in the OS's secret store.
-- **The app** signs in, unlocks, browses, searches, copies through the core (cleared after 30 seconds), and adds, edits, and trashes items.
+- **The app** signs in, unlocks, browses, searches, copies through the core (cleared after 30 seconds), and adds, edits, and trashes items. Its generator makes passwords or passphrases (EFF's long word list, `core/src/words/`) and remembers the last choices on the device.
 - **Windows Hello** (Touch ID once the agent has it) unlocks the app through the desktop agent, sharing the browser extension's enrollment. The agent's tray opens the app, and the app starts the agent.
 - **Not yet:** passkeys, attachments, the macOS and Linux installs, phones, and code signing.
 
