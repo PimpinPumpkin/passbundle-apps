@@ -177,6 +177,41 @@ jobs:
           name: core-android
           path: app/android/app/src/main/jniLibs
 
+  ios:
+    # The core on iOS (docs/phones.md, "The core on phones"): its lints for
+    # iOS, the static library for iPhones and the simulator that the app links,
+    # and its tests run on an iPhone simulator.
+    name: iOS
+    runs-on: macos-15
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the pinned Rust toolchain, with iOS's targets
+        working-directory: core
+        run: |
+          rustup toolchain install
+          rustup target add aarch64-apple-ios aarch64-apple-ios-sim
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: core
+          key: ios
+      - name: Lints, for iOS
+        working-directory: core
+        run: IPHONEOS_DEPLOYMENT_TARGET=17.0 cargo clippy --locked --all-targets --features ffi --target aarch64-apple-ios-sim -- -D warnings
+      - name: Build for iPhones and the simulator
+        run: tools/ios-core.sh build
+      - name: The core's tests, on an iPhone simulator
+        run: tools/ios-core.sh test
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: core-ios
+          path: app/ios/PassBundleCore.xcframework
+
   agent:
     # The desktop agent (agent/README.md): the tray app, Windows Hello for the
     # browser extension, and the native-messaging host. Moved here from

@@ -216,7 +216,14 @@ mod unix {
         Some(std::ffi::OsString::from_vec(path).into())
     }
 
-    #[cfg(not(target_os = "macos"))]
+    /// Phones have no agent, and iOS doesn't say which program a process
+    /// runs, so the other end is never known there: `reached` refuses.
+    #[cfg(all(target_vendor = "apple", not(target_os = "macos")))]
+    pub fn peer_program(_stream: &UnixStream) -> Option<std::path::PathBuf> {
+        None
+    }
+
+    #[cfg(not(target_vendor = "apple"))]
     pub fn peer_program(stream: &UnixStream) -> Option<std::path::PathBuf> {
         use std::os::fd::AsRawFd;
         let mut credentials: libc::ucred = unsafe { std::mem::zeroed() };
