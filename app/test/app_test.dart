@@ -425,6 +425,75 @@ void main() {
   );
 
   testWidgets(
+    'folders are made, renamed, and deleted from the sidebar, which needs the server',
+    (tester) async {
+      setSize(tester, const Size(1280, 800));
+      openSample();
+      await tester.pumpWidget(const PassBundleApp());
+      await tester.enterText(find.byType(TextField), samplePassword);
+      await tester.tap(find.text('Unlock'));
+      await pumpUntil(tester, find.text('Example Mail'));
+      await pumpUntil(
+        tester,
+        find.textContaining('Sign in again to get changes'),
+      );
+
+      // A new folder needs a name.
+      await tester.tap(find.byTooltip('New folder'));
+      await tester.pumpAndSettle();
+      final save = find.widgetWithText(FilledButton, 'Save');
+      expect(tester.widget<FilledButton>(save).onPressed, isNull);
+      await tester.enterText(find.widgetWithText(TextField, 'Name'), '  ');
+      await tester.pump();
+      expect(tester.widget<FilledButton>(save).onPressed, isNull);
+      await tester.enterText(find.widgetWithText(TextField, 'Name'), 'Bills');
+      await tester.pump();
+      // The sample has no server: making it says so.
+      await tester.tap(save);
+      await pumpUntil(
+        tester,
+        find.text('You\'ve been signed out. Sign in again.'),
+      );
+      // The dialog closes; no folder was made.
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(find.text('Bills'), findsNothing);
+
+      // Renaming starts from its name.
+      await tester.tap(find.byTooltip('More for Personal'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Rename'));
+      await tester.pumpAndSettle();
+      expect(find.text('Rename folder'), findsOneWidget);
+      expect(
+        tester
+            .widget<TextField>(find.widgetWithText(TextField, 'Name'))
+            .controller!
+            .text,
+        'Personal',
+      );
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+
+      // Deleting asks first, and says its items stay.
+      await tester.tap(find.byTooltip('More for Personal'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Delete'));
+      await tester.pumpAndSettle();
+      expect(find.text('Delete the folder Personal?'), findsOneWidget);
+      expect(
+        find.text('Its items stay in your vault, in no folder.'),
+        findsOneWidget,
+      );
+      await tester.tap(find.text('Delete folder'));
+      await pumpUntil(
+        tester,
+        find.text('You\'ve been signed out. Sign in again.'),
+      );
+      expect(find.text('Personal'), findsOneWidget);
+    },
+  );
+
+  testWidgets(
     'on a phone-width window, a header has the theme and Lock, and an item opens on its own page',
     (tester) async {
       setSize(tester, const Size(390, 844));

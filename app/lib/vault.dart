@@ -181,6 +181,69 @@ class VaultScreenState extends State<VaultScreen> {
     reload();
   }
 
+  /// Makes a folder, then shows it.
+  Future<void> newFolder() async {
+    final name = await askFolderName(context, 'New folder');
+    if (name == null || !mounted) return;
+    final answer = await whileBusy(() => Core.createFolder(name));
+    if (!mounted) return;
+    reload();
+    if (!answer.ok) {
+      showMessage(context, answer.error ?? 'Couldn\'t make the folder.');
+      return;
+    }
+    setState(() {
+      filter = Filter.folder;
+      filterId = answer.body['id'] as String?;
+    });
+  }
+
+  Future<void> renameFolder(String id, String name) async {
+    final renamed = await askFolderName(context, 'Rename folder', name);
+    if (renamed == null || renamed == name || !mounted) return;
+    final answer = await whileBusy(() => Core.renameFolder(id, renamed));
+    if (!mounted) return;
+    reload();
+    if (!answer.ok) {
+      showMessage(context, answer.error ?? 'Couldn\'t rename the folder.');
+    }
+  }
+
+  /// Deletes a folder; its items stay, in no folder.
+  Future<void> deleteFolder(String id, String name) async {
+    final sure = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('Delete the folder $name?'),
+        content: const Text('Its items stay in your vault, in no folder.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Delete folder'),
+          ),
+        ],
+      ),
+    );
+    if (sure != true || !mounted) return;
+    final answer = await whileBusy(() => Core.deleteFolder(id));
+    if (!mounted) return;
+    reload();
+    if (!answer.ok) {
+      showMessage(context, answer.error ?? 'Couldn\'t delete the folder.');
+      return;
+    }
+    if (filter == Filter.folder && filterId == id) {
+      setState(() {
+        filter = Filter.all;
+        filterId = null;
+      });
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final list = shown;
@@ -270,6 +333,9 @@ class VaultScreenState extends State<VaultScreen> {
                       filter = f;
                       filterId = id;
                     }),
+                    onNewFolder: newFolder,
+                    onRenameFolder: renameFolder,
+                    onDeleteFolder: deleteFolder,
                     mode: widget.mode,
                     onMode: widget.onMode,
                     onLock: widget.onLock,
@@ -313,6 +379,9 @@ class Sidebar extends StatelessWidget {
     required this.places,
     required this.counts,
     required this.onChoose,
+    required this.onNewFolder,
+    required this.onRenameFolder,
+    required this.onDeleteFolder,
     required this.mode,
     required this.onMode,
     required this.onLock,
@@ -324,6 +393,9 @@ class Sidebar extends StatelessWidget {
   final Map<String, dynamic> places;
   final (int, int) counts;
   final void Function(Filter, [String?]) onChoose;
+  final VoidCallback onNewFolder;
+  final void Function(String id, String name) onRenameFolder;
+  final void Function(String id, String name) onDeleteFolder;
   final ThemeMode mode;
   final ValueChanged<ThemeMode> onMode;
   final VoidCallback onLock;
@@ -337,6 +409,7 @@ class Sidebar extends StatelessWidget {
       bool on,
       VoidCallback tap, [
       int? count,
+      Widget? trailing,
     ]) => Padding(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 1),
       child: Material(
@@ -369,6 +442,7 @@ class Sidebar extends StatelessWidget {
                       fontSize: 12,
                     ),
                   ),
+                ?trailing,
               ],
             ),
           ),
@@ -430,13 +504,41 @@ class Sidebar extends StatelessWidget {
                   () => onChoose(Filter.favorites),
                   counts.$2,
                 ),
-                if (folders.isNotEmpty) headingText('Folders'),
+                Row(
+                  children: [
+                    Expanded(child: headingText('Folders')),
+                    Padding(
+                      padding: const EdgeInsets.only(top: 12, right: 12),
+                      child: IconButton(
+                        tooltip: 'New folder',
+                        visualDensity: VisualDensity.compact,
+                        iconSize: 18,
+                        color: c.sidebarText.withValues(alpha: 0.7),
+                        onPressed: onNewFolder,
+                        icon: const Icon(Icons.add_rounded),
+                      ),
+                    ),
+                  ],
+                ),
                 for (final f in folders)
                   entry(
                     Icons.folder_outlined,
                     f['name'] as String,
                     filter == Filter.folder && filterId == f['id'],
                     () => onChoose(Filter.folder, f['id'] as String),
+                    null,
+                    FolderMenu(
+                      name: f['name'] as String,
+                      color: c.sidebarText.withValues(alpha: 0.7),
+                      onRename: () => onRenameFolder(
+                        f['id'] as String,
+                        f['name'] as String,
+                      ),
+                      onDelete: () => onDeleteFolder(
+                        f['id'] as String,
+                        f['name'] as String,
+                      ),
+                    ),
                   ),
                 if (organizations.isNotEmpty) headingText('Organizations'),
                 for (final o in organizations)
@@ -1271,4 +1373,94 @@ String fileSize(num bytes) {
   if (bytes < 1000) return '${bytes.toInt()} bytes';
   if (bytes < 1000 * 1000) return '${(bytes / 1000).toStringAsFixed(1)} KB';
   return '${(bytes / (1000 * 1000)).toStringAsFixed(1)} MB';
+}
+
+/// A folder's Rename and Delete, beside its name in the sidebar.
+class FolderMenu extends StatelessWidget {
+  const FolderMenu({
+    super.key,
+    required this.name,
+    required this.color,
+    required this.onRename,
+    required this.onDelete,
+  });
+
+  final String name;
+  final Color color;
+  final VoidCallback onRename;
+  final VoidCallback onDelete;
+
+  @override
+  Widget build(BuildContext context) => SizedBox(
+    width: 24,
+    height: 20,
+    child: PopupMenuButton<VoidCallback>(
+      tooltip: 'More for $name',
+      padding: EdgeInsets.zero,
+      iconSize: 16,
+      icon: Icon(Icons.more_horiz_rounded, color: color),
+      onSelected: (action) => action(),
+      itemBuilder: (context) => [
+        PopupMenuItem(value: onRename, child: const Text('Rename')),
+        PopupMenuItem(value: onDelete, child: const Text('Delete')),
+      ],
+    ),
+  );
+}
+
+/// A folder's name, asked for: null when cancelled.
+Future<String?> askFolderName(
+  BuildContext context,
+  String title, [
+  String name = '',
+]) => showDialog<String>(
+  context: context,
+  builder: (context) => _FolderNameDialog(title: title, name: name),
+);
+
+class _FolderNameDialog extends StatefulWidget {
+  const _FolderNameDialog({required this.title, required this.name});
+
+  final String title;
+  final String name;
+
+  @override
+  State<_FolderNameDialog> createState() => _FolderNameDialogState();
+}
+
+class _FolderNameDialogState extends State<_FolderNameDialog> {
+  late final field = TextEditingController(text: widget.name);
+
+  @override
+  void dispose() {
+    field.dispose();
+    super.dispose();
+  }
+
+  void done() {
+    final name = field.text.trim();
+    if (name.isNotEmpty) Navigator.pop(context, name);
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    title: Text(widget.title),
+    content: TextField(
+      controller: field,
+      autofocus: true,
+      decoration: const InputDecoration(labelText: 'Name'),
+      onChanged: (_) => setState(() {}),
+      onSubmitted: (_) => done(),
+    ),
+    actions: [
+      TextButton(
+        onPressed: () => Navigator.pop(context),
+        child: const Text('Cancel'),
+      ),
+      FilledButton(
+        onPressed: field.text.trim().isEmpty ? null : done,
+        child: const Text('Save'),
+      ),
+    ],
+  );
 }

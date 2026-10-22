@@ -837,6 +837,39 @@ pub unsafe extern "C" fn pb_item(id: *const c_char) -> *mut c_char {
     })
 }
 
+/// Makes a folder: `{ok, id}`, or the words to show.
+///
+/// # Safety
+/// `name` is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_create_folder(name: *const c_char) -> *mut c_char {
+    let name = text(name);
+    with_app_waiting(|app| match app.create_folder(&name) {
+        Ok(id) => json!({ "ok": true, "id": id }),
+        Err(e) => failed(e),
+    })
+}
+
+/// Renames a folder: `{ok}`, or the words to show.
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_rename_folder(id: *const c_char, name: *const c_char) -> *mut c_char {
+    let (id, name) = (text(id), text(name));
+    with_app_waiting(|app| done(app.rename_folder(&id, &name)))
+}
+
+/// Deletes a folder; its items stay, in no folder: `{ok}`, or the words to show.
+///
+/// # Safety
+/// `id` is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_delete_folder(id: *const c_char) -> *mut c_char {
+    let id = text(id);
+    with_app_waiting(|app| done(app.delete_folder(&id)))
+}
+
 /// Saves one of an item's attachments to the Downloads folder (docs/core.md,
 /// "Attachments"): `{ok, path}`, or the words to show.
 ///
