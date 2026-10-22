@@ -16,10 +16,10 @@ CI's builds (each run's artifacts) are the whole desktop app: on Windows the app
 Early, and not released.
 - **The core** opens a vault (PBKDF2 and Argon2id accounts, organization keys, item keys) and refuses weak KDF settings and tampered data, checked against the vectors.
 - **On a real server**, the core signs in (with two-step login), syncs, saves, edits, and trashes items. It keeps the vault on the device to unlock offline, with the refresh token in the OS's secret store.
-- **The app** signs in, unlocks, browses, searches, copies through the core (cleared after 30 seconds), and adds, edits, and trashes items. Its generator makes passwords or passphrases (EFF's long word list, `core/src/words/`) and remembers the last choices on the device.
+- **The app** signs in, unlocks, browses, searches, copies through the core (cleared after 30 seconds), and adds, edits, and trashes items: logins, notes, cards, and identities (SSH keys to view), in folders it makes, renames, and deletes. It shows and saves attachments, and asks for the master password again where an item says to. Its generator makes passwords or passphrases (EFF's long word list, `core/src/words/`) and remembers the last choices on the device.
 - **Windows Hello** (Touch ID once the agent has it) unlocks the app through the desktop agent, sharing the browser extension's enrollment. The agent's tray opens the app, and the app starts the agent.
 - **Phones:** on Android, the app with biometric unlock, and autofill that fills, saves, and updates sign-ins in other apps and browsers. On iPhone, the app with Face ID unlock, and AutoFill that fills websites in Safari and other apps, with iOS suggesting logins above the keyboard. Both are tested in CI on emulators and simulators.
-- **Not yet:** passkeys, attachments, and code signing.
+- **Not yet:** passkeys (the core signs and makes them; the phones' providers are next) and code signing.
 
 ## Tests
 
