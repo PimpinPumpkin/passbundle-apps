@@ -3,6 +3,8 @@ package com.passbundle.app
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ApplicationInfo
+import android.util.Log
 import android.service.autofill.Dataset
 import android.service.autofill.FillResponse
 import android.service.autofill.SaveInfo
@@ -77,6 +79,10 @@ object Responses {
         val response = FillResponse.Builder()
         save?.let { response.setSaveInfo(it) }
         val offerTrust = claimed != null && !trusted && Browsers.couldBe(context, fields.packageName)
+        // Debug builds only, for the emulator tests' logs: what autofill decided, never a value.
+        if ((context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
+            Log.d("PassBundle", "autofill ${fields.packageName}: web domain ${fields.webDomain}, trusted $trusted, offers trust $offerTrust")
+        }
         // Nothing to fill: only the offer to save what the person signs in with.
         if (items.length() == 0 && !offerTrust) return save?.let { response.build() }
         for (i in 0 until items.length()) {
