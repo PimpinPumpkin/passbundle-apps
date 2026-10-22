@@ -124,6 +124,7 @@ mod tests {
         Item {
             card: None,
             identity: None,
+            ssh_key: None,
             kept: Default::default(),
             id: "id".into(),
             kind: ItemKind::Login,
