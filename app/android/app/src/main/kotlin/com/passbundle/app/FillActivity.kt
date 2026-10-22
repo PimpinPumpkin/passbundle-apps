@@ -6,7 +6,9 @@ import android.content.Intent
 import android.os.Bundle
 import android.os.Parcelable
 import android.text.InputType
+import android.view.WindowManager
 import android.view.autofill.AutofillManager
+import android.view.inputmethod.EditorInfo
 import android.widget.EditText
 import android.widget.Toast
 import org.json.JSONObject
@@ -46,31 +48,51 @@ class FillActivity : Activity() {
         if (!asks) return finishWith(Responses.filled(this, fields, item))
         val password = EditText(this).apply {
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+            imeOptions = EditorInfo.IME_ACTION_GO
             hint = "Master password"
         }
-        AlertDialog.Builder(this)
+        val dialog = AlertDialog.Builder(this)
             .setTitle("PassBundle")
             .setMessage("This login asks for your master password.")
             .setView(password)
-            .setPositiveButton("Continue") { _, _ ->
-                val typed = password.text.toString()
-                password.text.clear()
-                // The check derives the master key: off the main thread.
-                Thread {
-                    val answer = JSONObject(Core.confirmMasterPassword(item, typed) ?: "{}")
-                    runOnUiThread {
-                        if (answer.optBoolean("ok")) {
-                            finishWith(Responses.filled(this, fields, item))
-                        } else {
-                            Toast.makeText(this, answer.optString("error", "Couldn't check that."), Toast.LENGTH_LONG).show()
-                            finishWith(null)
-                        }
-                    }
-                }.start()
-            }
+            .setPositiveButton("Continue") { _, _ -> confirm(fields, item, password) }
             .setNegativeButton("Cancel") { _, _ -> finishWith(null) }
             .setOnCancelListener { finishWith(null) }
-            .show()
+            .create()
+        password.setOnEditorActionListener { _, action, _ ->
+            if (action != EditorInfo.IME_ACTION_GO) return@setOnEditorActionListener false
+            dialog.dismiss()
+            confirm(fields, item, password)
+            true
+        }
+        dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE)
+        dialog.show()
+        password.requestFocus()
+    }
+
+    /** Checks the master password off the main thread (the KDF), then fills, unless the person left. */
+    private fun confirm(fields: Fields, item: String, password: EditText) {
+        val typed = password.text.toString()
+        password.text.clear()
+        Thread {
+            val ok = try {
+                val answer = JSONObject(Core.confirmMasterPassword(item, typed) ?: "{}")
+                if (!answer.optBoolean("ok")) {
+                    val words = answer.optString("error", "Couldn't check that.")
+                    runOnUiThread { Toast.makeText(this, words, Toast.LENGTH_LONG).show() }
+                }
+                answer.optBoolean("ok")
+            } catch (_: RuntimeException) {
+                false
+            }
+            runOnUiThread {
+                when {
+                    isFinishing || isDestroyed -> Unit
+                    ok -> finishWith(Responses.filled(this, fields, item))
+                    else -> finishWith(null)
+                }
+            }
+        }.start()
     }
 
     private fun unlock(fields: Fields) {

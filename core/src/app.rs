@@ -66,6 +66,9 @@ pub struct App {
     /// out (docs/core.md, "Asking for the master password again"): until
     /// another item asks, or the vault locks.
     reprompted: Option<String>,
+    /// Counts each time `reprompted` is given or forgotten, so an editor
+    /// opened before can't save over an item's secrets (`grant`).
+    grant: u64,
     autolock: AutoLock,
 }
 
@@ -89,6 +92,7 @@ impl App {
             policy: LockPolicy::default(),
             generator_policy: GeneratorPolicy::default(),
             reprompted: None,
+            grant: 0,
             autolock: AutoLock::new(Instant::now(), SystemTime::now()),
         }
     }
@@ -438,6 +442,7 @@ impl App {
     /// Drops every key and everything decrypted.
     pub fn lock(&mut self) {
         self.reprompted = None;
+        self.grant += 1;
         self.vault = None;
         self.session = None;
         self.pending = None;
@@ -456,7 +461,6 @@ impl App {
         self.lock();
     }
 
-    /// Saves an item, new (no id) or edited, then syncs.
     /// Checks the master password for an item that asks for it again; if
     /// it's right, that item's secrets may be used (`may_use`).
     pub fn confirm_master_password(&mut self, id: &str, password: &str) -> Result<()> {
@@ -468,7 +472,15 @@ impl App {
             return Err(Error::WrongPassword);
         }
         self.reprompted = Some(id.to_owned());
+        self.grant += 1;
         Ok(())
+    }
+
+    /// Which giving of the master password is current: the editor of an
+    /// item that asks for it hands this back when saving, and a save from
+    /// an editor opened under another is refused.
+    pub fn grant(&self) -> u64 {
+        self.grant
     }
 
     /// Whether an item's secrets may leave the core now: it doesn't ask for
@@ -477,6 +489,7 @@ impl App {
         item.kept.reprompt == 0 || self.reprompted.as_deref() == Some(item.id.as_str())
     }
 
+    /// Saves an item, new (no id) or edited, then syncs.
     pub fn save(
         &mut self,
         id: Option<&str>,

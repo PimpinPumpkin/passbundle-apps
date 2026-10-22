@@ -133,9 +133,13 @@ fn it_lasts_until_another_item_asks_and_an_edit_waits_for_it() {
         Some(Error::MasterPasswordFirst)
     );
 
+    let before = app.grant();
     app.confirm_master_password(&sample.asks, &sample.password)
         .unwrap();
     assert!(app.value(&sample.asks, "password").is_ok());
+    // Each giving is a new grant, which an editor opened under it hands back.
+    let given = app.grant();
+    assert_ne!(given, before);
     // Giving it for another item moves it there.
     app.confirm_master_password(&sample.other, &sample.password)
         .unwrap();
@@ -143,6 +147,11 @@ fn it_lasts_until_another_item_asks_and_an_edit_waits_for_it() {
         app.value(&sample.asks, "password").err(),
         Some(Error::MasterPasswordFirst)
     );
+    assert_ne!(app.grant(), given);
+    let moved = app.grant();
+    app.lock();
+    assert_ne!(app.grant(), moved);
+    app.unlock(&sample.password).unwrap();
     // No such item: nothing to give it for.
     assert!(app
         .confirm_master_password("no-such-item", &sample.password)

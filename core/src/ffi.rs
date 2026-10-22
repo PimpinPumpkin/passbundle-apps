@@ -717,14 +717,18 @@ pub unsafe extern "C" fn pb_item(id: *const c_char) -> *mut c_char {
             return Value::Null;
         };
         let mut view = summary(vault, item);
+        // An item that asks for the master password shows its name until
+        // it's given, as upstream's apps do.
+        view["reprompt"] = json!(item.kept.reprompt != 0);
+        view["mayUse"] = json!(app.may_use(item));
+        if !app.may_use(item) {
+            return view;
+        }
+        view["grant"] = json!(app.grant());
         view["username"] = json!(item.username);
         view["uris"] = json!(item.uris);
         view["collectionIds"] = json!(item.collection_ids);
         view["hasPassword"] = json!(item.password.is_some());
-        // Asks for the master password before its secrets are used, and
-        // whether it was given for it.
-        view["reprompt"] = json!(item.kept.reprompt != 0);
-        view["mayUse"] = json!(app.may_use(item));
         view["hasTotp"] = json!(item.totp.is_some());
         view["hasNotes"] = json!(item.notes.is_some());
         // Each field's upstream type: 0 text, 1 hidden, 2 yes or no, 3 linked.
@@ -972,6 +976,16 @@ pub unsafe extern "C" fn pb_save(id: *const c_char, draft: *const c_char) -> *mu
             .collect();
         if draft.organization_id.is_some() && collections.is_empty() {
             return failed(Error::Refused("an organization's item needs a collection"));
+        }
+        // An item that asks for the master password saves only from an
+        // editor opened while it was given (its `grant`), whose fields hold
+        // the item's secrets rather than blanks.
+        let asks = app
+            .vault()
+            .and_then(|v| v.item(&id))
+            .is_some_and(|item| item.kept.reprompt != 0);
+        if asks && d["grant"].as_u64() != Some(app.grant()) {
+            return failed(Error::MasterPasswordFirst);
         }
         done(app.save(
             Some(id.as_str()).filter(|i| !i.is_empty()),

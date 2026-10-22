@@ -123,6 +123,19 @@ class VaultScreenState extends State<VaultScreen> {
 
   Future<void> edit([String? id, Map<String, dynamic>? prefill]) async {
     final wide = MediaQuery.sizeOf(context).width >= 900;
+    // An item that asks for the master password gets it before its editor
+    // opens, so the editor shows its secrets, not blanks (Android's "Save
+    // to PassBundle" opens the editor straight away).
+    if (id != null) {
+      final item = widget.core.item(id);
+      if (item != null &&
+          item['reprompt'] == true &&
+          item['mayUse'] != true &&
+          !await askForMasterPassword(context, id, item['name'] as String)) {
+        return;
+      }
+      if (!mounted) return;
+    }
     final saved = await openEditor(
       context,
       core: widget.core,
@@ -691,14 +704,31 @@ class _ItemPaneState extends State<ItemPane> {
   }
 
   void toggle(String what) => setState(() {
+    if (asksAgain()) return;
     if (revealed.remove(what) == null) {
       final secret = widget.core.reveal(widget.id, what);
       if (secret != null) revealed[what] = secret;
     }
   });
 
+  /// Whether the item asks for the master password again now (it was given
+  /// for another item since): then the pane asks before anything else.
+  bool asksAgain() {
+    final fresh = widget.core.item(widget.id);
+    if (fresh == null || fresh['reprompt'] != true || fresh['mayUse'] == true) {
+      return false;
+    }
+    item = fresh;
+    revealed.clear();
+    return true;
+  }
+
   /// Through the core, so the value never passes through Dart; secrets clear after 30 seconds.
   Future<void> copy(String label, String what, {bool secret = true}) async {
+    if (asksAgain()) {
+      setState(() {});
+      return;
+    }
     final answer = await widget.core.copy(widget.id, what);
     if (!mounted) return;
     showMessage(
@@ -1090,4 +1120,94 @@ class _ItemPaneState extends State<ItemPane> {
       ],
     );
   }
+}
+
+/// Asks for the master password for an item that asks for it again
+/// (docs/core.md, "Asking for the master password again"); true once it's
+/// given.
+Future<bool> askForMasterPassword(
+  BuildContext context,
+  String id,
+  String name,
+) async =>
+    await showDialog<bool>(
+      context: context,
+      builder: (_) => _MasterPasswordDialog(id: id, name: name),
+    ) ==
+    true;
+
+class _MasterPasswordDialog extends StatefulWidget {
+  const _MasterPasswordDialog({required this.id, required this.name});
+
+  final String id;
+  final String name;
+
+  @override
+  State<_MasterPasswordDialog> createState() => _MasterPasswordDialogState();
+}
+
+class _MasterPasswordDialogState extends State<_MasterPasswordDialog> {
+  final password = TextEditingController();
+  String? error;
+  bool working = false;
+
+  @override
+  void dispose() {
+    password.dispose();
+    super.dispose();
+  }
+
+  Future<void> confirm() async {
+    if (password.text.isEmpty || working) return;
+    setState(() {
+      working = true;
+      error = null;
+    });
+    final answer = await whileBusy(
+      () => Core.confirmMasterPassword(widget.id, password.text),
+    );
+    if (!mounted) return;
+    password.clear();
+    if (answer.ok) {
+      Navigator.of(context).pop(true);
+      return;
+    }
+    setState(() {
+      working = false;
+      error = answer.error;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    title: Text(widget.name),
+    content: SizedBox(
+      width: 360,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text('This item asks for your master password.'),
+          const SizedBox(height: 12),
+          TextField(
+            controller: password,
+            obscureText: true,
+            autofocus: true,
+            decoration: InputDecoration(
+              labelText: 'Master password',
+              errorText: error,
+            ),
+            onSubmitted: (_) => confirm(),
+          ),
+        ],
+      ),
+    ),
+    actions: [
+      TextButton(
+        onPressed: () => Navigator.of(context).pop(false),
+        child: const Text('Cancel'),
+      ),
+      WorkingButton(label: 'Continue', working: working, onPressed: confirm),
+    ],
+  );
 }
