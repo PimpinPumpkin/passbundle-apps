@@ -8,7 +8,8 @@
 use passbundle_core::crypto::{EncString, SymmetricKey};
 use passbundle_core::kdf::Prelogin;
 use passbundle_core::matching::{matches, Target};
-use passbundle_core::vault::{ItemDraft, Sync, Vault};
+use passbundle_core::vault::{Card, ItemDraft, Sync, Vault};
+use zeroize::Zeroizing;
 
 #[test]
 fn editing_keeps_how_each_website_is_matched() {
@@ -222,21 +223,28 @@ fn refuses_edits_the_app_cant_make_safely() {
     let note = v["ids"]["note"].as_str().unwrap().to_owned();
     let personal = v["ids"]["personal"].as_str().unwrap().to_owned();
     let organization = v["ids"]["organization"].as_str().unwrap().to_owned();
-    // A card: the web vault edits it, so the app never turns it into a login.
-    let card = {
+    // An SSH key: the web vault edits it, so the app never turns it into a login.
+    let ssh_key = {
         let mut c = cipher(&mut v, &note).clone();
         c["id"] = "7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d".into();
-        c["type"] = 3.into();
+        c["type"] = 5.into();
         c["secureNote"] = serde_json::Value::Null;
-        c["card"] = serde_json::json!({ "brand": null, "number": null });
+        c["sshKey"] =
+            serde_json::json!({ "privateKey": null, "publicKey": null, "keyFingerprint": null });
         v["sync"]["ciphers"].as_array_mut().unwrap().push(c);
         "7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d"
     };
     let vault = open(&v, &prelogin, &password);
-    let item = vault.item(card).unwrap();
+    let item = vault.item(ssh_key).unwrap();
     assert!(vault
         .encrypt_item(&ItemDraft::of(item), Some(item))
         .is_err());
+
+    // A card stays a card.
+    let card = vault.item(v["ids"]["card"].as_str().unwrap()).unwrap();
+    let mut draft = ItemDraft::of(card);
+    draft.card = None;
+    assert!(vault.encrypt_item(&draft, Some(card)).is_err());
 
     // A note stays a note.
     let item = vault.item(&note).unwrap();
@@ -350,4 +358,66 @@ fn websites_carry_their_checksums_and_kept_fields_keep_their_places() {
         .map(|f| opened(&item_key, &f["name"]))
         .collect();
     assert_eq!(names, ["Remember me", "API key"]);
+}
+
+fn user_key(v: &serde_json::Value) -> SymmetricKey {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(v["keys"]["userKey"].as_str().unwrap())
+        .unwrap();
+    SymmetricKey::from_bytes(&bytes).unwrap()
+}
+
+#[test]
+fn cards_and_identities_are_edited_and_made() {
+    let (v, prelogin, password) = sample();
+    let key = user_key(&v);
+    let vault = open(&v, &prelogin, &password);
+
+    // A new number and code on the vectors' card; it stays a card.
+    let card = vault.item(v["ids"]["card"].as_str().unwrap()).unwrap();
+    let mut draft = ItemDraft::of(card);
+    let details = draft.card.as_mut().unwrap();
+    details.number = Some(Zeroizing::new("5555555555554444".into()));
+    details.code = Some(Zeroizing::new("321".into()));
+    details.brand = Some("Mastercard".into());
+    let body = vault.encrypt_item(&draft, Some(card)).unwrap();
+    assert_eq!(body["type"], 3);
+    assert!(body["login"].is_null() && body["passwordHistory"].is_null());
+    let c = &body["card"];
+    assert_eq!(opened(&key, &c["number"]), "5555555555554444");
+    assert_eq!(opened(&key, &c["code"]), "321");
+    assert_eq!(opened(&key, &c["brand"]), "Mastercard");
+    assert_eq!(opened(&key, &c["cardholderName"]), "Ana Lopez");
+    assert_eq!(
+        (opened(&key, &c["expMonth"]), opened(&key, &c["expYear"])),
+        ("7".to_owned(), "2029".to_owned())
+    );
+
+    // A new email on the vectors' identity; the rest as it was.
+    let identity = vault.item(v["ids"]["identity"].as_str().unwrap()).unwrap();
+    let mut draft = ItemDraft::of(identity);
+    draft.identity.as_mut().unwrap().email = Some("ana@example.test".into());
+    let body = vault.encrypt_item(&draft, Some(identity)).unwrap();
+    assert_eq!(body["type"], 4);
+    let i = &body["identity"];
+    assert_eq!(opened(&key, &i["email"]), "ana@example.test");
+    assert_eq!(opened(&key, &i["ssn"]), "123-45-6789");
+    assert_eq!(opened(&key, &i["middleName"]), "María");
+    assert!(i["address3"].is_null());
+
+    // A new card, under the user key.
+    let new = ItemDraft {
+        name: "Work card".into(),
+        card: Some(Card {
+            cardholder_name: Some("Ana Lopez".into()),
+            number: Some(Zeroizing::new("4000056655665556".into())),
+            ..Card::default()
+        }),
+        ..ItemDraft::default()
+    };
+    let body = vault.encrypt_item(&new, None).unwrap();
+    assert_eq!(body["type"], 3);
+    assert_eq!(opened(&key, &body["card"]["number"]), "4000056655665556");
+    assert!(body["card"]["code"].is_null());
 }

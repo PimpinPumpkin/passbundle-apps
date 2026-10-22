@@ -301,7 +301,7 @@ impl Item {
 
 /// A card's details (docs/core.md, "Items"). The number and the security
 /// code are secrets, like a password.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Card {
     pub cardholder_name: Option<String>,
     pub brand: Option<String>,
@@ -348,7 +348,7 @@ impl Card {
 
 /// An identity's details (docs/core.md, "Items"). The Social Security,
 /// passport, and license numbers are secrets, like a password.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Identity {
     pub title: Option<String>,
     pub first_name: Option<String>,
@@ -486,8 +486,12 @@ fn iso8601(secs: u64, millis: u32) -> String {
 /// An item as the person edits it, before it's encrypted.
 #[derive(Default)]
 pub struct ItemDraft {
-    /// Login or secure note.
+    /// A secure note; else a login, unless it's a card or an identity.
     pub note: bool,
+    /// A card's details, for a card.
+    pub card: Option<Card>,
+    /// An identity's details, for an identity.
+    pub identity: Option<Identity>,
     pub name: String,
     pub notes: Option<Zeroizing<String>>,
     pub username: Option<String>,
@@ -501,6 +505,19 @@ pub struct ItemDraft {
 }
 
 impl ItemDraft {
+    /// What kind of item it makes.
+    pub fn kind(&self) -> ItemKind {
+        if self.card.is_some() {
+            ItemKind::Card
+        } else if self.identity.is_some() {
+            ItemKind::Identity
+        } else if self.note {
+            ItemKind::SecureNote
+        } else {
+            ItemKind::Login
+        }
+    }
+
     /// A draft of an opened item, to edit.
     pub fn of(item: &Item) -> ItemDraft {
         let copy = |z: &Option<Zeroizing<String>>| {
@@ -508,6 +525,8 @@ impl ItemDraft {
         };
         ItemDraft {
             note: item.kind == ItemKind::SecureNote,
+            card: item.card.clone(),
+            identity: item.identity.clone(),
             name: item.name.clone(),
             notes: copy(&item.notes),
             username: item.username.clone(),
@@ -689,13 +708,16 @@ impl Vault {
     ) -> Result<serde_json::Value> {
         use serde_json::json;
         if let Some(item) = editing {
-            if !matches!(item.kind, ItemKind::Login | ItemKind::SecureNote) {
+            if !matches!(
+                item.kind,
+                ItemKind::Login | ItemKind::SecureNote | ItemKind::Card | ItemKind::Identity
+            ) {
                 return Err(Error::Refused(
-                    "the app edits logins and notes; edit cards, identities, and SSH keys in the web vault",
+                    "the app edits logins, notes, cards, and identities; edit SSH keys in the web vault",
                 ));
             }
-            if (item.kind == ItemKind::SecureNote) != draft.note {
-                return Err(Error::Refused("a login stays a login, and a note a note"));
+            if item.kind != draft.kind() {
+                return Err(Error::Refused("an item stays the kind it is"));
             }
             if item.organization_id != draft.organization_id {
                 return Err(Error::Refused(
@@ -725,7 +747,7 @@ impl Vault {
         if let Some(item) = editing {
             let old = item.password.as_deref().map(String::as_str).unwrap_or("");
             let new = draft.password.as_deref().map(String::as_str).unwrap_or("");
-            if !draft.note && !old.is_empty() && old != new {
+            if draft.kind() == ItemKind::Login && !old.is_empty() && old != new {
                 password_changed = true;
                 history.insert(0, json!({ "password": enc(old), "lastUsedDate": now }));
             }
@@ -780,7 +802,12 @@ impl Vault {
         }
 
         let mut body = json!({
-            "type": if draft.note { 2 } else { 1 },
+            "type": match draft.kind() {
+                ItemKind::SecureNote => 2,
+                ItemKind::Card => 3,
+                ItemKind::Identity => 4,
+                _ => 1,
+            },
             "organizationId": draft.organization_id,
             "folderId": draft.folder_id,
             "name": enc(&draft.name),
@@ -793,7 +820,40 @@ impl Vault {
             "encryptedFor": self.user_id,
             "lastKnownRevisionDate": editing.and_then(|i| i.revision_date.clone()),
         });
-        if draft.note {
+        let secret =
+            |text: &Option<Zeroizing<String>>| enc_opt(text.as_deref().map(String::as_str));
+        let plain = |text: &Option<String>| enc_opt(text.as_deref());
+        if let Some(card) = &draft.card {
+            body["card"] = json!({
+                "cardholderName": plain(&card.cardholder_name),
+                "brand": plain(&card.brand),
+                "number": secret(&card.number),
+                "expMonth": plain(&card.exp_month),
+                "expYear": plain(&card.exp_year),
+                "code": secret(&card.code),
+            });
+        } else if let Some(id) = &draft.identity {
+            body["identity"] = json!({
+                "title": plain(&id.title),
+                "firstName": plain(&id.first_name),
+                "middleName": plain(&id.middle_name),
+                "lastName": plain(&id.last_name),
+                "address1": plain(&id.address1),
+                "address2": plain(&id.address2),
+                "address3": plain(&id.address3),
+                "city": plain(&id.city),
+                "state": plain(&id.state),
+                "postalCode": plain(&id.postal_code),
+                "country": plain(&id.country),
+                "company": plain(&id.company),
+                "email": plain(&id.email),
+                "phone": plain(&id.phone),
+                "ssn": secret(&id.ssn),
+                "username": plain(&id.username),
+                "passportNumber": secret(&id.passport_number),
+                "licenseNumber": secret(&id.license_number),
+            });
+        } else if draft.note {
             body["secureNote"] = kept
                 .and_then(|k| k.secure_note.clone())
                 .unwrap_or_else(|| json!({ "type": 0 }));

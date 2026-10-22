@@ -258,7 +258,7 @@ void main() {
   );
 
   testWidgets(
-    'a card and an identity show their details, with their secrets hidden until revealed',
+    'a card and an identity show their details, with their secrets hidden until revealed, and the editor has them',
     (tester) async {
       setSize(tester, const Size(1280, 800));
       openSample();
@@ -283,8 +283,19 @@ void main() {
       await tester.pump();
       expect(find.text('4111111111111111'), findsOneWidget);
       expect(find.text('123'), findsNothing);
-      // The web vault edits cards, for now.
-      expect(find.byTooltip('Edit'), findsNothing);
+      // The editor has its details, the secrets hidden until shown.
+      await tester.tap(find.byTooltip('Edit'));
+      await tester.pumpAndSettle();
+      expect(find.widgetWithText(TextField, 'Ana Lopez'), findsOneWidget);
+      expect(find.widgetWithText(TextField, '2029'), findsOneWidget);
+      expect(
+        find.widgetWithText(TextField, '4111111111111111'),
+        findsOneWidget,
+      );
+      expect(find.text('Visa'), findsWidgets);
+      expect(find.text('07'), findsOneWidget);
+      await tester.tap(find.byTooltip('Cancel'));
+      await tester.pumpAndSettle();
 
       await tester.tap(find.text('Ana at home'));
       await tester.pump();
@@ -298,7 +309,19 @@ void main() {
       await tester.tap(find.byTooltip('Reveal').first);
       await tester.pump();
       expect(find.text('123-45-6789'), findsOneWidget);
-      expect(find.byTooltip('Edit'), findsNothing);
+      await tester.tap(find.byTooltip('Edit'));
+      await tester.pumpAndSettle();
+      expect(find.widgetWithText(TextField, 'María'), findsOneWidget);
+      for (final value in ['Springfield', 'X0000000']) {
+        await tester.dragUntilVisible(
+          find.widgetWithText(TextField, value),
+          find.byType(ListView).last,
+          const Offset(0, -200),
+        );
+        expect(find.widgetWithText(TextField, value), findsOneWidget);
+      }
+      await tester.tap(find.byTooltip('Cancel'));
+      await tester.pumpAndSettle();
     },
   );
 
