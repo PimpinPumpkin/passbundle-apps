@@ -312,13 +312,14 @@ pub struct Card {
 }
 
 impl Card {
-    /// "Visa, *1111": the brand and the number's last 4 digits, as lists show a card.
+    /// "Visa, *1111": the brand and the number's last 4 digits, as lists
+    /// show a card. A number of 4 digits or fewer shows none of them.
     pub fn summary(&self) -> String {
-        let last4: Option<String> = self.number.as_ref().map(|n| {
+        let last4: Option<String> = self.number.as_ref().and_then(|n| {
             let digits: Vec<char> = n.chars().filter(char::is_ascii_digit).collect();
-            digits[digits.len().saturating_sub(4)..].iter().collect()
+            (digits.len() > 4).then(|| digits[digits.len() - 4..].iter().collect())
         });
-        match (self.brand.as_deref(), last4.filter(|l| !l.is_empty())) {
+        match (self.brand.as_deref().filter(|b| !b.is_empty()), last4) {
             (Some(brand), Some(last4)) => format!("{brand}, *{last4}"),
             (Some(brand), None) => brand.to_owned(),
             (None, Some(last4)) => format!("*{last4}"),
@@ -328,8 +329,15 @@ impl Card {
 
     /// "07/2029", or what there is of it.
     pub fn expiration(&self) -> Option<String> {
-        let month = self.exp_month.as_deref().map(|m| format!("{m:0>2}"));
-        match (month, self.exp_year.as_deref()) {
+        let month = self
+            .exp_month
+            .as_deref()
+            .filter(|m| !m.trim().is_empty())
+            .map(|m| format!("{:0>2}", m.trim()));
+        match (
+            month,
+            self.exp_year.as_deref().filter(|y| !y.trim().is_empty()),
+        ) {
             (Some(m), Some(y)) => Some(format!("{m}/{y}")),
             (Some(m), None) => Some(m),
             (None, Some(y)) => Some(y.to_owned()),
@@ -1011,11 +1019,16 @@ mod tests {
         };
         assert_eq!(card.summary(), "Visa, *1234");
         assert_eq!(card.expiration().as_deref(), Some("07/2029"));
+        // Too short to show any of it; empty parts are left out.
         let bare = Card {
-            number: Some(Zeroizing::new("12".into())),
+            brand: Some(String::new()),
+            number: Some(Zeroizing::new("1234".into())),
+            exp_month: Some(String::new()),
+            exp_year: Some("2029".into()),
             ..Card::default()
         };
-        assert_eq!(bare.summary(), "*12");
+        assert_eq!(bare.summary(), "");
+        assert_eq!(bare.expiration().as_deref(), Some("2029"));
         assert_eq!(Card::default().summary(), "");
         assert_eq!(Card::default().expiration(), None);
 
