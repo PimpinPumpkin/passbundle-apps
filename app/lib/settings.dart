@@ -173,35 +173,40 @@ class _SettingsDialogState extends State<SettingsDialog> {
     }
     return AlertDialog(
       title: const Text('Settings'),
+      // Scrolls on a small phone, or with the keyboard up.
       content: SizedBox(
         width: 420,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            unlock,
-            const Divider(height: 24),
-            lockAfter(),
-            SwitchListTile(
-              value: preferences['lockOnSleep'] == true,
-              onChanged: (on) => choose({'lockOnSleep': on}),
-              secondary: const Icon(Icons.bedtime_outlined),
-              title: Text(
-                isPhone
-                    ? 'Lock when the phone locks'
-                    : 'Lock when the computer sleeps',
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              unlock,
+              const Divider(height: 24),
+              lockAfter(),
+              SwitchListTile(
+                value: preferences['lockOnSleep'] == true,
+                onChanged: (on) => choose({'lockOnSleep': on}),
+                secondary: const Icon(Icons.bedtime_outlined),
+                title: Text(
+                  isPhone
+                      ? 'Lock when the phone locks'
+                      : 'Lock when the computer sleeps',
+                ),
+                subtitle: isPhone
+                    ? null
+                    : const Text('Or when its screen locks'),
+                contentPadding: EdgeInsets.zero,
               ),
-              subtitle: isPhone ? null : const Text('Or when its screen locks'),
-              contentPadding: EdgeInsets.zero,
-            ),
-            if (note != null) ...[
-              const SizedBox(height: 8),
-              Text(
-                note!,
-                style: TextStyle(color: Theme.of(context).colorScheme.error),
-              ),
+              if (note != null) ...[
+                const SizedBox(height: 8),
+                Text(
+                  note!,
+                  style: TextStyle(color: Theme.of(context).colorScheme.error),
+                ),
+              ],
             ],
-          ],
+          ),
         ),
       ),
       actions: [
