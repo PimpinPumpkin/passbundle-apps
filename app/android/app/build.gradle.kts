@@ -59,4 +59,6 @@ val rustlsVerifierVersion: String =
 
 dependencies {
     implementation("org.rustls:rustls-platform-verifier:$rustlsVerifierVersion")
+    // Android's Credential Manager, for passkeys (PasskeyProvider.kt). Apache 2.0.
+    implementation("androidx.credentials:credentials:1.6.0")
 }

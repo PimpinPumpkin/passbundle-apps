@@ -194,6 +194,32 @@ object Browsers {
             }
         }.getOrDefault(emptyMap()).also { listed = it }
 
+    /**
+     * The list as Android's Credential Manager takes it (CallingAppInfo's
+     * getOrigin), with only the certificates that count here: release ones
+     * the list doesn't also name for a debug build.
+     */
+    fun privilegedJson(context: Context): String {
+        val apps = JSONArray()
+        for ((name, fingerprints) in list(context)) {
+            if (fingerprints.isEmpty()) continue
+            val signatures = JSONArray()
+            for (hash in fingerprints) {
+                signatures.put(
+                    JSONObject()
+                        .put("build", "release")
+                        .put("cert_fingerprint_sha256", hash.joinToString(":") { "%02X".format(it) }),
+                )
+            }
+            apps.put(
+                JSONObject()
+                    .put("type", "android")
+                    .put("info", JSONObject().put("package_name", name).put("signatures", signatures)),
+            )
+        }
+        return JSONObject().put("apps", apps).toString()
+    }
+
     private fun fromHex(text: String): ByteArray =
         text.replace(":", "").chunked(2).map { it.toInt(16).toByte() }.toByteArray()
 }

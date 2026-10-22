@@ -24,4 +24,35 @@ if [ -n "${PB_TEST_SERVER:-}" ]; then
 fi
 
 cd app
-flutter test integration_test/phone_test.dart -d "$device" ${defines[@]+"${defines[@]}"}
+# The simulator sometimes never finishes installing or launching the app
+# after the build (simctl stalls, with no output). A try that's still going
+# after 15 minutes (the test takes 5) is stopped, the simulator restarted,
+# and the test run once more; a test that fails isn't run again.
+try() {
+  set -m
+  flutter test integration_test/phone_test.dart -d "$device" ${defines[@]+"${defines[@]}"} &
+  local test=$! waited=0
+  set +m
+  while kill -0 "$test" 2> /dev/null; do
+    if [ "$waited" -ge 900 ]; then
+      echo "The test stalled on the simulator; restarting it." >&2
+      # The test's whole process group: Flutter, and the simctl it waits on.
+      kill -- "-$test" 2> /dev/null || true
+      wait "$test" 2> /dev/null || true
+      xcrun simctl shutdown "$device" || true
+      xcrun simctl boot "$device"
+      xcrun simctl bootstatus "$device" -b > /dev/null
+      return 124
+    fi
+    sleep 5
+    waited=$((waited + 5))
+  done
+  wait "$test"
+}
+status=0
+try || status=$?
+if [ "$status" = 124 ]; then
+  status=0
+  try || status=$?
+fi
+exit "$status"
