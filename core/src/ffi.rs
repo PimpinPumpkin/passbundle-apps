@@ -210,6 +210,8 @@ fn summary(vault: &Vault, item: &Item) -> Value {
             .unwrap_or_default(),
         "website": item.uris.first(),
         "favorite": item.favorite,
+        // Asks for the master password before its secrets are used.
+        "reprompt": item.kept.reprompt != 0,
         "folderId": item.folder_id,
         "folder": item.folder_id.as_ref().and_then(|f| vault.folders.get(f)),
         "organizationId": item.organization_id,
@@ -482,6 +484,35 @@ pub unsafe extern "C" fn pb_unlock_with_key(key: *const u8, len: usize) -> *mut 
     CString::new(why).unwrap_or_default().into_raw()
 }
 
+/// The logins for a website, for iOS's AutoFill extension, as `fillable` has
+/// them: names and usernames only, never a password. Free it with `pb_free`.
+///
+/// # Safety
+/// `domain` is a NUL-terminated UTF-8 string, for the call.
+#[cfg(target_os = "ios")]
+#[no_mangle]
+pub unsafe extern "C" fn pb_fillable(domain: *const c_char) -> *mut c_char {
+    out(fillable("", &text(domain)))
+}
+
+/// What iOS may suggest above the keyboard, for the app to give iOS after
+/// each sync (docs/phones.md, "Autofill"): `[{id, username, domain}]`, never
+/// a password; none while locked. Free it with `pb_free`.
+#[cfg(target_os = "ios")]
+#[no_mangle]
+pub extern "C" fn pb_suggestions() -> *mut c_char {
+    with_app(|app| match app.vault() {
+        Some(vault) => Value::Array(
+            vault
+                .suggestions()
+                .into_iter()
+                .map(|s| json!({ "id": s.id, "username": s.username, "domain": s.domain }))
+                .collect(),
+        ),
+        None => json!([]),
+    })
+}
+
 /// What Swift does when the core turns biometric unlock off (signing out, or
 /// a key that's out of date): it deletes the Keychain item. Swift sets it at
 /// start.
@@ -514,10 +545,11 @@ pub(crate) fn open_if_closed(dir: &str) {
     }
 }
 
-/// The logins for an Android app or the page a browser shows, for its
-/// autofill (android.rs): names and usernames only. `locked` while there's no
-/// open vault, and `busy` while a slow call has the app.
-#[cfg(target_os = "android")]
+/// The logins for an Android app or the page a browser shows, for the phone's
+/// autofill (android.rs, or `pb_fillable` for iOS's AutoFill extension):
+/// names and usernames only. `locked` while there's no open vault, and `busy`
+/// while a slow call has the app.
+#[cfg(phone)]
 pub(crate) fn fillable(package: &str, domain: &str) -> Value {
     use crate::matching::Target;
     let guard = match APP.try_lock() {

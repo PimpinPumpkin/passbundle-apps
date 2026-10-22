@@ -25,3 +25,25 @@ fi
 
 cd app
 flutter test integration_test/phone_test.dart -d "$device" ${defines[@]+"${defines[@]}"}
+
+# The AutoFill extension, inside the app the tests ran: iOS's credential
+# provider, with the entitlements it needs (AutoFill, the App Group and
+# Keychain group it shares with the app), and the core linked in.
+built=$(find build/ios -path '*iphonesimulator*' -name Runner.app -type d | head -1)
+[ -n "$built" ] || { echo "No built app under app/build/ios." >&2; exit 1; }
+extension="$built/PlugIns/AutoFill.appex"
+[ "$(plutil -extract NSExtension.NSExtensionPointIdentifier raw "$extension/Info.plist")" = com.apple.authentication-services-credential-provider-ui ] \
+  || { echo "The extension isn't iOS's credential provider." >&2; exit 1; }
+# Simulator builds keep their entitlements in the binary's __entitlements
+# section, not the signature, so read both.
+section=$(mktemp)
+segedit "$extension/AutoFill" -extract __TEXT __entitlements "$section" 2> /dev/null || true
+entitlements=$(codesign -d --entitlements - --xml "$extension" 2> /dev/null; cat "$section")
+for needed in com.apple.developer.authentication-services.autofill-credential-provider group.com.passbundle.app com.passbundle.app.shared; do
+  grep -q "$needed" <<< "$entitlements" || { echo "The extension is missing $needed." >&2; exit 1; }
+done
+# Xcode's debug builds keep an executable's code in a .debug.dylib beside it.
+binaries=("$extension/AutoFill")
+[ -f "$extension/AutoFill.debug.dylib" ] && binaries+=("$extension/AutoFill.debug.dylib")
+[ "$(nm -gU "${binaries[@]}" 2> /dev/null | grep -c '_pb_fillable$')" -gt 0 ] || { echo "The extension doesn't have the core." >&2; exit 1; }
+echo "The AutoFill extension is in the app, with its entitlements and the core."

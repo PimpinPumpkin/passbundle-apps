@@ -111,6 +111,8 @@ class VaultScreenState extends State<VaultScreen> {
       showMessage(context, answer.error ?? 'Couldn\'t sync.');
     }
     reload();
+    // iOS's suggestions above the keyboard, from what's in the vault now.
+    Core.suggest();
   }
 
   List<Map<String, dynamic>> get shown => switch (filter) {

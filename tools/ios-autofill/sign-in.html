@@ -1,0 +1,27 @@
+<!doctype html>
+<!-- A website's sign-in form, for tools/ios-autofill-test.sh: PassBundle fills it
+     in Safari through iOS's AutoFill, and signing in says who signed in and how
+     long the password was (never the password). -->
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sign in</title>
+<style>
+  body { font: 18px -apple-system, sans-serif; margin: 40px 24px; }
+  input, button { display: block; width: 100%; box-sizing: border-box; font: inherit; margin: 12px 0; padding: 10px; }
+</style>
+<h1>Sign in</h1>
+<form id="form" action="#">
+  <input id="username" name="username" autocomplete="username" placeholder="Email" aria-label="Email">
+  <input id="password" name="password" type="password" autocomplete="current-password" placeholder="Password" aria-label="Password">
+  <button>Sign in</button>
+</form>
+<p id="result"></p>
+<script>
+  document.getElementById("form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    const username = document.getElementById("username").value;
+    const password = document.getElementById("password").value;
+    document.getElementById("result").textContent =
+      `Signed in as ${username}, password ${password.length} characters`;
+  });
+</script>

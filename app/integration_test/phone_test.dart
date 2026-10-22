@@ -151,6 +151,12 @@ void main() {
       );
       await tester.tap(find.text('Sign in'));
       await pumpUntil(tester, find.text('Saved before the phone signed in'));
+      if (Platform.isIOS) {
+        // Kept where the AutoFill extension reads it too, and iOS may suggest
+        // the login with a website, by its username and domain.
+        expect(dir, contains('/Shared/AppGroup/'));
+        expect((await Core.suggest())['count'], 1);
+      }
 
       if (Platform.isAndroid) {
         // Kept sealed by the Keystore: one file, of the IV, ciphertext, and
