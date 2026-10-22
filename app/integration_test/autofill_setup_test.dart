@@ -127,9 +127,45 @@ void main() {
     );
     File('$dir/autofill-updated').writeAsStringSync('');
 
-    // Then it leaves this file (run-as), and this ends.
+    // Where the script trusted the test app as a browser earlier (Android
+    // 11 and later), Settings lists it, and stopping trusting it there takes
+    // it off; elsewhere the script goes on to the end.
+    final untrust = File('$dir/autofill-untrust');
     final done = File('$dir/autofill-done');
-    final end = DateTime.now().add(const Duration(minutes: 2));
+    var end = DateTime.now().add(const Duration(minutes: 2));
+    while (!untrust.existsSync() &&
+        !done.existsSync() &&
+        DateTime.now().isBefore(end)) {
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(seconds: 1)),
+      );
+    }
+    if (untrust.existsSync()) {
+      // Back in front: the cover the app shows while it's away fades.
+      await tester.pump(const Duration(seconds: 2));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Settings'));
+      await pumpUntil(tester, find.text('Browsers you trust for autofill'));
+      expect(find.text('com.passbundle.autofilltest'), findsOneWidget);
+      // Down Settings as far as it (a small screen shows only the top).
+      await tester.ensureVisible(find.text('Stop trusting'));
+      await tester.pump(const Duration(milliseconds: 400));
+      await tester.tap(find.text('Stop trusting'));
+      await pumpUntil(tester, find.text('Close'));
+      for (var i = 0; i < 50; i++) {
+        await tester.pump(const Duration(milliseconds: 100));
+        if (find.text('Browsers you trust for autofill').evaluate().isEmpty) {
+          break;
+        }
+      }
+      expect(find.text('Browsers you trust for autofill'), findsNothing);
+      await tester.tap(find.text('Close'));
+      await tester.pump(const Duration(milliseconds: 400));
+      File('$dir/autofill-untrusted').writeAsStringSync('');
+    }
+
+    // Then it leaves this file (run-as), and this ends.
+    end = DateTime.now().add(const Duration(minutes: 2));
     while (!done.existsSync() && DateTime.now().isBefore(end)) {
       await tester.runAsync(
         () => Future<void>.delayed(const Duration(seconds: 1)),

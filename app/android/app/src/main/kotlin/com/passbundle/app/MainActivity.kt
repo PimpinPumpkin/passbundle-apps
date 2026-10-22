@@ -94,6 +94,12 @@ class MainActivity : FlutterActivity() {
                             Attachments.saveToDownloads(this, id, attachment, name) { answer -> result.success(answer) }
                         }
                     }
+                    // Browsers the person trusted for autofill (Browsers.kt), and stopping.
+                    "trustedBrowsers" -> result.success(Browsers.trusted(this))
+                    "untrustBrowser" -> {
+                        call.argument<String>("package")?.let { Browsers.untrust(this, it) }
+                        result.success(true)
+                    }
                     else -> result.notImplemented()
                 }
             }

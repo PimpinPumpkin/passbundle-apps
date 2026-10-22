@@ -18,7 +18,10 @@
 #      PassBundle; accepting opens PassBundle's editor, filled in, and the
 #      app's half saves it;
 #   5. signing in again with a new password for it, accepting opens that
-#      login, with the new password, and the app's half saves it.
+#      login, with the new password, and the app's half saves it;
+#   6. the app's Settings lists the test app as a trusted browser, and
+#      stopping trusting it there means the website's login isn't offered
+#      on its screen again (Android 11 and later, as for trusting it).
 #
 # Needs an emulator, a test server (PB_TEST_SERVER, tools/test-server.sh), and
 # what tools/android-app-test.sh needs.
@@ -308,6 +311,23 @@ echo "Saving a new password for it"
 sign_in_and_save new@example.test not-a-real-password-changed
 reached autofill-updated "PassBundle never updated the sign-in."
 echo "Updated: the same login has the new password."
+
+# Only where the test app was trusted (Android 11 and later, above).
+if [ "$(a shell getprop ro.build.version.sdk | tr -d '\r')" -ge 30 ]; then
+  echo "Stopping trusting the test app as a browser, in Settings"
+  # PassBundle in front and the screen on, so its screens aren't covered.
+  a shell input keyevent KEYCODE_WAKEUP
+  a shell wm dismiss-keyguard
+  a shell am start -n com.passbundle.app/.MainActivity > /dev/null
+  a shell run-as com.passbundle.app touch files/autofill-untrust
+  reached autofill-untrusted "PassBundle's Settings never stopped trusting the test app."
+  a shell am force-stop com.passbundle.autofilltest
+  a shell am start -W -n com.passbundle.autofilltest/.ClaimsWebsiteActivity > /dev/null
+  tap "id=com.passbundle.autofilltest:id/username"
+  shown "^Trust Autofill test as a browser first"
+  [ -z "$(where '^Bank website')" ] || { echo "The website's login was still offered after the app stopped being trusted." >&2; exit 1; }
+  echo "Untrusted: the website's login isn't offered there again."
+fi
 
 # Passkeys (Android 14 and later): the test app makes one in PassBundle
 # through Android's Credential Manager, then signs in with it, checking what

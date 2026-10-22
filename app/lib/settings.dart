@@ -53,6 +53,9 @@ class _SettingsDialogState extends State<SettingsDialog> {
   late Map<String, dynamic> preferences = core.preferences();
   late final Map<String, dynamic> policy = core.lockPolicy();
   Map<String, dynamic>? status;
+
+  /// Browsers trusted for Android's autofill (none elsewhere).
+  List<Map<String, String>> browsers = const [];
   bool working = false;
   String? note;
 
@@ -124,7 +127,19 @@ class _SettingsDialogState extends State<SettingsDialog> {
 
   Future<void> refresh() async {
     final next = await Core.biometricStatus();
-    if (mounted) setState(() => status = next);
+    final trusted = await Core.trustedBrowsers();
+    if (mounted) {
+      setState(() {
+        status = next;
+        browsers = trusted;
+      });
+    }
+  }
+
+  Future<void> untrust(String package) async {
+    await Core.untrustBrowser(package);
+    final trusted = await Core.trustedBrowsers();
+    if (mounted) setState(() => browsers = trusted);
   }
 
   Future<void> turn(bool on, String method) async {
@@ -252,6 +267,29 @@ class _SettingsDialogState extends State<SettingsDialog> {
                 subtitle: sleepNote.isEmpty ? null : Text(sleepNote),
                 contentPadding: EdgeInsets.zero,
               ),
+              if (browsers.isNotEmpty) ...[
+                const Divider(height: 24),
+                Text(
+                  'Browsers you trust for autofill',
+                  style: Theme.of(context).textTheme.titleSmall,
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  "PassBundle fills a website's logins in these too.",
+                  style: TextStyle(color: context.colors.muted, fontSize: 13),
+                ),
+                for (final b in browsers)
+                  ListTile(
+                    leading: const Icon(Icons.public_rounded),
+                    title: Text(b['name']!),
+                    subtitle: Text(b['package']!),
+                    trailing: TextButton(
+                      onPressed: () => untrust(b['package']!),
+                      child: const Text('Stop trusting'),
+                    ),
+                    contentPadding: EdgeInsets.zero,
+                  ),
+              ],
               if (note != null) ...[
                 const SizedBox(height: 8),
                 Text(

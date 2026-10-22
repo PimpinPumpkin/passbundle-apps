@@ -111,7 +111,7 @@ void main() {
       final server = await HttpServer.bindSecure('localhost', 0, context);
       server.listen((request) => request.response.close());
       try {
-        await tester.tap(find.text('Sign out').first);
+        await tapWhenStill(tester, find.text('Sign out').first);
         await pumpUntil(tester, find.text('Sign out?'));
         await tester.tap(find.widgetWithText(FilledButton, 'Sign out'));
         await pumpUntil(tester, find.text('Sign in to PassBundle'));
@@ -267,7 +267,7 @@ void main() {
       // Signing out turns it off: the core asks Kotlin to delete the key and the sealed user key.
       await tester.tap(find.byTooltip('Lock'));
       await pumpUntil(tester, find.text('Sign out'));
-      await tester.tap(find.text('Sign out').first);
+      await tapWhenStill(tester, find.text('Sign out').first);
       await pumpUntil(tester, find.text('Sign out?'));
       await tester.tap(find.widgetWithText(FilledButton, 'Sign out'));
       await pumpUntil(tester, find.text('Sign in to PassBundle'));
