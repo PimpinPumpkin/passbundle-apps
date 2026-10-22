@@ -56,8 +56,10 @@ object Responses {
         val ids = fields.ids
         if (ids.isEmpty()) return null
         Core.openIfClosed(context.filesDir.absolutePath)
-        val trusted = fields.webDomain != null && Browsers.trusts(context, fields.packageName)
-        val domain = fields.webDomain.takeIf { trusted }
+        // Only a hostname counts as a page's domain, and only from a browser.
+        val claimed = Browsers.domain(fields.webDomain)
+        val trusted = claimed != null && Browsers.trusts(context, fields.packageName)
+        val domain = claimed.takeIf { trusted }
         val answer = JSONObject(Core.fillable(fields.packageName, domain ?: "") ?: return null)
         if (answer.optBoolean("busy") || answer.optBoolean("signedOut")) return null
         val save = saveInfo(fields)
@@ -74,7 +76,7 @@ object Responses {
         val items = answer.optJSONArray("items") ?: return null
         val response = FillResponse.Builder()
         save?.let { response.setSaveInfo(it) }
-        val offerTrust = fields.webDomain != null && !trusted && Browsers.couldBe(context, fields.packageName)
+        val offerTrust = claimed != null && !trusted && Browsers.couldBe(context, fields.packageName)
         // Nothing to fill: only the offer to save what the person signs in with.
         if (items.length() == 0 && !offerTrust) return save?.let { response.build() }
         for (i in 0 until items.length()) {
@@ -93,7 +95,7 @@ object Responses {
         if (offerTrust) {
             val app = Browsers.label(context, fields.packageName)
             @Suppress("DEPRECATION")
-            val dataset = Dataset.Builder(presentation(context, "Logins for ${fields.webDomain}", "Trust $app as a browser first"))
+            val dataset = Dataset.Builder(presentation(context, "Logins for $claimed", "Trust $app as a browser first"))
             for (field in ids) {
                 @Suppress("DEPRECATION")
                 dataset.setValue(field, null)

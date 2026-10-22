@@ -93,6 +93,16 @@ shown() {
   return 1
 }
 
+# Every browser on the list is visible to PassBundle (its manifest's <queries>).
+python3 - app/android/app/src/main/assets/browsers.json app/android/app/src/main/AndroidManifest.xml <<'PY'
+import json, re, sys
+listed = {a["info"]["package_name"] for a in json.load(open(sys.argv[1]))["apps"] if a["type"] == "android"}
+queried = set(re.findall(r'<package android:name="([^"]+)"', open(sys.argv[2]).read()))
+missing = sorted(listed - queried)
+if missing:
+    sys.exit(f"Browsers missing from the manifest's <queries>: {', '.join(missing)}")
+PY
+
 echo "The test app"
 (cd app/android && ./gradlew -q :autofilltest:assembleDebug)
 a install -r app/build/autofilltest/outputs/apk/debug/autofilltest-debug.apk > /dev/null
@@ -150,6 +160,8 @@ shown "^Trust Autofill test as a browser first"
 # Trusted, in PassBundle's own dialog: then the website's login fills.
 tap "^Trust Autofill test as a browser first"
 shown "^Trust Autofill test as a browser\?"
+# Trust can't be tapped for its first moment.
+sleep 2
 tap "^(Trust|TRUST)$"
 tap "^Bank website"
 shown "^bank@example.test$"

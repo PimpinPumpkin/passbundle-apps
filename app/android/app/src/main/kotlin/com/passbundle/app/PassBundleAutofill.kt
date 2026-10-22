@@ -74,7 +74,7 @@ class PassBundleAutofill : AutofillService() {
         val (username, password) = Fields.values(structure, fields)
         if (password.isNullOrEmpty()) return callback.onSuccess()
         // A page's domain only from a browser (Browsers.kt); another app's sign-in is saved for the app.
-        val domain = fields.webDomain?.takeIf { Browsers.trusts(this, fields.packageName) }
+        val domain = Browsers.domain(fields.webDomain)?.takeIf { Browsers.trusts(this, fields.packageName) }
         val name = domain ?: Browsers.label(this, fields.packageName)
         offer(
             mapOf(
