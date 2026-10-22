@@ -1,7 +1,8 @@
 //! Where the refresh token is kept: the OS's secret store, Keychain (macOS,
 //! iOS), Credential Manager (Windows), or Secret Service (Linux). Where
 //! there's none, such as a Linux desktop without a keyring running, nothing is
-//! kept and the person signs in again next time. Tests use a store in memory,
+//! kept and the person signs in again next time. Android's comes with the
+//! Keystore (docs/phones.md); until then it keeps nothing. Tests use a store in memory,
 //! so they never touch the real one.
 
 use std::collections::HashMap;
@@ -16,6 +17,7 @@ pub trait SecretStore: Send {
     fn forget(&self, server: &str, email: &str);
 }
 
+#[cfg(not(target_os = "android"))]
 const SERVICE: &str = "PassBundle";
 
 fn account(server: &str, email: &str) -> String {
@@ -25,12 +27,27 @@ fn account(server: &str, email: &str) -> String {
 /// The OS's own secret store.
 pub struct OsSecretStore;
 
+#[cfg(target_os = "android")]
+impl SecretStore for OsSecretStore {
+    fn keep(&self, _server: &str, _email: &str, _refresh_token: &str) -> bool {
+        false
+    }
+
+    fn get(&self, _server: &str, _email: &str) -> Option<Zeroizing<String>> {
+        None
+    }
+
+    fn forget(&self, _server: &str, _email: &str) {}
+}
+
+#[cfg(not(target_os = "android"))]
 impl OsSecretStore {
     fn entry(server: &str, email: &str) -> Option<keyring::Entry> {
         keyring::Entry::new(SERVICE, &account(server, email)).ok()
     }
 }
 
+#[cfg(not(target_os = "android"))]
 impl SecretStore for OsSecretStore {
     fn keep(&self, server: &str, email: &str, refresh_token: &str) -> bool {
         Self::entry(server, email).is_some_and(|e| e.set_password(refresh_token).is_ok())
