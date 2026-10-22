@@ -676,6 +676,123 @@ impl App {
         })
     }
 
+    /// Makes a passkey for a site (docs/core.md, "Passkeys", "Making one"):
+    /// a new ES256 key in upstream's format, saved into the login `new.login`
+    /// names (replacing a passkey it had, and filling in its username if it
+    /// had none) or a new login for the site, before the site hears of it.
+    /// Refused, with nothing made, if the vault already has one of the site's
+    /// `exclude` credentials; offline, it's refused too.
+    pub fn passkey_create(&mut self, new: &NewPasskey<'_>) -> Result<PasskeyMade> {
+        use crate::passkey::{
+            attestation_object, authenticator_data, credential_id, flags, Attested, Key,
+        };
+        use base64::Engine;
+        let b64url = |bytes: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        let vault = self.vault.as_ref().ok_or(Error::SignedOut)?;
+        let excluded = vault.items.iter().filter(|i| !i.deleted).any(|i| {
+            i.passkey.as_ref().is_some_and(|p| {
+                p.rp_id == new.rp_id
+                    && credential_id(&p.credential_id).is_ok_and(|id| new.exclude.contains(&id))
+            })
+        });
+        if excluded {
+            return Err(Error::Refused(
+                "PassBundle already has a passkey for this account on this site",
+            ));
+        }
+        let editing = match new.login {
+            Some(id) => {
+                let item = vault.item(id).ok_or(Error::Damaged("no such item"))?;
+                if item.kind != crate::vault::ItemKind::Login {
+                    return Err(Error::Refused("a passkey goes in a login"));
+                }
+                if !self.may_use(item) {
+                    return Err(Error::MasterPasswordFirst);
+                }
+                Some(item)
+            }
+            None => None,
+        };
+        let mut draft = match editing {
+            Some(item) => ItemDraft::of(item),
+            None => ItemDraft {
+                name: new
+                    .rp_name
+                    .filter(|n| !n.trim().is_empty())
+                    .unwrap_or(new.rp_id)
+                    .to_owned(),
+                uris: vec![format!("https://{}", new.rp_id)],
+                ..ItemDraft::default()
+            },
+        };
+        if draft.username.as_deref().is_none_or(str::is_empty) {
+            draft.username = new.user_name.map(str::to_owned);
+        }
+        let key = Key::generate();
+        let stored_id = crate::passkey::new_credential_id();
+        let raw_id = credential_id(&stored_id)?;
+        let value_key = vault.value_key(&draft, editing)?;
+        let enc = |text: &str| serde_json::Value::String(value_key.encrypt_str(text).to_string());
+        let credential = serde_json::json!([{
+            "credentialId": enc(&stored_id),
+            "keyType": enc("public-key"),
+            "keyAlgorithm": enc("ECDSA"),
+            "keyCurve": enc("P-256"),
+            "keyValue": enc(&key.to_stored()?),
+            "rpId": enc(new.rp_id),
+            "rpName": new.rp_name.map(enc),
+            "userHandle": enc(&b64url(new.user_handle)),
+            "userName": new.user_name.map(enc),
+            "counter": enc("0"),
+            "userDisplayName": new.user_display_name.map(enc),
+            "discoverable": enc(if new.discoverable { "true" } else { "false" }),
+            "creationDate": crate::vault::now_iso8601(),
+        }]);
+        let body = vault.encrypt_item_with(&draft, editing, Some(credential))?;
+        let collection_ids = editing
+            .map(|i| i.collection_ids.clone())
+            .unwrap_or_default();
+        let (Some(server), Some(session)) = (&self.server, self.session.as_mut()) else {
+            return Err(Error::SignedOut);
+        };
+        server.save_item(session, new.login, body, &collection_ids)?;
+        self.sync()?;
+        let item_id = self
+            .vault
+            .as_ref()
+            .and_then(|v| {
+                v.items.iter().find(|i| {
+                    i.passkey
+                        .as_ref()
+                        .is_some_and(|p| p.credential_id == stored_id)
+                })
+            })
+            .map(|i| i.id.clone())
+            .ok_or(Error::Damaged(
+                "the passkey didn't come back from the server",
+            ))?;
+        let mut set = flags::USER_PRESENT | flags::BACKUP_ELIGIBLE | flags::BACKED_UP;
+        if new.user_verified {
+            set |= flags::USER_VERIFIED;
+        }
+        let authenticator_data = authenticator_data(
+            new.rp_id,
+            set,
+            0,
+            Some(&Attested {
+                credential_id: &raw_id,
+                public: key.public(),
+            }),
+        );
+        Ok(PasskeyMade {
+            attestation_object: attestation_object(&authenticator_data),
+            authenticator_data,
+            public_key: key.public_der()?,
+            credential_id: raw_id,
+            item_id,
+        })
+    }
+
     pub fn trash(&mut self, id: &str) -> Result<()> {
         let (Some(server), Some(session)) = (&self.server, self.session.as_mut()) else {
             return Err(Error::SignedOut);
@@ -738,6 +855,34 @@ impl App {
         .ok_or(Error::Damaged("nothing to copy"))?;
         Ok(secret)
     }
+}
+
+/// A passkey to make (`App::passkey_create`): what the site asked for.
+pub struct NewPasskey<'a> {
+    pub rp_id: &'a str,
+    pub rp_name: Option<&'a str>,
+    /// The site's ID for the account.
+    pub user_handle: &'a [u8],
+    pub user_name: Option<&'a str>,
+    pub user_display_name: Option<&'a str>,
+    /// The person proved who they are in this sign-up.
+    pub user_verified: bool,
+    pub discoverable: bool,
+    /// The login it goes in; None for a new login for the site.
+    pub login: Option<&'a str>,
+    /// The site's credentials it already has (`excludeCredentials`), raw.
+    pub exclude: &'a [Vec<u8>],
+}
+
+/// What making a passkey answers (WebAuthn's attestation), for the OS to
+/// hand the site, and the login it went in.
+pub struct PasskeyMade {
+    pub credential_id: Vec<u8>,
+    pub attestation_object: Vec<u8>,
+    pub authenticator_data: Vec<u8>,
+    /// SubjectPublicKeyInfo, DER.
+    pub public_key: Vec<u8>,
+    pub item_id: String,
 }
 
 /// What signing in with a passkey answers (WebAuthn's assertion), for the

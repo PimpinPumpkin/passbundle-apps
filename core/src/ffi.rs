@@ -973,6 +973,74 @@ pub unsafe extern "C" fn pb_passkey_assert(
     )
 }
 
+/// Makes a passkey for a site (docs/core.md, "Passkeys", "Making one"), from
+/// `{rpId, rpName, userHandle, userName, userDisplayName, userVerified,
+/// discoverable, login, exclude}` (IDs and the user handle in base64url;
+/// `login` the item it goes in, or null for a new login): `{ok, itemId,
+/// credentialId, attestationObject, authenticatorData, publicKey}` in
+/// base64url, or the words to show. Waits on the network: it's saved first.
+///
+/// # Safety
+/// `request` is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_passkey_create(request: *const c_char) -> *mut c_char {
+    use base64::Engine;
+    let decode = |text: &str| {
+        base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(text.trim_end_matches('='))
+            .ok()
+    };
+    let r: Value = serde_json::from_str(&text(request)).unwrap_or(Value::Null);
+    let (Some(rp_id), Some(user_handle)) = (
+        r["rpId"].as_str().map(str::to_owned),
+        r["userHandle"].as_str().and_then(decode),
+    ) else {
+        return out(failed(Error::Damaged(
+            "a passkey request without a site or an account",
+        )));
+    };
+    let exclude: Vec<Vec<u8>> = r["exclude"]
+        .as_array()
+        .map(|ids| {
+            ids.iter()
+                .filter_map(|id| id.as_str().and_then(decode))
+                .collect()
+        })
+        .unwrap_or_default();
+    let text_of = |key: &str| r[key].as_str().map(str::to_owned);
+    let (rp_name, user_name, user_display_name, login) = (
+        text_of("rpName"),
+        text_of("userName"),
+        text_of("userDisplayName"),
+        text_of("login"),
+    );
+    let user_verified = r["userVerified"].as_bool() == Some(true);
+    let discoverable = r["discoverable"].as_bool() != Some(false);
+    with_app_waiting(|app| {
+        match app.passkey_create(&crate::app::NewPasskey {
+            rp_id: &rp_id,
+            rp_name: rp_name.as_deref(),
+            user_handle: &user_handle,
+            user_name: user_name.as_deref(),
+            user_display_name: user_display_name.as_deref(),
+            user_verified,
+            discoverable,
+            login: login.as_deref(),
+            exclude: &exclude,
+        }) {
+            Ok(made) => json!({
+                "ok": true,
+                "itemId": made.item_id,
+                "credentialId": base64url(&made.credential_id),
+                "attestationObject": base64url(&made.attestation_object),
+                "authenticatorData": base64url(&made.authenticator_data),
+                "publicKey": base64url(&made.public_key),
+            }),
+            Err(e) => failed(e),
+        }
+    })
+}
+
 fn base64url(bytes: &[u8]) -> String {
     use base64::Engine;
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)

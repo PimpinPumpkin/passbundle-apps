@@ -613,7 +613,7 @@ fn uri_checksum(uri: &str) -> String {
 const PASSWORD_HISTORY: usize = 5;
 
 /// Now, as upstream's dates are written (ISO 8601, UTC, milliseconds).
-fn now_iso8601() -> String {
+pub(crate) fn now_iso8601() -> String {
     let since = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
@@ -873,6 +873,26 @@ impl Vault {
         self.encrypt_item_with(draft, editing, None)
     }
 
+    /// The key an item's values are encrypted with: its own item key if it
+    /// has one, else its owner's (the organization's, or the user's).
+    pub fn value_key<'a>(
+        &'a self,
+        draft: &ItemDraft,
+        editing: Option<&'a Item>,
+    ) -> Result<&'a SymmetricKey> {
+        if let Some(key) = editing.and_then(|i| i.kept.item_key.as_ref()) {
+            return Ok(key);
+        }
+        match &draft.organization_id {
+            Some(org) => self
+                .keys
+                .organizations
+                .get(org)
+                .ok_or(Error::Damaged("that organization's key doesn't open")),
+            None => Ok(&self.keys.user),
+        }
+    }
+
     /// `encrypt_item`, with the login's passkeys (`fido2Credentials`, already
     /// encrypted) in place of the ones it has: a passkey's raised counter.
     pub fn encrypt_item_with(
@@ -900,16 +920,8 @@ impl Vault {
                 ));
             }
         }
-        let owner = match &draft.organization_id {
-            Some(org) => self
-                .keys
-                .organizations
-                .get(org)
-                .ok_or(Error::Damaged("that organization's key doesn't open"))?,
-            None => &self.keys.user,
-        };
         let kept = editing.map(|i| &i.kept);
-        let key = kept.and_then(|k| k.item_key.as_ref()).unwrap_or(owner);
+        let key = self.value_key(draft, editing)?;
         let enc = |text: &str| key.encrypt_str(text).to_string();
         let enc_opt = |text: Option<&str>| text.filter(|t| !t.is_empty()).map(enc);
         let now = now_iso8601();
