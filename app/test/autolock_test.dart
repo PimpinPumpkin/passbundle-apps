@@ -1,7 +1,8 @@
 // Locking by itself, against the real core (PB_CORE_LIB): the native
 // runner's word that the computer is about to sleep, the core deciding on its
-// own, and the choices in Settings (docs/core.md, "Locking by itself"). When
-// the core locks, whatever was open over the vault closes too.
+// own, and the choices in Settings (docs/core.md, "Locking by itself"), within
+// an organization's policy ("Locking by policy"). When the core locks,
+// whatever was open over the vault closes too.
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -11,12 +12,15 @@ import 'package:passbundle/main.dart';
 
 import 'support.dart';
 
-Future<void> unlockSample(WidgetTester tester) async {
+Future<void> unlockSample(
+  WidgetTester tester, {
+  List<Map<String, dynamic>>? policies,
+}) async {
   tester.view.physicalSize = const Size(1280, 800);
   tester.view.devicePixelRatio = 1;
   addTearDown(tester.view.reset);
   // Each test turns "when the computer sleeps" on itself, right where it's about it.
-  openSample();
+  openSample(policies: policies);
   await tester.pumpWidget(const PassBundleApp());
   await tester.enterText(find.byType(TextField), samplePassword);
   await tester.tap(find.text('Unlock'));
@@ -109,4 +113,91 @@ void main() {
     expect(find.text('Backup service'), findsWidgets);
     expect(Core().state()['state'], 'unlocked');
   });
+
+  /// An organization's "Vault lock" policy, as the server sends it with a sync.
+  Map<String, dynamic> vaultLock(Map<String, dynamic> data) => {
+    'id': 'p1',
+    'organizationId': 'o1',
+    'type': 9,
+    'enabled': true,
+    'data': data,
+    'object': 'policy',
+  };
+
+  testWidgets(
+    "Settings offers only the waits an organization's policy allows, and says why",
+    (tester) async {
+      await unlockSample(
+        tester,
+        policies: [
+          vaultLock({'type': 'custom', 'minutes': 30, 'action': 'logOut'}),
+        ],
+      );
+      await openSettings(tester);
+      // The person's 15 minutes is within it, and stays.
+      expect(find.text('15 minutes'), findsOneWidget);
+      expect(
+        find.textContaining(
+          'Your organization signs you out after 30 minutes at most',
+        ),
+        findsOneWidget,
+      );
+      await tester.tap(find.text('15 minutes'));
+      await tester.pump(const Duration(milliseconds: 400));
+      for (final allowed in ['1 minute', '5 minutes', '30 minutes']) {
+        expect(find.text(allowed), findsWidgets);
+      }
+      expect(find.text('1 hour'), findsNothing);
+      expect(find.text('When the app closes'), findsNothing);
+      await tester.tap(find.text('30 minutes').last);
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(Core().preferences()['lockAfterMinutes'], 30);
+    },
+  );
+
+  testWidgets(
+    "a longer wait chosen before the policy shows as the policy's, and stays the person's",
+    (tester) async {
+      await unlockSample(
+        tester,
+        policies: [
+          vaultLock({'minutes': 5}),
+        ],
+      );
+      Core().setPreferences({'lockAfterMinutes': null, 'lockOnSleep': false});
+      await openSettings(tester);
+      expect(find.text('5 minutes'), findsOneWidget);
+      expect(
+        find.textContaining(
+          'Your organization locks PassBundle after 5 minutes at most',
+        ),
+        findsOneWidget,
+      );
+      expect(Core().preferences()['lockAfterMinutes'], isNull);
+    },
+  );
+
+  testWidgets(
+    "with the policy's \"when the computer locks\", that switch stays on",
+    (tester) async {
+      await unlockSample(
+        tester,
+        policies: [
+          vaultLock({'type': 'onSystemLock'}),
+        ],
+      );
+      await openSettings(tester);
+      final sleep = tester.widget<SwitchListTile>(
+        find.widgetWithText(SwitchListTile, 'Lock when the computer sleeps'),
+      );
+      expect(sleep.value, isTrue);
+      expect(sleep.onChanged, isNull);
+      expect(
+        find.textContaining('Your organization keeps this on'),
+        findsOneWidget,
+      );
+      // The person's own choice is still theirs.
+      expect(Core().preferences()['lockOnSleep'], isFalse);
+    },
+  );
 }

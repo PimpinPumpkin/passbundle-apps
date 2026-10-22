@@ -12,6 +12,7 @@ use crate::clipboard;
 use crate::crypto::SymmetricKey;
 use crate::error::{Error, Result};
 use crate::kdf::normalize_email;
+use crate::lock_policy::LockPolicy;
 use crate::secrets::SecretStore;
 use crate::server::{Device, PendingSignIn, Server, Session, SignIn, TwoFactor};
 use crate::store::{Settings, Store};
@@ -54,6 +55,8 @@ pub struct App {
     /// The agent's address and program, when not the ones installed next to this app (tests).
     agent: Option<(PathBuf, PathBuf)>,
     preferences: Preferences,
+    /// The organizations' "Vault lock" policy, from the kept sync.
+    policy: LockPolicy,
     autolock: AutoLock,
 }
 
@@ -74,6 +77,7 @@ impl App {
             vault: None,
             agent: None,
             preferences,
+            policy: LockPolicy::default(),
             autolock: AutoLock::new(Instant::now(), SystemTime::now()),
         }
     }
@@ -194,6 +198,11 @@ impl App {
                 user_key: vault.user_key().clone(),
             });
         self.vault = Some(vault);
+        self.policy = self
+            .store
+            .sync()
+            .map(|text| LockPolicy::from_sync(&text))
+            .unwrap_or_default();
         self.autolock = AutoLock::new(Instant::now(), SystemTime::now());
     }
 
@@ -296,6 +305,7 @@ impl App {
             other => other?,
         };
         self.store.save_sync(&text)?;
+        self.policy = LockPolicy::from_sync(&text);
         // The server may have issued a new refresh token.
         self.secrets
             .keep(&settings.server, &settings.email, &session.refresh_token);
@@ -306,6 +316,25 @@ impl App {
     /// When to lock by itself (docs/core.md, "Locking by itself").
     pub fn preferences(&self) -> Preferences {
         self.preferences
+    }
+
+    /// The organizations' "Vault lock" policy (docs/core.md, "Locking by policy").
+    pub fn lock_policy(&self) -> LockPolicy {
+        self.policy
+    }
+
+    /// What it locks by: the person's choices held to the policy.
+    fn held(&self) -> Preferences {
+        self.policy.apply(&self.preferences)
+    }
+
+    /// It's time: locks, or signs out if the policy says so.
+    fn time_up(&mut self) {
+        if self.policy.sign_out {
+            self.sign_out();
+        } else {
+            self.lock();
+        }
     }
 
     pub fn set_preferences(&mut self, preferences: Preferences) -> Result<()> {
@@ -334,30 +363,30 @@ impl App {
         wall: SystemTime,
     ) -> Option<Reason> {
         self.vault.as_ref()?;
-        let reason = self
-            .autolock
-            .check(&self.preferences, readings, now, wall)?;
-        self.lock();
+        let held = self.held();
+        let reason = self.autolock.check(&held, readings, now, wall)?;
+        self.time_up();
         Some(reason)
     }
 
-    /// The app left the screen (a phone's app switcher or home): locks if the
-    /// person chose "Immediately". Returns whether it locked.
+    /// The app left the screen (a phone's app switcher or home, a computer's
+    /// window closed or minimized): locks if the person chose "Immediately"
+    /// on a phone, or the policy says so. Returns whether it locked.
     pub fn left(&mut self) -> bool {
-        if self.vault.is_none() || !self.preferences.immediately() {
+        if self.vault.is_none() || !self.held().immediately() {
             return false;
         }
-        self.lock();
+        self.time_up();
         true
     }
 
     /// The OS says the computer is about to sleep: locks if the person chose
-    /// that. Returns whether it locked.
+    /// that, or the policy says so. Returns whether it locked.
     pub fn sleeping(&mut self) -> bool {
-        if self.vault.is_none() || !self.preferences.lock_on_sleep {
+        if self.vault.is_none() || !self.held().lock_on_sleep {
             return false;
         }
-        self.lock();
+        self.time_up();
         true
     }
 

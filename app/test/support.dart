@@ -1,6 +1,7 @@
 // Shared by the app's tests: the real fonts (tests otherwise draw boxes), the
 // core opened on a folder of the test's own, and waiting for slow calls,
 // which run on real isolates outside the test's fake clock.
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/services.dart';
@@ -31,10 +32,19 @@ String openEmpty({bool lockOnSleep = false}) {
 }
 
 /// The core on a new folder holding the sample vault (test/sample): locked.
-String openSample({bool lockOnSleep = false}) {
+/// With `policies`, its kept sync has them, as the server sends them.
+String openSample({
+  bool lockOnSleep = false,
+  List<Map<String, dynamic>>? policies,
+}) {
   final dir = Directory.systemTemp.createTempSync('pb-app-test-').path;
   for (final name in ['settings.json', 'sync.json']) {
     File('test/sample/$name').copySync('$dir/$name');
+  }
+  if (policies != null) {
+    final sync = File('$dir/sync.json');
+    final json = jsonDecode(sync.readAsStringSync()) as Map<String, dynamic>;
+    sync.writeAsStringSync(jsonEncode({...json, 'policies': policies}));
   }
   Core().openAt(dir);
   machineDoesntLock(lockOnSleep);

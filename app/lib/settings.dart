@@ -1,7 +1,8 @@
 // Settings: unlocking with Windows Hello or Touch ID, through the desktop
 // agent and shared with the browser extension (docs/core.md, "Unlock with
 // Windows Hello or Touch ID"), and when the app locks by itself ("Locking by
-// itself").
+// itself"), within what an organization's policy allows ("Locking by
+// policy").
 import 'package:flutter/material.dart';
 
 import 'core.dart';
@@ -28,9 +29,29 @@ String lockAfterName(int minutes) => switch (minutes) {
   final m => '$m minutes',
 };
 
+/// The organization's policy, said as the person reads it: what happens, and
+/// when, or null if it doesn't limit the wait.
+String? policyWait(Map<String, dynamic> policy) {
+  final does = policy['signOut'] == true ? 'signs you out' : 'locks PassBundle';
+  final max = policy['maxMinutes'] as int?;
+  if (policy['immediately'] == true) {
+    return isPhone
+        ? 'Your organization $does when you leave PassBundle'
+        : "Your organization $does when PassBundle's window closes or is minimized";
+  }
+  if (max != null) {
+    return 'Your organization $does after ${lockAfterName(max).toLowerCase()} at most';
+  }
+  if (policy['signOut'] == true) {
+    return 'Your organization signs you out instead of locking';
+  }
+  return null;
+}
+
 class _SettingsDialogState extends State<SettingsDialog> {
   final core = Core();
   late Map<String, dynamic> preferences = core.preferences();
+  late final Map<String, dynamic> policy = core.lockPolicy();
   Map<String, dynamic>? status;
   bool working = false;
   String? note;
@@ -49,22 +70,43 @@ class _SettingsDialogState extends State<SettingsDialog> {
   }
 
   Widget lockAfter() {
-    final minutes = (preferences['lockAfterMinutes'] as int?) ?? -1;
-    // A wait chosen some other way still shows as it is.
-    final choices = lockChoices.contains(minutes)
-        ? lockChoices
-        : [minutes, ...lockChoices];
+    final chosen = (preferences['lockAfterMinutes'] as int?) ?? -1;
+    // What it locks by, as the core holds the person's choice to the policy;
+    // their own choice is kept as it is.
+    final immediately = policy['immediately'] == true;
+    final max = policy['maxMinutes'] as int?;
+    final minutes = immediately
+        ? 0
+        : max == null
+        ? chosen
+        : chosen < 0
+        ? max
+        : chosen < max
+        ? chosen
+        : max;
+    final allowed = lockChoices.where(
+      (m) => immediately ? m == 0 : max == null || (m >= 0 && m <= max),
+    );
+    // A wait chosen or set some other way still shows as it is.
+    final choices = {...allowed, minutes}.toList()
+      ..sort((a, b) => (a < 0 ? 1 << 30 : a).compareTo(b < 0 ? 1 << 30 : b));
+    final note = policyWait(policy);
     return ListTile(
       leading: const Icon(Icons.lock_clock_outlined),
       title: const Text('Lock after'),
       subtitle: Text(
-        isPhone ? 'Away from PassBundle' : 'Without using the computer',
+        [
+          isPhone ? 'Away from PassBundle' : 'Without using the computer',
+          ?note,
+        ].join('\n'),
       ),
       trailing: DropdownButton<int>(
         value: minutes,
         underline: const SizedBox.shrink(),
-        onChanged: (m) =>
-            choose({'lockAfterMinutes': m == null || m < 0 ? null : m}),
+        onChanged: choices.length < 2
+            ? null
+            : (m) =>
+                  choose({'lockAfterMinutes': m == null || m < 0 ? null : m}),
         items: [
           for (final m in choices)
             DropdownMenuItem(value: m, child: Text(lockAfterName(m))),
@@ -171,6 +213,10 @@ class _SettingsDialogState extends State<SettingsDialog> {
         contentPadding: EdgeInsets.zero,
       );
     }
+    final sleepNote = [
+      if (!isPhone) 'Or when its screen locks',
+      if (policy['onSystemLock'] == true) 'Your organization keeps this on',
+    ].join('\n');
     return AlertDialog(
       title: const Text('Settings'),
       // Scrolls on a small phone, or with the keyboard up.
@@ -185,17 +231,19 @@ class _SettingsDialogState extends State<SettingsDialog> {
               const Divider(height: 24),
               lockAfter(),
               SwitchListTile(
-                value: preferences['lockOnSleep'] == true,
-                onChanged: (on) => choose({'lockOnSleep': on}),
+                value:
+                    preferences['lockOnSleep'] == true ||
+                    policy['onSystemLock'] == true,
+                onChanged: policy['onSystemLock'] == true
+                    ? null
+                    : (on) => choose({'lockOnSleep': on}),
                 secondary: const Icon(Icons.bedtime_outlined),
                 title: Text(
                   isPhone
                       ? 'Lock when the phone locks'
                       : 'Lock when the computer sleeps',
                 ),
-                subtitle: isPhone
-                    ? null
-                    : const Text('Or when its screen locks'),
+                subtitle: sleepNote.isEmpty ? null : Text(sleepNote),
                 contentPadding: EdgeInsets.zero,
               ),
               if (note != null) ...[
