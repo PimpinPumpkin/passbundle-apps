@@ -25,16 +25,21 @@ fi
 
 cd app
 # The simulator sometimes never finishes installing or launching the app
-# after the build (simctl stalls, with no output). A try that's still going
-# after 15 minutes (the test takes 5) is stopped, the simulator restarted,
-# and the test run once more; a test that fails isn't run again.
+# after the build (simctl stalls, with no output). A try that's said nothing
+# for five minutes after Xcode's build is done (a running test speaks within
+# a minute), or that's still going after 15 minutes (the test takes 5), is
+# stopped, the simulator restarted, and the test run again, up to three
+# times; a test that fails isn't run again.
+log=$(mktemp)
 try() {
+  : > "$log"
   set -m
-  flutter test integration_test/phone_test.dart -d "$device" ${defines[@]+"${defines[@]}"} &
-  local test=$! waited=0
+  (flutter test integration_test/phone_test.dart -d "$device" ${defines[@]+"${defines[@]}"} 2>&1 | tee "$log") &
+  local test=$! waited=0 quiet
   set +m
   while kill -0 "$test" 2> /dev/null; do
-    if [ "$waited" -ge 900 ]; then
+    quiet=$(($(date +%s) - $(stat -f %m "$log")))
+    if [ "$waited" -ge 900 ] || { grep -q "Xcode build done" "$log" && [ "$quiet" -ge 300 ]; }; then
       echo "The test stalled on the simulator; restarting it." >&2
       # The test's whole process group: Flutter, and the simctl it waits on.
       kill -- "-$test" 2> /dev/null || true
@@ -49,10 +54,10 @@ try() {
   done
   wait "$test"
 }
-status=0
-try || status=$?
-if [ "$status" = 124 ]; then
+status=124
+for _ in 1 2 3; do
+  [ "$status" = 124 ] || break
   status=0
   try || status=$?
-fi
+done
 exit "$status"
