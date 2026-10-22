@@ -7,6 +7,10 @@
 OTHER_LDFLAGS[sdk=iphoneos*] = $(inherited) $(PROJECT_DIR)/PassBundleCore.xcframework/ios-arm64/libpassbundle_core.a -framework Security -framework CoreFoundation
 OTHER_LDFLAGS[sdk=iphonesimulator*] = $(inherited) $(PROJECT_DIR)/PassBundleCore.xcframework/ios-arm64-simulator/libpassbundle_core.a -framework Security -framework CoreFoundation
 CODE_SIGN_ENTITLEMENTS = AutoFill/AutoFill.entitlements
+// Simulator builds put their entitlements in the code signature, as device
+// builds do, not a section of the binary: the simulator's Settings and
+// AutoFill read them from the signature to offer the AutoFill extension.
+ENTITLEMENTS_DESTINATION[sdk=iphonesimulator*] = Signature
 INFOPLIST_FILE = AutoFill/Info.plist
 PRODUCT_BUNDLE_IDENTIFIER = com.passbundle.app.autofill
 PRODUCT_NAME = $(TARGET_NAME)

@@ -65,13 +65,18 @@ built=$(find build/ios -path '*iphonesimulator*' -name Runner.app -type d | head
 extension="$built/PlugIns/AutoFill.appex"
 [ "$(plutil -extract NSExtension.NSExtensionPointIdentifier raw "$extension/Info.plist")" = com.apple.authentication-services-credential-provider-ui ] \
   || { echo "The extension isn't iOS's credential provider." >&2; exit 1; }
-# Simulator builds keep their entitlements in the binary's __entitlements
-# section, not the signature, so read both.
-section=$(mktemp)
-segedit "$extension/AutoFill" -extract __TEXT __entitlements "$section" 2> /dev/null || true
-entitlements=$(codesign -d --entitlements - --xml "$extension" 2> /dev/null; cat "$section")
-for needed in com.apple.developer.authentication-services.autofill-credential-provider group.com.passbundle.app com.passbundle.app.shared; do
-  grep -q "$needed" <<< "$entitlements" || { echo "The extension is missing $needed." >&2; exit 1; }
+# In the code signature, where the simulator's Settings and AutoFill read
+# them (ENTITLEMENTS_DESTINATION in the xcconfigs), for the app and the
+# extension both.
+for bundle in "$extension" "$built"; do
+  entitlements=$(codesign -d --entitlements - --xml "$bundle" 2> /dev/null || true)
+  for needed in com.apple.developer.authentication-services.autofill-credential-provider group.com.passbundle.app com.passbundle.app.shared; do
+    grep -q "$needed" <<< "$entitlements" || {
+      echo "$(basename "$bundle")'s signature is missing $needed:" >&2
+      codesign -d --entitlements - "$bundle" >&2 || true
+      exit 1
+    }
+  done
 done
 # Xcode's debug builds keep an executable's code in a .debug.dylib beside it.
 binaries=("$extension/AutoFill")
