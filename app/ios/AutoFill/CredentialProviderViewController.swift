@@ -569,7 +569,7 @@ struct ProviderView: View {
     password = ""
   }
 
-  private func row(_ login: Login, action: @escaping () -> Void) -> some View {
+  private func row(_ login: Provider.Login, action: @escaping () -> Void) -> some View {
     Button(action: action) {
       VStack(alignment: .leading, spacing: 2) {
         Text(login.name).font(.headline).foregroundStyle(Self.brand)
