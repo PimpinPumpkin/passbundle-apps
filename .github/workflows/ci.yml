@@ -228,7 +228,10 @@ jobs:
         run: |
           flutter config --no-analytics
           flutter --disable-analytics
+      # A limit of its own: the simulator sometimes stalls installing or
+      # launching the app, and this fails then rather than waiting out the job.
       - name: The app's tests, on an iPhone simulator (unlock, copying through Swift, locking, iOS's certificate checks, signing in with the Keychain keeping the session, and Face ID unlock)
+        timeout-minutes: 25
         run: tools/ios-app-test.sh
       - name: The server's log
         if: failure()
