@@ -583,6 +583,53 @@ impl App {
         self.sync()
     }
 
+    /// Makes a folder, its name under the user key, as folders are
+    /// (docs/core.md, "Items"), then syncs. Answers its id.
+    pub fn create_folder(&mut self, name: &str) -> Result<String> {
+        let name = Self::folder_name(name)?;
+        let vault = self.vault.as_ref().ok_or(Error::SignedOut)?;
+        let encrypted = vault.user_key().encrypt_str(&name).to_string();
+        let (Some(server), Some(session)) = (&self.server, self.session.as_mut()) else {
+            return Err(Error::SignedOut);
+        };
+        let id = server.create_folder(session, &encrypted)?;
+        self.sync()?;
+        Ok(id)
+    }
+
+    /// Renames a folder, then syncs.
+    pub fn rename_folder(&mut self, id: &str, name: &str) -> Result<()> {
+        let name = Self::folder_name(name)?;
+        let vault = self.vault.as_ref().ok_or(Error::SignedOut)?;
+        if !vault.folders.contains_key(id) {
+            return Err(Error::Damaged("no such folder"));
+        }
+        let encrypted = vault.user_key().encrypt_str(&name).to_string();
+        let (Some(server), Some(session)) = (&self.server, self.session.as_mut()) else {
+            return Err(Error::SignedOut);
+        };
+        server.rename_folder(session, id, &encrypted)?;
+        self.sync()
+    }
+
+    /// Deletes a folder, then syncs; its items stay, in no folder.
+    pub fn delete_folder(&mut self, id: &str) -> Result<()> {
+        let (Some(server), Some(session)) = (&self.server, self.session.as_mut()) else {
+            return Err(Error::SignedOut);
+        };
+        server.delete_folder(session, id)?;
+        self.sync()
+    }
+
+    /// A folder's name, trimmed; refused when empty.
+    fn folder_name(name: &str) -> Result<String> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(Error::Refused("a folder needs a name"));
+        }
+        Ok(name.to_owned())
+    }
+
     pub fn trash(&mut self, id: &str) -> Result<()> {
         let (Some(server), Some(session)) = (&self.server, self.session.as_mut()) else {
             return Err(Error::SignedOut);

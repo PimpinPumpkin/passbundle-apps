@@ -120,6 +120,15 @@ class Core {
   late final _totp = _lib.lookupFunction<_Str1, _Str1>('pb_totp');
   late final _save = _lib.lookupFunction<_Str2, _Str2>('pb_save');
   late final _trash = _lib.lookupFunction<_Str1, _Str1>('pb_trash');
+  late final _createFolder = _lib.lookupFunction<_Str1, _Str1>(
+    'pb_create_folder',
+  );
+  late final _renameFolder = _lib.lookupFunction<_Str2, _Str2>(
+    'pb_rename_folder',
+  );
+  late final _deleteFolder = _lib.lookupFunction<_Str1, _Str1>(
+    'pb_delete_folder',
+  );
   late final _generate = _lib.lookupFunction<_Str1, _Str1>('pb_generate');
   late final _generatorOptions = _lib.lookupFunction<_Str0, _Str0>(
     'pb_generator_options',
@@ -344,6 +353,20 @@ class Core {
 
   static Future<Answer> trash(String id) =>
       _background((c) => c._with([id], (p) => c._answer(c._trash(p[0]))));
+
+  /// Makes a folder, renames one, or deletes one (its items stay, in no
+  /// folder); each syncs after.
+  static Future<Answer> createFolder(String name) => _background(
+    (c) => c._with([name], (p) => c._answer(c._createFolder(p[0]))),
+  );
+
+  static Future<Answer> renameFolder(String id, String name) => _background(
+    (c) => c._with([id, name], (p) => c._answer(c._renameFolder(p[0], p[1]))),
+  );
+
+  static Future<Answer> deleteFolder(String id) => _background(
+    (c) => c._with([id], (p) => c._answer(c._deleteFolder(p[0]))),
+  );
 
   Map<String, dynamic> lock() => _answer(_lock()) as Map<String, dynamic>;
 

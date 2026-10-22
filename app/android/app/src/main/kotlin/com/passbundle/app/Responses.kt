@@ -3,6 +3,8 @@ package com.passbundle.app
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ApplicationInfo
+import android.util.Log
 import android.service.autofill.Dataset
 import android.service.autofill.FillResponse
 import android.service.autofill.SaveInfo
@@ -14,7 +16,9 @@ import org.json.JSONObject
  * What PassBundle offers Android's autofill (docs/phones.md, "Autofill"): the
  * matching logins by name and username, each filled only when picked (through
  * FillActivity, which takes the password from the core then), or "Unlock
- * PassBundle" while the vault is locked.
+ * PassBundle" while the vault is locked. A page's domain counts only from a
+ * browser (Browsers.kt); another app that can open web links and gives one is
+ * offered to be trusted as a browser, in PassBundle's own dialog.
  */
 object Responses {
     private var requests = 0
@@ -54,7 +58,11 @@ object Responses {
         val ids = fields.ids
         if (ids.isEmpty()) return null
         Core.openIfClosed(context.filesDir.absolutePath)
-        val answer = JSONObject(Core.fillable(fields.packageName, fields.webDomain ?: "") ?: return null)
+        // Only a hostname counts as a page's domain, and only from a browser.
+        val claimed = Browsers.domain(fields.webDomain)
+        val trusted = claimed != null && Browsers.trusts(context, fields.packageName)
+        val domain = claimed.takeIf { trusted }
+        val answer = JSONObject(Core.fillable(fields.packageName, domain ?: "") ?: return null)
         if (answer.optBoolean("busy") || answer.optBoolean("signedOut")) return null
         val save = saveInfo(fields)
         if (answer.optBoolean("locked")) {
@@ -70,8 +78,13 @@ object Responses {
         val items = answer.optJSONArray("items") ?: return null
         val response = FillResponse.Builder()
         save?.let { response.setSaveInfo(it) }
+        val offerTrust = claimed != null && !trusted && Browsers.couldBe(context, fields.packageName)
+        // Debug builds only, for the emulator tests' logs: what autofill decided, never a value.
+        if ((context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
+            Log.d("PassBundle", "autofill ${fields.packageName}: web domain ${fields.webDomain}, trusted $trusted, offers trust $offerTrust")
+        }
         // Nothing to fill: only the offer to save what the person signs in with.
-        if (items.length() == 0) return save?.let { response.build() }
+        if (items.length() == 0 && !offerTrust) return save?.let { response.build() }
         for (i in 0 until items.length()) {
             val item = items.getJSONObject(i)
             val id = item.getString("id")
@@ -83,6 +96,17 @@ object Responses {
                 dataset.setValue(field, null)
             }
             dataset.setAuthentication(pending(context, fields, FillActivity.FILL, id, item.optBoolean("reprompt")))
+            response.addDataset(dataset.build())
+        }
+        if (offerTrust) {
+            val app = Browsers.label(context, fields.packageName)
+            @Suppress("DEPRECATION")
+            val dataset = Dataset.Builder(presentation(context, "Logins for $claimed", "Trust $app as a browser first"))
+            for (field in ids) {
+                @Suppress("DEPRECATION")
+                dataset.setValue(field, null)
+            }
+            dataset.setAuthentication(pending(context, fields, FillActivity.TRUST))
             response.addDataset(dataset.build())
         }
         return response.build()

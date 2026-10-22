@@ -156,6 +156,12 @@ class _SettingsDialogState extends State<SettingsDialog> {
       working = true;
       note = null;
     });
+    // A slow call already running (the sync after signing in, say) has the
+    // core, and turning it on needs the user key from it: wait for that call,
+    // or it answers that PassBundle is locked.
+    for (var i = 0; i < 600 && busy.value; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    }
     final answer = await whileBusy(
       on ? Core.enrollBiometric : Core.removeBiometric,
     );
