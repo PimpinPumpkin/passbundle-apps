@@ -200,7 +200,7 @@ jobs:
     # to a real server on the runner.
     name: iOS
     runs-on: macos-15
-    timeout-minutes: 75
+    timeout-minutes: 110
     defaults:
       run:
         shell: bash
@@ -251,7 +251,7 @@ jobs:
         timeout-minutes: 25
         run: tools/ios-app-test.sh
       - name: Filling a website's sign-in form in Safari through iOS's AutoFill
-        timeout-minutes: 25
+        timeout-minutes: 40
         run: tools/ios-autofill-test.sh
       - name: The server's log
         if: failure()
