@@ -13,16 +13,19 @@ use crate::error::{Error, Result};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Preferences {
-    /// Minutes without using the computer before locking; None locks only when the app closes.
+    /// Minutes without using the computer before locking; None locks only
+    /// when the app closes. On phones, 0 is "Immediately": when the app
+    /// leaves the screen (`App::left`).
     pub lock_after_minutes: Option<u32>,
     /// Also lock when the screen locks or the computer sleeps.
     pub lock_on_sleep: bool,
 }
 
 impl Default for Preferences {
+    /// 15 minutes on a computer; 5 on a phone, which people put down and pick up.
     fn default() -> Self {
         Preferences {
-            lock_after_minutes: Some(15),
+            lock_after_minutes: Some(if cfg!(phone) { 5 } else { 15 }),
             lock_on_sleep: true,
         }
     }
@@ -34,11 +37,17 @@ pub const MAX_MINUTES: u32 = 24 * 60;
 impl Preferences {
     pub fn check(&self) -> Result<()> {
         match self.lock_after_minutes {
+            Some(0) if cfg!(phone) => Ok(()),
             Some(m) if m == 0 || m > MAX_MINUTES => Err(Error::Refused(
                 "the time before locking is from 1 minute to a day",
             )),
             _ => Ok(()),
         }
+    }
+
+    /// Whether to lock as soon as the app leaves the screen (phones).
+    pub fn immediately(&self) -> bool {
+        self.lock_after_minutes == Some(0)
     }
 }
 
@@ -119,8 +128,10 @@ impl AutoLock {
         now: Instant,
         wall: SystemTime,
     ) -> Option<Reason> {
+        // "Immediately" locks when the app leaves the screen, not while it's used.
         let limit = prefs
             .lock_after_minutes
+            .filter(|m| *m > 0)
             .map(|m| Duration::from_secs(u64::from(m) * 60));
         let app_idle = self.app_idle(now, wall);
         // The computer's own idle time where the OS says, since using other
@@ -677,17 +688,29 @@ mod tests {
     }
 
     #[test]
-    fn the_choices_are_from_a_minute_to_a_day() {
+    fn the_choices_are_from_a_minute_to_a_day_and_immediately_on_phones() {
         assert!(prefs(Some(1), true).check().is_ok());
         assert!(prefs(Some(MAX_MINUTES), true).check().is_ok());
         assert!(prefs(None, true).check().is_ok());
-        assert!(prefs(Some(0), true).check().is_err());
+        assert_eq!(prefs(Some(0), true).check().is_ok(), cfg!(phone));
         assert!(prefs(Some(MAX_MINUTES + 1), true).check().is_err());
         assert_eq!(
             Preferences::default(),
-            prefs(Some(15), true),
-            "15 minutes, and when the screen locks or the computer sleeps"
+            prefs(Some(if cfg!(phone) { 5 } else { 15 }), true),
+            "15 minutes on a computer, 5 on a phone, and when the screen locks or it sleeps"
         );
+    }
+
+    #[test]
+    fn immediately_never_locks_while_the_app_is_used() {
+        let mut c = Clock::new();
+        let mut lock = AutoLock::new(c.now, c.wall);
+        c.pass(60 * MIN);
+        assert_eq!(
+            lock.check(&prefs(Some(0), false), &Readings::default(), c.now, c.wall),
+            None
+        );
+        assert!(prefs(Some(0), false).immediately());
     }
 
     /// This computer's OS answers without failing, and time asleep only grows.

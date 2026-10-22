@@ -377,6 +377,8 @@ class _UnlockScreenState extends State<UnlockScreen> {
                     content: Text(
                       method == null
                           ? 'This removes the vault from this device. Signing in again brings it back from the server.'
+                          : isPhone
+                          ? 'This removes the vault from this phone and turns off unlocking with $method. Signing in again brings the vault back from the server.'
                           : 'This removes the vault from this device and turns off unlocking with $method, in your browser extension too. Signing in again brings the vault back from the server.',
                     ),
                     actions: [

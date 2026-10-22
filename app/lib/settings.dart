@@ -15,11 +15,13 @@ class SettingsDialog extends StatefulWidget {
   State<SettingsDialog> createState() => _SettingsDialogState();
 }
 
-/// The waits offered, in minutes; 0 is "when the app closes".
-const lockChoices = [1, 5, 15, 30, 60, 240, 0];
+/// The waits offered, in minutes: -1 is "when the app closes", and on phones
+/// 0 is "Immediately" (when the app leaves the screen).
+final lockChoices = [if (isPhone) 0, 1, 5, 15, 30, 60, 240, -1];
 
 String lockAfterName(int minutes) => switch (minutes) {
-  0 => 'When the app closes',
+  -1 => 'When the app closes',
+  0 => 'Immediately',
   1 => '1 minute',
   60 => '1 hour',
   final m when m % 60 == 0 => '${m ~/ 60} hours',
@@ -47,7 +49,7 @@ class _SettingsDialogState extends State<SettingsDialog> {
   }
 
   Widget lockAfter() {
-    final minutes = (preferences['lockAfterMinutes'] as int?) ?? 0;
+    final minutes = (preferences['lockAfterMinutes'] as int?) ?? -1;
     // A wait chosen some other way still shows as it is.
     final choices = lockChoices.contains(minutes)
         ? lockChoices
@@ -55,12 +57,14 @@ class _SettingsDialogState extends State<SettingsDialog> {
     return ListTile(
       leading: const Icon(Icons.lock_clock_outlined),
       title: const Text('Lock after'),
-      subtitle: const Text('Without using the computer'),
+      subtitle: Text(
+        isPhone ? 'Away from PassBundle' : 'Without using the computer',
+      ),
       trailing: DropdownButton<int>(
         value: minutes,
         underline: const SizedBox.shrink(),
         onChanged: (m) =>
-            choose({'lockAfterMinutes': m == null || m == 0 ? null : m}),
+            choose({'lockAfterMinutes': m == null || m < 0 ? null : m}),
         items: [
           for (final m in choices)
             DropdownMenuItem(value: m, child: Text(lockAfterName(m))),
@@ -87,7 +91,11 @@ class _SettingsDialogState extends State<SettingsDialog> {
         context: context,
         builder: (context) => AlertDialog(
           title: Text('Turn off unlocking with $method?'),
-          content: const Text('It turns off in your browser extension too.'),
+          content: Text(
+            isPhone
+                ? 'You can turn it on again here any time.'
+                : 'It turns off in your browser extension too.',
+          ),
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(context, false),
@@ -144,8 +152,10 @@ class _SettingsDialogState extends State<SettingsDialog> {
         onChanged: working ? null : (on) => turn(on, method),
         secondary: const Icon(Icons.fingerprint_rounded),
         title: Text('Unlock with $method'),
-        subtitle: const Text(
-          'Also in your browser extension, which shares it.',
+        subtitle: Text(
+          isPhone
+              ? 'Instead of your master password'
+              : 'Also in your browser extension, which shares it.',
         ),
         contentPadding: EdgeInsets.zero,
       );
@@ -156,38 +166,47 @@ class _SettingsDialogState extends State<SettingsDialog> {
         subtitle: Text(
           status['status'] == 'noAgent'
               ? 'Needs PassBundle\'s desktop agent, which isn\'t running.'
-              : '$method isn\'t set up on this computer.',
+              : '${method[0].toUpperCase()}${method.substring(1)} isn\'t set up on this ${isPhone ? 'phone' : 'computer'}.',
         ),
         contentPadding: EdgeInsets.zero,
       );
     }
     return AlertDialog(
       title: const Text('Settings'),
+      // Scrolls on a small phone, or with the keyboard up.
       content: SizedBox(
         width: 420,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            unlock,
-            const Divider(height: 24),
-            lockAfter(),
-            SwitchListTile(
-              value: preferences['lockOnSleep'] == true,
-              onChanged: (on) => choose({'lockOnSleep': on}),
-              secondary: const Icon(Icons.bedtime_outlined),
-              title: const Text('Lock when the computer sleeps'),
-              subtitle: const Text('Or when its screen locks'),
-              contentPadding: EdgeInsets.zero,
-            ),
-            if (note != null) ...[
-              const SizedBox(height: 8),
-              Text(
-                note!,
-                style: TextStyle(color: Theme.of(context).colorScheme.error),
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              unlock,
+              const Divider(height: 24),
+              lockAfter(),
+              SwitchListTile(
+                value: preferences['lockOnSleep'] == true,
+                onChanged: (on) => choose({'lockOnSleep': on}),
+                secondary: const Icon(Icons.bedtime_outlined),
+                title: Text(
+                  isPhone
+                      ? 'Lock when the phone locks'
+                      : 'Lock when the computer sleeps',
+                ),
+                subtitle: isPhone
+                    ? null
+                    : const Text('Or when its screen locks'),
+                contentPadding: EdgeInsets.zero,
               ),
+              if (note != null) ...[
+                const SizedBox(height: 8),
+                Text(
+                  note!,
+                  style: TextStyle(color: Theme.of(context).colorScheme.error),
+                ),
+              ],
             ],
-          ],
+          ),
         ),
       ),
       actions: [

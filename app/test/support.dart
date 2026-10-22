@@ -23,20 +23,33 @@ Future<void> loadFonts() async {
 }
 
 /// The core on a new, empty folder: signed out.
-String openEmpty() {
+String openEmpty({bool lockOnSleep = false}) {
   final dir = Directory.systemTemp.createTempSync('pb-app-test-').path;
   Core().openAt(dir);
+  machineDoesntLock(lockOnSleep);
   return dir;
 }
 
 /// The core on a new folder holding the sample vault (test/sample): locked.
-String openSample() {
+String openSample({bool lockOnSleep = false}) {
   final dir = Directory.systemTemp.createTempSync('pb-app-test-').path;
   for (final name in ['settings.json', 'sync.json']) {
     File('test/sample/$name').copySync('$dir/$name');
   }
   Core().openAt(dir);
+  machineDoesntLock(lockOnSleep);
   return dir;
+}
+
+/// The core reads the real computer's screen: on a test machine whose screen
+/// is locked (no one at it), the vault would lock in the middle of a test. So
+/// tests start with "Lock when the computer sleeps" off, unless they're about it.
+void machineDoesntLock(bool lockOnSleep) {
+  final answer = Core().setPreferences({
+    'lockAfterMinutes': 15,
+    'lockOnSleep': lockOnSleep,
+  });
+  if (!answer.ok) throw StateError('${answer.error}');
 }
 
 /// Pumps until something shows up, giving slow core calls real time.

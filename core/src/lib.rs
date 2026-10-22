@@ -10,12 +10,15 @@ pub mod crypto;
 pub mod error;
 pub mod generator;
 pub mod kdf;
+pub mod matching;
 pub mod secrets;
 pub mod server;
 pub mod store;
 pub mod totp;
 pub mod vault;
 
+#[cfg(target_os = "android")]
+pub mod android;
 #[cfg(feature = "ffi")]
 pub mod ffi;
 

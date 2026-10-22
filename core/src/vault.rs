@@ -91,6 +91,9 @@ pub struct LoginData {
 #[derive(Clone, Debug, Deserialize)]
 pub struct UriData {
     pub uri: Option<String>,
+    /// How the website is matched (matching.rs); null for the default.
+    #[serde(rename = "match", default)]
+    pub match_type: Option<u8>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -154,6 +157,8 @@ pub struct Item {
     pub deleted: bool,
     pub username: Option<String>,
     pub uris: Vec<String>,
+    /// How each of `uris` is matched for filling (matching.rs): None is the default.
+    pub uri_matches: Vec<Option<u8>>,
     pub notes: Option<Zeroizing<String>>,
     pub password: Option<Zeroizing<String>>,
     pub totp: Option<Zeroizing<String>>,
@@ -394,7 +399,12 @@ impl Vault {
                 "username": enc_opt(draft.username.as_deref()),
                 "password": enc_opt(draft.password.as_deref().map(String::as_str)),
                 "totp": enc_opt(draft.totp.as_deref().map(String::as_str)),
-                "uris": draft.uris.iter().map(|u| json!({ "uri": enc(u), "match": null })).collect::<Vec<_>>(),
+                // A website kept from the item being edited keeps how it's matched,
+                // which the web vault can set and this app doesn't show.
+                "uris": draft.uris.iter().map(|u| json!({
+                    "uri": enc(u),
+                    "match": editing.and_then(|i| i.uris.iter().position(|kept| kept == u).and_then(|at| i.uri_matches.get(at).copied().flatten())),
+                })).collect::<Vec<_>>(),
             });
         }
         Ok(body)
@@ -457,6 +467,7 @@ impl Keyring {
             .unwrap_or_default();
         let notes = open_text(&c.notes, &key)?;
         let (mut username, mut password, mut totp, mut uris) = (None, None, None, Vec::new());
+        let mut uri_matches = Vec::new();
         if let Some(login) = &c.login {
             username = plain(open_text(&login.username, &key)?);
             password = open_text(&login.password, &key)?;
@@ -464,6 +475,7 @@ impl Keyring {
             for uri in login.uris.iter().flatten() {
                 if let Some(u) = open_text(&uri.uri, &key)? {
                     uris.push(u.as_str().to_owned());
+                    uri_matches.push(uri.match_type);
                 }
             }
         }
@@ -486,6 +498,7 @@ impl Keyring {
             deleted: c.deleted_date.is_some(),
             username,
             uris,
+            uri_matches,
             notes,
             password,
             totp,

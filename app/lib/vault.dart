@@ -669,8 +669,9 @@ class _ItemPaneState extends State<ItemPane> {
   });
 
   /// Through the core, so the value never passes through Dart; secrets clear after 30 seconds.
-  void copy(String label, String what, {bool secret = true}) {
-    final answer = widget.core.copy(widget.id, what);
+  Future<void> copy(String label, String what, {bool secret = true}) async {
+    final answer = await widget.core.copy(widget.id, what);
+    if (!mounted) return;
     showMessage(
       context,
       answer.ok
@@ -715,7 +716,7 @@ class _ItemPaneState extends State<ItemPane> {
         );
     IconButton copyButton(String label, String what, {bool secret = true}) =>
         IconButton(
-          tooltip: 'Copy',
+          tooltip: 'Copy ${label.toLowerCase()}',
           icon: const Icon(Icons.copy_rounded, size: 19),
           onPressed: () => copy(label, what, secret: secret),
         );
@@ -801,7 +802,7 @@ class _ItemPaneState extends State<ItemPane> {
           ),
           actions: [
             IconButton(
-              tooltip: 'Copy',
+              tooltip: 'Copy website',
               icon: const Icon(Icons.copy_rounded, size: 19),
               onPressed: () {
                 Clipboard.setData(ClipboardData(text: uri));

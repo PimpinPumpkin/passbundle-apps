@@ -1,0 +1,6 @@
+# The Kotlin half of the core's Android certificate checks (rustls-platform-verifier),
+# from the project's own Maven branch, one line per file at the version core/Cargo.lock
+# has (rustls-platform-verifier-android). tools/android-core.sh refuses anything else;
+# when Cargo.lock moves to a new version, check the new files and add their lines.
+0.2.0 rustls-platform-verifier-0.2.0.aar aa021794230fbc2f0be355999e2cf67398dd563de066a2e17001ffbd0b69101b
+0.2.0 rustls-platform-verifier-0.2.0.pom 78dcb69a1a20e91e72017de9a67104bba1874a7ecc8e6dcdfb2fe1a85de6b362

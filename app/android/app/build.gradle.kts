@@ -5,7 +5,7 @@ plugins {
 }
 
 android {
-    namespace = "org.passbundle.passbundle"
+    namespace = "com.passbundle.app"
     compileSdk = flutter.compileSdkVersion
     ndkVersion = flutter.ndkVersion
 
@@ -15,11 +15,9 @@ android {
     }
 
     defaultConfig {
-        // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
-        applicationId = "org.passbundle.passbundle"
-        // You can update the following values to match your application needs.
-        // For more information, see: https://flutter.dev/to/review-gradle-config.
-        minSdk = flutter.minSdkVersion
+        applicationId = "com.passbundle.app"
+        // Android 10, the oldest the apps support (docs/phones.md).
+        minSdk = 29
         targetSdk = flutter.targetSdkVersion
         // Uses the version code from pubspec.yaml. When using split APKs, 1000 * ABI_VERSION
         // is added automatically by Flutter. (https://developer.android.com/studio/build/configure-apk-splits#configure-APK-versions)
@@ -46,4 +44,19 @@ kotlin {
 
 flutter {
     source = "../.."
+}
+
+// The Kotlin half of the core's certificate checks, at the version in the
+// core's Cargo.lock: tools/android-core.sh fetches it into ../rustls-maven and
+// checks it against ../rustls-platform-verifier.sha256.
+val rustlsVerifierVersion: String =
+    run {
+        val lock = rootProject.file("../../core/Cargo.lock").readLines()
+        val at = lock.indexOfFirst { it.trim() == "name = \"rustls-platform-verifier-android\"" }
+        require(at >= 0) { "rustls-platform-verifier-android isn't in core/Cargo.lock" }
+        Regex("\"([^\"]+)\"").find(lock[at + 1])!!.groupValues[1]
+    }
+
+dependencies {
+    implementation("org.rustls:rustls-platform-verifier:$rustlsVerifierVersion")
 }
