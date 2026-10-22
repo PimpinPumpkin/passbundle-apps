@@ -1,8 +1,12 @@
 //! An organization's "Vault lock" policy (docs/core.md, "Locking by policy"):
 //! upstream's vault timeout policy, type 9, as the server sends it with each
-//! sync, `{"type", "minutes", "action"}`. Every organization's applies, and
-//! the strictest of each part wins. The core locks by the stricter of this
-//! and the person's own choice, which it keeps as they chose it.
+//! sync, `{"type", "minutes", "action"}`. Every organization's applies, but
+//! not to the organization's owners, as in upstream's own apps (the web vault
+//! and the extension), and the strictest of each part wins. The core locks by
+//! the stricter of this and the person's own choice, which it keeps as they
+//! chose it.
+
+use std::collections::HashSet;
 
 use serde::Serialize;
 use serde_json::Value;
@@ -11,6 +15,9 @@ use crate::autolock::{Preferences, MAX_MINUTES};
 
 /// Upstream's number for the policy.
 const VAULT_LOCK: i64 = 9;
+
+/// Upstream's number for an organization's owner.
+const OWNER: i64 = 0;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -32,10 +39,22 @@ impl LockPolicy {
         let Ok(sync) = serde_json::from_str::<Value>(text) else {
             return policy;
         };
+        // The organizations this person owns, whose policy doesn't bind them.
+        let memberships = sync
+            .pointer("/profile/organizations")
+            .and_then(Value::as_array);
+        let owned: HashSet<&str> = memberships
+            .into_iter()
+            .flatten()
+            .filter(|o| o.get("type").and_then(Value::as_i64) == Some(OWNER))
+            .filter_map(|o| o.get("id").and_then(Value::as_str))
+            .collect();
         let policies = sync.get("policies").and_then(Value::as_array);
         for p in policies.into_iter().flatten() {
+            let org = p.get("organizationId").and_then(Value::as_str);
             if p.get("type").and_then(Value::as_i64) != Some(VAULT_LOCK)
                 || p.get("enabled").and_then(Value::as_bool) != Some(true)
+                || org.is_some_and(|org| owned.contains(org))
             {
                 continue;
             }
@@ -90,7 +109,12 @@ mod tests {
     use super::*;
 
     fn sync(policies: Value) -> String {
-        json!({ "profile": {}, "policies": policies }).to_string()
+        json!({ "profile": { "organizations": [
+            { "id": "owned", "type": 0, "status": 2 },
+            { "id": "admin", "type": 1, "status": 2 },
+            { "id": "custom", "type": 4, "status": 2 },
+        ] }, "policies": policies })
+        .to_string()
     }
 
     fn vault_lock(org: &str, data: Value) -> Value {
@@ -145,6 +169,26 @@ mod tests {
                 None
             );
         }
+    }
+
+    #[test]
+    fn binds_admins_and_everyone_else_but_not_owners() {
+        let policy = |org: &str| {
+            LockPolicy::from_sync(&sync(json!([vault_lock(
+                org,
+                json!({ "minutes": 5, "action": "logOut" })
+            )])))
+        };
+        assert_eq!(policy("owned"), LockPolicy::default());
+        let bound = LockPolicy {
+            max_minutes: Some(5),
+            sign_out: true,
+            ..Default::default()
+        };
+        assert_eq!(policy("admin"), bound);
+        assert_eq!(policy("custom"), bound);
+        // An organization the profile doesn't list (a member's).
+        assert_eq!(policy("member"), bound);
     }
 
     #[test]

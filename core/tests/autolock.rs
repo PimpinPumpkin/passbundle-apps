@@ -316,3 +316,20 @@ fn signing_out_by_policy_forgets_the_vault_on_this_device_when_its_time() {
         "the kept vault is gone"
     );
 }
+
+#[test]
+fn an_owner_isnt_held_to_their_own_organizations_policy() {
+    // The sample account owns Contoso; its policy binds everyone else there.
+    let sample = Sample::with_policies(Some(serde_json::json!([{
+        "id": "p1",
+        "organizationId": "8f9a7c1e-3b2d-4e5f-9a8b-7c6d5e4f3a2b",
+        "type": 9,
+        "enabled": true,
+        "data": { "type": "immediately", "action": "logOut" },
+        "object": "policy",
+    }])));
+    let mut app = sample.unlocked();
+    assert_eq!(app.lock_policy(), Default::default());
+    assert!(!app.left());
+    assert!(is_unlocked(&app));
+}
