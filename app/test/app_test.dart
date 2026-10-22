@@ -518,4 +518,48 @@ void main() {
       expect(find.text('Unlock PassBundle'), findsOneWidget);
     },
   );
+
+  testWidgets(
+    'on a phone, the menu shows favorites, folders, and organizations, and the header names the one shown',
+    (tester) async {
+      setSize(tester, const Size(390, 844));
+      openSample();
+      await tester.pumpWidget(const PassBundleApp());
+      await tester.enterText(find.byType(TextField), samplePassword);
+      await tester.tap(find.text('Unlock'));
+      await pumpUntil(tester, find.text('Office Wi-Fi'));
+      await pumpUntil(
+        tester,
+        find.textContaining('Sign in again to get changes'),
+      );
+
+      Future<void> choose(String place) async {
+        await tester.tap(find.byTooltip('Menu'));
+        await tester.pumpAndSettle();
+        expect(find.byTooltip('New folder'), findsOneWidget);
+        await tester.tap(find.text(place));
+        await tester.pumpAndSettle();
+      }
+
+      await choose('Personal');
+      expect(find.text('Personal'), findsOneWidget);
+      expect(find.text('PassBundle'), findsNothing);
+      expect(find.text('Example Mail'), findsOneWidget);
+      expect(find.text('Office Wi-Fi'), findsNothing);
+
+      await choose('Contoso');
+      expect(find.text('Contoso'), findsOneWidget);
+      expect(find.text('Office Wi-Fi'), findsOneWidget);
+      expect(find.text('Example Mail'), findsNothing);
+
+      await choose('Favorites');
+      expect(find.text('Example Mail'), findsOneWidget);
+      expect(find.text('Office Wi-Fi'), findsNothing);
+
+      await choose('All items');
+      expect(find.text('PassBundle'), findsOneWidget);
+      expect(find.text('Office Wi-Fi'), findsOneWidget);
+      expect(find.text('Example Mail'), findsOneWidget);
+    },
+  );
 }

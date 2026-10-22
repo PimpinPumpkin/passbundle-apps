@@ -51,6 +51,9 @@ class VaultScreenState extends State<VaultScreen> {
   bool syncing = false;
   bool signedOut = false;
 
+  /// On a phone the sidebar is a drawer, opened from the header.
+  final scaffold = GlobalKey<ScaffoldState>();
+
   /// Coming back to the app: a sign-in autofill offered to save may be
   /// waiting. Looked for after the next frame, since coming back can lock the
   /// app first (main.dart), and then it waits for the vault after unlocking.
@@ -120,6 +123,21 @@ class VaultScreenState extends State<VaultScreen> {
     Filter.organization =>
       all.where((i) => i['organizationId'] == filterId).toList(),
   };
+
+  /// What the list shows, by name, for a phone's header.
+  String? get placeName {
+    String? named(String key) => (places[key] as List)
+        .cast<Map<String, dynamic>>()
+        .where((p) => p['id'] == filterId)
+        .map((p) => p['name'] as String)
+        .firstOrNull;
+    return switch (filter) {
+      Filter.all => null,
+      Filter.favorites => 'Favorites',
+      Filter.folder => named('folders'),
+      Filter.organization => named('organizations'),
+    };
+  }
 
   Future<void> edit([String? id, Map<String, dynamic>? prefill]) async {
     final wide = MediaQuery.sizeOf(context).width >= 900;
@@ -263,9 +281,11 @@ class VaultScreenState extends State<VaultScreen> {
       header: wide
           ? null
           : PhoneHeader(
+              title: placeName,
               mode: widget.mode,
               onMode: widget.onMode,
               onLock: widget.onLock,
+              onMenu: () => scaffold.currentState?.openDrawer(),
             ),
       items: list,
       selected: selected,
@@ -300,7 +320,36 @@ class VaultScreenState extends State<VaultScreen> {
       },
     );
 
+    Widget sidebar({double width = 232}) => Sidebar(
+      width: width,
+      email: widget.email,
+      filter: filter,
+      filterId: filterId,
+      places: places,
+      counts: (all.length, all.where((i) => i['favorite'] == true).length),
+      onChoose: (f, [id]) {
+        setState(() {
+          filter = f;
+          filterId = id;
+        });
+        scaffold.currentState?.closeDrawer();
+      },
+      onNewFolder: newFolder,
+      onRenameFolder: renameFolder,
+      onDeleteFolder: deleteFolder,
+      mode: widget.mode,
+      onMode: widget.onMode,
+      onLock: widget.onLock,
+    );
+
     return Scaffold(
+      key: scaffold,
+      drawer: wide
+          ? null
+          : Drawer(
+              backgroundColor: context.colors.sidebar,
+              child: SafeArea(child: sidebar(width: double.infinity)),
+            ),
       body: Column(
         children: [
           if (signedOut)
@@ -319,27 +368,7 @@ class VaultScreenState extends State<VaultScreen> {
           Expanded(
             child: Row(
               children: [
-                if (wide)
-                  Sidebar(
-                    email: widget.email,
-                    filter: filter,
-                    filterId: filterId,
-                    places: places,
-                    counts: (
-                      all.length,
-                      all.where((i) => i['favorite'] == true).length,
-                    ),
-                    onChoose: (f, [id]) => setState(() {
-                      filter = f;
-                      filterId = id;
-                    }),
-                    onNewFolder: newFolder,
-                    onRenameFolder: renameFolder,
-                    onDeleteFolder: deleteFolder,
-                    mode: widget.mode,
-                    onMode: widget.onMode,
-                    onLock: widget.onLock,
-                  ),
+                if (wide) sidebar(),
                 SizedBox(width: wide ? 360 : width, child: listPane),
                 if (wide) const VerticalDivider(width: 1),
                 if (wide)
@@ -373,6 +402,7 @@ void showMessage(BuildContext context, String text) =>
 class Sidebar extends StatelessWidget {
   const Sidebar({
     super.key,
+    this.width = 232,
     required this.email,
     required this.filter,
     required this.filterId,
@@ -387,6 +417,8 @@ class Sidebar extends StatelessWidget {
     required this.onLock,
   });
 
+  /// Its own width beside the list; a phone's drawer gives it the drawer's.
+  final double width;
   final String email;
   final Filter filter;
   final String? filterId;
@@ -465,7 +497,7 @@ class Sidebar extends StatelessWidget {
     final organizations = (places['organizations'] as List)
         .cast<Map<String, dynamic>>();
     return Container(
-      width: 232,
+      width: width,
       color: c.sidebar,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -591,26 +623,39 @@ class Sidebar extends StatelessWidget {
 class PhoneHeader extends StatelessWidget {
   const PhoneHeader({
     super.key,
+    this.title,
     required this.mode,
     required this.onMode,
     required this.onLock,
+    required this.onMenu,
   });
 
+  /// The folder, organization, or Favorites the list shows; null for all items.
+  final String? title;
   final ThemeMode mode;
   final ValueChanged<ThemeMode> onMode;
   final VoidCallback onLock;
 
+  /// Opens the drawer: all items, favorites, folders, and organizations.
+  final VoidCallback onMenu;
+
   @override
   Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.fromLTRB(20, 16, 8, 0),
+    padding: const EdgeInsets.fromLTRB(8, 16, 8, 0),
     child: Row(
       children: [
-        const Mark(size: 22),
-        const SizedBox(width: 10),
-        const Expanded(
+        IconButton(
+          tooltip: 'Menu',
+          icon: const Icon(Icons.menu_rounded),
+          onPressed: onMenu,
+        ),
+        const SizedBox(width: 4),
+        if (title == null) ...[const Mark(size: 22), const SizedBox(width: 10)],
+        Expanded(
           child: Text(
-            'PassBundle',
-            style: TextStyle(fontWeight: FontWeight.w700, fontSize: 17),
+            title ?? 'PassBundle',
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 17),
           ),
         ),
         ThemeMenu(mode: mode, onMode: onMode),
