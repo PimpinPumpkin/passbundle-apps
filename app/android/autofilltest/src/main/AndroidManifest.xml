@@ -24,5 +24,9 @@
         <activity
             android:name=".WebSignInActivity"
             android:exported="true" />
+        <!-- A site's sign-in with passkeys, through Android's Credential Manager. -->
+        <activity
+            android:name=".PasskeySiteActivity"
+            android:exported="true" />
     </application>
 </manifest>

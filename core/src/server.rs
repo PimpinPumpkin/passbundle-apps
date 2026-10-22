@@ -205,8 +205,27 @@ fn message_of(body: &Value) -> Option<String> {
     None
 }
 
+/// The one certificate every connection trusts instead of the OS's, once a
+/// test tool that drives the whole app against a throwaway HTTPS server
+/// says so (`trust_only_for_tests`). Only in builds with the `test-trust`
+/// feature, such as the `interop` example; never the app's.
+#[cfg(feature = "test-trust")]
+static TEST_TRUST: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+
+/// Makes every connection from now on trust this certificate (PEM) instead
+/// of the OS's, for a test tool driving the app (`App`) against a throwaway
+/// HTTPS server. Only with the `test-trust` feature.
+#[cfg(feature = "test-trust")]
+pub fn trust_only_for_tests(pem: &[u8]) {
+    let _ = TEST_TRUST.set(pem.to_vec());
+}
+
 impl Server {
     pub fn new(url: &str, device: Device) -> Result<Server> {
+        #[cfg(feature = "test-trust")]
+        if let Some(pem) = TEST_TRUST.get() {
+            return Self::new_trusting(url, device, pem);
+        }
         // The OS's own certificate checks, so an office's root works as in its browser.
         Self::build(url, device, RootCerts::PlatformVerifier)
     }

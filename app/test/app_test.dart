@@ -399,6 +399,35 @@ void main() {
     },
   );
 
+  testWidgets('a login shows its passkey: who it\'s for, never its key', (
+    tester,
+  ) async {
+    setSize(tester, const Size(1280, 800));
+    openSample();
+    await tester.pumpWidget(const PassBundleApp());
+    await tester.enterText(find.byType(TextField), samplePassword);
+    await tester.tap(find.text('Unlock'));
+    await pumpUntil(tester, find.text('Backup service'));
+    await pumpUntil(
+      tester,
+      find.textContaining('Sign in again to get changes'),
+    );
+    await tester.tap(find.text('Backup service'));
+    await tester.pump();
+    expect(find.text('Passkey'), findsOneWidget);
+    // Made at 18:00 UTC: the 20th, or the 21st east of UTC+6.
+    expect(
+      find.textContaining(
+        RegExp(r'^For Backup Service · created October 2[01], 2026$'),
+      ),
+      findsOneWidget,
+    );
+    // A login without one shows none.
+    await tester.tap(find.text('Example Mail'));
+    await tester.pump();
+    expect(find.text('Passkey'), findsNothing);
+  });
+
   testWidgets(
     'an item lists its attachments, and saving one needs the server',
     (tester) async {

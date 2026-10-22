@@ -450,3 +450,79 @@ fn search_matches_every_word_in_names_usernames_websites_and_details() {
     );
     assert!(names("4111").is_empty() && names("123-45").is_empty());
 }
+
+/// Passkeys: a login's passkey opens (its private key only when asked), and
+/// signing in with it gives the vectors' authenticator data and signature to
+/// the byte. The vectors' signatures come from their own RFC 6979 signer, so
+/// two implementations agree, and Node's crypto verifies them.
+#[test]
+fn a_passkey_opens_and_signs_as_the_vectors_say() {
+    use crate::passkey::{authenticator_data, credential_id, flags};
+    let v = vectors();
+    let sync = Sync::from_json(&v["sync"].to_string()).unwrap();
+    let vault = Vault::unlock(
+        &sync,
+        &prelogin(&v["account"]["pbkdf2"]["prelogin"]),
+        v["account"]["password"].as_str().unwrap(),
+    )
+    .unwrap();
+    let mut seen = 0;
+    for (id, want) in v["opened"]["items"].as_object().unwrap() {
+        let item = vault.item(id).unwrap();
+        let Some(want) = want.get("passkey") else {
+            assert!(item.passkey.is_none(), "{id}");
+            continue;
+        };
+        let passkey = item.passkey.as_ref().unwrap();
+        assert_eq!(
+            passkey.credential_id,
+            want["credentialId"].as_str().unwrap()
+        );
+        assert_eq!(passkey.rp_id, want["rpId"].as_str().unwrap());
+        assert_eq!(passkey.rp_name.as_deref(), want["rpName"].as_str());
+        assert_eq!(passkey.user_handle.as_deref(), want["userHandle"].as_str());
+        assert_eq!(passkey.user_name.as_deref(), want["userName"].as_str());
+        assert_eq!(
+            passkey.user_display_name.as_deref(),
+            want["userDisplayName"].as_str()
+        );
+        assert_eq!(
+            u64::from(passkey.counter),
+            want["counter"].as_u64().unwrap()
+        );
+        assert_eq!(
+            passkey.discoverable,
+            want["discoverable"].as_bool().unwrap()
+        );
+        assert_eq!(
+            passkey.creation_date.as_deref(),
+            want["creationDate"].as_str()
+        );
+        assert!(passkey.usable);
+        let (x, y) = passkey.key().unwrap().public();
+        assert_eq!(x.to_vec(), b64(&v["passkeyPublic"]["x"]));
+        assert_eq!(y.to_vec(), b64(&v["passkeyPublic"]["y"]));
+        seen += 1;
+    }
+    assert_eq!(seen, 1);
+
+    for a in v["passkeyAssertions"].as_array().unwrap() {
+        let item = vault.item(a["itemId"].as_str().unwrap()).unwrap();
+        let passkey = item.passkey.as_ref().unwrap();
+        let mut set = flags::USER_PRESENT | flags::BACKUP_ELIGIBLE | flags::BACKED_UP;
+        if a["userVerified"].as_bool().unwrap() {
+            set |= flags::USER_VERIFIED;
+        }
+        let data = authenticator_data(a["rpId"].as_str().unwrap(), set, passkey.counter, None);
+        assert_eq!(data, b64(&a["authenticatorData"]));
+        let hash: [u8; 32] = b64(&a["clientDataHash"]).try_into().unwrap();
+        assert_eq!(
+            passkey.key().unwrap().sign(&data, &hash),
+            b64(&a["signature"])
+        );
+        assert_eq!(
+            credential_id(&passkey.credential_id).unwrap(),
+            b64(&a["credentialId"])
+        );
+    }
+}
