@@ -659,8 +659,25 @@ fn free_path(dir: &std::path::Path, name: &str) -> PathBuf {
             }
         })
         .collect();
-    let safe = safe.trim_start_matches('.').trim();
+    // No leading dots (hidden), and no trailing dots or spaces, which Windows drops.
+    let safe = safe
+        .trim_start_matches('.')
+        .trim()
+        .trim_end_matches(['.', ' ']);
     let safe = if safe.is_empty() { "attachment" } else { safe };
+    // Windows' device names, with or without an extension, aren't files.
+    let device = safe.split('.').next().unwrap_or("").to_ascii_uppercase();
+    let reserved = matches!(device.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || (device.len() == 4
+            && (device.starts_with("COM") || device.starts_with("LPT"))
+            && device.as_bytes()[3].is_ascii_digit());
+    let renamed;
+    let safe = if reserved {
+        renamed = format!("_{safe}");
+        renamed.as_str()
+    } else {
+        safe
+    };
     let (stem, ext) = match safe.rfind('.') {
         Some(at) if at > 0 => (&safe[..at], &safe[at..]),
         _ => (safe, ""),
@@ -694,6 +711,10 @@ mod attachment_tests {
         );
         assert_eq!(free_path(&dir, ".hidden"), dir.join("hidden"));
         assert_eq!(free_path(&dir, ""), dir.join("attachment"));
+        assert_eq!(free_path(&dir, "nul.txt"), dir.join("_nul.txt"));
+        assert_eq!(free_path(&dir, "COM1"), dir.join("_COM1"));
+        assert_eq!(free_path(&dir, "notes. "), dir.join("notes"));
+        assert_eq!(free_path(&dir, "console.txt"), dir.join("console.txt"));
         let _ = std::fs::remove_dir_all(dir);
     }
 }
