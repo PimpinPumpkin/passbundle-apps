@@ -3,6 +3,17 @@
 # test key, and published as a GitHub release, which the app's updater reads
 # (app/android/app/src/main/kotlin/com/passbundle/app/update/Updater.kt).
 #
+# Four jobs, so the key and the token that can publish never meet the build's
+# own code (Rust crates' build scripts and macros, Gradle, the Android Gradle
+# plugin, Flutter):
+#
+#   plan     the version, whether there's anything new, and the notes (git only)
+#   build    the APKs, signed with the runner's debug key; no secrets, read-only
+#   sign     the only job with the key: re-signs the build's APKs with the
+#            SDK's apksigner and this file's own shell, running nothing from
+#            the repository, and checks them; read-only
+#   publish  the only job that can write: gh release create; no secrets
+#
 # Tagged android-v<major>.<minor>.<build>: the major and minor are
 # pubspec.yaml's, and the build is this workflow's run number, which only
 # goes up, so each release's versionCode is higher than the last (Flutter
@@ -11,8 +22,8 @@
 # versions go backwards.
 #
 # The release is a full one (not a prerelease), so releases/latest is the
-# newest. Without the key's secrets (a fork), the APKs are built with the
-# debug key and kept as the run's artifact, never published.
+# newest. Without the key's secrets (a fork), sign stops after saying so, and
+# the debug-signed APKs stay as the build's artifact, never published.
 name: Android release
 
 on:
@@ -59,7 +70,7 @@ jobs:
       sha: ${{ steps.plan.outputs.sha }}
       version: ${{ steps.plan.outputs.version }}
       build: ${{ steps.plan.outputs.build }}
-      last: ${{ steps.plan.outputs.last }}
+      notes: ${{ steps.notes.outputs.notes }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -94,32 +105,57 @@ jobs:
             echo "Releasing ${sha:0:9} as $version (the last release is ${last:-none})." | tee -a "$GITHUB_STEP_SUMMARY"
             echo "release=true" >> "$GITHUB_OUTPUT"
           fi
+      - name: The notes, the commit subjects since the last release
+        id: notes
+        if: steps.plan.outputs.release == 'true'
+        env:
+          SHA: ${{ steps.plan.outputs.sha }}
+          VERSION: ${{ steps.plan.outputs.version }}
+          LAST: ${{ steps.plan.outputs.last }}
+        run: |
+          if [ -n "$LAST" ]; then
+            since="since ${LAST#android-v}"
+            changes=$(git log --no-merges --format='- %s' "$LAST..$SHA")
+          else
+            since="in this first test release"
+            changes=$(git log --no-merges --format='- %s' -n 20 "$SHA")
+          fi
+          notes=$(
+            echo "What's new $since:"
+            echo
+            echo "${changes:-- Maintenance}"
+            echo
+            echo "Files: passbundle-$VERSION-arm64-v8a.apk is for phones, and passbundle-$VERSION-x86_64.apk for the emulator and Chromebooks. SHA256SUMS lists their SHA-256."
+            echo
+            echo "A test build, signed with PassBundle's test key (certificate SHA-256 ${TEST_CERT_SHA256}). PassBundle updates itself from these releases (Settings, Updates). A copy signed with another key, such as one you built, has to be uninstalled before installing this one."
+          )
+          echo "$notes"
+          end="NOTES_$(od -An -N12 -tx1 /dev/urandom | tr -d ' \n')"
+          printf 'notes<<%s\n%s\n%s\n' "$end" "$notes" "$end" >> "$GITHUB_OUTPUT"
 
-  android:
-    name: Android ${{ needs.plan.outputs.version }}
+  build:
+    name: Build ${{ needs.plan.outputs.version }}
     needs: plan
     if: needs.plan.outputs.release == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    # No secrets here, and nothing it can write: this is where the build's
+    # own code runs.
     permissions:
-      # gh release create.
-      contents: write
+      contents: read
     defaults:
       run:
         shell: bash
     env:
-      SHA: ${{ needs.plan.outputs.sha }}
       VERSION: ${{ needs.plan.outputs.version }}
       BUILD: ${{ needs.plan.outputs.build }}
-      LAST: ${{ needs.plan.outputs.last }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.plan.outputs.sha }}
-          fetch-depth: 0
           persist-credentials: false
       # As CI's Android job builds them (ci.yml), without its cache: a
-      # signed release is built from scratch.
+      # release is built from scratch.
       - name: Install the pinned Rust toolchain, with Android's targets
         run: cd core && rustup toolchain install && rustup target add aarch64-linux-android x86_64-linux-android
       - name: Build the core for phones and the emulator
@@ -133,23 +169,11 @@ jobs:
         run: |
           flutter config --no-analytics
           flutter --disable-analytics
-      - name: The test key, from the repository's secrets
-        env:
-          KEYSTORE_BASE64: ${{ secrets.PASSBUNDLE_TEST_KEYSTORE_BASE64 }}
-        run: |
-          if [ -z "$KEYSTORE_BASE64" ]; then
-            echo "::notice::No test key in this repository's secrets: the APKs are signed with the debug key, and not published."
-            exit 0
-          fi
-          umask 077
-          printf '%s' "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/passbundle-test.p12"
-          echo "PASSBUNDLE_KEYSTORE_PATH=$RUNNER_TEMP/passbundle-test.p12" >> "$GITHUB_ENV"
-      - name: Build the release APKs, one per chip type
+      - name: The Dart packages pubspec.lock pins, and no others
         working-directory: app
-        env:
-          # Read by app/android/app/build.gradle.kts, never printed.
-          PASSBUNDLE_KEYSTORE_PASSWORD: ${{ secrets.PASSBUNDLE_TEST_KEYSTORE_PASSWORD }}
-          PASSBUNDLE_KEY_ALIAS: ${{ secrets.PASSBUNDLE_TEST_KEY_ALIAS }}
+        run: flutter pub get --enforce-lockfile
+      - name: Build the release APKs, one per chip type, with the debug key
+        working-directory: app
         run: flutter build apk --release --split-per-abi --target-platform android-arm64,android-x64 --build-name "$VERSION" --build-number "$BUILD"
       - name: Each keeps what the core calls through JNI, and has this version
         run: |
@@ -162,49 +186,120 @@ jobs:
             grep -q "^package: name='com.passbundle.app' .*versionName='$VERSION'" <<< "$badging"
             cp "$apk" "dist/passbundle-$VERSION-$abi.apk"
           done
-          (cd dist && sha256sum passbundle-*.apk > SHA256SUMS && cat SHA256SUMS)
-      - name: Each is signed with the test key
-        if: env.PASSBUNDLE_KEYSTORE_PATH != ''
+          ls -l dist
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: passbundle-android-${{ needs.plan.outputs.version }}-debug-key
+          path: dist
+          if-no-files-found: error
+          retention-days: 7
+
+  sign:
+    name: Sign ${{ needs.plan.outputs.version }}
+    needs: [plan, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    # Once the user makes an "android-release" environment (Settings,
+    # Environments), with the PASSBUNDLE_TEST_* secrets in it and whatever
+    # rules they want, this job, and only this one, takes it:
+    # environment: android-release
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    outputs:
+      signed: ${{ steps.key.outputs.signed }}
+    env:
+      VERSION: ${{ needs.plan.outputs.version }}
+    # No checkout: nothing from the repository runs here, only the SDK's
+    # build tools (apksigner, zipalign) and this file's own shell.
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: passbundle-android-${{ needs.plan.outputs.version }}-debug-key
+          path: unsigned
+      - name: The test key, from the repository's secrets
+        id: key
+        env:
+          KEYSTORE_BASE64: ${{ secrets.PASSBUNDLE_TEST_KEYSTORE_BASE64 }}
         run: |
-          apksigner=$(ls "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)
-          for apk in dist/*.apk; do
-            certs=$("$apksigner" verify --print-certs "$apk")
+          if [ -z "$KEYSTORE_BASE64" ]; then
+            echo "::notice::No test key in this repository's secrets: the APKs stay signed with the debug key (the build's artifact), and nothing is published."
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          umask 077
+          printf '%s' "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/passbundle-test.p12"
+          echo "signed=true" >> "$GITHUB_OUTPUT"
+      - name: Sign each with the test key, and check it
+        if: steps.key.outputs.signed == 'true'
+        env:
+          PASSBUNDLE_KEYSTORE_PASSWORD: ${{ secrets.PASSBUNDLE_TEST_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.PASSBUNDLE_TEST_KEY_ALIAS }}
+        run: |
+          tools=$(ls -d "$ANDROID_HOME"/build-tools/*/ | sort -V | tail -1)
+          mkdir dist
+          for abi in arm64-v8a x86_64; do
+            name="passbundle-$VERSION-$abi.apk"
+            # apksigner replaces the debug signature, keeping the build's
+            # alignment (native libraries on 16 KB pages). No JAR signature
+            # (Android 10 and later never read it) and no .idsig file.
+            "$tools/apksigner" sign \
+              --ks "$RUNNER_TEMP/passbundle-test.p12" --ks-type PKCS12 \
+              --ks-pass env:PASSBUNDLE_KEYSTORE_PASSWORD --key-pass env:PASSBUNDLE_KEYSTORE_PASSWORD \
+              --ks-key-alias "${KEY_ALIAS:-passbundle-test}" \
+              --min-sdk-version 29 \
+              --v1-signing-enabled false --v2-signing-enabled true --v3-signing-enabled true --v4-signing-enabled false \
+              --out "dist/$name" "unsigned/$name"
+            "$tools/zipalign" -c -P 16 4 "dist/$name"
+            certs=$("$tools/apksigner" verify --min-sdk-version 29 --print-certs "dist/$name")
             if ! grep -qx "Signer #1 certificate SHA-256 digest: $TEST_CERT_SHA256" <<< "$certs" || grep -q '^Signer #2' <<< "$certs"; then
               echo "$certs"
-              echo "$apk isn't signed with the test key alone." >&2
+              echo "$name isn't signed with the test key alone." >&2
               exit 1
             fi
           done
+          (cd dist && sha256sum passbundle-*.apk > SHA256SUMS && cat SHA256SUMS)
+          ls -l dist
+      - name: Remove the key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/passbundle-test.p12"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: steps.key.outputs.signed == 'true'
         with:
           name: passbundle-android-${{ needs.plan.outputs.version }}
           path: dist
           if-no-files-found: error
           retention-days: 7
-      - name: The notes, the commit subjects since the last release
-        run: |
-          if [ -n "$LAST" ]; then
-            since="since ${LAST#android-v}"
-            changes=$(git log --no-merges --format='- %s' "$LAST..$SHA")
-          else
-            since="in this first test release"
-            changes=$(git log --no-merges --format='- %s' -n 20 "$SHA")
-          fi
-          {
-            echo "What's new $since:"
-            echo
-            echo "${changes:-- Maintenance}"
-            echo
-            echo "Files: passbundle-$VERSION-arm64-v8a.apk is for phones, and passbundle-$VERSION-x86_64.apk for the emulator and Chromebooks. SHA256SUMS lists their SHA-256."
-            echo
-            echo "A test build, signed with PassBundle's test key (certificate SHA-256 ${TEST_CERT_SHA256}). PassBundle updates itself from these releases (Settings, Updates). A copy signed with another key, such as one you built, has to be uninstalled before installing this one."
-          } > "$RUNNER_TEMP/notes.md"
-          cat "$RUNNER_TEMP/notes.md"
+
+  publish:
+    name: Publish ${{ needs.plan.outputs.version }}
+    needs: [plan, sign]
+    if: needs.sign.outputs.signed == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    # The only job that can write, with no secrets but its token, and no
+    # code from the repository.
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: passbundle-android-${{ needs.plan.outputs.version }}
+          path: dist
       - name: Publish the release
-        if: env.PASSBUNDLE_KEYSTORE_PATH != ''
         env:
           GH_TOKEN: ${{ github.token }}
+          SHA: ${{ needs.plan.outputs.sha }}
+          VERSION: ${{ needs.plan.outputs.version }}
+          NOTES: ${{ needs.plan.outputs.notes }}
         run: |
+          (cd dist && sha256sum -c SHA256SUMS)
+          printf '%s\n' "$NOTES" > "$RUNNER_TEMP/notes.md"
           gh release create "android-v$VERSION" \
             --repo "$GITHUB_REPOSITORY" \
             --target "$SHA" \
@@ -213,6 +308,3 @@ jobs:
             --latest \
             dist/passbundle-*.apk dist/SHA256SUMS
           echo "Published https://github.com/$GITHUB_REPOSITORY/releases/tag/android-v$VERSION" | tee -a "$GITHUB_STEP_SUMMARY"
-      - name: Remove the key
-        if: always()
-        run: rm -f "$RUNNER_TEMP/passbundle-test.p12"

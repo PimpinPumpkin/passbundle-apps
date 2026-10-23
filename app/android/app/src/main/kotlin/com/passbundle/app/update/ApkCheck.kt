@@ -9,6 +9,21 @@ import java.security.MessageDigest
  * after this, by Updater, with Android's own reading of the APK.
  */
 object ApkCheck {
+    /** The most an update may be: far more than PassBundle is (about 25 MB). */
+    const val MAX_BYTES = 150L shl 20
+
+    /**
+     * The most to download for a release that says its file is [size] bytes
+     * (0 when it doesn't say): that size, or [MAX_BYTES]; null when the
+     * release says more than [MAX_BYTES], which isn't downloaded at all.
+     */
+    fun limit(size: Long): Long? =
+        when {
+            size > MAX_BYTES -> null
+            size > 0 -> size
+            else -> MAX_BYTES
+        }
+
     /** GitHub's asset `digest` ("sha256:<hex>") as bare lowercase hex, or null for anything else. */
     fun digestOf(digest: String?): String? = hex(digest?.trim()?.lowercase()?.removePrefix("sha256:"))
 

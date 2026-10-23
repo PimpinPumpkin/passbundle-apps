@@ -59,4 +59,14 @@ class ApkCheckTest {
         assertEquals(emptyMap<String, String>(), ApkCheck.sums("<html>Not Found</html>"))
         assertNull("a short hash isn't one", ApkCheck.sums("${"a".repeat(63)}  x.apk")["x.apk"])
     }
+
+    @Test fun downloadsAreCapped() {
+        val mib = 1L shl 20
+        assertEquals("the release's own size", 30 * mib, ApkCheck.limit(30 * mib))
+        assertEquals("no size given: the cap", 150 * mib, ApkCheck.limit(0))
+        assertEquals(150 * mib, ApkCheck.limit(-1))
+        assertEquals(150 * mib, ApkCheck.limit(150 * mib))
+        assertNull("a release saying more than the cap isn't downloaded", ApkCheck.limit(150 * mib + 1))
+        assertNull(ApkCheck.limit(Long.MAX_VALUE))
+    }
 }

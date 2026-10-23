@@ -10,6 +10,38 @@ package com.passbundle.app.update
 object Releases {
     const val TAG_PREFIX = "android-v"
 
+    /** Where checking asks: GitHub's API, and nothing else. */
+    const val API_HOST = "api.github.com"
+
+    /** Where a release's files are: PassBundle's own releases, and nowhere else. */
+    const val DOWNLOADS = "https://github.com/PimpinPumpkin/passbundle-apps/releases/download/"
+
+    /** The hosts a download may end at: github.com, and where it hands the file. */
+    val DOWNLOAD_HOSTS = setOf("github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com")
+
+    /**
+     * Whether [url] is a file on PassBundle's own releases:
+     * [DOWNLOADS]`<tag>/<file name>`, the tag and the name plain (letters,
+     * digits, dots, hyphens, underscores, and plus signs, never "." or "..").
+     */
+    fun isReleaseDownload(url: String): Boolean {
+        if (!url.startsWith(DOWNLOADS)) return false
+        val parts = url.removePrefix(DOWNLOADS).split('/')
+        return parts.size == 2 &&
+            parts.all { part ->
+                part.isNotEmpty() && part != "." && part != ".." && part.all { it in 'a'..'z' || it in 'A'..'Z' || it in '0'..'9' || it in "._-+" }
+            }
+    }
+
+    /** Whether a check ended at GitHub's API. */
+    fun isApiHost(host: String?): Boolean = host?.lowercase() == API_HOST
+
+    /** Whether a download (after GitHub's redirects) ended at one of [DOWNLOAD_HOSTS]. */
+    fun isDownloadHost(host: String?): Boolean = host?.lowercase() in DOWNLOAD_HOSTS
+
+    /** Whether a downloaded APK's versionName is the version its release's tag names. */
+    fun isSameVersion(apkVersionName: String?, version: String): Boolean = apkVersionName != null && apkVersionName == version
+
     private val TAG = Regex("""^android-v(\d+\.\d+\.(\d+))$""")
     private val NAME = Regex("""^\d+\.\d+\.(\d+)$""")
 

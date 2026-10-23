@@ -45,4 +45,48 @@ class ReleasesTest {
         assertTrue(Releases.changes(long, max = 100).length <= 102)
         assertTrue(Releases.changes(long, max = 100).endsWith("\n…"))
     }
+
+    @Test fun `only files on PassBundle's own releases are downloaded`() {
+        val base = "https://github.com/PimpinPumpkin/passbundle-apps/releases/download"
+        assertTrue(Releases.isReleaseDownload("$base/android-v0.1.12/passbundle-0.1.12-arm64-v8a.apk"))
+        assertTrue(Releases.isReleaseDownload("$base/android-v0.1.12/SHA256SUMS"))
+        // Another repository, another host, or not HTTPS.
+        assertFalse(Releases.isReleaseDownload("https://github.com/someone/passbundle-apps/releases/download/android-v0.1.12/x.apk"))
+        assertFalse(Releases.isReleaseDownload("https://github.com/PimpinPumpkin/passbundle-apps-fork/releases/download/android-v0.1.12/x.apk"))
+        assertFalse(Releases.isReleaseDownload("https://github.com.example.test/PimpinPumpkin/passbundle-apps/releases/download/a/b.apk"))
+        assertFalse(Releases.isReleaseDownload("https://example.test/PimpinPumpkin/passbundle-apps/releases/download/a/b.apk"))
+        assertFalse(Releases.isReleaseDownload("http://github.com/PimpinPumpkin/passbundle-apps/releases/download/a/b.apk"))
+        // Paths that would leave the releases once a client tidies them.
+        assertFalse(Releases.isReleaseDownload("$base/../../../other/repo/b.apk"))
+        assertFalse(Releases.isReleaseDownload("$base/android-v0.1.12/../b.apk"))
+        assertFalse(Releases.isReleaseDownload("$base/../b.apk"))
+        assertFalse(Releases.isReleaseDownload("$base/%2e%2e/b.apk"))
+        // Anything but a tag and a file name.
+        assertFalse(Releases.isReleaseDownload("$base/android-v0.1.12/b.apk?x=1"))
+        assertFalse(Releases.isReleaseDownload("$base/android-v0.1.12/sub/b.apk"))
+        assertFalse(Releases.isReleaseDownload("$base/android-v0.1.12/"))
+        assertFalse(Releases.isReleaseDownload("$base/b.apk"))
+    }
+
+    @Test fun `a download ends only at GitHub's own hosts`() {
+        assertTrue(Releases.isDownloadHost("github.com"))
+        assertTrue(Releases.isDownloadHost("objects.githubusercontent.com"))
+        assertTrue(Releases.isDownloadHost("release-assets.githubusercontent.com"))
+        assertTrue(Releases.isDownloadHost("GitHub.com"))
+        assertFalse(Releases.isDownloadHost("api.github.com"))
+        assertFalse(Releases.isDownloadHost("githubusercontent.com"))
+        assertFalse(Releases.isDownloadHost("evil.objects.githubusercontent.com"))
+        assertFalse(Releases.isDownloadHost("example.test"))
+        assertFalse(Releases.isDownloadHost(null))
+        assertTrue(Releases.isApiHost("api.github.com"))
+        assertFalse(Releases.isApiHost("github.com"))
+        assertFalse(Releases.isApiHost(null))
+    }
+
+    @Test fun `the APK must be the version its tag names`() {
+        assertTrue(Releases.isSameVersion("0.1.12", "0.1.12"))
+        assertFalse("an older build behind a newer tag", Releases.isSameVersion("0.1.11", "0.1.12"))
+        assertFalse(Releases.isSameVersion("0.1.12-debug", "0.1.12"))
+        assertFalse(Releases.isSameVersion(null, "0.1.12"))
+    }
 }
