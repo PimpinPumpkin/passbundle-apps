@@ -64,7 +64,9 @@ import_p12() { # <file> <password>
 }
 
 # A throwaway code signing certificate, as PassBundle's test one is made
-# (README, "Mac test releases"), but for two days.
+# (README, "Mac test releases"), but for two days. (codesign names this one
+# "certificate leaf" in the designated requirement, and the test one
+# "certificate root": either way, that certificate alone.)
 throwaway() { # <name> <common name>
   local dir="$work/certs/$1" pass
   mkdir -p "$dir"
@@ -79,6 +81,7 @@ CN = $2
 basicConstraints = critical, CA:FALSE
 keyUsage = critical, digitalSignature
 extendedKeyUsage = critical, codeSigning
+subjectKeyIdentifier = hash
 EOF
   /usr/bin/openssl req -x509 -newkey rsa:2048 -nodes -keyout "$dir/key.pem" -out "$dir/cert.pem" \
     -days 2 -sha256 -config "$dir/req.cnf" 2> /dev/null
@@ -98,7 +101,7 @@ fi
 throwaway other "Someone else"
 security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$kcpass" "$kc" > /dev/null
 identity() { # <common name>: its SHA-1, which names it alone
-  security find-identity -p codesigning "$kc" | awk -v name="\"$1\"" 'index($0, name) { print $2; exit }'
+  security find-identity -p codesigning "$kc" | awk -v name="\"$1\"" 'index($0, name) && !found { print $2; found = 1 }'
 }
 ours=$(identity "$ours_name")
 other=$(identity "Someone else")
@@ -210,7 +213,7 @@ if [ -n "$built" ]; then
   real real-new.app 0.1.2 "$ours"
   real real-adhoc.app 0.1.2 -
   echo "The built app, signed:"
-  codesign -dv "$fixtures/real-new.app" 2>&1 | grep -E '^(Identifier|CodeDirectory|Authority|TeamIdentifier)='
+  codesign -dvv "$fixtures/real-new.app" 2>&1 | grep -E '^(Identifier=|CodeDirectory |Authority=|TeamIdentifier=)'
   codesign -d -r- "$fixtures/real-new.app" 2>&1 | grep designated
   if [ -n "$launch" ]; then
     data="$work/launch-data"

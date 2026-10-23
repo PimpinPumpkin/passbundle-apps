@@ -209,12 +209,12 @@ jobs:
           tools/bundle-mac.sh "$app" core/target/release/libpassbundle_core.dylib agent/target/universal
           # Every program and library in it, for both kinds of Mac.
           find "$app" -type f -print0 | while IFS= read -r -d '' file; do
-            file -b "$file" | grep -q 'Mach-O' || continue
+            [[ "$(file -b "$file")" == *Mach-O* ]] || continue
             archs=" $(lipo -archs "$file") "
-            case "$archs" in
-              *" arm64 "*" x86_64 "* | *" x86_64 "*" arm64 "*) ;;
-              *) echo "$file is only for$archs" >&2; exit 1 ;;
-            esac
+            if [[ "$archs" != *" arm64 "* || "$archs" != *" x86_64 "* ]]; then
+              echo "$file is only for$archs" >&2
+              exit 1
+            fi
           done
           # Named for people (Flutter names it after the project), with the
           # entitlements the sign job signs it with.
@@ -320,7 +320,7 @@ jobs:
           # Every program and library in it signed with the test
           # certificate alone, with the hardened runtime.
           find "$app" -type f -print0 | while IFS= read -r -d '' file; do
-            file -b "$file" | grep -q 'Mach-O' || continue
+            [[ "$(file -b "$file")" == *Mach-O* ]] || continue
             rm -f "$RUNNER_TEMP"/leaf-*
             codesign -d --extract-certificates="$RUNNER_TEMP/leaf-" "$file" 2> /dev/null
             if [ ! -f "$RUNNER_TEMP/leaf-0" ] || [ -e "$RUNNER_TEMP/leaf-1" ] \
@@ -328,18 +328,24 @@ jobs:
               echo "$file isn't signed with the test certificate alone." >&2
               exit 1
             fi
-            if ! codesign -dv "$file" 2>&1 | grep -q 'flags=0x10000(runtime)'; then
+            if [[ "$(codesign -dv "$file" 2>&1)" != *"flags=0x10000(runtime)"* ]]; then
               echo "$file isn't signed with the hardened runtime." >&2
               exit 1
             fi
           done
-          # The requirement each update must meet: this app, this certificate.
+          # The requirement each update must meet: this app, this
+          # certificate (which codesign names as the root, being self-signed;
+          # "leaf" would pin it as well).
           requirement=$(codesign -d -r- "$app" 2>&1 | grep '^designated => ')
           echo "$requirement"
-          if [ "$requirement" != "designated => identifier \"com.passbundle.app\" and certificate root = H\"$TEST_CERT_SHA1\"" ]; then
-            echo "The app's designated requirement isn't the one updates are checked against." >&2
-            exit 1
-          fi
+          case "$requirement" in
+            "designated => identifier \"com.passbundle.app\" and certificate root = H\"$TEST_CERT_SHA1\"") ;;
+            "designated => identifier \"com.passbundle.app\" and certificate leaf = H\"$TEST_CERT_SHA1\"") ;;
+            *)
+              echo "The app's designated requirement isn't the one updates are checked against." >&2
+              exit 1
+              ;;
+          esac
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")" = "$VERSION"
 
           # Zipped as the updater takes it, its signatures (and the
