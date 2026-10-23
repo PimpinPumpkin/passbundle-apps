@@ -446,7 +446,7 @@ jobs:
         if: matrix.platform == 'linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends clang cmake ninja-build pkg-config libgtk-3-dev libdbus-1-dev libssl-dev xvfb imagemagick
+          sudo apt-get install -y --no-install-recommends clang cmake ninja-build pkg-config libgtk-3-dev libdbus-1-dev libssl-dev xvfb imagemagick xdotool x11-utils
       - name: The agent's test build, for the app's unlock test
         working-directory: agent
         run: |
@@ -566,6 +566,17 @@ jobs:
         if: matrix.platform == 'windows'
         shell: pwsh
         run: tools/measure.ps1 -Exe "${{ matrix.exe }}" -Bundle "${{ matrix.bundle }}" -Shot screenshot-windows.png | Tee-Object -Append -FilePath $env:GITHUB_STEP_SUMMARY
+      # After measuring, which opens the app on a window of its own.
+      - name: The window opens no smaller than 400 by 560, and again where and how big it was left (Linux)
+        if: matrix.platform == 'linux'
+        run: |
+          Xvfb :98 -screen 0 1440x900x24 &
+          sleep 2
+          DISPLAY=:98 tools/window-test.sh "${{ matrix.exe }}"
+      - name: The window opens no smaller than 400 by 560, and again where and how big it was left (Windows)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: tools/window-test.ps1 -Exe "${{ matrix.exe }}"
       - name: Pack the build
         run: tar -czf "passbundle-${{ matrix.platform }}.tar.gz" -C "$(dirname "${{ matrix.bundle }}")" "$(basename "${{ matrix.bundle }}")"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

@@ -26,6 +26,11 @@ constexpr const wchar_t kGetPreferredBrightnessRegKey[] =
   L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize";
 constexpr const wchar_t kGetPreferredBrightnessRegValue[] = L"AppsUseLightTheme";
 
+/// Where the window's place is kept between launches: its WINDOWPLACEMENT,
+/// under the person's own key.
+constexpr const wchar_t kPlacementKey[] = L"Software\\PassBundle\\Window";
+constexpr const wchar_t kPlacementValue[] = L"Placement";
+
 // The number of Win32Window objects that currently exist.
 static int g_active_window_count = 0;
 
@@ -150,7 +155,63 @@ bool Win32Window::Create(const std::wstring& title,
 }
 
 bool Win32Window::Show() {
-  return ShowWindow(window_handle_, SW_SHOWNORMAL);
+  return ShowWindow(window_handle_,
+                    show_maximized_ ? SW_SHOWMAXIMIZED : SW_SHOWNORMAL);
+}
+
+void Win32Window::SetMinimumSize(const Size& size) {
+  minimum_size_ = size;
+}
+
+bool Win32Window::RestorePlacement() {
+  WINDOWPLACEMENT placement{};
+  DWORD length = sizeof(placement);
+  if (RegGetValue(HKEY_CURRENT_USER, kPlacementKey, kPlacementValue,
+                  RRF_RT_REG_BINARY, nullptr, &placement,
+                  &length) != ERROR_SUCCESS ||
+      length != sizeof(placement) || placement.length != sizeof(placement)) {
+    return false;
+  }
+  // Only onto a screen that's still there, and no bigger than it.
+  RECT& rect = placement.rcNormalPosition;
+  HMONITOR monitor = MonitorFromRect(&rect, MONITOR_DEFAULTTONULL);
+  MONITORINFO info{};
+  info.cbSize = sizeof(info);
+  if (monitor == nullptr || !GetMonitorInfo(monitor, &info) ||
+      rect.right <= rect.left || rect.bottom <= rect.top) {
+    return false;
+  }
+  const LONG most_wide = info.rcWork.right - info.rcWork.left;
+  const LONG most_high = info.rcWork.bottom - info.rcWork.top;
+  if (rect.right - rect.left > most_wide) {
+    rect.right = rect.left + most_wide;
+  }
+  if (rect.bottom - rect.top > most_high) {
+    rect.bottom = rect.top + most_high;
+  }
+  show_maximized_ = placement.showCmd == SW_SHOWMAXIMIZED;
+  // Still hidden: |Show| shows it once Flutter has drawn its first frame.
+  placement.showCmd = SW_HIDE;
+  placement.flags = 0;
+  return SetWindowPlacement(window_handle_, &placement) != 0;
+}
+
+void Win32Window::SavePlacement() {
+  WINDOWPLACEMENT placement{};
+  placement.length = sizeof(placement);
+  if (window_handle_ == nullptr ||
+      !GetWindowPlacement(window_handle_, &placement)) {
+    return;
+  }
+  // Minimized, it opens next time as it was before: maximized or not.
+  const bool maximized =
+      placement.showCmd == SW_SHOWMAXIMIZED ||
+      (placement.showCmd == SW_SHOWMINIMIZED &&
+       (placement.flags & WPF_RESTORETOMAXIMIZED) != 0);
+  placement.showCmd = maximized ? SW_SHOWMAXIMIZED : SW_SHOWNORMAL;
+  placement.flags = 0;
+  RegSetKeyValue(HKEY_CURRENT_USER, kPlacementKey, kPlacementValue,
+                 REG_BINARY, &placement, sizeof(placement));
 }
 
 // static
@@ -180,12 +241,42 @@ Win32Window::MessageHandler(HWND hwnd,
                             LPARAM const lparam) noexcept {
   switch (message) {
     case WM_DESTROY:
+      SavePlacement();
       window_handle_ = nullptr;
       Destroy();
       if (quit_on_close_) {
         PostQuitMessage(0);
       }
       return 0;
+
+    // Where and how big it's left: kept as the person finishes moving or
+    // sizing it, and when Windows ends the session (the window may not get
+    // to close), as well as when it closes.
+    case WM_EXITSIZEMOVE:
+      SavePlacement();
+      break;
+
+    case WM_ENDSESSION:
+      if (wparam) {
+        SavePlacement();
+      }
+      break;
+
+    case WM_GETMINMAXINFO: {
+      if (minimum_size_.width == 0 || minimum_size_.height == 0) {
+        break;
+      }
+      // The content's smallest size on this screen, with the window's frame.
+      HMONITOR monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+      double scale_factor = FlutterDesktopGetDpiForMonitor(monitor) / 96.0;
+      RECT frame = {0, 0, Scale(minimum_size_.width, scale_factor),
+                    Scale(minimum_size_.height, scale_factor)};
+      AdjustWindowRectEx(&frame, WS_OVERLAPPEDWINDOW, FALSE, 0);
+      auto info = reinterpret_cast<MINMAXINFO*>(lparam);
+      info->ptMinTrackSize.x = frame.right - frame.left;
+      info->ptMinTrackSize.y = frame.bottom - frame.top;
+      return 0;
+    }
 
     case WM_DPICHANGED: {
       auto newRectSize = reinterpret_cast<RECT*>(lparam);

@@ -55,6 +55,15 @@ class Win32Window {
   // Return a RECT representing the bounds of the current client area.
   RECT GetClientArea();
 
+  // The smallest the window's content may be, in logical pixels (scaled for
+  // the screen it's on).
+  void SetMinimumSize(const Size& size);
+
+  // Puts the window back where and how big the person left it, if that's
+  // still on a screen (the screens may have changed since). Before |Show|.
+  // Returns whether there was a place to go back to.
+  bool RestorePlacement();
+
  protected:
   // Processes and route salient window messages for mouse handling,
   // size change and DPI. Delegates handling of these to member overloads that
@@ -90,7 +99,16 @@ class Win32Window {
   // Update the window frame's theme to match the system theme.
   static void UpdateTheme(HWND const window);
 
+  // Remembers where and how big the window is, for |RestorePlacement| next time.
+  void SavePlacement();
+
   bool quit_on_close_ = false;
+
+  // The smallest content size, in logical pixels; none when zero.
+  Size minimum_size_ = Size(0, 0);
+
+  // It was maximized when the person left it: |Show| maximizes it again.
+  bool show_maximized_ = false;
 
   // window handle for top level window.
   HWND window_handle_ = nullptr;
