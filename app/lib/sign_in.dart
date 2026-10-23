@@ -14,6 +14,18 @@ import 'widgets.dart';
 
 final _measuring = Platform.environment['PB_MEASURE'] == '1';
 
+/// A server address as someone typed it, with https:// added when they left
+/// the scheme off ("vault.example.com"). An address that names http:// stays
+/// as typed, so the core can say why it won't use it.
+String serverAddress(String typed) {
+  final address = typed.trim();
+  if (address.isEmpty) return address;
+  final scheme = RegExp(r'^([A-Za-z][A-Za-z0-9+.-]*)://').firstMatch(address);
+  if (scheme == null) return 'https://$address';
+  return scheme.group(1)!.toLowerCase() +
+      address.substring(scheme.group(1)!.length);
+}
+
 class SignInScreen extends StatefulWidget {
   const SignInScreen({
     super.key,
@@ -46,7 +58,8 @@ class _SignInScreenState extends State<SignInScreen> {
     text: selfHosted ? widget.server : '',
   );
 
-  String get signInTo => managed ?? (selfHosted ? server.text.trim() : ours);
+  String get signInTo =>
+      managed ?? (selfHosted ? serverAddress(server.text) : ours);
   late final email = TextEditingController(text: widget.email ?? '');
   final password = TextEditingController();
   final code = TextEditingController();
@@ -206,7 +219,7 @@ class _SignInScreenState extends State<SignInScreen> {
             keyboardType: TextInputType.url,
             decoration: const InputDecoration(
               labelText: 'Server',
-              hintText: 'https://vault.example.com',
+              hintText: 'vault.example.com',
             ),
           ),
           const SizedBox(height: 12),
@@ -285,7 +298,7 @@ class _SignInScreenState extends State<SignInScreen> {
         keyboardType: TextInputType.url,
         decoration: const InputDecoration(
           labelText: 'Server',
-          hintText: 'https://vault.example.com',
+          hintText: 'vault.example.com',
         ),
       ),
       const SizedBox(height: 12),
