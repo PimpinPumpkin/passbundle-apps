@@ -3,7 +3,7 @@
 PassBundle's own desktop and mobile apps: one Rust core and one Flutter app, so every platform looks and behaves the same. Bitwarden's format and the PassBundle server stay for storage and encryption.
 
 - **`core/`**: the core, in Rust. Keys, the vault format, sync, search, one-time codes: everything but drawing. The design is `docs/core.md` in the meta repo (PimpinPumpkin/Passbundle), with test vectors in `docs/vectors/core-v1.json` (copied into `core/tests/vectors`).
-- **`app/`**: the Flutter app, for Windows, macOS, Linux, iOS, and Android. Its own look (brand colors and the bundled Inter font), light and dark.
+- **`app/`**: the Flutter app, for Windows, macOS, Linux, iOS, and Android. Its own look (brand colors and the bundled Google Sans Flex font), light and dark.
 - **`agent/`**: the desktop agent: the tray (menu bar on macOS), Windows Hello for the app and the browser extension, and the extension's native-messaging host. Moved here from passbundle-clients on October 21, 2026.
 - **`ipc/`**: the agent's socket, shared by the agent and the core.
 - **`brand/`**: the brand the agent and the core bake in (`brand/README.md`).
@@ -52,4 +52,4 @@ Every commit on `main` that passes CI becomes a test release for Android (`.gith
 - Key handling changes only with a design note and test vectors in the meta repo first.
 - No key crosses into Dart, and a secret only while the person reveals it.
 
-Licensed under the GPL, version 3 (`LICENSE`). Inter is under the SIL Open Font License (`app/assets/fonts/Inter-LICENSE.txt`).
+Licensed under the GPL, version 3 (`LICENSE`). Google Sans Flex is under the SIL Open Font License (`app/assets/fonts/GoogleSansFlex-OFL.txt`).

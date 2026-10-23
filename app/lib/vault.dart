@@ -1038,7 +1038,7 @@ class _ItemPaneState extends State<ItemPane> {
         );
     Widget secretRow(String label, String what, {bool canCopy = true}) => row(
       label,
-      // Inter, like everything else: no system font, so it looks the same everywhere.
+      // Google Sans Flex, like everything else: no system font, so it looks the same everywhere.
       SelectableText(
         revealed[what] ?? '••••••••••••',
         style: const TextStyle(fontSize: 15, letterSpacing: 0.4),
