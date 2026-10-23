@@ -316,7 +316,11 @@ void main() {
           .data!;
       expect(made.split(' '), hasLength(8));
       expect(made, matches(RegExp(r'^([A-Z][a-z-]+ ){7}[A-Z][a-z-]+$')));
-      expect(find.text('8'), findsOneWidget);
+      // The generator's count, not the one-time code's seconds behind it.
+      expect(
+        tester.widget<Text>(find.byKey(const Key('Words count'))).data,
+        '8',
+      );
       final capitalize = tester.widget<SwitchListTile>(
         find.widgetWithText(SwitchListTile, 'Capitalize'),
       );
