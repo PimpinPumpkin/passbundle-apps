@@ -1,0 +1,403 @@
+# Mac test releases (README, "Mac test releases"): every commit on main that
+# passes CI, built again from that commit, signed with PassBundle's own test
+# certificate (not Apple's, and not notarized), and published as a GitHub
+# release, which the app's updater reads (app/macos/Runner/Updater.swift).
+#
+# Four jobs, as the Android releases' (release.yml), so the certificate's key
+# and the token that can publish never meet the build's own code (Rust
+# crates' build scripts and macros, Xcode's build phases, Flutter):
+#
+#   plan     the version, whether there's anything new, and the notes (git only)
+#   build    the app, universal, signed ad hoc; no secrets, read-only
+#   sign     the only job with the key: signs the build's app with Apple's
+#            codesign and this file's own shell, running nothing from the
+#            repository, and checks it; read-only
+#   publish  the only job that can write: gh release create; no secrets
+#
+# Tagged macos-v<major>.<minor>.<build>: the major and minor are
+# pubspec.yaml's, and the build is this workflow's run number, which only
+# goes up. Renaming this file starts the run number at 1 again: add an
+# offset to BUILD then, or the versions go backwards.
+#
+# A Mac release is never marked as the latest: releases/latest stays
+# Android's, which the Android app reads first. The Mac app reads the list
+# of releases and takes the newest macos-v one. Without the certificate's
+# secrets (a fork), sign stops after saying so, and nothing is published.
+name: macOS release
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: macos-release
+  cancel-in-progress: false
+
+env:
+  FLUTTER_VERSION: 3.47.6
+  FLUTTER_COMMIT: 5fc346839b5d0eef006ed8404392afb4dfae428d
+  # The test certificate (the PASSBUNDLE_MAC_CERT_* secrets): a release is
+  # published only signed with it, through and through. Its SHA-1 is how a
+  # code requirement names it: the app's designated requirement, which each
+  # update must meet (Updater.swift), and which keeps the keychain trusting
+  # the app from one release to the next.
+  IDENTITY: PassBundle test builds
+  TEST_CERT_SHA256: 0158113951f63b39bac06ba43d9dc838ade6cde2dae8bc55608fd4297d3d24ac
+  TEST_CERT_SHA1: 5833cb215225bb004aa67e200cb6c64bd95fc479
+
+jobs:
+  plan:
+    name: What to release
+    # Only main's own pushes that passed CI (not a fork's branch that's also
+    # called main), or a run started by hand on main.
+    if: >-
+      (github.event_name == 'workflow_run'
+        && github.event.workflow_run.conclusion == 'success'
+        && github.event.workflow_run.event == 'push'
+        && github.event.workflow_run.head_branch == 'main'
+        && github.event.workflow_run.head_repository.full_name == github.repository)
+      || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    outputs:
+      release: ${{ steps.plan.outputs.release }}
+      sha: ${{ steps.plan.outputs.sha }}
+      version: ${{ steps.plan.outputs.version }}
+      build: ${{ steps.plan.outputs.build }}
+      notes: ${{ steps.notes.outputs.notes }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The commit CI passed, not main's head now.
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          # The tags, for the last release and the notes.
+          fetch-depth: 0
+          persist-credentials: false
+      - name: The version, and whether there's anything new
+        id: plan
+        env:
+          BUILD: ${{ github.run_number }}
+        run: |
+          sha=$(git rev-parse HEAD)
+          base=$(sed -n 's/^version: \([0-9]*\.[0-9]*\)\..*/\1/p' app/pubspec.yaml)
+          [ -n "$base" ] || { echo "No version in app/pubspec.yaml." >&2; exit 1; }
+          version="$base.$BUILD"
+          # The newest Mac release, by build number.
+          last=$(git tag -l 'macos-v*' | awk -F. '{ print $NF "\t" $0 }' | sort -n | tail -1 | cut -f2)
+          {
+            echo "sha=$sha"
+            echo "version=$version"
+            echo "build=$BUILD"
+            echo "last=$last"
+          } >> "$GITHUB_OUTPUT"
+          # A commit already released, or older than the last release (CI
+          # runs can finish out of order), isn't released again.
+          if [ -n "$last" ] && git merge-base --is-ancestor "$sha" "$last"; then
+            echo "${sha:0:9} is already in $last: nothing new to release." | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Releasing ${sha:0:9} as $version (the last release is ${last:-none})." | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: The notes, the commit subjects since the last release
+        id: notes
+        if: steps.plan.outputs.release == 'true'
+        env:
+          SHA: ${{ steps.plan.outputs.sha }}
+          VERSION: ${{ steps.plan.outputs.version }}
+          LAST: ${{ steps.plan.outputs.last }}
+        run: |
+          if [ -n "$LAST" ]; then
+            since="since ${LAST#macos-v}"
+            changes=$(git log --no-merges --format='- %s' "$LAST..$SHA")
+          else
+            since="in this first test release"
+            changes=$(git log --no-merges --format='- %s' -n 20 "$SHA")
+          fi
+          notes=$(
+            echo "What's new $since:"
+            echo
+            echo "${changes:-- Maintenance}"
+            echo
+            echo "Files: PassBundle-$VERSION-macos.zip is the app, for Macs with Apple silicon and with Intel. SHA256SUMS lists its SHA-256."
+            echo
+            echo "A test build, signed with PassBundle's own test certificate (SHA-256 ${TEST_CERT_SHA256}), not by Apple, and not notarized. The first time, macOS won't open it until you allow it: on macOS 15 and later, open it once, then choose Open Anyway in System Settings, Privacy & Security; on earlier versions, Control-click it and choose Open. After that, PassBundle updates itself from these releases (Settings, Updates)."
+          )
+          echo "$notes"
+          end="NOTES_$(od -An -N12 -tx1 /dev/urandom | tr -d ' \n')"
+          printf 'notes<<%s\n%s\n%s\n' "$end" "$notes" "$end" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build ${{ needs.plan.outputs.version }}
+    needs: plan
+    if: needs.plan.outputs.release == 'true'
+    runs-on: macos-15
+    timeout-minutes: 60
+    # No secrets here, and nothing it can write: this is where the build's
+    # own code runs.
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    env:
+      VERSION: ${{ needs.plan.outputs.version }}
+      BUILD: ${{ needs.plan.outputs.build }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+      # As CI's App (macos) job builds it (ci.yml), without its cache: a
+      # release is built from scratch.
+      - name: Install the pinned Rust toolchains, with both Mac targets
+        run: |
+          for dir in core agent; do
+            (cd "$dir" && rustup toolchain install && rustup target add aarch64-apple-darwin x86_64-apple-darwin)
+          done
+      - name: Build the core, universal (Apple silicon and Intel), as the app is
+        working-directory: core
+        run: |
+          cargo build --locked --release --features ffi --target aarch64-apple-darwin
+          cargo build --locked --release --features ffi --target x86_64-apple-darwin
+          mkdir -p target/release
+          lipo -create -output target/release/libpassbundle_core.dylib \
+            target/aarch64-apple-darwin/release/libpassbundle_core.dylib \
+            target/x86_64-apple-darwin/release/libpassbundle_core.dylib
+      - name: Build the desktop agent, universal
+        working-directory: agent
+        run: |
+          mkdir -p target/universal
+          for target in aarch64-apple-darwin x86_64-apple-darwin; do
+            cargo build --locked --release --target "$target"
+          done
+          for program in passbundle-agent passbundle-agent-host; do
+            lipo -create -output "target/universal/$program" \
+              "target/aarch64-apple-darwin/release/$program" "target/x86_64-apple-darwin/release/$program"
+          done
+      - name: Install Flutter at the pinned release
+        run: |
+          git clone --quiet --depth 1 --branch "$FLUTTER_VERSION" https://github.com/flutter/flutter.git "$RUNNER_TEMP/flutter"
+          test "$(git -C "$RUNNER_TEMP/flutter" rev-parse HEAD)" = "$FLUTTER_COMMIT"
+          echo "$RUNNER_TEMP/flutter/bin" >> "$GITHUB_PATH"
+      - name: Turn off analytics
+        run: |
+          flutter config --no-analytics
+          flutter --disable-analytics
+      - name: The Dart packages pubspec.lock pins, and no others
+        working-directory: app
+        run: flutter pub get --enforce-lockfile
+      - name: Build the app, with this version
+        working-directory: app
+        run: flutter build macos --release --build-name "$VERSION" --build-number "$BUILD"
+      - name: Put the core and the agent in it, check it, and pack it
+        run: |
+          app=app/build/macos/Build/Products/Release/passbundle.app
+          plist="$app/Contents/Info.plist"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$plist")" = com.passbundle.app
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$plist")" = "$VERSION"
+          tools/bundle-mac.sh "$app" core/target/release/libpassbundle_core.dylib agent/target/universal
+          # Every program and library in it, for both kinds of Mac.
+          find "$app" -type f -print0 | while IFS= read -r -d '' file; do
+            file -b "$file" | grep -q 'Mach-O' || continue
+            archs=" $(lipo -archs "$file") "
+            case "$archs" in
+              *" arm64 "*" x86_64 "* | *" x86_64 "*" arm64 "*) ;;
+              *) echo "$file is only for$archs" >&2; exit 1 ;;
+            esac
+          done
+          # Named for people (Flutter names it after the project), with the
+          # entitlements the sign job signs it with.
+          mkdir -p stage dist
+          ditto "$app" stage/PassBundle.app
+          ditto -c -k --keepParent stage/PassBundle.app "dist/PassBundle-$VERSION-macos-unsigned.zip"
+          cp app/macos/Runner/Release.entitlements dist/
+          ls -l dist
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: passbundle-macos-${{ needs.plan.outputs.version }}-unsigned
+          path: dist
+          if-no-files-found: error
+          retention-days: 7
+
+  sign:
+    name: Sign ${{ needs.plan.outputs.version }}
+    needs: [plan, build]
+    runs-on: macos-15
+    timeout-minutes: 15
+    # Once the user makes a "macos-release" environment (Settings,
+    # Environments), with the PASSBUNDLE_MAC_CERT_* secrets in it and
+    # whatever rules they want, this job, and only this one, takes it:
+    # environment: macos-release
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    outputs:
+      signed: ${{ steps.key.outputs.signed }}
+    env:
+      VERSION: ${{ needs.plan.outputs.version }}
+    # No checkout: nothing from the repository runs here, only Apple's tools
+    # (security, codesign, ditto) and this file's own shell.
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: passbundle-macos-${{ needs.plan.outputs.version }}-unsigned
+          path: unsigned
+      - name: The test certificate, in a keychain of its own
+        id: key
+        env:
+          P12_BASE64: ${{ secrets.PASSBUNDLE_MAC_CERT_P12_BASE64 }}
+          P12_PASSWORD: ${{ secrets.PASSBUNDLE_MAC_CERT_PASSWORD }}
+        run: |
+          if [ -z "$P12_BASE64" ] || [ -z "$P12_PASSWORD" ]; then
+            echo "::notice::No test certificate in this repository's secrets: the app stays signed ad hoc (the build's artifact), and nothing is published."
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          umask 077
+          keychain="$RUNNER_TEMP/passbundle-signing.keychain-db"
+          password=$(openssl rand -hex 24)
+          echo "::add-mask::$password"
+          printf '%s' "$P12_BASE64" | base64 --decode > "$RUNNER_TEMP/mac-test-signing.p12"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 3600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          security import "$RUNNER_TEMP/mac-test-signing.p12" -k "$keychain" -f pkcs12 -P "$P12_PASSWORD" -T /usr/bin/codesign > /dev/null
+          rm -f "$RUNNER_TEMP/mac-test-signing.p12"
+          # codesign may use the key without asking, and finds identities
+          # only on the keychain search list.
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$password" "$keychain" > /dev/null
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          security find-identity -p codesigning "$keychain" | grep -F "\"$IDENTITY\""
+          echo "signed=true" >> "$GITHUB_OUTPUT"
+      - name: Sign the app with the test certificate, and check it
+        if: steps.key.outputs.signed == 'true'
+        run: |
+          keychain="$RUNNER_TEMP/passbundle-signing.keychain-db"
+          ent=unsigned/Release.entitlements
+          # The entitlements the app may have: any other is a change to
+          # review here first.
+          plutil -lint "$ent"
+          keys=$(plutil -convert json -o - "$ent" | python3 -c 'import json, sys; print(" ".join(sorted(json.load(sys.stdin))))')
+          if [ "$keys" != "com.apple.security.cs.disable-library-validation" ]; then
+            echo "The app's entitlements aren't the ones this workflow signs: $keys" >&2
+            exit 1
+          fi
+          ditto -x -k "unsigned/PassBundle-$VERSION-macos-unsigned.zip" work
+          app=work/PassBundle.app
+          # What's nested first, each on its own (the app's entitlements are
+          # the app's, never the agent's), then the app with its
+          # entitlements; the hardened runtime throughout. The same as
+          # tools/mac-update-test.sh's sign_app, which CI runs on every
+          # commit with a throwaway certificate.
+          sign() { codesign --force --timestamp=none --options runtime --keychain "$keychain" --sign "$IDENTITY" "$@"; }
+          for item in "$app"/Contents/Frameworks/*; do
+            case "$item" in *.framework | *.dylib) sign "$item" ;; esac
+          done
+          for helper in "$app"/Contents/Helpers/*.app; do
+            [ -d "$helper" ] || continue
+            main=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$helper/Contents/Info.plist")
+            for program in "$helper"/Contents/MacOS/*; do
+              [ "$(basename "$program")" = "$main" ] || sign "$program"
+            done
+            sign "$helper"
+          done
+          sign --entitlements "$ent" "$app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+
+          # Every program and library in it signed with the test
+          # certificate alone, with the hardened runtime.
+          find "$app" -type f -print0 | while IFS= read -r -d '' file; do
+            file -b "$file" | grep -q 'Mach-O' || continue
+            rm -f "$RUNNER_TEMP"/leaf-*
+            codesign -d --extract-certificates="$RUNNER_TEMP/leaf-" "$file" 2> /dev/null
+            if [ ! -f "$RUNNER_TEMP/leaf-0" ] || [ -e "$RUNNER_TEMP/leaf-1" ] \
+              || [ "$(shasum -a 256 < "$RUNNER_TEMP/leaf-0" | cut -d' ' -f1)" != "$TEST_CERT_SHA256" ]; then
+              echo "$file isn't signed with the test certificate alone." >&2
+              exit 1
+            fi
+            if ! codesign -dv "$file" 2>&1 | grep -q 'flags=0x10000(runtime)'; then
+              echo "$file isn't signed with the hardened runtime." >&2
+              exit 1
+            fi
+          done
+          # The requirement each update must meet: this app, this certificate.
+          requirement=$(codesign -d -r- "$app" 2>&1 | grep '^designated => ')
+          echo "$requirement"
+          if [ "$requirement" != "designated => identifier \"com.passbundle.app\" and certificate root = H\"$TEST_CERT_SHA1\"" ]; then
+            echo "The app's designated requirement isn't the one updates are checked against." >&2
+            exit 1
+          fi
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")" = "$VERSION"
+
+          # Zipped as the updater takes it, its signatures (and the
+          # frameworks' links) kept: the same app comes out again.
+          mkdir dist
+          ditto -c -k --keepParent "$app" "dist/PassBundle-$VERSION-macos.zip"
+          ditto -x -k "dist/PassBundle-$VERSION-macos.zip" "$RUNNER_TEMP/unzipped"
+          test "$(ls "$RUNNER_TEMP/unzipped")" = PassBundle.app
+          codesign --verify --deep --strict "$RUNNER_TEMP/unzipped/PassBundle.app"
+          (cd dist && shasum -a 256 "PassBundle-$VERSION-macos.zip" > SHA256SUMS && cat SHA256SUMS)
+          ls -l dist
+      - name: Remove the keychain
+        if: always()
+        run: |
+          rm -f "$RUNNER_TEMP/mac-test-signing.p12"
+          keychain="$RUNNER_TEMP/passbundle-signing.keychain-db"
+          if [ -e "$keychain" ]; then security delete-keychain "$keychain"; fi
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: steps.key.outputs.signed == 'true'
+        with:
+          name: passbundle-macos-${{ needs.plan.outputs.version }}
+          path: dist
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish ${{ needs.plan.outputs.version }}
+    needs: [plan, sign]
+    if: needs.sign.outputs.signed == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    # The only job that can write, with no secrets but its token, and no
+    # code from the repository.
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: passbundle-macos-${{ needs.plan.outputs.version }}
+          path: dist
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ needs.plan.outputs.sha }}
+          VERSION: ${{ needs.plan.outputs.version }}
+          NOTES: ${{ needs.plan.outputs.notes }}
+        run: |
+          (cd dist && sha256sum -c SHA256SUMS)
+          printf '%s\n' "$NOTES" > "$RUNNER_TEMP/notes.md"
+          # Not the latest: releases/latest stays Android's (see the top).
+          gh release create "macos-v$VERSION" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$SHA" \
+            --title "PassBundle $VERSION for Mac" \
+            --notes-file "$RUNNER_TEMP/notes.md" \
+            --latest=false \
+            "dist/PassBundle-$VERSION-macos.zip" dist/SHA256SUMS
+          echo "Published https://github.com/$GITHUB_REPOSITORY/releases/tag/macos-v$VERSION" | tee -a "$GITHUB_STEP_SUMMARY"

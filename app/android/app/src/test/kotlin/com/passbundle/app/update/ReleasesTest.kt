@@ -15,6 +15,8 @@ class ReleasesTest {
         assertNull(Releases.versionOf("v0.1.12"))
         assertNull(Releases.buildOfTag("android-v0.1.12-rc"))
         assertNull(Releases.buildOfTag("desktop-v0.1.12"))
+        assertNull(Releases.versionOf("macos-v0.1.12"))
+        assertNull(Releases.buildOfTag("macos-v0.1.12"))
     }
 
     @Test fun `only a higher build is newer, whatever the version line`() {
@@ -35,6 +37,15 @@ class ReleasesTest {
         val tags = listOf("android-v0.1.9", "desktop-v0.3.0", "android-v0.1.12", "android-v0.1.10", "canary")
         assertEquals("android-v0.1.12", Releases.newest(tags))
         assertNull(Releases.newest(listOf("desktop-v0.3.0")))
+    }
+
+    @Test fun `Mac releases, with higher build numbers of their own, are never Android's`() {
+        // The Mac's releases (macos-release.yml) count their own builds, and
+        // come out alongside Android's: never an update for a phone.
+        val tags = listOf("macos-v0.1.40", "android-v0.1.12", "macos-v0.1.41", "android-v0.1.11")
+        assertEquals("android-v0.1.12", Releases.newest(tags))
+        assertFalse(Releases.isNewer("macos-v0.1.41", "0.1.12"))
+        assertNull(Releases.newest(listOf("macos-v0.1.40")))
     }
 
     @Test fun `what's new is the notes' list`() {

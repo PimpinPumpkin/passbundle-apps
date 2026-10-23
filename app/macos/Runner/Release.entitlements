@@ -2,7 +2,18 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!-- Not sandboxed: the app reaches its server, the keychain, and the desktop
      agent's socket, and starts the agent from its own bundle, as desktop
-     password managers sold outside the Mac App Store do. -->
+     password managers sold outside the Mac App Store do.
+
+     The test releases (.github/workflows/macos-release.yml) run with the
+     hardened runtime, which keeps other programs from loading code into the
+     app (DYLD_INSERT_LIBRARIES) or reading its memory. They're signed with
+     PassBundle's own test certificate, which has no Apple team ID, and the
+     hardened runtime's library validation loads only libraries signed by
+     the app's team or by Apple: so it's off, and the app can load its own
+     frameworks and the core. The rest of the hardened runtime stays on. -->
 <plist version="1.0">
-<dict/>
+<dict>
+	<key>com.apple.security.cs.disable-library-validation</key>
+	<true/>
+</dict>
 </plist>

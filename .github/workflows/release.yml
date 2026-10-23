@@ -22,8 +22,10 @@
 # versions go backwards.
 #
 # The release is a full one (not a prerelease), so releases/latest is the
-# newest. Without the key's secrets (a fork), sign stops after saying so, and
-# the debug-signed APKs stay as the build's artifact, never published.
+# newest; the Mac's releases (macos-release.yml) are never marked latest, so
+# it stays Android's. Without the key's secrets (a fork), sign stops after
+# saying so, and the debug-signed APKs stay as the build's artifact, never
+# published.
 name: Android release
 
 on:

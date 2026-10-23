@@ -1,9 +1,12 @@
-// Updates from PassBundle's GitHub releases, on Android (README, "Android
-// test releases"); the app's Kotlin does the work (update/Updater.kt). In
-// Settings: this version, checking, and updating, with what's new. When the
-// check on start (at most once a day) finds one, a quiet notice over the
-// vault. Nothing installs without the person's tap and Android's own prompt.
-// Elsewhere there are no updates here.
+// Updates from PassBundle's GitHub releases, on Android and the Mac (README,
+// "Android test releases" and "Mac test releases"); the app's own native
+// code does the work (Android: update/Updater.kt; the Mac:
+// macos/Runner/Updater.swift). In Settings: this version, checking, and
+// updating, with what's new. When the check on start (at most once a day)
+// finds one, a quiet notice over the vault. Nothing installs without the
+// person's tap, and on Android Android's own prompt; on the Mac PassBundle
+// takes the new version's place and restarts. Elsewhere there are no
+// updates here.
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -11,19 +14,27 @@ import 'package:flutter/services.dart';
 
 import 'theme.dart';
 
-/// What the app's Kotlin does for updates (MainActivity.kt), as maps.
+/// What the app's native code does for updates (Android: MainActivity.kt;
+/// the Mac: MainFlutterWindow.swift), as maps.
 abstract class UpdatePlatform {
   /// `version`, `store` (the app store that installed PassBundle, or null),
-  /// and `auto` (whether it checks once a day).
+  /// `auto` (whether it checks once a day), and `restarts` (whether
+  /// updating restarts PassBundle, as on the Mac).
   Future<Map<String, dynamic>> status();
 
   /// `{ok, available, version, notes}` or `{ok: false, error}`; `quiet` is
   /// the check on start, which Kotlin skips if it checked today.
   Future<Map<String, dynamic>> check({required bool quiet});
 
-  /// Downloads, checks, and hands the update to Android's installer: `{ok}`
-  /// or `{ok: false, error}`.
+  /// Downloads, checks, and hands the update to Android's installer, or on
+  /// the Mac puts it in this copy's place: `{ok}` (with `restart` when
+  /// PassBundle restarts now) or `{ok: false, error}`, with `reveal` when
+  /// the checked update can be shown in Finder for the person to put in
+  /// place (PassBundle can't change the folder it's in).
   Future<Map<String, dynamic>> install();
+
+  /// Shows that checked update in Finder.
+  Future<bool> reveal();
 
   Future<void> setAuto(bool on);
 
@@ -60,6 +71,15 @@ class ChannelUpdatePlatform implements UpdatePlatform {
   Future<Map<String, dynamic>> install() => _call('updateInstall');
 
   @override
+  Future<bool> reveal() async {
+    try {
+      return await _platform.invokeMethod<bool>('updateReveal') ?? false;
+    } on PlatformException {
+      return false;
+    }
+  }
+
+  @override
   Future<void> setAuto(bool on) =>
       _platform.invokeMethod<bool>('updateAuto', {'on': on});
 
@@ -87,6 +107,13 @@ class Updates extends ChangeNotifier {
   bool auto = true;
   bool loaded = false;
 
+  /// Updating restarts PassBundle (the Mac), and it's restarting now.
+  bool restarts = false;
+  bool restarting = false;
+
+  /// The update is downloaded and checked, and can be shown in Finder.
+  bool revealable = false;
+
   /// A newer release: `version` and `notes`.
   Map<String, dynamic>? offer;
   bool checking = false;
@@ -106,6 +133,7 @@ class Updates extends ChangeNotifier {
     version = status['version'] as String?;
     store = status['store'] as String?;
     auto = status['auto'] != false;
+    restarts = status['restarts'] == true;
     loaded = true;
     notifyListeners();
   }
@@ -131,16 +159,26 @@ class Updates extends ChangeNotifier {
   }
 
   Future<void> install() async {
-    if (offer == null || percent != null) return;
+    if (offer == null || percent != null || restarting) return;
     percent = 0;
     note = null;
+    revealable = false;
     notifyListeners();
     final answer = await platform.install();
     percent = null;
-    note = answer['ok'] == true
+    final ok = answer['ok'] == true;
+    restarting = ok && answer['restart'] == true;
+    revealable = !ok && answer['reveal'] == true;
+    note = ok
         ? null
         : answer['error'] as String? ?? "Couldn't update PassBundle.";
     notifyListeners();
+  }
+
+  /// Shows the checked update in Finder, for the person to put in place.
+  Future<void> reveal() async {
+    if (!revealable) return;
+    await platform.reveal();
   }
 
   Future<void> setAuto(bool on) async {
@@ -160,15 +198,21 @@ class Updates extends ChangeNotifier {
     if (what == 'progress' && percent != null) {
       percent = details['percent'] as int?;
     } else if (what == 'installed' && details['ok'] != true) {
+      restarting = false;
       note = details['error'] as String? ?? "PassBundle wasn't updated.";
     }
     notifyListeners();
   }
 }
 
-/// Updates on this device: Android only, where PassBundle updates itself.
-/// Tests put one with a stand-in platform here.
-Updates? updates = Platform.isAndroid ? Updates(ChannelUpdatePlatform()) : null;
+/// Updates on this device: Android and the Mac, where PassBundle updates
+/// itself. Tests (flutter test runs on a Mac too) put one with a stand-in
+/// platform here.
+Updates? updates =
+    Platform.isAndroid ||
+        (Platform.isMacOS && !Platform.environment.containsKey('FLUTTER_TEST'))
+    ? Updates(ChannelUpdatePlatform())
+    : null;
 
 /// The once-a-day check, as the app starts; quiet, whatever it finds.
 Future<void> checkForUpdatesOnStart() async {
@@ -324,6 +368,7 @@ class UpdateOffer extends StatelessWidget {
       if (offer == null) return const SizedBox.shrink();
       final notes = (offer['notes'] as String? ?? '').trim();
       final percent = updates.percent;
+      final muted = TextStyle(color: context.colors.muted, fontSize: 13);
       return Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         mainAxisSize: MainAxisSize.min,
@@ -336,26 +381,29 @@ class UpdateOffer extends StatelessWidget {
             const SizedBox(height: 4),
             ConstrainedBox(
               constraints: const BoxConstraints(maxHeight: 200),
-              child: SingleChildScrollView(
-                child: Text(
-                  notes,
-                  style: TextStyle(color: context.colors.muted, fontSize: 13),
-                ),
-              ),
+              child: SingleChildScrollView(child: Text(notes, style: muted)),
             ),
             const SizedBox(height: 12),
           ],
-          if (percent == null)
+          if (updates.restarting) ...[
+            const LinearProgressIndicator(),
+            const SizedBox(height: 6),
+            Text('Restarting PassBundle', style: muted),
+          ] else if (percent == null) ...[
             FilledButton(
               onPressed: updates.install,
               child: Text('Update to ${offer['version']}'),
-            )
-          else ...[
+            ),
+            if (updates.restarts) ...[
+              const SizedBox(height: 6),
+              Text('PassBundle restarts to finish.', style: muted),
+            ],
+          ] else ...[
             LinearProgressIndicator(value: percent == 0 ? null : percent / 100),
             const SizedBox(height: 6),
             Text(
               percent >= 100 ? 'Checking the download' : 'Downloading',
-              style: TextStyle(color: context.colors.muted, fontSize: 13),
+              style: muted,
             ),
           ],
           if (updates.note != null) ...[
@@ -365,6 +413,15 @@ class UpdateOffer extends StatelessWidget {
               style: TextStyle(color: Theme.of(context).colorScheme.error),
             ),
           ],
+          if (updates.revealable)
+            Align(
+              alignment: Alignment.centerLeft,
+              child: TextButton.icon(
+                onPressed: updates.reveal,
+                icon: const Icon(Icons.folder_open_outlined),
+                label: const Text('Show in Finder'),
+              ),
+            ),
           const SizedBox(height: 8),
         ],
       );

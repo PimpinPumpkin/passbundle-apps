@@ -540,6 +540,9 @@ jobs:
               cp agent/target/release/passbundle-agent.exe agent/target/release/passbundle-agent-host.exe "${{ matrix.bundle }}/" ;;
           esac
           ls "${{ matrix.bundle }}" | head -20
+      - name: The Mac updater against signed bundles, and this build signed as the releases are (tools/mac-update-test.sh)
+        if: matrix.platform == 'macos'
+        run: tools/mac-update-test.sh --launch "${{ matrix.bundle }}"
       - name: Measure (Linux)
         if: matrix.platform == 'linux'
         run: |
