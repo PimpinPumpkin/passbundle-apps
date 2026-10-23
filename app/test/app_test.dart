@@ -893,7 +893,17 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.byType(Image), findsNothing);
       // Turning them off forgets them.
-      expect(Directory('$dir/icons').existsSync(), isFalse);
+      final icons = Directory('$dir/icons');
+      String? why;
+      if (icons.existsSync()) {
+        why = 'still kept: ${icons.listSync().map((e) => e.path).join(', ')}';
+        try {
+          icons.deleteSync(recursive: true);
+        } on FileSystemException catch (e) {
+          why = '$why; deleting it: ${e.osError ?? e.message}';
+        }
+      }
+      expect(why, isNull);
     },
   );
 

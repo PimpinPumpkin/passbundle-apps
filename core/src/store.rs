@@ -163,10 +163,7 @@ impl Store {
     pub fn forget_vault(&self) {
         let _ = fs::remove_file(self.path("sync.json"));
         // Its websites' icons say which sites it has logins for.
-        let icons = crate::icons::folder(&self.dir);
-        if icons.is_dir() {
-            let _ = fs::remove_dir_all(icons);
-        }
+        crate::icons::forget(&crate::icons::folder(&self.dir));
     }
 
     /// How the app looks on this device (`Appearance`); the defaults until

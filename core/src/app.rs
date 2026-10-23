@@ -311,6 +311,12 @@ impl App {
             .map(GeneratorPolicy::from_sync)
             .unwrap_or_default();
         self.autolock = AutoLock::new(Instant::now(), SystemTime::now());
+        // Icons left behind when they were turned off (a file that couldn't
+        // be deleted then) go now.
+        let icons = crate::icons::folder(self.store.dir());
+        if !self.store.appearance().show_icons && icons.exists() {
+            crate::icons::forget(&icons);
+        }
     }
 
     /// The account's id: the open vault's, or the kept sync's.
@@ -1083,7 +1089,7 @@ impl App {
     pub fn set_appearance(&mut self, appearance: crate::store::Appearance) -> Result<()> {
         self.store.save_appearance(&appearance)?;
         if !appearance.show_icons {
-            let _ = std::fs::remove_dir_all(crate::icons::folder(self.store.dir()));
+            crate::icons::forget(&crate::icons::folder(self.store.dir()));
         }
         Ok(())
     }

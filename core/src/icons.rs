@@ -92,6 +92,22 @@ pub fn kept(folder: &Path, host: &str) -> Option<Option<PathBuf>> {
     None
 }
 
+/// Deletes every kept icon (on sign out, and when icons are turned off).
+/// Windows can't delete a file another program has open for a moment (a
+/// virus scanner reading a new file, say), so it tries again a few times,
+/// for at most about a second and a half. True when they're gone.
+pub fn forget(folder: &Path) -> bool {
+    for attempt in 0..5 {
+        match std::fs::remove_dir_all(folder) {
+            Ok(()) => return true,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return true,
+            Err(_) if attempt < 4 => std::thread::sleep(Duration::from_millis(100 << attempt)),
+            Err(_) => {}
+        }
+    }
+    !folder.exists()
+}
+
 /// Keeps what the server answered for a host: its icon, or that it has none.
 pub fn keep(folder: &Path, host: &str, icon: Option<&[u8]>) -> Option<PathBuf> {
     std::fs::create_dir_all(folder).ok()?;
@@ -163,6 +179,8 @@ mod tests {
         assert_eq!(kept(&dir, "example.com"), Some(Some(path)));
         keep(&dir, "none.example", None);
         assert_eq!(kept(&dir, "none.example"), Some(None));
-        let _ = std::fs::remove_dir_all(dir);
+        assert!(forget(&dir));
+        assert!(!dir.exists());
+        assert!(forget(&dir), "nothing to forget is forgotten");
     }
 }
