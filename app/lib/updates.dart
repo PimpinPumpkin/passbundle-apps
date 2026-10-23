@@ -291,7 +291,6 @@ class _UpdatesSectionState extends State<UpdatesSection> {
     listenable: widget.updates,
     builder: (context, _) {
       final u = widget.updates;
-      final muted = TextStyle(color: context.colors.muted, fontSize: 13);
       final store = u.store;
       final String? said = store != null
           ? 'Updates come from $store.'
@@ -300,55 +299,59 @@ class _UpdatesSectionState extends State<UpdatesSection> {
           : u.upToDate
           ? 'This is the newest version.'
           : null;
-      return Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        mainAxisSize: MainAxisSize.min,
+      final primary = Theme.of(context).colorScheme.primary;
+      // A group like Settings' others; checking is a row of its own, so
+      // nothing squeezes the version beside it.
+      return SettingsGroup(
+        title: 'Updates',
+        footer: store != null
+            ? null
+            : 'The daily check is as PassBundle opens. Checking asks GitHub, '
+                  'where PassBundle is published, and nothing else.',
         children: [
-          Text('Updates', style: Theme.of(context).textTheme.titleSmall),
           ListTile(
-            leading: const Icon(Icons.system_update_outlined),
             title: Text(
               u.version == null ? 'PassBundle' : 'Version ${u.version}',
             ),
             subtitle: said == null ? null : Text(said),
-            trailing: store != null
-                ? null
-                : u.checking
-                ? const SizedBox(
-                    width: 20,
-                    height: 20,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : TextButton(
-                    onPressed: u.loaded ? () => u.check() : null,
-                    child: const Text('Check for updates'),
-                  ),
-            contentPadding: EdgeInsets.zero,
           ),
           if (store == null) ...[
+            ListTile(
+              title: Text(
+                'Check for updates',
+                style: TextStyle(
+                  color: u.loaded ? primary : context.colors.muted,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              trailing: u.checking
+                  ? const SizedBox(
+                      width: 20,
+                      height: 20,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : null,
+              onTap: u.loaded && !u.checking ? () => u.check() : null,
+            ),
             // What went wrong shows by what the person tapped.
             if (u.offer != null)
-              UpdateOffer(updates: u)
-            else if (u.note != null) ...[
-              Text(
-                u.note!,
-                style: TextStyle(color: Theme.of(context).colorScheme.error),
+              Padding(
+                padding: const EdgeInsets.all(16),
+                child: UpdateOffer(updates: u),
+              )
+            else if (u.note != null)
+              Padding(
+                padding: const EdgeInsets.all(16),
+                child: Text(
+                  u.note!,
+                  style: TextStyle(color: Theme.of(context).colorScheme.error),
+                ),
               ),
-              const SizedBox(height: 8),
-            ],
             SwitchListTile(
               value: u.auto,
               onChanged: u.loaded ? (on) => u.setAuto(on) : null,
-              secondary: const Icon(Icons.update_rounded),
               title: const Text('Check once a day'),
-              subtitle: const Text(
-                'When PassBundle opens. It never updates without you.',
-              ),
-              contentPadding: EdgeInsets.zero,
-            ),
-            Text(
-              'Checking asks GitHub, where PassBundle is published, and nothing else.',
-              style: muted,
+              subtitle: const Text('It never updates without you'),
             ),
           ],
         ],

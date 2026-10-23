@@ -8,6 +8,7 @@ import 'dart:io';
 import 'dart:isolate';
 
 import 'package:ffi/ffi.dart';
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:flutter/services.dart';
 
 typedef _Str0 = Pointer<Utf8> Function();
@@ -66,7 +67,12 @@ DynamicLibrary _open() {
 
 /// A phone: biometric unlock is the phone's own, with no desktop agent or
 /// browser extension sharing it.
-final isPhone = Platform.isAndroid || Platform.isIOS;
+bool get isPhone => debugPhone ?? (Platform.isAndroid || Platform.isIOS);
+
+/// Tests only: the phone's screens and words on a computer, with a stand-in
+/// for the phone's own code (its method channel). Null is what this is.
+@visibleForTesting
+bool? debugPhone;
 
 /// An answer from a call that can fail: ok, or the core's words.
 class Answer {
@@ -204,9 +210,15 @@ class Core {
 
   /// The app on a folder of its own: Android's app folder, or a test's, with
   /// the refresh token in memory for tests and tools.
-  Map<String, dynamic> openAt(String dir, {bool memorySecrets = true}) =>
-      _with([dir], (p) => _answer(_openAt(p[0], memorySecrets)))
-          as Map<String, dynamic>;
+  Map<String, dynamic> openAt(String dir, {bool memorySecrets = true}) {
+    folder = dir;
+    return _with([dir], (p) => _answer(_openAt(p[0], memorySecrets)))
+        as Map<String, dynamic>;
+  }
+
+  /// The folder the vault is kept in, once opened on one: where the app keeps
+  /// the little it remembers itself (unlock_offer.dart).
+  static String? folder;
 
   /// What only the phone's own code does (docs/phones.md, "Talking to the OS").
   static const platform = MethodChannel('passbundle/platform');
@@ -430,7 +442,8 @@ class Core {
 
   /// The organizations' "Vault lock" policy, which Settings keeps to:
   /// `maxMinutes` (the longest wait, or null), `immediately`, `onSystemLock`,
-  /// and `signOut`.
+  /// and `signOut`; and `removeUnlockWithPin`, their "Remove Unlock with
+  /// PIN" policy, under which the app doesn't offer biometric unlock itself.
   Map<String, dynamic> lockPolicy() =>
       _answer(_lockPolicy()) as Map<String, dynamic>;
 

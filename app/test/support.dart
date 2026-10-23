@@ -1,6 +1,7 @@
 // Shared by the app's tests: the real fonts (tests otherwise draw boxes), the
-// core opened on a folder of the test's own, and waiting for slow calls,
-// which run on real isolates outside the test's fake clock.
+// core opened on a folder of the test's own, waiting for slow calls, which
+// run on real isolates outside the test's fake clock, and a phone stood in
+// for on this computer.
 import 'dart:convert';
 import 'dart:io';
 
@@ -83,4 +84,46 @@ Future<void> pumpUntil(
     if (finder.evaluate().isNotEmpty) return;
   }
   throw TestFailure('Never showed up: $finder');
+}
+
+/// A phone, on this computer: the phone's words and screens, with a stand-in
+/// for its own code (MainActivity.kt, AppDelegate.swift) that answers about
+/// biometrics as a phone with a fingerprint set up would. `enrolled` counts
+/// the times turning it on was asked for; each asks for the fingerprint, and
+/// the stand-in gives it unless [biometricAnswers] says no.
+class PhoneStandIn {
+  PhoneStandIn(
+    WidgetTester tester, {
+    this.status = 'notSetUp',
+    this.method = 'fingerprint',
+  }) {
+    debugPhone = true;
+    addTearDown(() => debugPhone = null);
+    final messenger = tester.binding.defaultBinaryMessenger;
+    messenger.setMockMethodCallHandler(Core.platform, (call) async {
+      switch (call.method) {
+        case 'biometricStatus':
+          return {'status': status, 'method': method};
+        case 'biometricEnroll':
+          enrolled++;
+          final yes = biometricAnswers.isEmpty || biometricAnswers.removeAt(0);
+          if (yes) status = 'setUp';
+          return {'ok': true, 'on': yes};
+        case 'biometricRemove':
+          status = 'notSetUp';
+          return {'ok': true};
+        default:
+          return null;
+      }
+    });
+    addTearDown(() => messenger.setMockMethodCallHandler(Core.platform, null));
+  }
+
+  /// "setUp", "notSetUp", or "unavailable", as Biometric.status() says.
+  String status;
+  final String method;
+  var enrolled = 0;
+
+  /// What the person does at each biometric prompt: true gives it.
+  final biometricAnswers = <bool>[];
 }

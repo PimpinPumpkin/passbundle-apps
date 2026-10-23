@@ -421,6 +421,7 @@ class _SignInScreenState extends State<SignInScreen> {
         ),
         if (step.length > 1)
           SegmentedButton<int>(
+            showSelectedIcon: false,
             segments: const [
               ButtonSegment(value: 0, label: Text('Authenticator app')),
               ButtonSegment(value: 1, label: Text('Email')),
@@ -496,7 +497,10 @@ class UnlockScreen extends StatefulWidget {
 
   final String email;
   final String server;
-  final ValueChanged<int> onUnlocked;
+
+  /// How long the master password took to unlock, in milliseconds, or null
+  /// when biometrics unlocked it.
+  final ValueChanged<int?> onUnlocked;
   final VoidCallback onSignOut;
 
   @override
@@ -536,7 +540,7 @@ class _UnlockScreenState extends State<UnlockScreen> {
     final answer = await whileBusy(Core.unlockWithBiometric);
     if (!mounted) return;
     if (answer.ok && answer.body['unlocked'] == true) {
-      widget.onUnlocked(0);
+      widget.onUnlocked(null);
       return;
     }
     setState(() {

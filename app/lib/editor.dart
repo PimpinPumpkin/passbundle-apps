@@ -279,6 +279,7 @@ class _ItemEditorState extends State<ItemEditor> {
     gap(),
     DropdownButtonFormField<String?>(
       initialValue: brand,
+      isExpanded: true,
       decoration: const InputDecoration(labelText: 'Brand'),
       items: [
         const DropdownMenuItem(value: null, child: Text('None')),
@@ -295,33 +296,27 @@ class _ItemEditorState extends State<ItemEditor> {
       keyboard: TextInputType.number,
     ),
     gap(),
-    Row(
-      children: [
-        Expanded(
-          child: DropdownButtonFormField<String?>(
-            initialValue: expMonth,
-            decoration: const InputDecoration(labelText: 'Expiration month'),
-            items: [
-              const DropdownMenuItem(value: null, child: Text('None')),
-              for (var m = 1; m <= 12; m++)
-                DropdownMenuItem(
-                  value: '$m',
-                  child: Text(m.toString().padLeft(2, '0')),
-                ),
-            ],
-            onChanged: (v) => setState(() => expMonth = v),
-          ),
-        ),
-        const SizedBox(width: 12),
-        Expanded(
-          child: _detail(
-            card['expYear']!,
-            'Expiration year',
-            keyboard: TextInputType.number,
-          ),
-        ),
-      ],
-    ),
+    _sideBySide([
+      DropdownButtonFormField<String?>(
+        initialValue: expMonth,
+        isExpanded: true,
+        decoration: const InputDecoration(labelText: 'Expiration month'),
+        items: [
+          const DropdownMenuItem(value: null, child: Text('None')),
+          for (var m = 1; m <= 12; m++)
+            DropdownMenuItem(
+              value: '$m',
+              child: Text(m.toString().padLeft(2, '0')),
+            ),
+        ],
+        onChanged: (v) => setState(() => expMonth = v),
+      ),
+      _detail(
+        card['expYear']!,
+        'Expiration year',
+        keyboard: TextInputType.number,
+      ),
+    ]),
     gap(),
     _detail(
       card['code']!,
@@ -330,6 +325,35 @@ class _ItemEditorState extends State<ItemEditor> {
       keyboard: TextInputType.number,
     ),
   ];
+
+  /// Two fields side by side where there's room for both labels, else one
+  /// over the other.
+  Widget _sideBySide(List<Widget> fields) => LayoutBuilder(
+    builder: (context, constraints) {
+      final roomy =
+          constraints.maxWidth / MediaQuery.textScalerOf(context).scale(1) >=
+          380;
+      if (!roomy) {
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            for (var i = 0; i < fields.length; i++) ...[
+              if (i > 0) const SizedBox(height: 12),
+              fields[i],
+            ],
+          ],
+        );
+      }
+      return Row(
+        children: [
+          for (var i = 0; i < fields.length; i++) ...[
+            if (i > 0) const SizedBox(width: 12),
+            Expanded(child: fields[i]),
+          ],
+        ],
+      );
+    },
+  );
 
   List<Widget> _identityFields(Widget Function([double]) gap) => [
     for (final part in _identityParts.entries) ...[
@@ -384,21 +408,49 @@ class _ItemEditorState extends State<ItemEditor> {
             gap(),
           ],
           if (!editing) ...[
-            SegmentedButton<String>(
-              showSelectedIcon: false,
-              segments: const [
-                ButtonSegment(value: 'login', label: Text('Login')),
-                ButtonSegment(value: 'note', label: Text('Note')),
-                ButtonSegment(value: 'card', label: Text('Card')),
-                ButtonSegment(value: 'identity', label: Text('Identity')),
-              ],
-              selected: {kind},
-              onSelectionChanged: (s) => setState(() {
-                kind = s.first;
-                if (kind == 'login' && uris.isEmpty) {
-                  uris.add(TextEditingController());
-                }
-              }),
+            // The kinds the app makes, each with its color: four in a row
+            // where there's room, else two by two.
+            LayoutBuilder(
+              builder: (context, constraints) {
+                const kinds = [
+                  ItemKind.login,
+                  ItemKind.note,
+                  ItemKind.card,
+                  ItemKind.identity,
+                ];
+                final perRow =
+                    constraints.maxWidth /
+                            MediaQuery.textScalerOf(context).scale(1) >=
+                        460
+                    ? 4
+                    : 2;
+                return Column(
+                  children: [
+                    for (var i = 0; i < kinds.length; i += perRow) ...[
+                      if (i > 0) const SizedBox(height: 8),
+                      Row(
+                        children: [
+                          for (var j = i; j < i + perRow; j++) ...[
+                            if (j > i) const SizedBox(width: 8),
+                            Expanded(
+                              child: _KindChoice(
+                                kind: kinds[j],
+                                selected: kind == kinds[j].kind,
+                                onTap: () => setState(() {
+                                  kind = kinds[j].kind;
+                                  if (kind == 'login' && uris.isEmpty) {
+                                    uris.add(TextEditingController());
+                                  }
+                                }),
+                              ),
+                            ),
+                          ],
+                        ],
+                      ),
+                    ],
+                  ],
+                );
+              },
             ),
             gap(16),
           ],
@@ -512,19 +564,19 @@ class _ItemEditorState extends State<ItemEditor> {
             Row(
               children: [
                 Expanded(
-                  child: TextField(
-                    controller: fields[i].name,
-                    decoration: const InputDecoration(hintText: 'Name'),
-                  ),
+                  child: _sideBySide([
+                    TextField(
+                      controller: fields[i].name,
+                      decoration: const InputDecoration(hintText: 'Name'),
+                    ),
+                    TextField(
+                      controller: fields[i].value,
+                      obscureText: fields[i].hidden,
+                      decoration: const InputDecoration(hintText: 'Value'),
+                    ),
+                  ]),
                 ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: TextField(
-                    controller: fields[i].value,
-                    obscureText: fields[i].hidden,
-                    decoration: const InputDecoration(hintText: 'Value'),
-                  ),
-                ),
+                const SizedBox(width: 4),
                 IconButton(
                   tooltip: fields[i].hidden
                       ? 'Hidden: make it visible'
@@ -557,6 +609,7 @@ class _ItemEditorState extends State<ItemEditor> {
           gap(16),
           DropdownButtonFormField<String?>(
             initialValue: folderId,
+            isExpanded: true,
             decoration: const InputDecoration(labelText: 'Folder'),
             items: [
               const DropdownMenuItem(value: null, child: Text('No folder')),
@@ -572,6 +625,7 @@ class _ItemEditorState extends State<ItemEditor> {
             gap(),
             DropdownButtonFormField<String?>(
               initialValue: organizationId,
+              isExpanded: true,
               decoration: const InputDecoration(labelText: 'Owner'),
               // Moving an item between owners is for the web vault, which re-encrypts it.
               items: [
@@ -595,6 +649,7 @@ class _ItemEditorState extends State<ItemEditor> {
             gap(),
             DropdownButtonFormField<String?>(
               initialValue: collectionId,
+              isExpanded: true,
               decoration: const InputDecoration(labelText: 'Collection'),
               items: [
                 for (final col in collections)
@@ -616,6 +671,65 @@ class _ItemEditorState extends State<ItemEditor> {
             contentPadding: EdgeInsets.zero,
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// A kind of item to make, with its jewel tile: the chosen one tinted and
+/// outlined in the brand color.
+class _KindChoice extends StatelessWidget {
+  const _KindChoice({
+    required this.kind,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final ItemKind kind;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.colors;
+    final primary = Theme.of(context).colorScheme.primary;
+    final shape = RoundedRectangleBorder(
+      borderRadius: BorderRadius.circular(12),
+      side: BorderSide(
+        color: selected ? primary : c.line,
+        width: selected ? 1.6 : 1,
+      ),
+    );
+    return Semantics(
+      selected: selected,
+      button: true,
+      child: Material(
+        color: selected ? c.selected : c.pane,
+        shape: shape,
+        child: InkWell(
+          customBorder: shape,
+          onTap: onTap,
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(minHeight: 48),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+              child: Row(
+                children: [
+                  JewelTile(jewel: kind, size: 24),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      kind.one,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(fontWeight: FontWeight.w600),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
       ),
     );
   }

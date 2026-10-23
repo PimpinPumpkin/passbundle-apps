@@ -76,6 +76,11 @@ class _PassBundleAppState extends State<PassBundleApp> {
   /// Signing in again while a vault is kept here (the server signed this device out).
   bool signingInAgain = false;
 
+  /// Unlocked just now with the master password (signing in, or the lock
+  /// screen's field), not biometrics: a phone may offer biometrics for next
+  /// time (unlock_offer.dart).
+  bool withPassword = false;
+
   /// While unlocked, asks the core every two seconds whether to lock by itself.
   Timer? ticker;
   DateTime lastUsed = DateTime(0);
@@ -120,10 +125,11 @@ class _PassBundleAppState extends State<PassBundleApp> {
     super.dispose();
   }
 
-  void refresh() {
+  void refresh({bool withPassword = false}) {
     setState(() {
       state = core.state();
       signingInAgain = false;
+      this.withPassword = withPassword;
     });
     watch();
   }
@@ -175,7 +181,7 @@ class _PassBundleAppState extends State<PassBundleApp> {
       home = SignInScreen(
         server: server,
         email: email,
-        onSignedIn: refresh,
+        onSignedIn: () => refresh(withPassword: true),
         onCancel: signingInAgain
             ? () => setState(() => signingInAgain = false)
             : null,
@@ -186,9 +192,9 @@ class _PassBundleAppState extends State<PassBundleApp> {
         server: server!,
         onUnlocked: (ms) {
           if (measuring) {
-            report('unlocked $ms ms, ${core.list('').length} items');
+            report('unlocked ${ms ?? 0} ms, ${core.list('').length} items');
           }
-          refresh();
+          refresh(withPassword: ms != null);
         },
         onSignOut: () {
           core.signOut();
@@ -200,6 +206,7 @@ class _PassBundleAppState extends State<PassBundleApp> {
         key: const ValueKey('vault'),
         core: core,
         email: email!,
+        server: server,
         mode: mode,
         onMode: (m) => setState(() => mode = m),
         onLock: () {
@@ -209,6 +216,7 @@ class _PassBundleAppState extends State<PassBundleApp> {
         onSignInAgain: () => setState(() => signingInAgain = true),
         // Measuring uses a sample vault with no server behind it.
         syncOnOpen: !measuring,
+        offerBiometric: withPassword,
       );
       if (measuring && !_readyReported) {
         _readyReported = true;
