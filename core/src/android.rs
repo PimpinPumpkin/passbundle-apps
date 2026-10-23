@@ -46,13 +46,38 @@ pub fn init<'caller>(
         .resolve::<ThrowRuntimeExAndDefault>();
 }
 
-/// An item's value for the clipboard ("username", "password", "totp",
-/// "notes", or "field:<index>"), as UTF-8 bytes Kotlin zeroes after use; null
-/// while locked or busy, or if there's nothing to copy. It goes from here to
-/// the clipboard without passing through Dart.
+/// An item's value for autofill to fill ("username", "password", "totp",
+/// or "field:<index>"), as UTF-8 bytes Kotlin zeroes after use; null while
+/// locked or busy, or if there's nothing to fill. It goes from here into
+/// the other app's field without passing through Dart. A secret the
+/// person's shared folder hides still fills, as upstream's apps fill it.
 #[cfg(feature = "ffi")]
 #[jni_mangle("com.passbundle.app.Core")]
 pub fn value<'caller>(
+    mut unowned_env: EnvUnowned<'caller>,
+    _class: JClass<'caller>,
+    id: JString<'caller>,
+    what: JString<'caller>,
+) -> JByteArray<'caller> {
+    unowned_env
+        .with_env(|env| -> JniResult<JByteArray<'caller>> {
+            let id = id.try_to_string(env)?;
+            let what = what.try_to_string(env)?;
+            match crate::ffi::value_for_fill(&id, &what) {
+                Some(value) => env.byte_array_from_slice(value.as_bytes()),
+                None => Ok(JByteArray::default()),
+            }
+        })
+        .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+/// An item's value for the clipboard ("username", "password", "totp",
+/// "notes", or "field:<index>"), as `value` gives it, but never a secret
+/// the person's shared folder hides from them; null then too. It goes from
+/// here to the clipboard without passing through Dart.
+#[cfg(feature = "ffi")]
+#[jni_mangle("com.passbundle.app.Core")]
+pub fn copy_value<'caller>(
     mut unowned_env: EnvUnowned<'caller>,
     _class: JClass<'caller>,
     id: JString<'caller>,

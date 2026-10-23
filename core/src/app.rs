@@ -729,6 +729,39 @@ impl App {
             asked.dedup();
             item.organization_id.is_some() && !asked.is_empty() && held != asked
         });
+        // A move between shared folders is checked as the server checks it
+        // (change_item_folders), before anything is saved: share in each
+        // folder it leaves, and create in each it joins, with share on the
+        // item. Folders the person doesn't reach stay as they are.
+        if let Some(item) = moved {
+            let grid = vault.grid(item);
+            if !grid.edit {
+                return Err(Error::Refused(
+                    "your organization doesn't let you change this item's shared folders",
+                ));
+            }
+            let leaves = item
+                .collection_ids
+                .iter()
+                .filter(|c| !collection_ids.contains(c));
+            for c in leaves {
+                if vault.collection_grids.get(c).is_some_and(|g| !g.share) {
+                    return Err(Error::Refused(
+                        "your organization doesn't let you move items out of this shared folder",
+                    ));
+                }
+            }
+            let joins = collection_ids
+                .iter()
+                .filter(|c| !item.collection_ids.contains(c));
+            for c in joins {
+                if !grid.share || !vault.collection_grids.get(c).is_some_and(|g| g.create) {
+                    return Err(Error::Refused(
+                        "your organization doesn't let you add this item to that shared folder",
+                    ));
+                }
+            }
+        }
         let moved = moved.is_some();
         let body = vault.encrypt_item(draft, editing)?;
         let (Some(server), Some(session)) = (&self.server, self.session.as_mut()) else {
@@ -741,8 +774,9 @@ impl App {
             (true, Some(id)) => server.set_item_collections(session, id, collection_ids),
             _ => Ok(()),
         };
-        self.sync()?;
-        placed
+        // The move's refusal, if any, before the sync's.
+        let synced = self.sync();
+        placed.and(synced)
     }
 
     /// Makes a folder, its name under the user key, as folders are
@@ -1014,21 +1048,25 @@ impl App {
             .ok_or(Error::Damaged("no such item"))?;
         let plain_detail = item.details.iter().any(|d| d.key == what && !d.secret);
         if what == "username" || crate::vault::PLAIN_DETAILS.contains(&what) || plain_detail {
-            return clipboard::copy_text(&self.value(id, what)?);
+            return clipboard::copy_text(&self.value_to_copy(id, what)?);
         }
-        // Never a secret someone may not see (their shared folder hides
-        // passwords), as the screens never offer it.
-        if what != "notes"
-            && self
-                .vault
-                .as_ref()
-                .is_some_and(|v| !v.grid(item).see_passwords)
-        {
-            return Err(Error::Refused(
-                "your organization hides this item's passwords from you",
-            ));
+        clipboard::copy_secret(&self.value_to_copy(id, what)?, clipboard::CLEAR_AFTER)
+    }
+
+    /// The value `copy` copies, on a computer or (through its native piece)
+    /// a phone: never a secret the person's shared folder hides from them,
+    /// as the screens never offer it (`Item::is_secret`).
+    pub fn value_to_copy(&self, id: &str, what: &str) -> Result<zeroize::Zeroizing<String>> {
+        if let Some(vault) = self.vault.as_ref() {
+            if let Some(item) = vault.item(id) {
+                if item.is_secret(what) && !vault.grid(item).see_passwords {
+                    return Err(Error::Refused(
+                        "your organization hides this item's passwords from you",
+                    ));
+                }
+            }
         }
-        clipboard::copy_secret(&self.value(id, what)?, clipboard::CLEAR_AFTER)
+        self.value(id, what)
     }
 
     /// The value `copy` copies. On phones the app's native piece puts it on

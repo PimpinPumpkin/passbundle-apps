@@ -372,7 +372,23 @@ pub fn custom(item: &Item) -> Option<Template> {
 /// built-in ones. Empty groups are left out.
 pub fn groups(vault: &Vault) -> Vec<Group> {
     let by_name = |a: &Template, b: &Template| a.name.to_lowercase().cmp(&b.name.to_lowercase());
-    let mut all: Vec<Template> = vault.items.iter().filter_map(custom).collect();
+    // A hidden field's default is a secret like any other: someone the
+    // template's folder hides passwords from gets the field, empty.
+    let mut all: Vec<Template> = vault
+        .items
+        .iter()
+        .filter_map(|item| {
+            let mut template = custom(item)?;
+            if !vault.grid(item).see_passwords {
+                for field in &mut template.fields {
+                    if field.kind == FieldKind::Hidden {
+                        field.value = None;
+                    }
+                }
+            }
+            Some(template)
+        })
+        .collect();
     all.sort_by(by_name);
     let (from_msp, custom): (Vec<Template>, Vec<Template>) = all.into_iter().partition(|t| {
         t.from.is_some()

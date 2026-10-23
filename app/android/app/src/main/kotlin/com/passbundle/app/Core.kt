@@ -12,10 +12,16 @@ object Core {
     @JvmStatic external fun init(context: Context)
 
     /**
-     * An item's value for the clipboard, as UTF-8 to zero after use; null
-     * while the vault is locked or busy, or if there's nothing to copy.
+     * An item's value for autofill to fill, as UTF-8 to zero after use; null
+     * while the vault is locked or busy, or if there's nothing to fill.
      */
     @JvmStatic external fun value(id: String, what: String): ByteArray?
+
+    /**
+     * An item's value for the clipboard, as [value], but never a secret the
+     * person's shared folder hides from them (null then too).
+     */
+    @JvmStatic external fun copyValue(id: String, what: String): ByteArray?
 
     /** The unlocked vault's user key, to seal for biometric unlock; zero it after use. Null while locked. */
     @JvmStatic external fun userKey(): ByteArray?

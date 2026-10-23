@@ -277,23 +277,6 @@ fn summary(vault: &Vault, item: &Item) -> Value {
     })
 }
 
-/// Whether a value, by the name `pb_reveal` and `pb_copy` take it, is one
-/// of the item's secrets, which someone who can't see its passwords is
-/// never shown (docs/core.md, "Folders and permissions").
-fn is_secret(item: &Item, what: &str) -> bool {
-    match what {
-        "username" | "notes" => false,
-        "password" | "totp" => true,
-        what if SECRET_DETAILS.contains(&what) => true,
-        what if what.contains('.') => item.details.iter().any(|d| d.key == what && d.secret),
-        other => other
-            .strip_prefix("field:")
-            .and_then(|i| i.parse::<usize>().ok())
-            .and_then(|i| item.fields.get(i))
-            .is_some_and(|f| f.hidden),
-    }
-}
-
 /// Opens the app on a folder of its own instead of the usual one, with the
 /// refresh token kept in memory when `memory_secrets`: for tests and tools.
 ///
@@ -517,10 +500,24 @@ pub extern "C" fn pb_lock() -> *mut c_char {
 }
 
 /// An item's value for the clipboard, for the phone app's native piece
-/// (android.rs, or `pb_secret` for iOS's Swift). None while locked, while a
-/// slow call has the app, or if there's nothing to copy.
+/// (android.rs, or `pb_secret` for iOS's Swift): never a secret the
+/// person's shared folder hides from them (`App::value_to_copy`). None while
+/// locked, while a slow call has the app, or if there's nothing to copy.
 #[cfg(phone)]
 pub(crate) fn value_for_copy(id: &str, what: &str) -> Option<Zeroizing<String>> {
+    let guard = match APP.try_lock() {
+        Ok(guard) => guard,
+        Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        Err(TryLockError::WouldBlock) => return None,
+    };
+    guard.as_ref()?.value_to_copy(id, what).ok()
+}
+
+/// An item's value for Android's autofill to fill (android.rs): as for
+/// copying, except that a secret a shared folder hides still fills, as
+/// upstream's apps fill it, without the person seeing it.
+#[cfg(target_os = "android")]
+pub(crate) fn value_for_fill(id: &str, what: &str) -> Option<Zeroizing<String>> {
     let guard = match APP.try_lock() {
         Ok(guard) => guard,
         Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
@@ -1325,7 +1322,7 @@ pub unsafe extern "C" fn pb_reveal(id: *const c_char, what: *const c_char) -> *m
             return Value::Null;
         }
         // Never a secret someone may not see (their shared folder hides passwords).
-        if is_secret(item, &what) && app.vault().is_some_and(|v| !v.grid(item).see_passwords) {
+        if item.is_secret(&what) && app.vault().is_some_and(|v| !v.grid(item).see_passwords) {
             return Value::Null;
         }
         if let Some(detail) = item.details.iter().find(|d| d.key == what) {

@@ -405,9 +405,9 @@ impl Field {
 
     /// Whether the app's editor edits it: a named text, hidden, or yes-or-no
     /// field of the person's own (`kind`, upstream's field type, from
-    /// `Kept`). Linked fields, nameless ones, and our own data stay as they are.
+    /// `Kept`). Linked fields, nameless ones (or blank), and our own data stay as they are.
     pub fn edited_by_the_app(&self, kind: u8) -> bool {
-        kind <= 2 && !self.reserved() && !self.name.is_empty()
+        kind <= 2 && !self.reserved() && !self.name.trim().is_empty()
     }
 
     /// Upstream's field type: 0 text, 1 hidden, 2 yes or no.
@@ -614,6 +614,25 @@ pub const PLAIN_DETAILS: [&str; 10] = [
 ];
 
 impl Item {
+    /// Whether a value, by the name the app reveals and copies it with
+    /// ("password", "field:2", "cardNumber", "bankAccount.iban"), is one of
+    /// the item's secrets, which someone whose shared folder hides
+    /// passwords is never given (docs/core.md, "Folders and permissions").
+    /// Its username, notes, and plain fields and details aren't.
+    pub fn is_secret(&self, what: &str) -> bool {
+        match what {
+            "username" | "notes" => false,
+            "password" | "totp" => true,
+            what if SECRET_DETAILS.contains(&what) => true,
+            what if what.contains('.') => self.details.iter().any(|d| d.key == what && d.secret),
+            other => other
+                .strip_prefix("field:")
+                .and_then(|i| i.parse::<usize>().ok())
+                .and_then(|i| self.fields.get(i))
+                .is_some_and(|f| f.hidden),
+        }
+    }
+
     /// One of a card's or an identity's values (`SECRET_DETAILS`,
     /// `PLAIN_DETAILS`); None if it hasn't that one.
     pub fn detail(&self, what: &str) -> Option<Zeroizing<String>> {

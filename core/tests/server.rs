@@ -1112,14 +1112,45 @@ fn a_shared_folders_permissions_hold_in_the_app() {
         )
         .unwrap();
 
-    // The owner's items, one in each shared folder.
+    // The owner's items, one in each shared folder, and a template in IT
+    // whose hidden field has a default.
     let vault = open(&server, &mut session);
+    let field = |name: &str, value: &str, hidden: bool| Field {
+        name: name.into(),
+        value: Zeroizing::new(value.into()),
+        hidden,
+        boolean: false,
+    };
+    let template = ItemDraft {
+        note: true,
+        name: "Router".into(),
+        organization_id: Some(org_id.clone()),
+        fields: vec![
+            field("Model", "not-a-real-model", false),
+            field("Admin PIN", "not-a-real-pin", true),
+            field(
+                passbundle_core::templates::DEFINITION_FIELD,
+                r#"{"id":"office-router","base":"note","v":1}"#,
+                false,
+            ),
+        ],
+        ..ItemDraft::default()
+    };
+    server
+        .save_item(
+            &mut session,
+            None,
+            vault.encrypt_item(&template, None).unwrap(),
+            std::slice::from_ref(&it),
+        )
+        .unwrap();
     for (name, password, folder) in [
         ("Office Wi-Fi", "not-a-real-password-it", &it),
         ("Project wiki", "not-a-real-password-wiki", &projects),
     ] {
         let draft = ItemDraft {
             name: name.into(),
+            username: Some("not-a-real-user".into()),
             password: secret(password),
             organization_id: Some(org_id.clone()),
             ..ItemDraft::default()
@@ -1156,22 +1187,54 @@ fn a_shared_folders_permissions_hold_in_the_app() {
     let nested = passbundle_core::places::nest(&collections);
     assert!(nested.iter().all(|n| n.depth == 0));
 
-    // Its secrets aren't copied, and it isn't edited.
-    assert!(matches!(
-        app.copy(&wifi_id, "password"),
-        Err(Error::Refused(_))
-    ));
+    // Its secrets aren't copied or filled, its plain values are, and it
+    // isn't edited.
+    for what in ["password", "totp"] {
+        assert!(matches!(
+            app.value_to_copy(&wifi_id, what),
+            Err(Error::Refused(_))
+        ));
+    }
+    assert_eq!(
+        app.value_to_copy(&wifi_id, "username").unwrap().as_str(),
+        "not-a-real-user"
+    );
+    // The template's hidden default isn't handed to them; its plain one is.
+    let groups = passbundle_core::templates::groups(app.vault().unwrap());
+    let router = groups
+        .iter()
+        .flat_map(|g| &g.templates)
+        .find(|t| t.id == "office-router")
+        .unwrap();
+    let default = |label: &str| {
+        router
+            .fields
+            .iter()
+            .find(|f| f.label == label)
+            .unwrap()
+            .value
+            .clone()
+    };
+    assert_eq!(default("Model").as_deref(), Some("not-a-real-model"));
+    assert_eq!(default("Admin PIN"), None);
     let draft = ItemDraft::of(app.vault().unwrap().item(&wifi_id).unwrap());
     assert!(app
         .save(Some(&wifi_id), &draft, std::slice::from_ref(&it))
         .is_err());
 
-    // The wiki is edited; moving it into IT, where the member can't add
-    // items, is refused, and it stays in Projects/Web.
+    // Moving the wiki into IT, where the member can't add items, is refused
+    // before anything is saved, as the server would refuse it; edited where
+    // it is, it's saved.
     let mut draft = ItemDraft::of(app.vault().unwrap().item(&wiki_id).unwrap());
     draft.name = "Project wiki (team)".into();
     let moved = app.save(Some(&wiki_id), &draft, std::slice::from_ref(&it));
-    assert!(moved.is_err(), "{moved:?}");
+    assert!(matches!(moved, Err(Error::Refused(_))), "{moved:?}");
+    assert_eq!(
+        app.vault().unwrap().item(&wiki_id).unwrap().name,
+        "Project wiki"
+    );
+    app.save(Some(&wiki_id), &draft, std::slice::from_ref(&projects))
+        .unwrap();
     let wiki = app.vault().unwrap().item(&wiki_id).unwrap();
     assert_eq!(wiki.name, "Project wiki (team)");
     assert_eq!(wiki.collection_ids, std::slice::from_ref(&projects));

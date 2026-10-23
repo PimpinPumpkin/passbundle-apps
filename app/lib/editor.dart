@@ -215,9 +215,7 @@ class _ItemEditorState extends State<ItemEditor> {
       organizationId = item['organizationId'] as String?;
       held = (item['collectionIds'] as List?)?.cast<String>() ?? const [];
       // The first of its shared folders the person has.
-      collectionId =
-          held.where((c) => widget.places.collection(c) != null).firstOrNull ??
-          held.firstOrNull;
+      collectionId = shown;
     }
     // A new item: the kind or template picked, where it's going.
     final choice = widget.choice;
@@ -279,11 +277,24 @@ class _ItemEditorState extends State<ItemEditor> {
     }
   }
 
+  /// The shared folder the picker shows an organization's item in: the
+  /// first of its folders the person has.
+  String? get shown =>
+      held.where((c) => widget.places.collection(c) != null).firstOrNull ??
+      held.firstOrNull;
+
   /// The picker can't change anything: an organization's item the person
-  /// may not move between its shared folders (share; the server refuses
-  /// it too).
-  bool get placeLocked =>
-      editing && organizationId != null && permissions['share'] == false;
+  /// may not move between its shared folders, as the server has it (edit
+  /// and share on the item, and share in the folder it leaves; the server
+  /// refuses it too).
+  bool get placeLocked {
+    if (!editing || organizationId == null) return false;
+    if (permissions['edit'] == false || permissions['share'] == false) {
+      return true;
+    }
+    final from = shown == null ? null : widget.places.collection(shown!);
+    return (from?['grid'] as Map?)?['share'] == false;
+  }
 
   /// The Folder picker's choices, grouped by owner: (value, label, glyph,
   /// depth), a heading's value starting with "heading:". An item stays with
@@ -345,9 +356,6 @@ class _ItemEditorState extends State<ItemEditor> {
   List<String> get collectionIds {
     if (organizationId == null || collectionId == null) return const [];
     if (!editing) return [collectionId!];
-    final shown =
-        held.where((c) => widget.places.collection(c) != null).firstOrNull ??
-        held.firstOrNull;
     return [
       collectionId!,
       for (final c in held)
@@ -380,9 +388,11 @@ class _ItemEditorState extends State<ItemEditor> {
       'uris': [for (final u in uris) u.text.trim()],
       'fields': [
         for (final f in fields)
+          // Names as they are: one with spaces around it is the web
+          // vault's too, and stays so.
           if (f.name.text.trim().isNotEmpty)
             {
-              'name': f.name.text.trim(),
+              'name': f.name.text,
               'value': f.boolean ? (f.yes ? 'true' : 'false') : f.value.text,
               'type': f.kind,
             },
