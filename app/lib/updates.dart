@@ -23,7 +23,7 @@ abstract class UpdatePlatform {
   Future<Map<String, dynamic>> status();
 
   /// `{ok, available, version, notes}` or `{ok: false, error}`; `quiet` is
-  /// the check on start, which Kotlin skips if it checked today.
+  /// the check on start, which the native code skips if it checked today.
   Future<Map<String, dynamic>> check({required bool quiet});
 
   /// Downloads, checks, and hands the update to Android's installer, or on
@@ -39,7 +39,8 @@ abstract class UpdatePlatform {
   Future<void> setAuto(bool on);
 
   /// How far the download is (`progress`, `{percent}`) and what Android's
-  /// installer said (`installed`, `{ok, error}`).
+  /// installer said, or on the Mac that PassBundle couldn't restart itself
+  /// (`installed`, `{ok, error}`).
   set onEvent(void Function(String what, Map<String, dynamic> details) handler);
 }
 
