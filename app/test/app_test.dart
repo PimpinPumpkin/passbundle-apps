@@ -854,7 +854,16 @@ void main() {
     expect(find.text('Copy password'), findsOneWidget);
     await tester.tap(find.text('Copy password'));
     await tester.pump();
-    expect(find.textContaining('It clears in 30 seconds'), findsWidgets);
+    // Copied through the core, which clears it in 30 seconds; a computer
+    // with no clipboard (CI's Linux, with no display) says it couldn't.
+    expect(
+      find.textContaining(
+        Platform.isLinux
+            ? RegExp('clears in 30 seconds|clipboard')
+            : RegExp('It clears in 30 seconds'),
+      ),
+      findsWidgets,
+    );
     await tester.tap(find.byTooltip('Close'));
     await tester.pumpAndSettle();
   });
