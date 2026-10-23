@@ -519,3 +519,44 @@ fn permissions_a_server_leaves_out_count_as_the_least_access() {
     let grid = vault.grid(vault.item(&shared).unwrap());
     assert!(grid.see_passwords && grid.edit && grid.delete && grid.share);
 }
+
+/// A version's passkeys (src/history.rs): a login with a second passkey
+/// shows as changed, though its first is the same.
+#[test]
+fn a_second_passkey_shows_in_an_items_history() {
+    let (mut v, prelogin, password) = sample();
+    let id = v["ids"]["withKey"].as_str().unwrap().to_owned();
+    let item_key = open(&v, &prelogin, &password)
+        .item(&id)
+        .unwrap()
+        .kept
+        .item_key
+        .clone()
+        .expect("the vectors' item has its own key");
+    let enc = |text: &str| serde_json::Value::from(item_key.encrypt_str(text).to_string());
+    let passkey = |user: &str| {
+        serde_json::json!({
+            "credentialId": enc(&format!("credential-{user}")),
+            "keyType": enc("public-key"),
+            "rpId": enc("backup.example.test"),
+            "userName": enc(user),
+        })
+    };
+    let passkey_entry = |v: &serde_json::Value| {
+        let vault = open(v, &prelogin, &password);
+        let entries = passbundle_core::history::entries(vault.item(&id).unwrap());
+        let entry = entries
+            .into_iter()
+            .find(|e| e.key == "login.passkey.0")
+            .expect("a passkey row");
+        (entry.value.as_str().to_owned(), entry.compare)
+    };
+    cipher(&mut v, &id)["login"]["fido2Credentials"] = serde_json::json!([passkey("ana")]);
+    let (one, one_compared) = passkey_entry(&v);
+    cipher(&mut v, &id)["login"]["fido2Credentials"] =
+        serde_json::json!([passkey("ana"), passkey("ana.work")]);
+    let (two, two_compared) = passkey_entry(&v);
+    assert_eq!(one, "backup.example.test, ana");
+    assert_eq!(two, "backup.example.test, ana and 1 more");
+    assert_ne!(one_compared, two_compared);
+}

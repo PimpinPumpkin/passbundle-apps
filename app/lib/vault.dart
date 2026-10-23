@@ -18,6 +18,7 @@ import 'editor.dart';
 import 'generator.dart';
 import 'glyphs.dart';
 import 'history.dart';
+import 'icons.dart';
 import 'new_item.dart';
 import 'places.dart';
 import 'settings.dart';
@@ -97,6 +98,9 @@ class VaultScreenState extends State<VaultScreen> {
   @override
   void initState() {
     super.initState();
+    // What was known of icons before (another sign-in, or a locked vault's
+    // empty answers) is asked again.
+    siteIcons.forget();
     reload();
     lifecycle;
     updates?.addListener(updateFound);

@@ -31,6 +31,13 @@ class SiteIcons {
     changes.add(null);
   }
 
+  /// Forgets what's known, setting included, as a vault opens: what the
+  /// core answered while it was locked or signed out was "none".
+  void forget() {
+    _on = null;
+    _known.clear();
+  }
+
   /// What's known for a host now, without waiting: the file, null for none,
   /// or [unknown].
   Object? now(String host) => _known.containsKey(host) ? _known[host] : unknown;

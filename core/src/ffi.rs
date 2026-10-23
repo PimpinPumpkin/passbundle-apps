@@ -1092,7 +1092,16 @@ pub unsafe extern "C" fn pb_icon(host: *const c_char) -> *mut c_char {
             .and_then(|s| s.icon(&host));
         match fetched {
             Ok(icon) => {
-                let path = crate::icons::keep(&folder, &host, icon.as_deref());
+                // Kept only while icons are still on for this vault: signing
+                // out or turning them off while it was fetched removed the
+                // folder, which mustn't come back.
+                let mut path = None;
+                let _ = app_value(|app| {
+                    if app.icon_source().as_ref() == Some(&(server.clone(), folder.clone())) {
+                        path = crate::icons::keep(&folder, &host, icon.as_deref());
+                    }
+                    Value::Null
+                });
                 json!({ "ok": true, "path": path.map(|p| p.to_string_lossy().into_owned()) })
             }
             Err(e) => failed(e),

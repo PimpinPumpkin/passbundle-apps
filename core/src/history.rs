@@ -222,9 +222,17 @@ pub fn entries(item: &Item) -> Vec<Entry> {
         if item.kept.reprompt != 0 { "On" } else { "Off" }.into(),
         false,
     );
-    // A passkey is compared by its credential, shown by who it's for.
+    // A passkey is compared by its credential, shown by who it's for; a
+    // login with more than one by the first and how many there are (the
+    // others are opened only to sign in).
     if let Some(passkey) = &item.passkey {
-        let shown = [
+        let count = item
+            .kept
+            .fido2_credentials
+            .as_ref()
+            .and_then(|all| all.as_array())
+            .map_or(1, |all| all.len().max(1));
+        let mut shown = [
             Some(
                 passkey
                     .rp_name
@@ -238,6 +246,9 @@ pub fn entries(item: &Item) -> Vec<Entry> {
         .filter(|p| !p.is_empty())
         .collect::<Vec<_>>()
         .join(", ");
+        if count > 1 {
+            shown = format!("{shown} and {} more", count - 1);
+        }
         let at = out
             .iter()
             .position(|e| e.key == "expires")
@@ -248,7 +259,7 @@ pub fn entries(item: &Item) -> Vec<Entry> {
                 key: "login.passkey.0".into(),
                 label: "Passkey".into(),
                 value: Zeroizing::new(shown),
-                compare: Some(passkey.credential_id.clone()),
+                compare: Some(format!("{} {count}", passkey.credential_id)),
                 secret: false,
             },
         );
