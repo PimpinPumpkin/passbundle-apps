@@ -176,6 +176,10 @@ jobs:
         run: |
           (cd app && flutter build apk --release --split-per-abi --target-platform android-arm64,android-x64)
           for apk in app/build/app/outputs/flutter-apk/app-*-release.apk; do tools/android-release-check.sh "$apk"; done
+      - name: The updater's own logic, on the computer (app/android/app/src/test)
+        if: matrix.api == 29
+        working-directory: app/android
+        run: ./gradlew :app:testDebugUnitTest --console=plain
       - name: The emulator's and the server's logs
         if: failure()
         run: |

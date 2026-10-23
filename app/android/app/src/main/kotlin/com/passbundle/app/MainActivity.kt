@@ -7,14 +7,15 @@ import android.content.IntentFilter
 import android.os.Build
 import android.os.Bundle
 import android.view.WindowManager
+import com.passbundle.app.update.Updater
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 
 /**
  * The app's one screen, which Flutter draws. What's here is what only Android
- * does (docs/phones.md, "Talking to the OS"): the app's own folder, and
- * copying straight from the core to the clipboard.
+ * does (docs/phones.md, "Talking to the OS"): the app's own folder,
+ * copying straight from the core to the clipboard, and updates from GitHub.
  */
 class MainActivity : FlutterActivity() {
     private var screenOff: BroadcastReceiver? = null
@@ -46,6 +47,9 @@ class MainActivity : FlutterActivity() {
             }
         Core.init(applicationContext)
         Biometric.init(applicationContext)
+        // How an update's download goes, and what Android's installer said (update/Updater.kt).
+        val updates = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "passbundle/updates")
+        Updater.listener = { what, details -> updates.invokeMethod(what, details) }
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "passbundle/platform")
             .setMethodCallHandler { call, result ->
                 when (call.method) {
@@ -100,6 +104,20 @@ class MainActivity : FlutterActivity() {
                         call.argument<String>("package")?.let { Browsers.untrust(this, it) }
                         result.success(true)
                     }
+                    // Updates from PassBundle's GitHub releases (update/Updater.kt).
+                    "updateStatus" -> result.success(Updater.status(this))
+                    "updateCheck" -> {
+                        val quiet = call.argument<Boolean>("quiet") == true
+                        Thread {
+                            val answer = Updater.check(applicationContext, quiet)
+                            runOnUiThread { result.success(answer) }
+                        }.start()
+                    }
+                    "updateInstall" -> Updater.install(this) { answer -> result.success(answer) }
+                    "updateAuto" -> {
+                        Updater.setAuto(this, call.argument<Boolean>("on") == true)
+                        result.success(true)
+                    }
                     else -> result.notImplemented()
                 }
             }
@@ -108,6 +126,7 @@ class MainActivity : FlutterActivity() {
     override fun cleanUpFlutterEngine(flutterEngine: FlutterEngine) {
         screenOff?.let { unregisterReceiver(it) }
         screenOff = null
+        Updater.listener = null
         super.cleanUpFlutterEngine(flutterEngine)
     }
 }

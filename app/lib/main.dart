@@ -13,6 +13,7 @@ import 'package:flutter/services.dart';
 import 'core.dart';
 import 'sign_in.dart';
 import 'theme.dart';
+import 'updates.dart';
 import 'vault.dart';
 
 final measuring = Platform.environment['PB_MEASURE'] == '1';
@@ -45,6 +46,8 @@ Future<void> main() async {
   if (!measuring && (Platform.isWindows || Platform.isMacOS)) {
     Core.startAgent();
   }
+  // On Android, a newer release, at most once a day; the vault says so quietly.
+  checkForUpdatesOnStart();
   runApp(const PassBundleApp());
 }
 
