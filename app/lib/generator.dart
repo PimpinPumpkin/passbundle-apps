@@ -118,6 +118,7 @@ class _GeneratorDialogState extends State<GeneratorDialog> {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               SegmentedButton<String>(
+                showSelectedIcon: false,
                 segments: [
                   ButtonSegment(
                     value: 'password',
@@ -273,7 +274,10 @@ class _Count extends StatelessWidget {
   @override
   Widget build(BuildContext context) => Row(
     children: [
-      SizedBox(width: 64, child: Text(label)),
+      ConstrainedBox(
+        constraints: const BoxConstraints(minWidth: 64),
+        child: Text(label),
+      ),
       Expanded(
         child: Slider(
           value: value.toDouble(),

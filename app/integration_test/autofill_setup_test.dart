@@ -11,6 +11,7 @@ import 'package:integration_test/integration_test.dart';
 
 import 'package:passbundle/core.dart';
 import 'package:passbundle/main.dart';
+import 'package:passbundle/unlock_offer.dart';
 
 const server = String.fromEnvironment('PB_TEST_SERVER');
 const email = String.fromEnvironment('PB_TEST_EMAIL');
@@ -30,6 +31,25 @@ Future<void> pumpUntil(
   throw TestFailure('Never showed up: $finder');
 }
 
+/// Taps once the screen holds still: hit-testable, and in the same place for
+/// a few frames (the keyboard going away moves the screen, and on a small
+/// screen it covers what's under it).
+Future<void> tapWhenStill(WidgetTester tester, Finder finder) async {
+  FocusManager.instance.primaryFocus?.unfocus();
+  Offset? last;
+  var still = 0;
+  final end = DateTime.now().add(const Duration(seconds: 30));
+  while (still < 3 && DateTime.now().isBefore(end)) {
+    await tester.pump(const Duration(milliseconds: 100));
+    final found = finder.hitTestable().evaluate();
+    final at = found.isEmpty ? null : tester.getCenter(finder);
+    still = at != null && at == last ? still + 1 : 0;
+    last = at;
+  }
+  if (still < 3) throw TestFailure('Never held still: $finder');
+  await tester.tap(finder);
+}
+
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
 
@@ -41,6 +61,9 @@ void main() {
       kept.deleteSync(recursive: true);
     }
     await Core.openOnThisDevice();
+    // A phone with biometrics set up would offer them after signing in; this
+    // turns them on in Settings instead, so it's been declined just now.
+    declineOffer();
     await tester.pumpWidget(PassBundleApp(key: UniqueKey()));
     await pumpUntil(tester, find.text('Sign in to PassBundle'));
     await tester.tap(find.text('Self-hosted?'));
@@ -51,8 +74,8 @@ void main() {
       find.widgetWithText(TextField, 'Master password'),
       password,
     );
-    await tester.tap(find.text('Sign in'));
-    await pumpUntil(tester, find.text('Autofill test app'));
+    await tapWhenStill(tester, find.text('Sign in'));
+    await pumpUntil(tester, find.text('Logins'));
 
     // Debug builds' stand-in for Android's prompt says yes, here and when
     // autofill unlocks later (it's kept for the app's next process).
@@ -71,7 +94,7 @@ void main() {
             w.value,
       ),
     );
-    await tester.tap(find.text('Close'));
+    await tester.tap(find.byTooltip('Vault'));
     await tester.pump(const Duration(milliseconds: 400));
     await tester.tap(find.byTooltip('Lock'));
     await pumpUntil(tester, find.text(unlockWith));
@@ -151,7 +174,6 @@ void main() {
       await tester.ensureVisible(find.text('Stop trusting'));
       await tester.pump(const Duration(milliseconds: 400));
       await tester.tap(find.text('Stop trusting'));
-      await pumpUntil(tester, find.text('Close'));
       for (var i = 0; i < 50; i++) {
         await tester.pump(const Duration(milliseconds: 100));
         if (find.text('Browsers you trust for autofill').evaluate().isEmpty) {
@@ -159,7 +181,7 @@ void main() {
         }
       }
       expect(find.text('Browsers you trust for autofill'), findsNothing);
-      await tester.tap(find.text('Close'));
+      await tester.tap(find.byTooltip('Vault'));
       await tester.pump(const Duration(milliseconds: 400));
       File('$dir/autofill-untrusted').writeAsStringSync('');
     }

@@ -655,7 +655,8 @@ pub extern "C" fn pb_preferences() -> *mut c_char {
 
 /// The organizations' "Vault lock" policy (docs/core.md, "Locking by
 /// policy"): `maxMinutes` (the longest wait, or null), `immediately`,
-/// `onSystemLock`, and `signOut`. All off when no organization sets it.
+/// `onSystemLock`, and `signOut`; and `removeUnlockWithPin`, from their
+/// "Remove Unlock with PIN" policy. All off when no organization sets them.
 #[no_mangle]
 pub extern "C" fn pb_lock_policy() -> *mut c_char {
     with_app(|app| json!(app.lock_policy()))

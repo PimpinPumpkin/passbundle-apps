@@ -13,11 +13,20 @@ class MainFlutterWindow: NSWindow {
   private var platform: FlutterMethodChannel?
   private var updates: FlutterMethodChannel?
 
+  /// Where macOS keeps the window's frame between launches.
+  private static let frameName = "PassBundle"
+
   override func awakeFromNib() {
     let flutterViewController = FlutterViewController()
-    let windowFrame = self.frame
     self.contentViewController = flutterViewController
-    self.setFrame(windowFrame, display: true)
+    // Wide enough for the menu, the list, and an item side by side (the
+    // app's wide layout starts at 900 points), within the screen; after
+    // that, where and how big the person left it.
+    self.contentMinSize = NSSize(width: 400, height: 560)
+    if !self.setFrameUsingName(Self.frameName) {
+      self.setFrame(self.openingFrame(), display: true)
+    }
+    _ = self.setFrameAutosaveName(Self.frameName)
 
     RegisterGeneratedPlugins(registry: flutterViewController)
 
@@ -44,6 +53,19 @@ class MainFlutterWindow: NSWindow {
     self.updates = updates
 
     super.awakeFromNib()
+  }
+
+  /// 1200 by 800 points, or as much of the screen as there is, centered.
+  private func openingFrame() -> NSRect {
+    let visible = (self.screen ?? NSScreen.main)?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+    let chrome = self.frameRect(forContentRect: NSRect(x: 0, y: 0, width: 100, height: 100)).size
+    let content = NSSize(
+      width: max(self.contentMinSize.width, min(1200, visible.width - 40 - (chrome.width - 100))),
+      height: max(self.contentMinSize.height, min(800, visible.height - 40 - (chrome.height - 100))))
+    let size = self.frameRect(forContentRect: NSRect(origin: .zero, size: content)).size
+    return NSRect(
+      x: visible.midX - size.width / 2, y: visible.midY - size.height / 2,
+      width: size.width, height: size.height)
   }
 
   private func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult, updates: FlutterMethodChannel) {
