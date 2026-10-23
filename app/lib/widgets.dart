@@ -79,6 +79,75 @@ class _MarkPainter extends CustomPainter {
   bool shouldRepaint(_MarkPainter old) => old.color != color;
 }
 
+/// PassBundle's logo, as the web vault and the extension show it
+/// (passbundle-clients, brand/wordmark.py): the emerald jewel tile with the
+/// mark in white, then the name in lower case, "pass" bold and "bundle"
+/// lighter, in the brand's two tones. [size] is the tile's; the rest keeps
+/// the logo's proportions (a 42-unit tile, 12 to the name, the name at 31).
+class Wordmark extends StatelessWidget {
+  const Wordmark({super.key, this.size = 42});
+
+  final double size;
+
+  static const _emerald = Color(0xFF0E7A5A);
+
+  @override
+  Widget build(BuildContext context) {
+    final dark = Theme.of(context).brightness == Brightness.dark;
+    final u = size / 42;
+    final font = 31 * u;
+    TextStyle style(double weight, Color color) => TextStyle(
+      fontFamily: passBundleFontFamily,
+      fontSize: font,
+      fontWeight: weight >= 600 ? FontWeight.w700 : FontWeight.w400,
+      fontVariations: [FontVariation('wght', weight)],
+      letterSpacing: -0.02 * font,
+      height: 1,
+      color: color,
+    );
+    return Semantics(
+      label: 'PassBundle',
+      excludeSemantics: true,
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          JewelTile(
+            jewel: Jewel.allItems,
+            size: size,
+            // The lock is 18 of the tile's 42 units wide.
+            child: Mark(size: 18 * u * 32 / 26, color: Colors.white),
+          ),
+          SizedBox(width: 12 * u),
+          // The logo doesn't grow with the text size: it's a picture.
+          Text.rich(
+            TextSpan(
+              children: [
+                TextSpan(
+                  text: 'pass',
+                  style: style(
+                    700,
+                    dark ? const Color(0xFFE7EFEC) : const Color(0xFF1B3A33),
+                  ),
+                ),
+                TextSpan(
+                  text: 'bundle',
+                  style: style(
+                    450,
+                    dark ? const Color(0xFF6FD4B4) : _emerald,
+                  ),
+                ),
+              ],
+            ),
+            textScaler: TextScaler.noScaling,
+            maxLines: 1,
+            softWrap: false,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 /// An item's tile: a login's first letter on a tint of the login color (a
 /// site's own icon is for later), and for the other kinds their kind's jewel
 /// tile, so a list is never a column of identical keys. The same on a phone,
@@ -279,8 +348,8 @@ class Centered extends StatelessWidget {
 
 Widget heading(BuildContext context, String title, String? subtitle) => Column(
   children: [
-    const Center(child: Mark(size: 48)),
-    const SizedBox(height: 20),
+    const Center(child: Wordmark(size: 44)),
+    const SizedBox(height: 28),
     Text(
       title,
       textAlign: TextAlign.center,

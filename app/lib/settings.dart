@@ -364,6 +364,22 @@ class _SettingsListState extends State<SettingsList> {
               ),
             ],
           ),
+        // About: the logo, and this version where the app knows it.
+        Padding(
+          padding: const EdgeInsets.fromLTRB(4, 32, 4, 8),
+          child: Column(
+            children: [
+              const Wordmark(size: 28),
+              if (updates?.version case final version?) ...[
+                const SizedBox(height: 8),
+                Text(
+                  'Version $version',
+                  style: TextStyle(color: context.colors.muted, fontSize: 13),
+                ),
+              ],
+            ],
+          ),
+        ),
       ],
     );
   }
