@@ -2,11 +2,12 @@
 // agent and shared with the browser extension (docs/core.md, "Unlock with
 // Windows Hello or Touch ID"), and when the app locks by itself ("Locking by
 // itself"), within what an organization's policy allows ("Locking by
-// policy").
+// policy"). On Android, updates from PassBundle's releases (updates.dart).
 import 'package:flutter/material.dart';
 
 import 'core.dart';
 import 'theme.dart';
+import 'updates.dart';
 import 'widgets.dart';
 
 class SettingsDialog extends StatefulWidget {
@@ -289,6 +290,10 @@ class _SettingsDialogState extends State<SettingsDialog> {
                     ),
                     contentPadding: EdgeInsets.zero,
                   ),
+              ],
+              if (updates case final updates?) ...[
+                const Divider(height: 24),
+                UpdatesSection(updates: updates),
               ],
               if (note != null) ...[
                 const SizedBox(height: 8),

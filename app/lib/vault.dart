@@ -11,6 +11,7 @@ import 'core.dart';
 import 'editor.dart';
 import 'settings.dart';
 import 'theme.dart';
+import 'updates.dart';
 import 'widgets.dart';
 
 enum Filter { all, favorites, folder, organization }
@@ -69,16 +70,24 @@ class VaultScreenState extends State<VaultScreen> {
     super.initState();
     reload();
     lifecycle;
+    updates?.addListener(updateFound);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (widget.syncOnOpen) sync();
       saveOffered();
+      updateFound();
     });
   }
 
   @override
   void dispose() {
+    updates?.removeListener(updateFound);
     lifecycle.dispose();
     super.dispose();
+  }
+
+  /// A newer PassBundle the check on start found: a quiet notice, once (updates.dart).
+  void updateFound() {
+    if (mounted) showUpdateNotice(context);
   }
 
   /// A sign-in Android's autofill offered to save: the editor, filled in.

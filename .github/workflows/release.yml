@@ -1,0 +1,218 @@
+# Android test releases (README, "Android test releases"): every commit on
+# main that passes CI, built again from that commit, signed with PassBundle's
+# test key, and published as a GitHub release, which the app's updater reads
+# (app/android/app/src/main/kotlin/com/passbundle/app/update/Updater.kt).
+#
+# Tagged android-v<major>.<minor>.<build>: the major and minor are
+# pubspec.yaml's, and the build is this workflow's run number, which only
+# goes up, so each release's versionCode is higher than the last (Flutter
+# adds 2000 to it for arm64-v8a and 4000 for x86_64). Renaming this file
+# starts the run number at 1 again: add an offset to BUILD then, or the
+# versions go backwards.
+#
+# The release is a full one (not a prerelease), so releases/latest is the
+# newest. Without the key's secrets (a fork), the APKs are built with the
+# debug key and kept as the run's artifact, never published.
+name: Android release
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: android-release
+  cancel-in-progress: false
+
+env:
+  FLUTTER_VERSION: 3.47.6
+  FLUTTER_COMMIT: 5fc346839b5d0eef006ed8404392afb4dfae428d
+  # The test key's certificate (the PASSBUNDLE_TEST_KEYSTORE_* secrets): a
+  # release is published only signed with it.
+  TEST_CERT_SHA256: c995faf233199dec1b7453a52cf405d1657323d9b4bf98efcb52a718a71d9e3a
+
+jobs:
+  plan:
+    name: What to release
+    # Only main's own pushes that passed CI (not a fork's branch that's also
+    # called main), or a run started by hand on main.
+    if: >-
+      (github.event_name == 'workflow_run'
+        && github.event.workflow_run.conclusion == 'success'
+        && github.event.workflow_run.event == 'push'
+        && github.event.workflow_run.head_branch == 'main'
+        && github.event.workflow_run.head_repository.full_name == github.repository)
+      || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    outputs:
+      release: ${{ steps.plan.outputs.release }}
+      sha: ${{ steps.plan.outputs.sha }}
+      version: ${{ steps.plan.outputs.version }}
+      build: ${{ steps.plan.outputs.build }}
+      last: ${{ steps.plan.outputs.last }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The commit CI passed, not main's head now.
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          # The tags, for the last release and the notes.
+          fetch-depth: 0
+          persist-credentials: false
+      - name: The version, and whether there's anything new
+        id: plan
+        env:
+          BUILD: ${{ github.run_number }}
+        run: |
+          sha=$(git rev-parse HEAD)
+          base=$(sed -n 's/^version: \([0-9]*\.[0-9]*\)\..*/\1/p' app/pubspec.yaml)
+          [ -n "$base" ] || { echo "No version in app/pubspec.yaml." >&2; exit 1; }
+          version="$base.$BUILD"
+          # The newest Android release, by build number.
+          last=$(git tag -l 'android-v*' | awk -F. '{ print $NF "\t" $0 }' | sort -n | tail -1 | cut -f2)
+          {
+            echo "sha=$sha"
+            echo "version=$version"
+            echo "build=$BUILD"
+            echo "last=$last"
+          } >> "$GITHUB_OUTPUT"
+          # A commit already released, or older than the last release (CI
+          # runs can finish out of order), isn't released again.
+          if [ -n "$last" ] && git merge-base --is-ancestor "$sha" "$last"; then
+            echo "${sha:0:9} is already in $last: nothing new to release." | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Releasing ${sha:0:9} as $version (the last release is ${last:-none})." | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  android:
+    name: Android ${{ needs.plan.outputs.version }}
+    needs: plan
+    if: needs.plan.outputs.release == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      # gh release create.
+      contents: write
+    defaults:
+      run:
+        shell: bash
+    env:
+      SHA: ${{ needs.plan.outputs.sha }}
+      VERSION: ${{ needs.plan.outputs.version }}
+      BUILD: ${{ needs.plan.outputs.build }}
+      LAST: ${{ needs.plan.outputs.last }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      # As CI's Android job builds them (ci.yml), without its cache: a
+      # signed release is built from scratch.
+      - name: Install the pinned Rust toolchain, with Android's targets
+        run: cd core && rustup toolchain install && rustup target add aarch64-linux-android x86_64-linux-android
+      - name: Build the core for phones and the emulator
+        run: ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME" tools/android-core.sh build arm64-v8a x86_64
+      - name: Install Flutter at the pinned release
+        run: |
+          git clone --quiet --depth 1 --branch "$FLUTTER_VERSION" https://github.com/flutter/flutter.git "$RUNNER_TEMP/flutter"
+          test "$(git -C "$RUNNER_TEMP/flutter" rev-parse HEAD)" = "$FLUTTER_COMMIT"
+          echo "$RUNNER_TEMP/flutter/bin" >> "$GITHUB_PATH"
+      - name: Turn off analytics
+        run: |
+          flutter config --no-analytics
+          flutter --disable-analytics
+      - name: The test key, from the repository's secrets
+        env:
+          KEYSTORE_BASE64: ${{ secrets.PASSBUNDLE_TEST_KEYSTORE_BASE64 }}
+        run: |
+          if [ -z "$KEYSTORE_BASE64" ]; then
+            echo "::notice::No test key in this repository's secrets: the APKs are signed with the debug key, and not published."
+            exit 0
+          fi
+          umask 077
+          printf '%s' "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/passbundle-test.p12"
+          echo "PASSBUNDLE_KEYSTORE_PATH=$RUNNER_TEMP/passbundle-test.p12" >> "$GITHUB_ENV"
+      - name: Build the release APKs, one per chip type
+        working-directory: app
+        env:
+          # Read by app/android/app/build.gradle.kts, never printed.
+          PASSBUNDLE_KEYSTORE_PASSWORD: ${{ secrets.PASSBUNDLE_TEST_KEYSTORE_PASSWORD }}
+          PASSBUNDLE_KEY_ALIAS: ${{ secrets.PASSBUNDLE_TEST_KEY_ALIAS }}
+        run: flutter build apk --release --split-per-abi --target-platform android-arm64,android-x64 --build-name "$VERSION" --build-number "$BUILD"
+      - name: Each keeps what the core calls through JNI, and has this version
+        run: |
+          aapt2=$(ls "$ANDROID_HOME"/build-tools/*/aapt2 | sort -V | tail -1)
+          mkdir dist
+          for abi in arm64-v8a x86_64; do
+            apk="app/build/app/outputs/flutter-apk/app-$abi-release.apk"
+            tools/android-release-check.sh "$apk"
+            badging=$("$aapt2" dump badging "$apk")
+            grep -q "^package: name='com.passbundle.app' .*versionName='$VERSION'" <<< "$badging"
+            cp "$apk" "dist/passbundle-$VERSION-$abi.apk"
+          done
+          (cd dist && sha256sum passbundle-*.apk > SHA256SUMS && cat SHA256SUMS)
+      - name: Each is signed with the test key
+        if: env.PASSBUNDLE_KEYSTORE_PATH != ''
+        run: |
+          apksigner=$(ls "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)
+          for apk in dist/*.apk; do
+            certs=$("$apksigner" verify --print-certs "$apk")
+            if ! grep -qx "Signer #1 certificate SHA-256 digest: $TEST_CERT_SHA256" <<< "$certs" || grep -q '^Signer #2' <<< "$certs"; then
+              echo "$certs"
+              echo "$apk isn't signed with the test key alone." >&2
+              exit 1
+            fi
+          done
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: passbundle-android-${{ needs.plan.outputs.version }}
+          path: dist
+          if-no-files-found: error
+          retention-days: 7
+      - name: The notes, the commit subjects since the last release
+        run: |
+          if [ -n "$LAST" ]; then
+            since="since ${LAST#android-v}"
+            changes=$(git log --no-merges --format='- %s' "$LAST..$SHA")
+          else
+            since="in this first test release"
+            changes=$(git log --no-merges --format='- %s' -n 20 "$SHA")
+          fi
+          {
+            echo "What's new $since:"
+            echo
+            echo "${changes:-- Maintenance}"
+            echo
+            echo "Files: passbundle-$VERSION-arm64-v8a.apk is for phones, and passbundle-$VERSION-x86_64.apk for the emulator and Chromebooks. SHA256SUMS lists their SHA-256."
+            echo
+            echo "A test build, signed with PassBundle's test key (certificate SHA-256 ${TEST_CERT_SHA256}). PassBundle updates itself from these releases (Settings, Updates). A copy signed with another key, such as one you built, has to be uninstalled before installing this one."
+          } > "$RUNNER_TEMP/notes.md"
+          cat "$RUNNER_TEMP/notes.md"
+      - name: Publish the release
+        if: env.PASSBUNDLE_KEYSTORE_PATH != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "android-v$VERSION" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$SHA" \
+            --title "PassBundle $VERSION for Android" \
+            --notes-file "$RUNNER_TEMP/notes.md" \
+            --latest \
+            dist/passbundle-*.apk dist/SHA256SUMS
+          echo "Published https://github.com/$GITHUB_REPOSITORY/releases/tag/android-v$VERSION" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Remove the key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/passbundle-test.p12"
