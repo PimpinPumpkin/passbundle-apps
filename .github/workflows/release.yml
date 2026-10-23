@@ -254,7 +254,10 @@ jobs:
               --out "dist/$name" "unsigned/$name"
             "$tools/zipalign" -c -P 16 4 "dist/$name"
             certs=$("$tools/apksigner" verify --min-sdk-version 29 --print-certs "dist/$name")
-            if ! grep -qx "Signer #1 certificate SHA-256 digest: $TEST_CERT_SHA256" <<< "$certs" || grep -q '^Signer #2' <<< "$certs"; then
+            # Every certificate line, whichever way this apksigner labels the
+            # signer ("Signer #1" or "V3.0 Signer"), must name the test key.
+            digests=$({ grep -oE 'certificate SHA-256 digest: [0-9a-f]+' <<< "$certs" || true; } | awk '{print $NF}' | sort -u)
+            if [ "$digests" != "$TEST_CERT_SHA256" ]; then
               echo "$certs"
               echo "$name isn't signed with the test key alone." >&2
               exit 1
