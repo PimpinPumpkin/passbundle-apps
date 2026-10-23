@@ -1,6 +1,8 @@
 // Settings' Updates and the notice over the vault (updates.dart), with a
-// stand-in for the app's Kotlin, which does the checking and installing on
-// Android (update/Updater.kt, tested on its own in app/android/app/src/test).
+// stand-in for the app's native code, which does the checking and installing
+// (Android: update/Updater.kt, tested on its own in app/android/app/src/test;
+// the Mac: macos/Runner/Updater.swift, tested on its own by
+// tools/mac-update-test.sh).
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -10,14 +12,17 @@ import 'package:passbundle/updates.dart';
 class StandIn implements UpdatePlatform {
   StandIn({
     this.store,
+    this.restarts = false,
     this.checkAnswer = const {'ok': true, 'available': false},
   });
 
   final String? store;
+  final bool restarts;
   Map<String, dynamic> checkAnswer;
   Map<String, dynamic> installAnswer = {'ok': true};
   final checks = <bool>[];
   var installs = 0;
+  var reveals = 0;
   bool? auto;
   void Function(String, Map<String, dynamic>)? event;
 
@@ -26,6 +31,7 @@ class StandIn implements UpdatePlatform {
     'version': '0.1.4',
     'store': store,
     'auto': true,
+    'restarts': restarts,
   };
 
   @override
@@ -39,6 +45,12 @@ class StandIn implements UpdatePlatform {
     installs++;
     event?.call('progress', {'percent': 40});
     return installAnswer;
+  }
+
+  @override
+  Future<bool> reveal() async {
+    reveals++;
+    return true;
   }
 
   @override
@@ -70,6 +82,10 @@ Future<void> showSection(WidgetTester tester, Updates u) async {
 
 void main() {
   tearDown(() => updates = null);
+
+  test('tests never reach the real updater, on any computer', () {
+    expect(updates, isNull);
+  });
 
   testWidgets('Settings shows the version, checks, and offers what it found', (
     tester,
@@ -149,6 +165,62 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text("The update wasn't installed."), findsOneWidget);
   });
+
+  testWidgets('on the Mac, updating says it restarts, and then restarts', (
+    tester,
+  ) async {
+    final standIn = StandIn(restarts: true, checkAnswer: newer)
+      ..installAnswer = {'ok': true, 'restart': true};
+    final u = Updates(standIn);
+    await showSection(tester, u);
+    await tester.tap(find.text('Check for updates'));
+    await tester.pumpAndSettle();
+    expect(find.text('PassBundle restarts to finish.'), findsOneWidget);
+    expect(standIn.installs, 0);
+
+    await tester.tap(find.text('Update to 0.1.5'));
+    await tester.pump();
+    expect(standIn.installs, 1);
+    expect(find.text('Restarting PassBundle'), findsOneWidget);
+    expect(find.text('Update to 0.1.5'), findsNothing);
+    // Once it's restarting, another click does nothing.
+    await u.install();
+    expect(standIn.installs, 1);
+  });
+
+  testWidgets(
+    "where PassBundle can't replace itself, the checked update shows in Finder",
+    (tester) async {
+      const words =
+          "PassBundle can't replace itself in Applications, which only an "
+          'administrator can change. The new version is downloaded and '
+          'checked: show it in Finder, and drag it to Applications yourself.';
+      final standIn = StandIn(restarts: true, checkAnswer: newer)
+        ..installAnswer = {'ok': false, 'error': words, 'reveal': true};
+      final u = Updates(standIn);
+      await showSection(tester, u);
+      await tester.tap(find.text('Check for updates'));
+      await tester.pumpAndSettle();
+      expect(find.text('Show in Finder'), findsNothing);
+      await tester.tap(find.text('Update to 0.1.5'));
+      await tester.pumpAndSettle();
+      expect(find.text(words), findsOneWidget);
+      expect(find.text('Restarting PassBundle'), findsNothing);
+
+      await tester.tap(find.text('Show in Finder'));
+      await tester.pumpAndSettle();
+      expect(standIn.reveals, 1);
+
+      // A refusal that isn't about the folder offers nothing to show.
+      standIn.installAnswer = {
+        'ok': false,
+        'error': 'The update is signed with a different certificate.',
+      };
+      await tester.tap(find.text('Update to 0.1.5'));
+      await tester.pumpAndSettle();
+      expect(find.text('Show in Finder'), findsNothing);
+    },
+  );
 
   testWidgets('installed by a store, it leaves updates to the store', (
     tester,

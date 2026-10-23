@@ -44,10 +44,12 @@ pub struct Store {
 }
 
 impl Store {
-    /// The app's own folder: PB_DATA_DIR if set (tests), else the OS's local
-    /// app data folder (AppData\Local on Windows, Application Support on macOS,
-    /// ~/.local/share on Linux), in "PassBundle".
+    /// The app's own folder: the OS's local app data folder (AppData\Local on
+    /// Windows, Application Support on macOS, ~/.local/share on Linux), in
+    /// "PassBundle". Test builds (the test-hooks feature) take PB_DATA_DIR
+    /// instead when it's set.
     pub fn default_dir() -> PathBuf {
+        #[cfg(feature = "test-hooks")]
         if let Some(dir) = std::env::var_os("PB_DATA_DIR") {
             return PathBuf::from(dir);
         }

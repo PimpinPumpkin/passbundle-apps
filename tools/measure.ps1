@@ -1,6 +1,7 @@
 # Measures a built app on Windows, as tools/measure.sh does on Linux and
 # macOS: size, compressed size, time to the first frame, unlock time, memory
-# once the vault is open, and a screenshot.
+# once the vault is open, and a screenshot. It needs a build with test hooks,
+# as CI's are (tools/measure.sh says how); a release ignores its settings.
 #
 #   tools/measure.ps1 -Exe <passbundle.exe> -Bundle <Release folder> -Shot <screenshot.png>
 param(

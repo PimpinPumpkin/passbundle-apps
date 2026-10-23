@@ -18,6 +18,12 @@ ffi = []
 # Trusting a given certificate instead of the OS's, for tests against a
 # throwaway HTTPS server (examples/interop.rs). Never in the app.
 test-trust = []
+# Settings for test runs from the environment: PB_DATA_DIR (the app's
+# folder) and PB_SECRETS=memory (the session in memory, never the OS's
+# store), for CI's builds that tools/measure.sh, tools/measure.ps1, and
+# tools/mac-update-test.sh --launch open. Never in a release
+# (.github/workflows/macos-release.yml checks): a release reads neither.
+test-hooks = []
 
 # Signs in, prints what it reads, and saves an item: the e2e suite checks the
 # web vault and the core read each other's items.

@@ -1,8 +1,8 @@
 // PassBundle: sign in to a PassBundle server, unlock the vault kept on this
 // device, and use it, with the look every platform shares. It locks by itself
-// as chosen in Settings (docs/core.md, "Locking by itself"). Set PB_MEASURE=1
-// to unlock by itself (with PB_MEASURE_PASSWORD) and report timings
-// (tools/measure.sh).
+// as chosen in Settings (docs/core.md, "Locking by itself"). In a build with
+// test hooks (core.dart, testHooks; never a release), PB_MEASURE=1 unlocks by
+// itself (with PB_MEASURE_PASSWORD) and reports timings (tools/measure.sh).
 import 'dart:async';
 import 'dart:io';
 
@@ -16,9 +16,9 @@ import 'theme.dart';
 import 'updates.dart';
 import 'vault.dart';
 
-final measuring = Platform.environment['PB_MEASURE'] == '1';
+final measuring = testSetting('PB_MEASURE') == '1';
 var _readyReported = false;
-final _measureFile = Platform.environment['PB_MEASURE_FILE'];
+final _measureFile = testSetting('PB_MEASURE_FILE');
 
 /// A timing line for tools/measure.sh: to PB_MEASURE_FILE when set (a Windows
 /// app has no stdout), and to stdout where there is one.
@@ -46,8 +46,9 @@ Future<void> main() async {
   if (!measuring && (Platform.isWindows || Platform.isMacOS)) {
     Core.startAgent();
   }
-  // On Android, a newer release, at most once a day; the vault says so quietly.
-  checkForUpdatesOnStart();
+  // On Android and the Mac, a newer release, at most once a day; the vault
+  // says so quietly. Not while measuring (tools/measure.sh), which stays offline.
+  if (!measuring) checkForUpdatesOnStart();
   runApp(const PassBundleApp());
 }
 
@@ -64,7 +65,7 @@ class PassBundleApp extends StatefulWidget {
 class _PassBundleAppState extends State<PassBundleApp> {
   late ThemeMode mode =
       widget.themeMode ??
-      switch (Platform.environment['PB_THEME']) {
+      switch (testSetting('PB_THEME')) {
         'dark' => ThemeMode.dark,
         'light' => ThemeMode.light,
         _ => ThemeMode.system,

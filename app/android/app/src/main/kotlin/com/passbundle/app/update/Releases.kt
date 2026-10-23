@@ -66,6 +66,8 @@ object Releases {
     /**
      * The newest Android release among [tags] (from the list of releases,
      * when releases/latest is another platform's), or null when there's none.
+     * The Mac's releases (macos-v, which count their own builds) are never
+     * marked latest, but are in the list, and never taken for Android's.
      */
     fun newest(tags: List<String>): String? = tags.filter { buildOfTag(it) != null }.maxByOrNull { buildOfTag(it)!! }
 

@@ -2,7 +2,8 @@
 // agent and shared with the browser extension (docs/core.md, "Unlock with
 // Windows Hello or Touch ID"), and when the app locks by itself ("Locking by
 // itself"), within what an organization's policy allows ("Locking by
-// policy"). On Android, updates from PassBundle's releases (updates.dart).
+// policy"). On Android and the Mac, updates from PassBundle's releases
+// (updates.dart).
 import 'package:flutter/material.dart';
 
 import 'core.dart';
