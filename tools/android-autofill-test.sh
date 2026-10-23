@@ -104,6 +104,32 @@ web_field() {
   return 1
 }
 
+# Picks an entry in Android's autofill list ($1) and waits for what it fills
+# ($2). The list can still be settling when it first shows, and Android 10
+# drops a tap that lands then, so it waits a moment before tapping. If
+# nothing was filled, it opens the list again from the field ($3) and retries.
+pick() {
+  local at
+  for _ in 1 2 3; do
+    shown "$1" || return 1
+    sleep 1
+    at=$(where "$1")
+    if [ -n "$at" ]; then
+      # shellcheck disable=SC2086
+      a shell input tap $at
+    fi
+    for _ in $(seq 8); do
+      [ -n "$(where "$2")" ] && return 0
+      sleep 1
+    done
+    echo "Picking $1 filled nothing; opening the list again." >&2
+    tap "$3" || return 1
+  done
+  echo "Picking $1 never filled $2" >&2
+  screen | grep -oE '(text|resource-id)="[^"]+"' | sort -u | head -40 >&2
+  return 1
+}
+
 # Waits up to 30 seconds for something to be on screen.
 shown() {
   for _ in $(seq 30); do
@@ -208,8 +234,7 @@ tap "id=com.passbundle.autofilltest:id/username"
 # login. The one whose name another key isn't, nor a website the app
 # doesn't name.
 shown "^Autofill test app"
-tap "^Linked website"
-shown "^linked@example.test$"
+pick "^Linked website" "^linked@example.test$" "id=com.passbundle.autofilltest:id/username"
 tap "id=com.passbundle.autofilltest:id/sign_in"
 shown "^Signed in as linked@example.test, password 26 characters$"
 a shell am force-stop com.passbundle.autofilltest
