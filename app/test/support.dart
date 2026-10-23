@@ -9,6 +9,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:passbundle/core.dart';
+import 'package:passbundle/icons.dart';
 
 /// The sample vault's master password (the core's test vectors).
 const samplePassword = 'correct horse battery staple 1';
@@ -72,7 +73,8 @@ String openSample({
 
 /// For screenshots: the fuller sample vault core/examples/showcase.rs
 /// writes (folders in folders, shared folders, templates), from the folder
-/// PB_SHOWCASE names; the sample vault without it. The same account and
+/// PB_SHOWCASE names, with the websites' icons in its `icons` folder, if
+/// any (`<host>.png`); the sample vault without it. The same account and
 /// master password either way.
 String openShowcase() {
   final from = Platform.environment['PB_SHOWCASE'];
@@ -83,6 +85,15 @@ String openShowcase() {
   }
   Core().openAt(dir);
   machineDoesntLock(false);
+  // Websites' icons, as the core keeps the ones it fetched, if the folder has some.
+  final icons = Directory('$from/icons');
+  if (icons.existsSync()) {
+    Directory('$dir/icons').createSync();
+    for (final f in icons.listSync().whereType<File>()) {
+      f.copySync('$dir/icons/${f.uri.pathSegments.last}');
+    }
+    showIcons(true);
+  }
   return dir;
 }
 
@@ -95,6 +106,16 @@ void machineDoesntLock(bool lockOnSleep) {
     'lockOnSleep': lockOnSleep,
   });
   if (!answer.ok) throw StateError('${answer.error}');
+  // And no websites' icons, which would ask the sample's server (which
+  // isn't there): tests that want them turn them on.
+  showIcons(false);
+}
+
+/// Websites' icons on or off, as Settings turns them.
+void showIcons(bool on) {
+  final answer = Core().setAppearance({'showIcons': on});
+  if (!answer.ok) throw StateError('${answer.error}');
+  siteIcons.turn(on);
 }
 
 /// Pumps until something shows up, giving slow core calls real time.
@@ -140,6 +161,9 @@ class PhoneStandIn {
         case 'biometricRemove':
           status = 'notSetUp';
           return {'ok': true};
+        case 'copy':
+          copied.add(Map<String, dynamic>.from(call.arguments as Map));
+          return true;
         default:
           return null;
       }
@@ -154,4 +178,7 @@ class PhoneStandIn {
 
   /// What the person does at each biometric prompt: true gives it.
   final biometricAnswers = <bool>[];
+
+  /// What was copied, as the phone's code was asked: `{id, what}`.
+  final copied = <Map<String, dynamic>>[];
 }

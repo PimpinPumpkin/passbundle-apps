@@ -152,6 +152,13 @@ class Jewel {
     Color(0xFFB98310),
     Color(0xFFB98310),
   );
+
+  /// A bank's emerald: Health, as the web vault's menu has it.
+  static const health = Jewel(
+    Glyphs.health,
+    Color(0xFF0E7A47),
+    Color(0xFF128752),
+  );
 }
 
 /// The kinds of item, each with its jewel, and what the screens call one and

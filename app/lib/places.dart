@@ -5,12 +5,14 @@
 // unlocking it); every place an item lives is a folder.
 import 'glyphs.dart';
 
-/// What the vault's list shows: everything, favorites, a kind, Personal,
-/// Personal's items in no folder, one of the person's folders, an
-/// organization, or one of its shared folders.
+/// What the vault's list shows: everything, favorites, the logins with
+/// something to fix (Health), a kind, Personal, Personal's items in no
+/// folder, one of the person's folders, an organization, or one of its
+/// shared folders.
 enum Filter {
   all,
   favorites,
+  health,
   kind,
   personal,
   noFolder,
@@ -141,12 +143,19 @@ class PlaceEntry {
 }
 
 /// Whether an item shows under a filter. A template an MSP keeps up to date
-/// in a client's Templates shared folder shows only there.
-bool shows(Map<String, dynamic> item, Filter filter, String? id) {
+/// in a client's Templates shared folder shows only there. Health shows the
+/// logins in [health] (core/src/health.rs).
+bool shows(
+  Map<String, dynamic> item,
+  Filter filter,
+  String? id, {
+  Map<String, Map<String, dynamic>> health = const {},
+}) {
   if (item['mspCopy'] == true && filter != Filter.collection) return false;
   return switch (filter) {
     Filter.all => true,
     Filter.favorites => item['favorite'] == true,
+    Filter.health => health.containsKey(item['id']),
     Filter.kind => item['kind'] == id,
     Filter.personal => item['organizationId'] == null,
     Filter.noFolder =>
@@ -173,4 +182,15 @@ String whereIs(Map<String, dynamic> item, Places places) {
   }
   final folder = item['folder'] as String?;
   return folder == null ? 'Personal' : 'Personal › $folder';
+}
+
+/// What a login has to fix, said briefly: "Weak password · used 3 times".
+String healthIssues(Map<String, dynamic> issues) {
+  final reused = (issues['reused'] as num?)?.toInt() ?? 0;
+  return [
+    if (issues['weak'] == true) 'Weak password',
+    if (reused > 0)
+      reused == 1 ? 'Password used twice' : 'Password used ${reused + 1} times',
+    if (issues['unsecured'] == true) 'Unsecured website',
+  ].join(' · ');
 }

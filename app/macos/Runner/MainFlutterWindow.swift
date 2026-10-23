@@ -72,6 +72,15 @@ class MainFlutterWindow: NSWindow {
     let arguments = call.arguments as? [String: Any]
     let updater = self.updater
     switch call.method {
+    // A login's website, in the browser: only http and https.
+    case "openUrl":
+      guard let text = arguments?["url"] as? String, let url = URL(string: text),
+        url.scheme == "https" || url.scheme == "http"
+      else {
+        result(false)
+        return
+      }
+      result(NSWorkspace.shared.open(url))
     case "updateStatus":
       result(updater.status())
     case "updateCheck":

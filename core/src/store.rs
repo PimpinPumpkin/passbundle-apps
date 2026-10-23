@@ -43,6 +43,21 @@ pub struct Store {
     dir: PathBuf,
 }
 
+/// How the app looks, kept on this device: whether logins show their
+/// websites' icons from the server (upstream's "Show website icons", on
+/// until turned off).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Appearance {
+    pub show_icons: bool,
+}
+
+impl Default for Appearance {
+    fn default() -> Self {
+        Appearance { show_icons: true }
+    }
+}
+
 impl Store {
     /// The app's own folder: the OS's local app data folder (AppData\Local on
     /// Windows, Application Support on macOS, ~/.local/share on Linux), in
@@ -147,6 +162,26 @@ impl Store {
     /// Signing out forgets the vault; the server and email stay, to sign in again.
     pub fn forget_vault(&self) {
         let _ = fs::remove_file(self.path("sync.json"));
+        // Its websites' icons say which sites it has logins for.
+        let icons = crate::icons::folder(&self.dir);
+        if icons.is_dir() {
+            let _ = fs::remove_dir_all(icons);
+        }
+    }
+
+    /// How the app looks on this device (`Appearance`); the defaults until
+    /// the person chooses.
+    pub fn appearance(&self) -> Appearance {
+        self.read("appearance.json")
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn save_appearance(&self, appearance: &Appearance) -> Result<()> {
+        self.write(
+            "appearance.json",
+            &serde_json::to_string_pretty(appearance).expect("appearance always serializes"),
+        )
     }
 
     pub fn dir(&self) -> &Path {

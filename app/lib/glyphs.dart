@@ -38,6 +38,13 @@ abstract final class Glyphs {
       'M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8Z M4 21c1-4 4-6 8-6s7 2 8 6';
   static const building =
       'M4 21V5h10v16 M14 9h6v12 M7 8h3 M7 12h3 M7 16h3 M3 21h18';
+  static const generator =
+      'M5 5h14v14H5Z M9 9h.01 M15 9h.01 M12 12h.01 M9 15h.01 M15 15h.01';
+  static const health =
+      'M12 3l8 3v6c0 4.5-3.4 8-8 9-4.6-1-8-4.5-8-9V6Z M8.5 12l2.5 2.5 4.5-5';
+  static const download = 'M12 4v11 M8 11l4 4 4-4 M4 20h16';
+  static const open = 'M14 4h6v6 M20 4l-9 9 M18 14v6H4V6h6';
+  static const history = 'M3 12a9 9 0 1 0 3-6.7 M3 4v5h5 M12 7v5l3 2';
   static const settings =
       'M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z M19 12a7 7 0 0 0-.1-1.2l2-1.5-2-3.4-2.3.9a7 7 0 0 0-2.1-1.2L14 3h-4l-.5 2.6a7 7 0 0 0-2.1 1.2l-2.3-.9-2 3.4 2 1.5A7 7 0 0 0 5 12c0 .4 0 .8.1 1.2l-2 1.5 2 3.4 2.3-.9a7 7 0 0 0 2.1 1.2L10 21h4l.5-2.6a7 7 0 0 0 2.1-1.2l2.3.9 2-3.4-2-1.5c.1-.4.1-.8.1-1.2Z';
 

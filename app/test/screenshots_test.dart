@@ -26,10 +26,15 @@ Future<void> size(WidgetTester tester, Size size, {double text = 1}) async {
   addTearDown(tester.platformDispatcher.clearAllTestValues);
 }
 
-Future<void> shoot(String name) => expectLater(
-  find.byType(MaterialApp),
-  matchesGoldenFile('screenshots/$name.png'),
-);
+/// Draws what's on screen: the websites' icons first, which load outside
+/// the test's clock.
+Future<void> shoot(String name, [WidgetTester? tester]) async {
+  if (tester != null) await tester.pump();
+  await expectLater(
+    find.byType(MaterialApp),
+    matchesGoldenFile('screenshots/$name.png'),
+  );
+}
 
 Future<void> unlock(WidgetTester tester, {bool phone = false}) async {
   await tester.enterText(find.byType(TextField), samplePassword);
@@ -72,6 +77,19 @@ class _Updates implements UpdatePlatform {
 /// The switch for unlocking with Windows Hello or Touch ID, in Settings.
 const biometric = ValueKey('biometric');
 
+/// The showcase's websites' icons, decoded ahead (outside the test's clock,
+/// where images load), so tiles draw them rather than waiting.
+Future<void> precacheIcons(WidgetTester tester, String dir) async {
+  final icons = Directory('$dir/icons');
+  if (!icons.existsSync()) return;
+  final context = tester.element(find.byType(MaterialApp));
+  await tester.runAsync(() async {
+    for (final f in icons.listSync().whereType<File>()) {
+      if (f.path.endsWith('.png')) await precacheImage(FileImage(f), context);
+    }
+  });
+}
+
 /// A screenshot test, with shadows drawn as a phone or computer draws them:
 /// tests otherwise draw them as solid blocks, which keeps checks steady, but
 /// these are only for looking at.
@@ -99,23 +117,24 @@ void main() {
       await size(tester, const Size(1280, 800));
       openEmpty();
       await tester.pumpWidget(PassBundleApp(themeMode: theme));
-      await shoot('sign-in-$b');
+      await shoot('sign-in-$b', tester);
     });
 
     shots('unlock, vault, item, editor, desktop, $b', (tester) async {
       await size(tester, const Size(1280, 800));
-      openShowcase();
+      final dir = openShowcase();
       await tester.pumpWidget(PassBundleApp(themeMode: theme));
-      await shoot('unlock-$b');
+      await precacheIcons(tester, dir);
+      await shoot('unlock-$b', tester);
       await unlock(tester);
       await tester.tap(find.text('Example Mail').first);
       await tester.pump();
       await tester.tap(find.byTooltip('Reveal').first);
       await tester.pump();
-      await shoot('item-desktop-$b');
+      await shoot('item-desktop-$b', tester);
       await tester.tap(find.widgetWithText(OutlinedButton, 'Edit'));
       await tester.pumpAndSettle();
-      await shoot('editor-desktop-$b');
+      await shoot('editor-desktop-$b', tester);
       await tester.tap(find.byTooltip('Cancel'));
       await tester.pumpAndSettle();
 
@@ -129,10 +148,10 @@ void main() {
 
         // An item made from a template, in an organization's shared folder.
         await open('office', 'Office server');
-        await shoot('template-item-desktop-$b');
+        await shoot('template-item-desktop-$b', tester);
         // One in a shared folder that hides its passwords.
         await open('vpn', 'Fabrikam VPN');
-        await shoot('hidden-passwords-desktop-$b');
+        await shoot('hidden-passwords-desktop-$b', tester);
         await tester.enterText(find.byType(TextField).first, '');
         await tester.pump();
       }
@@ -140,14 +159,74 @@ void main() {
       // New item: the kinds, then More categories' templates.
       await tester.tap(find.text('New'));
       await tester.pumpAndSettle();
-      await shoot('new-item-desktop-$b');
+      await shoot('new-item-desktop-$b', tester);
       await tester.tap(find.text('More categories'));
       await tester.pumpAndSettle();
-      await shoot('new-item-more-desktop-$b');
+      await shoot('new-item-more-desktop-$b', tester);
       await tester.tap(find.text('Wi-Fi network'));
       await tester.pumpAndSettle();
-      await shoot('editor-template-desktop-$b');
+      await shoot('editor-template-desktop-$b', tester);
     });
+
+    // On a real server (PB_TEST_SERVER, tools/test-server.sh): an item's
+    // versions, and one beside the item now.
+    shots('version history, desktop, $b', (tester) async {
+      final server = Platform.environment['PB_TEST_SERVER']!;
+      await size(tester, const Size(1280, 800));
+      openEmpty();
+      final email =
+          'history-${DateTime.now().microsecondsSinceEpoch}@example.test';
+      final made = await tester.runAsync(
+        () => Core.signUp(
+          server,
+          email,
+          '',
+          'correct horse battery staple 9',
+          '',
+        ),
+      );
+      expect(made!.ok, isTrue, reason: made.error);
+      Future<void> save(
+        String? id,
+        String name,
+        String password,
+        String port,
+      ) async {
+        final saved = await tester.runAsync(
+          () => Core.save(id, {
+            'name': name,
+            'username': 'alex@contoso.example',
+            'password': password,
+            'uris': ['https://mail.contoso.example'],
+            'fields': [
+              {'name': 'Port', 'value': port, 'type': 0},
+            ],
+            'collectionIds': <String>[],
+          }),
+        );
+        expect(saved!.ok, isTrue, reason: saved.error);
+      }
+
+      await save(null, 'Contoso Mail', 'not-a-real-password-1', '993');
+      final id = Core().list('').single['id'] as String;
+      await save(id, 'Contoso Mail', 'not-a-real-password-2', '993');
+      await save(id, 'Contoso Mail (work)', 'not-a-real-password-3', '995');
+      await tester.pumpWidget(PassBundleApp(themeMode: theme));
+      await pumpUntil(tester, find.text('Contoso Mail (work)'));
+      await tester.tap(find.text('Contoso Mail (work)').first);
+      await tester.pump();
+      await tester.ensureVisible(find.text('Version history'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Version history'));
+      await pumpUntil(tester, find.textContaining('Saved by you'));
+      await tester.pump(const Duration(milliseconds: 400));
+      await shoot('history-desktop-$b', tester);
+      await tester.tap(find.textContaining('Saved by you').last);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Show hidden values'));
+      await tester.pumpAndSettle();
+      await shoot('version-desktop-$b', tester);
+    }, skip: Platform.environment['PB_TEST_SERVER'] == null);
 
     shots('unlocking with Windows Hello or Touch ID, $b', (tester) async {
       await size(tester, const Size(1280, 800));
@@ -191,28 +270,29 @@ void main() {
       );
       // Past the dialog's fade-in, which the test's clock doesn't advance by itself.
       await tester.pump(const Duration(milliseconds: 400));
-      await shoot('settings-$b');
+      await shoot('settings-$b', tester);
       await tester.tap(find.text('Close'));
       await tester.pumpAndSettle();
       await tester.tap(find.text('Lock'));
       await tester.pump();
       await pumpUntil(tester, find.textContaining('Unlock with '));
-      await shoot('unlock-with-biometrics-$b');
+      await shoot('unlock-with-biometrics-$b', tester);
     }, skip: Platform.environment['PB_TEST_AGENT'] == null);
 
     shots('vault, item, editor, and the offer, phone, $b', (tester) async {
       await size(tester, const Size(390, 844));
       PhoneStandIn(tester);
-      openShowcase();
+      final dir = openShowcase();
       await tester.pumpWidget(PassBundleApp(themeMode: theme));
+      await precacheIcons(tester, dir);
       await unlock(tester, phone: true);
       // Unlocked with the master password, on a phone with a fingerprint.
       await pumpUntil(tester, find.text('Unlock with fingerprint next time?'));
       await tester.pumpAndSettle();
-      await shoot('unlock-offer-phone-$b');
+      await shoot('unlock-offer-phone-$b', tester);
       await tester.tap(find.text('Not now'));
       await tester.pumpAndSettle();
-      await shoot('vault-phone-$b');
+      await shoot('vault-phone-$b', tester);
       // Its folders: Personal's, then each organization's shared folders.
       await tester.scrollUntilVisible(
         find.text('Folders'),
@@ -221,7 +301,7 @@ void main() {
       );
       await tester.drag(find.byType(Scrollable).last, const Offset(0, -260));
       await tester.pumpAndSettle();
-      await shoot('folders-phone-$b');
+      await shoot('folders-phone-$b', tester);
       await tester.drag(find.byType(Scrollable).last, const Offset(0, 4000));
       await tester.pumpAndSettle();
 
@@ -229,16 +309,22 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(find.text('Backup service'));
       await tester.pumpAndSettle();
-      await shoot('item-phone-$b');
+      await shoot('item-phone-$b', tester);
       await tester.pageBack();
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byTooltip('Generator'));
+      await tester.pumpAndSettle();
+      await shoot('generator-phone-$b', tester);
+      await tester.tap(find.byTooltip('Items'));
       await tester.pumpAndSettle();
 
       await tester.tap(find.byTooltip('New item'));
       await tester.pumpAndSettle();
-      await shoot('new-item-phone-$b');
+      await shoot('new-item-phone-$b', tester);
       await tester.tap(find.text('Login'));
       await tester.pumpAndSettle();
-      await shoot('editor-phone-$b');
+      await shoot('editor-phone-$b', tester);
     });
 
     for (final (width, text) in [(390.0, 1.0), (360.0, 1.3)]) {
@@ -257,7 +343,7 @@ void main() {
         await tester.pump();
         await pumpUntil(tester, find.byKey(biometric));
         await tester.pumpAndSettle();
-        await shoot(name);
+        await shoot(name, tester);
       });
     }
   }

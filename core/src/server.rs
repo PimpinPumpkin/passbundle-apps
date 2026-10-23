@@ -580,6 +580,76 @@ impl Server {
         .map(|_| ())
     }
 
+    /// Favorites an item, or not, and leaves its folder as it is: only the
+    /// person's own marks, so an item they can't edit takes it too, and
+    /// nothing is encrypted again (upstream's partial update).
+    pub fn set_favorite(
+        &self,
+        session: &mut Session,
+        id: &str,
+        folder_id: Option<&str>,
+        favorite: bool,
+    ) -> Result<()> {
+        self.call(
+            session,
+            "PUT",
+            &format!("/api/ciphers/{id}/partial"),
+            Some(json!({ "folderId": folder_id, "favorite": favorite })),
+        )
+        .map(|_| ())
+    }
+
+    /// An item's past versions (passbundle-server, keykeeper_cipher_history.rs):
+    /// `{hidePasswords, savedBy, data: [{id, revisionDate, savedBy, cipher}]}`,
+    /// newest first, each version's `cipher` encrypted as the item is.
+    pub fn item_history(&self, session: &mut Session, id: &str) -> Result<Value> {
+        self.call(
+            session,
+            "GET",
+            &format!("/api/keykeeper/ciphers/{id}/history"),
+            None,
+        )
+    }
+
+    /// Clears an item's history, or deletes one of its versions.
+    pub fn delete_history(
+        &self,
+        session: &mut Session,
+        id: &str,
+        version: Option<&str>,
+    ) -> Result<()> {
+        let path = match version {
+            Some(v) => format!("/api/keykeeper/ciphers/{id}/history/{v}"),
+            None => format!("/api/keykeeper/ciphers/{id}/history"),
+        };
+        self.call(session, "DELETE", &path, None).map(|_| ())
+    }
+
+    /// A website's icon from the server's icon service (`<server>/icons/<host>/icon.png`),
+    /// as the web vault shows it: no session, at most 512 KB and 10 seconds,
+    /// and None where there's none (the server's 19 by 19 fallback counts as
+    /// none).
+    pub fn icon(&self, host: &str) -> Result<Option<Vec<u8>>> {
+        let mut response = self
+            .agent
+            .get(self.url(&format!("/icons/{host}/icon.png")))
+            .config()
+            .timeout_global(Some(Duration::from_secs(10)))
+            .build()
+            .call()
+            .map_err(|e| Error::Network(e.to_string()))?;
+        if response.status().as_u16() != 200 {
+            return Ok(None);
+        }
+        let bytes = response
+            .body_mut()
+            .with_config()
+            .limit(512 * 1024)
+            .read_to_vec()
+            .map_err(|e| Error::Network(e.to_string()))?;
+        Ok(Some(bytes).filter(|b| !crate::icons::is_fallback(b)))
+    }
+
     /// An attachment's file, as the server stores it (still encrypted).
     pub fn attachment(
         &self,

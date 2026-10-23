@@ -149,6 +149,25 @@ class Core {
   late final _left = _lib.lookupFunction<_Str0, _Str0>('pb_left');
   late final _places = _lib.lookupFunction<_Str0, _Str0>('pb_places');
   late final _templates = _lib.lookupFunction<_Str0, _Str0>('pb_templates');
+  late final _icon = _lib.lookupFunction<_Str1, _Str1>('pb_icon');
+  late final _appearance = _lib.lookupFunction<_Str0, _Str0>('pb_appearance');
+  late final _setAppearance = _lib.lookupFunction<_Str1, _Str1>(
+    'pb_set_appearance',
+  );
+  late final _health = _lib.lookupFunction<_Str0, _Str0>('pb_health');
+  late final _history = _lib.lookupFunction<_Str1, _Str1>('pb_history');
+  late final _itemVersion = _lib.lookupFunction<_Str3, _Str3>(
+    'pb_item_version',
+  );
+  late final _restoreVersion = _lib.lookupFunction<_Str2, _Str2>(
+    'pb_restore_version',
+  );
+  late final _deleteHistory = _lib.lookupFunction<_Str2, _Str2>(
+    'pb_delete_history',
+  );
+  late final _setFavorite = _lib.lookupFunction<_Str2, _Str2>(
+    'pb_set_favorite',
+  );
   late final _list = _lib.lookupFunction<_Str1, _Str1>('pb_list');
   late final _item = _lib.lookupFunction<_Str1, _Str1>('pb_item');
   late final _reveal = _lib.lookupFunction<_Str2, _Str2>('pb_reveal');
@@ -472,6 +491,94 @@ class Core {
   /// `{id, name, label, depth, parentId}`, nested by name, and a shared
   /// folder with what the person can do in it (`grid`, `canCreate`).
   Map<String, dynamic> places() => _answer(_places()) as Map<String, dynamic>;
+
+  /// A website's icon for a login's tile (core/src/icons.rs): the file
+  /// it's kept in, or null where there's none, icons are off, or the vault
+  /// is locked. Waits on the server the first time, on a background isolate.
+  static Future<String?> icon(String host) async {
+    final answer = await _background(
+      (c) => c._with([host], (p) => c._answer(c._icon(p[0]))),
+    );
+    return answer.ok ? answer.body['path'] as String? : null;
+  }
+
+  /// How the app looks on this device: `showIcons`.
+  Map<String, dynamic> appearance() =>
+      _answer(_appearance()) as Map<String, dynamic>;
+
+  Answer setAppearance(Map<String, dynamic> appearance) => Answer(
+    _with([jsonEncode(appearance)], (p) => _answer(_setAppearance(p[0])))
+        as Map<String, dynamic>,
+  );
+
+  /// The logins with something to fix (core/src/health.rs): `items`, each
+  /// `{id, weak, reused, unsecured}`. Judged on a background isolate.
+  static Future<Answer> health() => _background((c) => c._answer(c._health()));
+
+  /// An item's past versions (core/src/history.rs), from the server:
+  /// `{hidePasswords, canRestore, canClear, unreadable, versions: [{id,
+  /// revisionDate, savedBy, opens, restorable, changes, rows}]}`.
+  static Future<Answer> history(String id) =>
+      _background((c) => c._with([id], (p) => c._answer(c._history(p[0]))));
+
+  /// One version beside the item now (`rows`, each `{label, version,
+  /// current, secret, changed}`), its secrets shown when [reveal].
+  Answer itemVersion(String id, String versionId, {bool reveal = false}) =>
+      Answer(
+        _with(
+          [id, versionId, '$reveal'],
+          (p) => _answer(_itemVersion(p[0], p[1], p[2])),
+        ) as Map<String, dynamic>,
+      );
+
+  /// Restores a version, as a normal edit, then syncs.
+  static Future<Answer> restoreVersion(String id, String versionId) =>
+      _background(
+        (c) => c._with([
+          id,
+          versionId,
+        ], (p) => c._answer(c._restoreVersion(p[0], p[1]))),
+      );
+
+  /// Clears an item's history (no version), or deletes one version.
+  static Future<Answer> deleteHistory(String id, [String? versionId]) =>
+      _background(
+        (c) => c._with([
+          id,
+          versionId ?? '',
+        ], (p) => c._answer(c._deleteHistory(p[0], p[1]))),
+      );
+
+  /// Favorites an item or not, then syncs.
+  static Future<Answer> setFavorite(String id, bool favorite) => _background(
+    (c) => c._with([
+      id,
+      '$favorite',
+    ], (p) => c._answer(c._setFavorite(p[0], p[1]))),
+  );
+
+  /// Opens a website in the browser: only http and https. Phones and the
+  /// Mac through their own code, Windows and Linux through the OS's opener.
+  static Future<bool> openWebsite(String address) async {
+    final text = address.trim();
+    final uri = Uri.tryParse(text.contains('://') ? text : 'https://$text');
+    if (uri == null || (uri.scheme != 'https' && uri.scheme != 'http')) {
+      return false;
+    }
+    final url = uri.toString();
+    if (isPhone || Platform.isMacOS) {
+      return await platform.invokeMethod<bool>('openUrl', {'url': url}) ??
+          false;
+    }
+    try {
+      final opened = Platform.isWindows
+          ? await Process.run('rundll32', ['url.dll,FileProtocolHandler', url])
+          : await Process.run('xdg-open', [url]);
+      return opened.exitCode == 0;
+    } on ProcessException {
+      return false;
+    }
+  }
 
   /// Templates for New item, grouped as the web vault groups them
   /// (core/src/templates.rs): `[{name, templates: [{id, name, base,

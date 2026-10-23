@@ -40,6 +40,15 @@ import UniformTypeIdentifiers
           return
         }
         result(Platform.copy(id: id, what: what))
+      // A login's website, in the browser: only http and https.
+      case "openUrl":
+        guard let text = (call.arguments as? [String: Any])?["url"] as? String, let url = URL(string: text),
+          url.scheme == "https" || url.scheme == "http"
+        else {
+          result(false)
+          return
+        }
+        UIApplication.shared.open(url) { opened in result(opened) }
       // Unlocking with Face ID or Touch ID (Biometric, below).
       case "biometricStatus":
         result(["status": Biometric.status(), "method": Biometric.method()])
