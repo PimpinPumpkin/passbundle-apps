@@ -210,7 +210,10 @@ func updater(_ s: Setup, source: URL, debug: Bool = true, prefs: UpdatePrefs = U
       let to = s.trash.appendingPathComponent("\(n)-\(url.lastPathComponent)")
       try fm.moveItem(at: url, to: to)
       return to
-    }, prefs: prefs)
+    }, prefs: prefs,
+    // macOS's answer for a copy it runs from a temporary place, which a test
+    // can't make: the folder's name stands in for it.
+    translocated: { $0.path.contains("/AppTranslocation/") })
 }
 
 /// What a refused update must leave: the older copy, unchanged, where it was.
@@ -288,6 +291,32 @@ func testUpdates() {
   refused("larger", "new.app", saying: ["larger than its release says"], size: 4096)
   refused("slow", "new.app", saying: ["took too long"], seconds: 0)
   refused("translocated", "new.app", saying: ["temporary place"], under: "AppTranslocation/X/d", reveal: true)
+  refused("unpacks-too-big", "bomb.app", saying: ["would unpack to more than PassBundle accepts"])
+  expect(!Updater.isTranslocated(runs), "macOS says a folder of its own isn't a temporary copy")
+
+  // What a zip holds once unpacked, from its own list.
+  do {
+    let dir = runs.appendingPathComponent("zips", isDirectory: true)
+    try! fm.createDirectory(at: dir, withIntermediateDirectories: true)
+    let zip = dir.appendingPathComponent("new.zip")
+    precondition(run("/usr/bin/ditto", ["-c", "-k", "--keepParent", fixtures.appendingPathComponent("new.app").path, zip.path]))
+    let listed = Updater.unpackedSize(zip)
+    let unzipped = dir.appendingPathComponent("unzipped", isDirectory: true)
+    precondition(run("/usr/bin/ditto", ["-x", "-k", zip.path, unzipped.path]))
+    var total: Int64 = 0
+    for case let file as URL in fm.enumerator(at: unzipped, includingPropertiesForKeys: [.fileSizeKey, .isSymbolicLinkKey])! {
+      let values = try! file.resourceValues(forKeys: [.fileSizeKey, .isSymbolicLinkKey, .isRegularFileKey])
+      if values.isRegularFile == true, values.isSymbolicLink != true { total += Int64(values.fileSize ?? 0) }
+    }
+    expect(listed != nil && listed!.bytes >= total && listed!.files > 10, "a zip's list adds up its files (\(listed?.bytes ?? -1) for \(total) on disk)")
+    let junk = dir.appendingPathComponent("junk.zip")
+    try! Data("PK not really a zip".utf8).write(to: junk)
+    expect(Updater.unpackedSize(junk) == nil, "and something that isn't a zip lists nothing")
+    expect(
+      Updater.unpackedLimit(zipSize: 30 << 20) == 240 << 20 && Updater.unpackedLimit(zipSize: 1 << 20) == 64 << 20
+        && Updater.unpackedLimit(zipSize: 200 << 20) == Updater.maxUnpacked,
+      "a zip may unpack to 8 times its size, at least 64 MB, at most 1 GB")
+  }
 
   // A folder the person can't change: checked, then offered to show in Finder.
   do {

@@ -28,10 +28,28 @@ typedef _Str5 = Pointer<Utf8> Function(
 typedef _FinishNative = Pointer<Utf8> Function(Uint8, Pointer<Utf8>, Bool);
 typedef _Finish = Pointer<Utf8> Function(int, Pointer<Utf8>, bool);
 
+/// A product build: `flutter build` in release mode, as the releases are.
+const product = bool.fromEnvironment('dart.vm.product');
+
+/// Whether this build takes test settings from its environment (PB_MEASURE,
+/// PB_MEASURE_PASSWORD, PB_MEASURE_FILE, PB_THEME): tests and debug builds,
+/// and the release-mode builds CI makes for the measuring tools
+/// (`--dart-define=PB_TEST_HOOKS=true`, with the core's test-hooks feature).
+/// The releases are built without, so they ignore all of these.
+const testHooks = !product || bool.fromEnvironment('PB_TEST_HOOKS');
+
+/// A test setting from the environment, or null where [testHooks] is off.
+String? testSetting(String name) =>
+    testHooks ? Platform.environment[name] : null;
+
 DynamicLibrary _open() {
-  // Tests and tools point at a library they built.
-  final override = Platform.environment['PB_CORE_LIB'];
-  if (override != null) return DynamicLibrary.open(override);
+  // Tests and tools point at a library they built. Never in a product
+  // build: whatever library this opens is the core, and gets the master
+  // password and the keychain's trust.
+  if (!product) {
+    final override = Platform.environment['PB_CORE_LIB'];
+    if (override != null) return DynamicLibrary.open(override);
+  }
   final dir = File(Platform.resolvedExecutable).parent.path;
   if (Platform.isLinux) {
     return DynamicLibrary.open('$dir/lib/libpassbundle_core.so');

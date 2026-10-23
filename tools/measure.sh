@@ -5,6 +5,12 @@
 # CI runs it after each build; on Linux it needs a display (DISPLAY, such as
 # Xvfb's).
 #
+# It needs a build with test hooks, as CI's are: the core built with its
+# test-hooks feature (cargo build --release --features ffi,test-hooks) and
+# the app with --dart-define=PB_TEST_HOOKS=true. Those take PB_MEASURE,
+# PB_DATA_DIR, and PB_SECRETS=memory from the environment; a release
+# ignores them, and would open on the computer's own PassBundle folder.
+#
 #   tools/measure.sh <executable> <bundle> <screenshot.png>
 set -euo pipefail
 

@@ -4,15 +4,13 @@
 // PassBundle's own server without being asked; a server an organization set
 // by policy is used and shown; and someone hosting their own types it in,
 // behind "Self-hosted?".
-import 'dart:io';
-
 import 'package:flutter/material.dart';
 
 import 'core.dart';
 import 'theme.dart';
 import 'widgets.dart';
 
-final _measuring = Platform.environment['PB_MEASURE'] == '1';
+final _measuring = testSetting('PB_MEASURE') == '1';
 
 /// A server address as someone typed it, with https:// added when they left
 /// the scheme off ("vault.example.com"). An address that names http:// stays
@@ -507,7 +505,7 @@ class UnlockScreen extends StatefulWidget {
 
 class _UnlockScreenState extends State<UnlockScreen> {
   final password = TextEditingController(
-    text: _measuring ? (Platform.environment['PB_MEASURE_PASSWORD'] ?? '') : '',
+    text: _measuring ? (testSetting('PB_MEASURE_PASSWORD') ?? '') : '',
   );
   String? error;
   bool working = false;

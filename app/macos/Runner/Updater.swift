@@ -453,6 +453,7 @@ final class Updater {
   private let debug: Bool
   private let workDir: URL
   private let trash: (URL) throws -> URL
+  private let translocated: (URL) -> Bool
   private let prefs: UpdatePrefs
   /// The longest a download may take, however it goes.
   var downloadSeconds: TimeInterval = 15 * 60
@@ -468,7 +469,8 @@ final class Updater {
 
   init(
     installed: @escaping () -> InstalledApp, source: URL?, debug: Bool, workDir: URL,
-    trash: @escaping (URL) throws -> URL, prefs: UpdatePrefs
+    trash: @escaping (URL) throws -> URL, prefs: UpdatePrefs,
+    translocated: @escaping (URL) -> Bool = Updater.isTranslocated
   ) {
     self.installed = installed
     self.source = source
@@ -476,6 +478,7 @@ final class Updater {
     self.workDir = workDir
     self.trash = trash
     self.prefs = prefs
+    self.translocated = translocated
   }
 
   /// The updater for the running app.
@@ -682,6 +685,19 @@ final class Updater {
     }
     progress?(100)
 
+    // What it holds once unpacked, from its own list, before anything is
+    // unpacked: a zip that would unpack far bigger than it is isn't.
+    guard let listing = Updater.unpackedSize(zip) else {
+      throw UpdateError("The download isn't a PassBundle app, so it wasn't installed.")
+    }
+    guard listing.files <= Updater.maxUnpackedFiles, listing.bytes <= Updater.unpackedLimit(zipSize: size) else {
+      throw UpdateError("The update would unpack to more than PassBundle accepts, so it wasn't installed.")
+    }
+    if let free = try? workDir.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+      .volumeAvailableCapacityForImportantUsage, free < listing.bytes + (64 << 20)
+    {
+      throw UpdateError("There isn't enough space on this Mac for the update.")
+    }
     let unpacked = workDir.appendingPathComponent("unpacked", isDirectory: true)
     try fm.createDirectory(at: unpacked, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
     guard Updater.run("/usr/bin/ditto", ["-x", "-k", zip.path, unpacked.path]) else {
@@ -705,7 +721,7 @@ final class Updater {
     // The old copy's helpers (the desktop agent) keep running from it, in
     // the Trash, until they're stopped; which they are, as PassBundle restarts.
     let helpers = Updater.processes(under: app.bundleURL.appendingPathComponent("Contents/Helpers", isDirectory: true))
-    let trashed = try Updater.replace(app.bundleURL, with: new, trash: trash) { placed in
+    let trashed = try Updater.replace(app.bundleURL, with: new, trash: trash, translocated: translocated) { placed in
       Updater.problem(app: placed, meets: requirement, id: app.bundleID, version: offer.version, newerThan: app.version)
     }
     locked { checkedCopy = nil }
@@ -785,17 +801,90 @@ final class Updater {
     return nil
   }
 
+  /// The most a release's zip may hold once unpacked: 1 GB, and 8 times the
+  /// zip (PassBundle unpacks to about 2.5 times its zip), but never less
+  /// than 64 MB; and at most 100,000 files.
+  static let maxUnpacked: Int64 = 1 << 30
+  static let maxUnpackedFiles = 100_000
+
+  static func unpackedLimit(zipSize: Int64) -> Int64 {
+    min(maxUnpacked, max(8 * zipSize, 64 << 20))
+  }
+
+  /// What a zip's files add up to once unpacked, and how many there are, as
+  /// its central directory lists them; nil for anything that isn't a plain
+  /// zip (ZIP64 too, which no release needs, being far smaller than 4 GB).
+  static func unpackedSize(_ zip: URL) -> (bytes: Int64, files: Int)? {
+    guard let handle = try? FileHandle(forReadingFrom: zip) else { return nil }
+    defer { try? handle.close() }
+    guard let size = try? handle.seekToEnd(), size >= 22 else { return nil }
+    // The end of the central directory: 22 bytes, then a comment of up to 64 KB.
+    let tailLength = min(size, 22 + 0xFFFF)
+    guard (try? handle.seek(toOffset: size - tailLength)) != nil,
+      let tail = try? handle.read(upToCount: Int(tailLength)), tail.count == Int(tailLength)
+    else { return nil }
+    let t = [UInt8](tail)
+    func u16(_ b: [UInt8], _ i: Int) -> Int { Int(b[i]) | Int(b[i + 1]) << 8 }
+    func u32(_ b: [UInt8], _ i: Int) -> Int64 {
+      Int64(b[i]) | Int64(b[i + 1]) << 8 | Int64(b[i + 2]) << 16 | Int64(b[i + 3]) << 24
+    }
+    guard let end = stride(from: t.count - 22, through: 0, by: -1).first(where: {
+      t[$0] == 0x50 && t[$0 + 1] == 0x4B && t[$0 + 2] == 0x05 && t[$0 + 3] == 0x06
+    }) else { return nil }
+    let files = u16(t, end + 10)
+    let directorySize = u32(t, end + 12)
+    let directoryAt = u32(t, end + 16)
+    let endAt = Int64(size) - Int64(tailLength) + Int64(end)
+    guard files != 0xFFFF, directorySize != 0xFFFF_FFFF, directoryAt != 0xFFFF_FFFF,
+      directorySize <= 64 << 20, directoryAt + directorySize <= endAt
+    else { return nil }
+    guard (try? handle.seek(toOffset: UInt64(directoryAt))) != nil,
+      let directory = try? handle.read(upToCount: Int(directorySize)), directory.count == Int(directorySize)
+    else { return nil }
+    let d = [UInt8](directory)
+    var at = 0
+    var bytes: Int64 = 0
+    for _ in 0..<files {
+      guard at + 46 <= d.count, d[at] == 0x50, d[at + 1] == 0x4B, d[at + 2] == 0x01, d[at + 3] == 0x02 else {
+        return nil
+      }
+      let unpacked = u32(d, at + 24)
+      if unpacked == 0xFFFF_FFFF { return nil }
+      bytes += unpacked
+      at += 46 + u16(d, at + 28) + u16(d, at + 30) + u16(d, at + 32)
+    }
+    return (bytes, files)
+  }
+
+  /// Whether macOS runs `url` from a temporary, read-only copy (App
+  /// Translocation: an app opened where it was downloaded, still marked as
+  /// a download), as Security's SecTranslocateIsTranslocatedURL says. It
+  /// has no public header, so it's found as Sparkle finds it; where it isn't
+  /// there, the copy can't be written to either, which the updater also
+  /// checks.
+  static func isTranslocated(_ url: URL) -> Bool {
+    typealias Check = @convention(c) (
+      CFURL, UnsafeMutablePointer<Bool>, UnsafeMutablePointer<Unmanaged<CFError>?>?
+    ) -> DarwinBoolean
+    guard let symbol = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "SecTranslocateIsTranslocatedURL") else {
+      return false
+    }
+    var translocated = false
+    return unsafeBitCast(symbol, to: Check.self)(url as CFURL, &translocated, nil).boolValue && translocated
+  }
+
   /// Puts `new` where `target` is: next to it first (one disk, so the last
   /// step is a rename), then `target` to the Trash, then `new` in its place,
   /// checked again there with `check`. Anything that fails on the way puts
   /// `target` back. The Trash's copy, once it's done.
   static func replace(
-    _ target: URL, with new: URL, trash: (URL) throws -> URL, check: (URL) -> String?
+    _ target: URL, with new: URL, trash: (URL) throws -> URL, translocated: (URL) -> Bool = isTranslocated,
+    check: (URL) -> String?
   ) throws -> URL {
     let fm = FileManager.default
     let parent = target.deletingLastPathComponent()
     let folder = fm.displayName(atPath: parent.path)
-    if target.path.contains("/AppTranslocation/") {
+    if translocated(target) {
       throw UpdateError(
         "macOS is running this copy of PassBundle from a temporary place, since it was opened where it was downloaded, so it can't replace itself. The new version is downloaded and checked: show it in Finder, and drag it to Applications.",
         reveal: true)

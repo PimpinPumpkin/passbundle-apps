@@ -208,10 +208,13 @@ class Updates extends ChangeNotifier {
 
 /// Updates on this device: Android and the Mac, where PassBundle updates
 /// itself. Tests (flutter test runs on a Mac too) put one with a stand-in
-/// platform here.
+/// platform here; a product build never takes FLUTTER_TEST from its
+/// environment.
 Updates? updates =
     Platform.isAndroid ||
-        (Platform.isMacOS && !Platform.environment.containsKey('FLUTTER_TEST'))
+        (Platform.isMacOS &&
+            (const bool.fromEnvironment('dart.vm.product') ||
+                !Platform.environment.containsKey('FLUTTER_TEST')))
     ? Updates(ChannelUpdatePlatform())
     : null;
 

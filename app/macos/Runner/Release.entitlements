@@ -5,12 +5,23 @@
      password managers sold outside the Mac App Store do.
 
      The test releases (.github/workflows/macos-release.yml) run with the
-     hardened runtime, which keeps other programs from loading code into the
-     app (DYLD_INSERT_LIBRARIES) or reading its memory. They're signed with
+     hardened runtime, which ignores DYLD_INSERT_LIBRARIES and the like and
+     keeps other programs from reading the app's memory. They're signed with
      PassBundle's own test certificate, which has no Apple team ID, and the
      hardened runtime's library validation loads only libraries signed by
-     the app's team or by Apple: so it's off, and the app can load its own
-     frameworks and the core. The rest of the hardened runtime stays on. -->
+     the app's team or by Apple: so it's off, or the app couldn't load its
+     own frameworks and the core. With it off, the app would load any
+     validly signed library (even one signed ad hoc) that it was pointed at
+     or that took one of its own's place in its folder. So the release adds
+     a library load constraint instead (the sign job): the app loads exactly
+     its own libraries, by their code directory hashes, and the OS's. macOS
+     14 and later enforce that; on macOS 12 and 13 any validly signed library
+     put in the app's folder would load. And a release never takes a
+     library's path from its environment (PB_CORE_LIB is for tests only:
+     app/lib/core.dart).
+
+     The release's sign job writes these entitlements itself, and checks the
+     signed app has exactly them; keep the two the same. -->
 <plist version="1.0">
 <dict>
 	<key>com.apple.security.cs.disable-library-validation</key>

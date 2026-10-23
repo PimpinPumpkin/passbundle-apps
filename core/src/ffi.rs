@@ -143,12 +143,13 @@ fn notices(app: &mut App) {
 }
 
 fn secrets(dir: &std::path::Path) -> Box<dyn SecretStore> {
-    // Tests and CI keep the refresh token in memory, never in the OS's store.
+    // Test builds (the test-hooks feature) can keep the refresh token in
+    // memory, never in the OS's store; a release always uses the OS's.
+    #[cfg(feature = "test-hooks")]
     if std::env::var("PB_SECRETS").as_deref() == Ok("memory") {
-        Box::new(MemorySecretStore::default())
-    } else {
-        Box::new(OsSecretStore::new(dir))
+        return Box::new(MemorySecretStore::default());
     }
+    Box::new(OsSecretStore::new(dir))
 }
 
 fn failed(e: Error) -> Value {

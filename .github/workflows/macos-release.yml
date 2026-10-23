@@ -207,6 +207,13 @@ jobs:
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$plist")" = com.passbundle.app
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$plist")" = "$VERSION"
           tools/bundle-mac.sh "$app" core/target/release/libpassbundle_core.dylib agent/target/universal
+          # A release's core reads no test settings from its environment
+          # (the core's test-hooks feature, which only CI's builds have).
+          core=$(strings -a "$app/Contents/Frameworks/libpassbundle_core.dylib")
+          if [[ "$core" == *PB_DATA_DIR* || "$core" == *PB_SECRETS* ]]; then
+            echo "The core was built with its test hooks." >&2
+            exit 1
+          fi
           # Every program and library in it, for both kinds of Mac.
           find "$app" -type f -print0 | while IFS= read -r -d '' file; do
             [[ "$(file -b "$file")" == *Mach-O* ]] || continue
@@ -216,12 +223,10 @@ jobs:
               exit 1
             fi
           done
-          # Named for people (Flutter names it after the project), with the
-          # entitlements the sign job signs it with.
+          # Named for people (Flutter names it after the project).
           mkdir -p stage dist
           ditto "$app" stage/PassBundle.app
           ditto -c -k --keepParent stage/PassBundle.app "dist/PassBundle-$VERSION-macos-unsigned.zip"
-          cp app/macos/Runner/Release.entitlements dist/
           ls -l dist
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -286,22 +291,32 @@ jobs:
         if: steps.key.outputs.signed == 'true'
         run: |
           keychain="$RUNNER_TEMP/passbundle-signing.keychain-db"
-          ent=unsigned/Release.entitlements
-          # The entitlements the app may have: any other is a change to
-          # review here first.
+          # The app's entitlements, this file's own (app/macos/Runner/
+          # Release.entitlements says why): library validation off, since it
+          # takes only an Apple team's libraries, and this certificate has
+          # no team. The library load constraint below takes its place.
+          ent="$RUNNER_TEMP/entitlements.plist"
+          allowed='{"com.apple.security.cs.disable-library-validation":true}'
+          cat > "$ent" << 'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+          	<key>com.apple.security.cs.disable-library-validation</key>
+          	<true/>
+          </dict>
+          </plist>
+          EOF
           plutil -lint "$ent"
-          keys=$(plutil -convert json -o - "$ent" | python3 -c 'import json, sys; print(" ".join(sorted(json.load(sys.stdin))))')
-          if [ "$keys" != "com.apple.security.cs.disable-library-validation" ]; then
-            echo "The app's entitlements aren't the ones this workflow signs: $keys" >&2
-            exit 1
-          fi
+          test "$(plutil -convert json -o - "$ent")" = "$allowed"
           ditto -x -k "unsigned/PassBundle-$VERSION-macos-unsigned.zip" work
           app=work/PassBundle.app
           # What's nested first, each on its own (the app's entitlements are
           # the app's, never the agent's), then the app with its
-          # entitlements; the hardened runtime throughout. The same as
-          # tools/mac-update-test.sh's sign_app, which CI runs on every
-          # commit with a throwaway certificate.
+          # entitlements and its library load constraint; the hardened
+          # runtime throughout. The same as tools/mac-update-test.sh's
+          # sign_app, which CI runs on every commit with a throwaway
+          # certificate.
           sign() { codesign --force --timestamp=none --options runtime --keychain "$keychain" --sign "$IDENTITY" "$@"; }
           for item in "$app"/Contents/Frameworks/*; do
             case "$item" in *.framework | *.dylib) sign "$item" ;; esac
@@ -314,8 +329,50 @@ jobs:
             done
             sign "$helper"
           done
-          sign --entitlements "$ent" "$app"
+          # The library load constraint: the libraries the app may load are
+          # its own, by each architecture's code directory hash (cdhash), as
+          # just signed; and Rosetta's translations of them (validation
+          # category 8), without which the Intel half can't run on Apple
+          # silicon. The OS's own libraries are never constrained. macOS 14
+          # and later enforce it; 12 and 13 don't.
+          constraint="$RUNNER_TEMP/library-constraint.plist"
+          {
+            printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>' \
+              '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
+              '<plist version="1.0">' '<dict>' '<key>$or</key>' '<dict>' \
+              '<key>validation-category</key>' '<integer>8</integer>' \
+              '<key>cdhash</key>' '<dict>' '<key>$in</key>' '<array>'
+            find "$app/Contents/Frameworks" -type f -print0 | sort -z | while IFS= read -r -d '' file; do
+              [[ "$(file -b "$file")" == *Mach-O* ]] || continue
+              for arch in $(lipo -archs "$file"); do
+                codesign -d -vvv --arch "$arch" "$file" 2>&1 | sed -n 's/^CandidateCDHash [a-z0-9]*=//p' | while read -r hash; do
+                  echo "<data>$(printf '%s' "$hash" | xxd -r -p | base64)</data>"
+                done
+              done
+            done
+            printf '%s\n' '</array>' '</dict>' '</dict>' '</dict>' '</plist>'
+          }  > "$constraint"
+          plutil -lint "$constraint"
+          pinned=$(grep -c '<data>' "$constraint")
+          echo "The library load constraint pins $pinned code directory hashes."
+          # FlutterMacOS, App, and the core, for both architectures, at the least.
+          [ "$pinned" -ge 6 ]
+          sign --entitlements "$ent" --library-constraint "$constraint" "$app"
           codesign --verify --deep --strict --verbose=2 "$app"
+          [[ "$(codesign -d -vvv "$app" 2>&1)" == *"Has Library Load Constraints"* ]]
+
+          # Its entitlements exactly those, and nothing nested has any.
+          codesign -d --entitlements - --xml "$app" > "$RUNNER_TEMP/signed-entitlements.plist" 2> /dev/null
+          test "$(plutil -convert json -o - "$RUNNER_TEMP/signed-entitlements.plist")" = "$allowed"
+          main="$app/Contents/MacOS/$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist")"
+          find "$app" -type f -print0 | while IFS= read -r -d '' file; do
+            [[ "$(file -b "$file")" == *Mach-O* ]] || continue
+            [ "$file" = "$main" ] && continue
+            if [ -n "$(codesign -d --entitlements - --xml "$file" 2> /dev/null)" ]; then
+              echo "$file has entitlements of its own." >&2
+              exit 1
+            fi
+          done
 
           # Every program and library in it signed with the test
           # certificate alone, with the hardened runtime.

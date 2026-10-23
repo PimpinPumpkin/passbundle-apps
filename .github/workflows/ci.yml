@@ -61,6 +61,7 @@ jobs:
         run: |
           cargo clippy --locked --all-targets -- -D warnings
           cargo clippy --locked --all-targets --features ffi -- -D warnings
+          cargo clippy --locked --all-targets --features ffi,test-hooks -- -D warnings
       - name: Tests (the vectors, a real agent, and the real clipboard where there's a desktop)
         env:
           PB_TEST_CLIPBOARD: ${{ runner.os != 'Linux' && '1' || '' }}
@@ -448,21 +449,26 @@ jobs:
         run: |
           rustup toolchain install
           cargo build --locked --features test-authenticator
-      - name: Build the core
+      # CI's builds are test builds: the core's test-hooks feature and
+      # PB_TEST_HOOKS (the Build step) let tools/measure.sh and the Mac
+      # updater test open them on a vault of their own, with the session in
+      # memory. The releases are built without either (macos-release.yml,
+      # release.yml), and ignore those settings.
+      - name: Build the core, with its test hooks
         working-directory: core
         run: |
           if [ "${{ matrix.platform }}" = macos ]; then
             # The Mac app is universal (Apple silicon and Intel), so the core is too.
             rustup target add aarch64-apple-darwin x86_64-apple-darwin
-            cargo build --locked --release --features ffi --target aarch64-apple-darwin
-            cargo build --locked --release --features ffi --target x86_64-apple-darwin
+            cargo build --locked --release --features ffi,test-hooks --target aarch64-apple-darwin
+            cargo build --locked --release --features ffi,test-hooks --target x86_64-apple-darwin
             mkdir -p target/release
             lipo -create -output target/release/libpassbundle_core.dylib \
               target/aarch64-apple-darwin/release/libpassbundle_core.dylib \
               target/x86_64-apple-darwin/release/libpassbundle_core.dylib
             lipo -info target/release/libpassbundle_core.dylib
           else
-            cargo build --locked --release --features ffi
+            cargo build --locked --release --features ffi,test-hooks
           fi
       - name: Install Flutter at the pinned release
         run: |
@@ -484,9 +490,9 @@ jobs:
         run: |
           export PB_TEST_AGENT="$GITHUB_WORKSPACE/agent/target/debug/passbundle-agent$( [ "$RUNNER_OS" = Windows ] && echo .exe)"
           PB_CORE_LIB="$GITHUB_WORKSPACE/${{ matrix.lib }}" $FLUTTER test --exclude-tags screenshots
-      - name: Build
+      - name: Build, with its test hooks
         working-directory: app
-        run: $FLUTTER build ${{ matrix.platform }} --release
+        run: $FLUTTER build ${{ matrix.platform }} --release --dart-define=PB_TEST_HOOKS=true
       - name: The desktop agent's release build (Windows and macOS, where its tray is)
         if: matrix.platform != 'linux'
         working-directory: agent

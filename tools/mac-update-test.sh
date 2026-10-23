@@ -5,8 +5,12 @@
 # .github/workflows/macos-release.yml signs a release (keep the two the
 # same: sign_app below and the release's sign job), and runs it. An older
 # copy updates to a newer one; a tampered download, a copy signed ad hoc or
-# with another certificate, the wrong version, another app, and a broken
-# signature are each refused, and the older copy stays as it was.
+# with another certificate, the wrong version, another app, a broken
+# signature, and a zip that unpacks far bigger than it is are each refused,
+# and the older copy stays as it was. And the library load constraint
+# (macOS 14 and later): a signed app loads its own libraries, and not
+# another, however it's signed, natively and under Rosetta where there is
+# one.
 #
 #   tools/mac-update-test.sh [--launch] [<a built passbundle.app>]
 #
@@ -14,7 +18,10 @@
 # tools/bundle-mac.sh), it also updates that app, signed as 0.1.1 and as
 # 0.1.2; with --launch it opens the signed copy as tools/measure.sh does
 # (its own sample vault, the session in memory), to show it runs under the
-# hardened runtime with a certificate like PassBundle's.
+# hardened runtime and the library load constraint, with a certificate like
+# PassBundle's. That needs a build with test hooks, as CI's are (the core's
+# test-hooks feature, and --dart-define=PB_TEST_HOOKS=true); a release
+# ignores those settings.
 #
 # It signs with PB_MAC_SIGN_P12 (a PKCS12 file) and PB_MAC_SIGN_PASSWORD
 # when both are set (PassBundle's test certificate), else with a throwaway
@@ -108,9 +115,48 @@ other=$(identity "Someone else")
 [ -n "$ours" ] && [ -n "$other" ] || { echo "The signing identities aren't in the keychain." >&2; exit 1; }
 echo "Signing as \"$ours_name\" ($ours)"
 
+# The app's library load constraint: the libraries it may load are its own,
+# by each architecture's code directory hash (cdhash), as signed; and
+# Rosetta's translations of them (validation category 8), without which the
+# Intel half can't run on Apple silicon. The OS's own libraries are never
+# constrained. macOS 14 and later enforce it.
+library_constraint() { # <app>
+  local file arch
+  cat << 'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>$or</key>
+	<dict>
+		<key>validation-category</key>
+		<integer>8</integer>
+		<key>cdhash</key>
+		<dict>
+			<key>$in</key>
+			<array>
+EOF
+  find "$1/Contents/Frameworks" -type f -print0 | sort -z | while IFS= read -r -d '' file; do
+    [[ "$(file -b "$file")" == *Mach-O* ]] || continue
+    for arch in $(lipo -archs "$file"); do
+      codesign -d -vvv --arch "$arch" "$file" 2>&1 | sed -n 's/^CandidateCDHash [a-z0-9]*=//p' | while read -r hash; do
+        printf '\t\t\t\t<data>%s</data>\n' "$(printf '%s' "$hash" | xxd -r -p | base64)"
+      done
+    done
+  done
+  cat << 'EOF'
+			</array>
+		</dict>
+	</dict>
+</dict>
+</plist>
+EOF
+}
+
 # As the release's sign job does: what's nested first, each on its own (the
 # app's entitlements are the app's, never the agent's), then the app with
-# its entitlements; the hardened runtime throughout.
+# its entitlements and its library load constraint; the hardened runtime
+# throughout.
 sign_app() { # <app> <identity, or - for ad hoc>
   local app=$1 id=$2 item helper main program
   sign() { codesign --force --timestamp=none --options runtime --sign "$id" "$@"; }
@@ -125,14 +171,31 @@ sign_app() { # <app> <identity, or - for ad hoc>
     done
     sign "$helper"
   done
-  sign --entitlements "$entitlements" "$app"
+  library_constraint "$app" > "$work/constraint.plist"
+  plutil -lint "$work/constraint.plist" > /dev/null
+  [ "$(grep -c '<data>' "$work/constraint.plist")" -gt 0 ] || { echo "No libraries to pin in $app." >&2; exit 1; }
+  sign --entitlements "$entitlements" --library-constraint "$work/constraint.plist" "$app"
   codesign --verify --deep --strict "$app"
 }
 
-# Small stand-ins for the app's parts: its program, the core, a framework
-# like Flutter's (with its links), the agent's app with two programs.
+# Small stand-ins for the app's parts: its program (which loads the
+# framework, and opens each library it's given, saying whether it could),
+# the core, a framework like Flutter's (with its links), the agent's app
+# with two programs.
 cat > "$work/src/main.c" << 'EOF'
+#include <dlfcn.h>
+int pb_framework(void);
+int main(int argc, char **argv) {
+  if (pb_framework() != 1) return 2;
+  for (int i = 1; i < argc; i++) if (!dlopen(argv[i], RTLD_NOW)) return 3;
+  return 0;
+}
+EOF
+cat > "$work/src/helper.c" << 'EOF'
 int main(void) { return 0; }
+EOF
+cat > "$work/src/framework.c" << 'EOF'
+int pb_framework(void) { return 1; }
 EOF
 # A program that waits, for the agent the old copy leaves running.
 cat > "$work/src/sleeper.c" << 'EOF'
@@ -145,11 +208,13 @@ int pb_version(void) { return 1; }
 EOF
 # Universal, as the app is.
 archs=(-arch arm64 -arch x86_64)
-clang "${archs[@]}" -o "$work/src/program" "$work/src/main.c"
+clang "${archs[@]}" -dynamiclib -install_name @rpath/FlutterMacOS.framework/Versions/A/FlutterMacOS \
+  -o "$work/src/framework" "$work/src/framework.c"
+clang "${archs[@]}" -o "$work/src/program" "$work/src/main.c" "$work/src/framework" \
+  -Wl,-rpath,@executable_path/../Frameworks
+clang "${archs[@]}" -o "$work/src/helper" "$work/src/helper.c"
 clang -o "$fixtures/sleeper" "$work/src/sleeper.c"
 clang "${archs[@]}" -dynamiclib -o "$work/src/core.dylib" "$work/src/core.c"
-clang "${archs[@]}" -dynamiclib -install_name @rpath/FlutterMacOS.framework/Versions/A/FlutterMacOS \
-  -o "$work/src/framework" "$work/src/core.c"
 
 plist() { # <file> <bundle id> <executable> <version> <package type>
   cat > "$1" << EOF
@@ -187,8 +252,12 @@ make_app() { # <name> <bundle id> <version> <identity>
   ln -s Versions/Current/Resources "$fw/Resources"
   echo '{}' > "$app/Contents/Resources/flutter_assets/AssetManifest.json"
   plist "$helper/Contents/Info.plist" com.passbundle.agent passbundle-agent "$3" APPL
-  cp "$work/src/program" "$helper/Contents/MacOS/passbundle-agent"
-  cp "$work/src/program" "$helper/Contents/MacOS/passbundle-agent-host"
+  cp "$work/src/helper" "$helper/Contents/MacOS/passbundle-agent"
+  cp "$work/src/helper" "$helper/Contents/MacOS/passbundle-agent-host"
+  if [ -n "${5:-}" ]; then
+    # Unpacks to far more than its zip: 100 MB of zeros.
+    dd if=/dev/zero of="$app/Contents/Resources/flutter_assets/zeros" bs=1048576 count=100 2> /dev/null
+  fi
   sign_app "$app" "$4"
 }
 
@@ -201,6 +270,42 @@ make_app wrongid.app com.example.notpassbundle 0.1.2 "$ours"
 make_app broken.app com.passbundle.app 0.1.2 "$ours"
 echo '{"changed": "after signing"}' > "$fixtures/broken.app/Contents/Resources/flutter_assets/AssetManifest.json"
 make_app oldadhoc.app com.passbundle.app 0.1.1 -
+make_app bomb.app com.passbundle.app 0.1.2 "$ours" zeros
+
+# The library load constraint, where macOS enforces it (14 and later).
+if [ "$(sw_vers -productVersion | cut -d. -f1)" -ge 14 ]; then
+  app="$fixtures/new.app"
+  loads() { "$@" > /dev/null 2>&1; }
+  # A library signed as validly as the app's own, with the same certificate.
+  cp "$work/src/core.dylib" "$work/other.dylib"
+  codesign --force --timestamp=none --options runtime --sign "$ours" "$work/other.dylib"
+  ditto "$app" "$work/swapped.app"
+  cp "$work/other.dylib" "$work/swapped.app/Contents/Frameworks/libpassbundle_core.dylib"
+  modes=(native)
+  if arch -x86_64 /usr/bin/true 2> /dev/null; then modes+=(rosetta); fi
+  for mode in "${modes[@]}"; do
+    run=()
+    [ "$mode" = rosetta ] && run=(arch -x86_64)
+    loads ${run[@]+"${run[@]}"} "$app/Contents/MacOS/passbundle" "$app/Contents/Frameworks/libpassbundle_core.dylib" ||
+      { echo "FAIL  ($mode) the app doesn't load its own core" >&2; exit 1; }
+    echo "ok    ($mode) the app loads its own framework and core"
+    if loads ${run[@]+"${run[@]}"} "$app/Contents/MacOS/passbundle" "$work/other.dylib"; then
+      echo "FAIL  ($mode) the app loaded a library it doesn't pin" >&2
+      exit 1
+    fi
+    echo "ok    ($mode) and not another library signed with the same certificate"
+    if loads ${run[@]+"${run[@]}"} "$work/swapped.app/Contents/MacOS/passbundle" "$work/swapped.app/Contents/Frameworks/libpassbundle_core.dylib"; then
+      echo "FAIL  ($mode) the app loaded a core swapped in its own folder" >&2
+      exit 1
+    fi
+    echo "ok    ($mode) nor one swapped in for its core"
+    loads ${run[@]+"${run[@]}"} "$app/Contents/MacOS/passbundle" /usr/lib/libz.dylib ||
+      { echo "FAIL  ($mode) the app doesn't load the OS's own libraries" >&2; exit 1; }
+    echo "ok    ($mode) and the OS's own libraries load"
+  done
+else
+  echo "      (macOS $(sw_vers -productVersion) doesn't enforce library load constraints: not checked)"
+fi
 
 if [ -n "$built" ]; then
   real() { # <name> <version> <identity>
