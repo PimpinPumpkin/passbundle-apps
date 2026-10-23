@@ -13,11 +13,9 @@ import 'package:passbundle/core.dart';
 const samplePassword = 'correct horse battery staple 1';
 
 Future<void> loadFonts() async {
-  final inter = FontLoader('Inter');
-  for (final weight in ['Regular', 'Medium', 'SemiBold', 'Bold']) {
-    inter.addFont(rootBundle.load('assets/fonts/Inter-$weight.ttf'));
-  }
-  await inter.load();
+  await (FontLoader(
+    'Google Sans Flex',
+  )..addFont(rootBundle.load('assets/fonts/GoogleSansFlex-wght.ttf'))).load();
   await (FontLoader(
     'MaterialIcons',
   )..addFont(rootBundle.load('fonts/MaterialIcons-Regular.otf'))).load();

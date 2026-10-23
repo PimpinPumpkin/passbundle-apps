@@ -1,9 +1,13 @@
-// PassBundle's own look, the same on every platform: brand colors, Inter
-// (bundled, so no system font changes it), and our own shapes. Light and dark,
-// or following the system.
+// PassBundle's own look, the same on every platform: brand colors, Google
+// Sans Flex (bundled, so no system font changes it), and our own shapes. Light
+// and dark, or following the system.
 import 'package:flutter/material.dart';
 
 const brandGreen = Color(0xFF1F6F5C);
+
+/// The typeface, everywhere: one variable font, whose weight axis follows
+/// each style's FontWeight (pubspec.yaml).
+const passBundleFontFamily = 'Google Sans Flex';
 
 class PassBundleColors extends ThemeExtension<PassBundleColors> {
   const PassBundleColors({
@@ -60,7 +64,7 @@ ThemeData passBundleTheme(Brightness brightness) {
   final base = ThemeData(
     useMaterial3: true,
     colorScheme: scheme,
-    fontFamily: 'Inter',
+    fontFamily: passBundleFontFamily,
     scaffoldBackgroundColor: scheme.surface,
     splashFactory: NoSplash.splashFactory,
     extensions: [colors],
@@ -94,7 +98,7 @@ ThemeData passBundleTheme(Brightness brightness) {
         shape: shape,
         padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
         textStyle: const TextStyle(
-          fontFamily: 'Inter',
+          fontFamily: passBundleFontFamily,
           fontWeight: FontWeight.w600,
         ),
       ),
