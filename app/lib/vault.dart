@@ -1100,26 +1100,12 @@ class Sidebar extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(18, 18, 16, 10),
-            child: Row(
-              children: [
-                // The mark on an emerald jewel, as the web vault's menu has it.
-                const JewelTile(
-                  jewel: Jewel.allItems,
-                  size: 30,
-                  child: Mark(size: 16, color: Colors.white),
-                ),
-                const SizedBox(width: 10),
-                const Text(
-                  'PassBundle',
-                  style: TextStyle(
-                    fontWeight: FontWeight.w700,
-                    fontSize: 18,
-                    letterSpacing: -0.2,
-                  ),
-                ),
-              ],
+          // The logo, as the web vault's menu has it.
+          const Padding(
+            padding: EdgeInsets.fromLTRB(18, 18, 16, 12),
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: Wordmark(size: 30),
             ),
           ),
           Expanded(
