@@ -873,12 +873,21 @@ void main() {
     (tester) async {
       setSize(tester, const Size(1280, 800));
       final dir = openSample();
-      // As the core keeps one it fetched (core/src/icons.rs).
-      Directory('$dir/icons').createSync();
-      File('linux/icons/com.passbundle.app.png')
-          .copySync('$dir/icons/mail.example.test.png');
+      // As the core keeps one it fetched (core/src/icons.rs), at the path
+      // it gives.
+      final sep = Platform.pathSeparator;
+      Directory('$dir${sep}icons').createSync();
+      final kept = '$dir${sep}icons${sep}mail.example.test.png';
+      File('linux/icons/com.passbundle.app.png').copySync(kept);
       showIcons(true);
       await tester.pumpWidget(const PassBundleApp());
+      // Read in real time, as the app reads it: a read left waiting in the
+      // test's fake time would keep the file open, and Windows doesn't
+      // delete an open file.
+      final context = tester.element(find.byType(MaterialApp));
+      await tester.runAsync(
+        () => precacheImage(FileImage(File(kept)), context),
+      );
       await tester.enterText(find.byType(TextField), samplePassword);
       await tester.tap(find.text('Unlock'));
       await pumpUntil(tester, find.text('Example Mail'));
