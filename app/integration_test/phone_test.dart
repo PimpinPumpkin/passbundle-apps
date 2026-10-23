@@ -294,7 +294,7 @@ void main() {
               w.value,
         ),
       );
-      await tester.tap(find.byTooltip('Vault'));
+      await tester.tap(find.byTooltip('Items'));
       await tester.pump(const Duration(milliseconds: 400));
 
       // Unlocking with it: no master password, and nothing offered.
@@ -346,7 +346,7 @@ void main() {
     await tester.tap(find.text('Immediately').last);
     await tester.pump(const Duration(milliseconds: 500));
     expect(Core().preferences()['lockAfterMinutes'], 0);
-    await tester.tap(find.byTooltip('Vault'));
+    await tester.tap(find.byTooltip('Items'));
     await tester.pump(const Duration(milliseconds: 400));
     expect(find.text('Logins'), findsOneWidget);
 

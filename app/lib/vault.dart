@@ -1,10 +1,12 @@
-// The vault: a sidebar (all items, favorites, folders, organizations), the
-// list with search, and the item, side by side on a wide window. On a phone
-// (or a phone-wide window), the vault is a tab beside Settings: its kinds as
-// colored tiles, then favorites, folders, organizations, and every item, and
-// an item opens on a page of its own. Copying goes through the core, so a
-// password never passes through Dart; secrets reach the screen only while
-// revealed.
+// The vault: a menu (all items, favorites, the categories, and the folders:
+// Personal's, then each organization's shared folders), the list with
+// search, and the item, side by side on a wide window, as the web vault has
+// them. On a phone (or a phone-wide window), the items are a tab beside
+// Settings: their kinds as colored tiles, then favorites, the folders, and
+// every item, and an item opens on a page of its own. Copying goes through
+// the core, so a password never passes through Dart; secrets reach the
+// screen only while revealed, and never when the person's shared folder
+// hides them.
 import 'dart:async';
 import 'dart:math' as math;
 
@@ -14,13 +16,13 @@ import 'package:flutter/services.dart';
 import 'core.dart';
 import 'editor.dart';
 import 'glyphs.dart';
+import 'new_item.dart';
+import 'places.dart';
 import 'settings.dart';
 import 'theme.dart';
 import 'unlock_offer.dart';
 import 'updates.dart';
 import 'widgets.dart';
-
-enum Filter { all, favorites, folder, organization, kind }
 
 class VaultScreen extends StatefulWidget {
   const VaultScreen({
@@ -60,8 +62,13 @@ class VaultScreenState extends State<VaultScreen> {
   Filter filter = Filter.all;
   String? filterId;
   String? selected;
+
+  /// What the search finds (everything, without one).
   List<Map<String, dynamic>> all = [];
-  Map<String, dynamic> places = {'folders': [], 'organizations': []};
+
+  /// Every item, whatever the search: the menu's counts.
+  List<Map<String, dynamic>> everything = [];
+  Places places = Places.empty;
   bool syncing = false;
   bool signedOut = false;
 
@@ -131,7 +138,8 @@ class VaultScreenState extends State<VaultScreen> {
     if (busy.value) return;
     setState(() {
       all = widget.core.list(query);
-      places = widget.core.places();
+      everything = query.isEmpty ? all : widget.core.list('');
+      places = Places(widget.core.places());
       if (selected != null && widget.core.item(selected!) == null) {
         selected = null;
       }
@@ -153,42 +161,62 @@ class VaultScreenState extends State<VaultScreen> {
     reload();
   }
 
-  List<Map<String, dynamic>> get shown => switch (filter) {
-    Filter.all => all,
-    Filter.favorites => all.where((i) => i['favorite'] == true).toList(),
-    Filter.folder => all.where((i) => i['folderId'] == filterId).toList(),
-    Filter.organization =>
-      all.where((i) => i['organizationId'] == filterId).toList(),
-    Filter.kind => all.where((i) => i['kind'] == filterId).toList(),
+  List<Map<String, dynamic>> get shown =>
+      all.where((i) => shows(i, filter, filterId)).toList();
+
+  /// What the list shows, by name, for its header.
+  String? get placeName => switch (filter) {
+    Filter.all => null,
+    Filter.favorites => 'Favorites',
+    Filter.kind => ItemKind.of(filterId ?? '').many,
+    Filter.personal => 'Personal',
+    Filter.noFolder => 'No folder',
+    Filter.folder => places.folder(filterId)?['label'] as String?,
+    Filter.organization => places.organization(filterId)?['name'] as String?,
+    Filter.collection => places.collection(filterId)?['label'] as String?,
   };
 
-  List<Map<String, dynamic>> get folders =>
-      (places['folders'] as List).cast<Map<String, dynamic>>();
-
-  List<Map<String, dynamic>> get organizations =>
-      (places['organizations'] as List).cast<Map<String, dynamic>>();
-
-  /// What the list shows, by name, for a phone's header.
-  String? get placeName {
-    String? named(List<Map<String, dynamic>> places) => places
-        .where((p) => p['id'] == filterId)
-        .map((p) => p['name'] as String)
-        .firstOrNull;
-    return switch (filter) {
-      Filter.all => null,
-      Filter.favorites => 'Favorites',
-      Filter.folder => named(folders),
-      Filter.organization => named(organizations),
-      Filter.kind => ItemKind.of(filterId ?? '').many,
-    };
-  }
+  /// Where a new item goes by default: the folder or shared folder shown,
+  /// where the person may add items there (as the web vault does).
+  String? get placeShown => switch (filter) {
+    Filter.folder => 'personal:$filterId',
+    Filter.personal || Filter.noFolder => 'personal:',
+    Filter.collection when places.collection(filterId)?['canCreate'] == true =>
+      () {
+        final org = places.organizations
+            .where(
+              (o) => (o['collections'] as List).any(
+                (c) => (c as Map)['id'] == filterId,
+              ),
+            )
+            .first;
+        return 'org:${org['id']}:$filterId';
+      }(),
+    _ => null,
+  };
 
   void choose(Filter f, [String? id]) => setState(() {
     filter = f;
     filterId = id;
   });
 
-  Future<void> edit([String? id, Map<String, dynamic>? prefill]) async {
+  /// New item: the picker (the main kinds, then templates), then its editor.
+  Future<void> newItem() async {
+    final wide = MediaQuery.sizeOf(context).width >= 900;
+    final choice = await chooseNewItem(
+      context,
+      templates: widget.core.templates(),
+      asDialog: wide,
+    );
+    if (choice == null || !mounted) return;
+    await edit(null, null, choice);
+  }
+
+  Future<void> edit([
+    String? id,
+    Map<String, dynamic>? prefill,
+    NewItemChoice? choice,
+  ]) async {
     final wide = MediaQuery.sizeOf(context).width >= 900;
     // An item that asks for the master password gets it before its editor
     // opens, so the editor shows its secrets, not blanks (Android's "Save
@@ -209,6 +237,8 @@ class VaultScreenState extends State<VaultScreen> {
       places: places,
       id: id,
       prefill: prefill,
+      choice: choice,
+      place: id == null ? placeShown : null,
       asDialog: wide,
     );
     if (saved == null || !mounted) return;
@@ -311,6 +341,7 @@ class VaultScreenState extends State<VaultScreen> {
       builder: (_) => ItemPane(
         core: widget.core,
         id: id,
+        places: places,
         phone: true,
         onEdit: () => edit(id),
         onTrash: (name) async {
@@ -345,6 +376,7 @@ class VaultScreenState extends State<VaultScreen> {
             key: ValueKey(selected),
             core: widget.core,
             id: selected!,
+            places: places,
             onEdit: () => edit(selected),
             onTrash: (name) => trash(selected!, name),
           );
@@ -360,7 +392,7 @@ class VaultScreenState extends State<VaultScreen> {
                   filter: filter,
                   filterId: filterId,
                   places: places,
-                  items: all,
+                  items: everything,
                   onChoose: choose,
                   onNewFolder: newFolder,
                   onRenameFolder: renameFolder,
@@ -374,13 +406,18 @@ class VaultScreenState extends State<VaultScreen> {
                   child: ItemList(
                     title: placeName ?? 'All items',
                     items: shown,
+                    badges: !const {
+                      Filter.folder,
+                      Filter.noFolder,
+                      Filter.collection,
+                    }.contains(filter),
                     selected: selected,
                     syncing: syncing,
                     onSearch: (q) {
                       query = q;
                       reload();
                     },
-                    onNew: () => edit(),
+                    onNew: newItem,
                     onSync: sync,
                     onSelect: (id) => setState(() => selected = id),
                   ),
@@ -450,7 +487,7 @@ class VaultScreenState extends State<VaultScreen> {
         floatingActionButton: tab == 0
             ? FloatingActionButton(
                 tooltip: 'New item',
-                onPressed: () => edit(),
+                onPressed: newItem,
                 child: Glyph(
                   Glyphs.plus,
                   strokeWidth: 2.2,
@@ -465,7 +502,7 @@ class VaultScreenState extends State<VaultScreen> {
           destinations: const [
             NavigationDestination(
               icon: Glyph(Glyphs.grid, size: 22),
-              label: 'Vault',
+              label: 'Items',
             ),
             NavigationDestination(
               icon: Glyph(Glyphs.settings, size: 22),
@@ -486,17 +523,15 @@ class VaultScreenState extends State<VaultScreen> {
   Widget phoneVault(BuildContext context) {
     final c = context.colors;
     final filtered = filter != Filter.all;
-    final folder = filter == Filter.folder
-        ? folders.where((f) => f['id'] == filterId).firstOrNull
-        : null;
+    final folder = filter == Filter.folder ? places.folder(filterId) : null;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         PageTitle(
-          placeName ?? 'Vault',
+          placeName ?? 'Items',
           leading: filtered
               ? IconButton(
-                  tooltip: 'Back to the vault',
+                  tooltip: 'Back to all items',
                   icon: const Icon(Icons.arrow_back_rounded),
                   onPressed: () => choose(Filter.all),
                 )
@@ -552,8 +587,8 @@ class VaultScreenState extends State<VaultScreen> {
             },
             decoration: InputDecoration(
               hintText: filtered
-                  ? 'Search ${placeName ?? 'your vault'}'
-                  : 'Search your vault',
+                  ? 'Search ${placeName ?? 'items'}'
+                  : 'Search items',
               prefixIcon: Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 14),
                 child: Glyph(Glyphs.search, size: 20, color: c.muted),
@@ -622,7 +657,8 @@ class VaultScreenState extends State<VaultScreen> {
         ],
       ];
     }
-    final favorites = all.where((i) => i['favorite'] == true).toList();
+    final listed = shown;
+    final favorites = listed.where((i) => i['favorite'] == true).toList();
     Widget heading(String text, [Widget? trailing]) => SliverToBoxAdapter(
       child: SectionHeading(
         text,
@@ -631,16 +667,22 @@ class VaultScreenState extends State<VaultScreen> {
         trailing: trailing,
       ),
     );
-    int count(bool Function(Map<String, dynamic>) test) =>
-        all.where(test).length;
+    int count(Filter f, [String? id]) =>
+        all.where((i) => shows(i, f, id)).length;
+    // Each owner on a card of its own: Personal and its folders, then each
+    // organization and its shared folders.
+    final owners = <List<PlaceEntry>>[];
+    for (final e in PlaceEntry.all(places)) {
+      if (e.owner) owners.add([]);
+      owners.last.add(e);
+    }
     return [
       SliverPadding(
         padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
         sliver: SliverToBoxAdapter(
-          child: Categories(
+          child: CategoryTiles(
             counts: {
-              for (final k in ItemKind.all)
-                k.kind: count((i) => i['kind'] == k.kind),
+              for (final k in ItemKind.all) k.kind: count(Filter.kind, k.kind),
             },
             onChoose: (kind) => choose(Filter.kind, kind),
           ),
@@ -655,30 +697,15 @@ class VaultScreenState extends State<VaultScreen> {
           onPressed: newFolder,
         ),
       ),
-      if (folders.isNotEmpty)
+      for (final (i, entries) in owners.indexed) ...[
+        if (i > 0) const SliverToBoxAdapter(child: SizedBox(height: 10)),
         placeCard([
-          for (final f in folders)
-            (
-              Glyphs.folder,
-              f['name'] as String,
-              count((i) => i['folderId'] == f['id']),
-              () => choose(Filter.folder, f['id'] as String),
-            ),
-        ]),
-      if (organizations.isNotEmpty) ...[
-        heading('Organizations'),
-        placeCard([
-          for (final o in organizations)
-            (
-              Glyphs.building,
-              o['name'] as String,
-              count((i) => i['organizationId'] == o['id']),
-              () => choose(Filter.organization, o['id'] as String),
-            ),
+          for (final e in entries)
+            (e, count(e.filter, e.id), () => choose(e.filter, e.id)),
         ]),
       ],
       heading('All items'),
-      if (all.isEmpty)
+      if (listed.isEmpty)
         SliverToBoxAdapter(
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
@@ -689,7 +716,7 @@ class VaultScreenState extends State<VaultScreen> {
           ),
         )
       else
-        itemCard(all),
+        itemCard(listed),
       end,
     ];
   }
@@ -732,56 +759,59 @@ class VaultScreenState extends State<VaultScreen> {
         );
       });
 
-  Widget placeCard(List<(String, String, int, VoidCallback)> places) => card(
-    places.length,
-    (context, i, radius) {
-      final (icon, name, count, tap) = places[i];
-      final c = context.colors;
-      return InkWell(
-        borderRadius: radius,
-        onTap: tap,
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(minHeight: 56),
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(16, 8, 12, 8),
-            child: Row(
-              children: [
-                Container(
-                  width: 40,
-                  height: 40,
-                  decoration: BoxDecoration(
-                    color: c.tint,
-                    borderRadius: BorderRadius.circular(11),
-                  ),
-                  alignment: Alignment.center,
-                  child: Glyph(
-                    icon,
-                    size: 21,
-                    color: Theme.of(context).colorScheme.primary,
+  /// An owner and its folders, on a card: the owner first, its folders a
+  /// step in, nested ones further.
+  Widget placeCard(
+    List<(PlaceEntry, int, VoidCallback)> places,
+  ) => card(places.length, (context, i, radius) {
+    final (entry, count, tap) = places[i];
+    final c = context.colors;
+    final primary = Theme.of(context).colorScheme.primary;
+    return InkWell(
+      borderRadius: radius,
+      onTap: tap,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: 56),
+        child: Padding(
+          padding: EdgeInsets.fromLTRB(
+            16 + 18.0 * math.max(0, entry.depth - 1),
+            8,
+            12,
+            8,
+          ),
+          child: Row(
+            children: [
+              Container(
+                width: 40,
+                height: 40,
+                decoration: BoxDecoration(
+                  color: c.tint,
+                  borderRadius: BorderRadius.circular(11),
+                ),
+                alignment: Alignment.center,
+                child: Glyph(entry.glyph, size: 21, color: primary),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(
+                  entry.label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: entry.owner ? FontWeight.w700 : FontWeight.w500,
                   ),
                 ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Text(
-                    name,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      fontSize: 16,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ),
-                Text('$count', style: TextStyle(color: c.muted, fontSize: 14)),
-                const SizedBox(width: 6),
-                Glyph(Glyphs.chevron, size: 18, color: c.muted, strokeWidth: 2),
-              ],
-            ),
+              ),
+              Text('$count', style: TextStyle(color: c.muted, fontSize: 14)),
+              const SizedBox(width: 6),
+              Glyph(Glyphs.chevron, size: 18, color: c.muted, strokeWidth: 2),
+            ],
           ),
         ),
-      );
-    },
-  );
+      ),
+    );
+  });
 }
 
 void showMessage(BuildContext context, String text) =>
@@ -789,11 +819,16 @@ void showMessage(BuildContext context, String text) =>
       SnackBar(content: Text(text), duration: const Duration(seconds: 3)),
     );
 
-/// The vault's kinds on a phone, each its jewel tile with how many there
-/// are: two to a row, or one when the names need the room (a large text
-/// size, a narrow phone).
-class Categories extends StatelessWidget {
-  const Categories({super.key, required this.counts, required this.onChoose});
+/// The kinds of item on a phone, each its jewel tile with how many there
+/// are: two to a row, or one when the names' words need the room (a large
+/// text size, a narrow phone). Only kinds that have items, as the web vault lists
+/// them.
+class CategoryTiles extends StatelessWidget {
+  const CategoryTiles({
+    super.key,
+    required this.counts,
+    required this.onChoose,
+  });
 
   final Map<String, int> counts;
   final ValueChanged<String> onChoose;
@@ -825,30 +860,38 @@ class Categories extends StatelessWidget {
   Widget build(BuildContext context) => LayoutBuilder(
     builder: (context, constraints) {
       final scaler = MediaQuery.textScalerOf(context);
-      final widest = ItemKind.all
-          .map((k) => _width(k.many, _name, scaler))
+      final kinds = ItemKind.all
+          .where((k) => (counts[k.kind] ?? 0) > 0)
+          .toList();
+      if (kinds.isEmpty) return const SizedBox.shrink();
+      // A name may take two lines ("Bank / accounts"), but no word breaks.
+      final widest = kinds
+          .expand((k) => k.many.split(' '))
+          .map((w) => _width(w, _name, scaler))
           .reduce(math.max);
       final most = counts.values.fold(0, math.max);
       // A tile: its padding, the jewel, the name, and the count.
       final needs =
           12 + 34 + 10 + widest + 8 + _width('$most', _count, scaler) + 12;
       final columns = needs <= (constraints.maxWidth - _gap) / 2 ? 2 : 1;
-      final kinds = ItemKind.all;
       return Column(
         children: [
           for (var i = 0; i < kinds.length; i += columns) ...[
             if (i > 0) const SizedBox(height: _gap),
-            Row(
-              children: [
-                for (var j = i; j < i + columns; j++) ...[
-                  if (j > i) const SizedBox(width: _gap),
-                  Expanded(
-                    child: j < kinds.length
-                        ? _tile(context, kinds[j])
-                        : const SizedBox.shrink(),
-                  ),
+            IntrinsicHeight(
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  for (var j = i; j < i + columns; j++) ...[
+                    if (j > i) const SizedBox(width: _gap),
+                    Expanded(
+                      child: j < kinds.length
+                          ? _tile(context, kinds[j])
+                          : const SizedBox.shrink(),
+                    ),
+                  ],
                 ],
-              ],
+              ),
             ),
           ],
         ],
@@ -871,7 +914,7 @@ class Categories extends StatelessWidget {
               Expanded(
                 child: Text(
                   kind.many,
-                  maxLines: 1,
+                  maxLines: 2,
                   overflow: TextOverflow.ellipsis,
                   style: _name,
                 ),
@@ -916,11 +959,7 @@ class PhoneItemRow extends StatelessWidget {
           padding: const EdgeInsets.fromLTRB(16, 10, 12, 10),
           child: Row(
             children: [
-              Avatar(
-                name: item['name'] as String,
-                kind: item['kind'] as String,
-                size: 40,
-              ),
+              Avatar.of(item, size: 40),
               const SizedBox(width: 12),
               Expanded(
                 child: Column(
@@ -975,9 +1014,10 @@ const favoriteColor = Color(0xFFE8B23A);
 const favoriteEdge = Color(0xFFC9921B);
 
 /// The menu on a computer, as the web vault has it: a card on the ground
-/// with All items and Favorites, the kinds of item with their jewel tiles,
-/// folders, and organizations, each with how many it holds; then who's
-/// signed in, the theme, Settings, and Lock.
+/// with All items and Favorites, the kinds of item that have items, with
+/// their jewel tiles, and the folders (Personal and its folders, then each
+/// organization and its shared folders, nested), each with how many it
+/// holds; then who's signed in, the theme, Settings, and Lock.
 class Sidebar extends StatelessWidget {
   const Sidebar({
     super.key,
@@ -1000,7 +1040,7 @@ class Sidebar extends StatelessWidget {
   final String email;
   final Filter filter;
   final String? filterId;
-  final Map<String, dynamic> places;
+  final Places places;
 
   /// Every item, for the counts beside each entry.
   final List<Map<String, dynamic>> items;
@@ -1015,8 +1055,8 @@ class Sidebar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = context.colors;
-    int count(bool Function(Map<String, dynamic>) test) =>
-        items.where(test).length;
+    int count(Filter f, [String? id]) =>
+        items.where((i) => shows(i, f, id)).length;
     Widget entry({
       required Widget tile,
       required String label,
@@ -1024,8 +1064,10 @@ class Sidebar extends StatelessWidget {
       required VoidCallback tap,
       int? count,
       Widget? trailing,
+      int depth = 0,
+      bool strong = false,
     }) => Padding(
-      padding: const EdgeInsets.symmetric(vertical: 1),
+      padding: EdgeInsets.only(top: 1, bottom: 1, left: 20.0 * depth),
       child: Material(
         color: on ? c.tint : Colors.transparent,
         borderRadius: BorderRadius.circular(10),
@@ -1046,7 +1088,11 @@ class Sidebar extends StatelessWidget {
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
                         fontSize: 14,
-                        fontWeight: on ? FontWeight.w700 : FontWeight.w500,
+                        fontWeight: on
+                            ? FontWeight.w700
+                            : strong
+                            ? FontWeight.w600
+                            : FontWeight.w500,
                       ),
                     ),
                   ),
@@ -1085,10 +1131,19 @@ class Sidebar extends StatelessWidget {
         ],
       ),
     );
-    Widget outline(String glyph) => Glyph(glyph, size: 18, color: c.muted);
-    final folders = (places['folders'] as List).cast<Map<String, dynamic>>();
-    final organizations = (places['organizations'] as List)
-        .cast<Map<String, dynamic>>();
+    Widget outline(String glyph, {bool strong = false}) => Glyph(
+      glyph,
+      size: 18,
+      color: strong ? Theme.of(context).colorScheme.onSurface : c.muted,
+    );
+    // The kinds that have items, and the one shown.
+    final kinds = ItemKind.all
+        .where(
+          (k) =>
+              count(Filter.kind, k.kind) > 0 ||
+              (filter == Filter.kind && filterId == k.kind),
+        )
+        .toList();
     return Container(
       width: width,
       margin: const EdgeInsets.fromLTRB(12, 12, 0, 12),
@@ -1117,23 +1172,23 @@ class Sidebar extends StatelessWidget {
                   label: 'All items',
                   on: filter == Filter.all,
                   tap: () => onChoose(Filter.all),
-                  count: items.length,
+                  count: count(Filter.all),
                 ),
                 entry(
                   tile: const JewelTile(jewel: Jewel.favorites, size: 24),
                   label: 'Favorites',
                   on: filter == Filter.favorites,
                   tap: () => onChoose(Filter.favorites),
-                  count: count((i) => i['favorite'] == true),
+                  count: count(Filter.favorites),
                 ),
-                heading('Categories'),
-                for (final k in ItemKind.all)
+                if (kinds.isNotEmpty) heading('Categories'),
+                for (final k in kinds)
                   entry(
                     tile: JewelTile(jewel: k, size: 24),
                     label: k.many,
                     on: filter == Filter.kind && filterId == k.kind,
                     tap: () => onChoose(Filter.kind, k.kind),
-                    count: count((i) => i['kind'] == k.kind),
+                    count: count(Filter.kind, k.kind),
                   ),
                 heading(
                   'Folders',
@@ -1146,37 +1201,32 @@ class Sidebar extends StatelessWidget {
                     icon: const Icon(Icons.add_rounded),
                   ),
                 ),
-                for (final f in folders)
+                for (final e in PlaceEntry.all(places))
                   entry(
-                    tile: outline(Glyphs.folder),
-                    label: f['name'] as String,
-                    on: filter == Filter.folder && filterId == f['id'],
-                    tap: () => onChoose(Filter.folder, f['id'] as String),
-                    count: count((i) => i['folderId'] == f['id']),
-                    trailing: Padding(
-                      padding: const EdgeInsets.only(left: 4),
-                      child: FolderMenu(
-                        name: f['name'] as String,
-                        color: c.muted,
-                        onRename: () => onRenameFolder(
-                          f['id'] as String,
-                          f['name'] as String,
-                        ),
-                        onDelete: () => onDeleteFolder(
-                          f['id'] as String,
-                          f['name'] as String,
-                        ),
-                      ),
-                    ),
-                  ),
-                if (organizations.isNotEmpty) heading('Organizations'),
-                for (final o in organizations)
-                  entry(
-                    tile: outline(Glyphs.building),
-                    label: o['name'] as String,
-                    on: filter == Filter.organization && filterId == o['id'],
-                    tap: () => onChoose(Filter.organization, o['id'] as String),
-                    count: count((i) => i['organizationId'] == o['id']),
+                    tile: outline(e.glyph, strong: e.owner),
+                    label: e.label,
+                    depth: e.depth,
+                    strong: e.owner,
+                    on: filter == e.filter && filterId == e.id,
+                    tap: () => onChoose(e.filter, e.id),
+                    count: count(e.filter, e.id),
+                    trailing: e.ownFolder
+                        ? Padding(
+                            padding: const EdgeInsets.only(left: 4),
+                            child: FolderMenu(
+                              name: places.folder(e.id)!['name'] as String,
+                              color: c.muted,
+                              onRename: () => onRenameFolder(
+                                e.id!,
+                                places.folder(e.id)!['name'] as String,
+                              ),
+                              onDelete: () => onDeleteFolder(
+                                e.id!,
+                                places.folder(e.id)!['name'] as String,
+                              ),
+                            ),
+                          )
+                        : null,
                   ),
                 const SizedBox(height: 8),
               ],
@@ -1225,10 +1275,14 @@ class ItemList extends StatelessWidget {
     required this.onNew,
     required this.onSync,
     required this.onSelect,
+    this.badges = true,
   });
 
   /// What the list shows: All items, a kind, a folder.
   final String title;
+
+  /// Where each item is, beside it (not while one folder is shown).
+  final bool badges;
   final List<Map<String, dynamic>> items;
   final String? selected;
   final bool syncing;
@@ -1252,7 +1306,7 @@ class ItemList extends StatelessWidget {
                 child: TextField(
                   onChanged: onSearch,
                   decoration: InputDecoration(
-                    hintText: 'Search',
+                    hintText: 'Search items',
                     prefixIcon: Padding(
                       padding: const EdgeInsets.symmetric(horizontal: 12),
                       child: Glyph(Glyphs.search, size: 18, color: c.muted),
@@ -1367,11 +1421,7 @@ class ItemList extends StatelessWidget {
                               ),
                               child: Row(
                                 children: [
-                                  Avatar(
-                                    name: item['name'] as String,
-                                    kind: item['kind'] as String,
-                                    size: 40,
-                                  ),
+                                  Avatar.of(item, size: 40),
                                   const SizedBox(width: 12),
                                   Expanded(
                                     child: Column(
@@ -1412,6 +1462,9 @@ class ItemList extends StatelessWidget {
                                         semanticLabel: 'Favorite',
                                       ),
                                     ),
+                                  if (badges &&
+                                      (item['where'] as String?) != null)
+                                    WhereBadge(item['where'] as String),
                                 ],
                               ),
                             ),
@@ -1427,6 +1480,45 @@ class ItemList extends StatelessWidget {
   }
 }
 
+/// Where an item is, in a quiet pill beside it in the list, as the web
+/// vault's list has it: its folder, its organization's shared folder, or
+/// Personal.
+class WhereBadge extends StatelessWidget {
+  const WhereBadge(this.where, {super.key});
+
+  final String where;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.colors;
+    return Padding(
+      padding: const EdgeInsets.only(left: 8),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 110),
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            color: c.ground,
+            borderRadius: BorderRadius.circular(7),
+          ),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+            child: Text(
+              where,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: c.heading,
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 /// An item: beside the list on a computer, or on a phone a page of its own,
 /// with a big tile, its name, and big copy buttons.
 class ItemPane extends StatefulWidget {
@@ -1434,6 +1526,7 @@ class ItemPane extends StatefulWidget {
     super.key,
     required this.core,
     required this.id,
+    required this.places,
     required this.onEdit,
     required this.onTrash,
     this.phone = false,
@@ -1441,6 +1534,9 @@ class ItemPane extends StatefulWidget {
 
   final Core core;
   final String id;
+
+  /// Where items live, to say where this one is.
+  final Places places;
 
   /// Opens the editor; done when it closes.
   final Future<void> Function() onEdit;
@@ -1508,6 +1604,12 @@ class _ItemPaneState extends State<ItemPane> {
     revealed.clear();
     return true;
   }
+
+  /// Whether the person may do something with the item (`edit`,
+  /// `seePasswords`, `delete`, ...), as their shared folders allow; yes for
+  /// their own items, and when the core doesn't say.
+  bool may(Map<String, dynamic> item, String what) =>
+      (item['permissions'] as Map?)?[what] != false;
 
   /// Downloads, opens, and saves an attachment to Downloads, through the core.
   Future<void> saveAttachment(String attachmentId, String name) async {
@@ -1583,11 +1685,7 @@ class _ItemPaneState extends State<ItemPane> {
       children: [
         Row(
           children: [
-            Avatar(
-              name: item['name'] as String,
-              kind: item['kind'] as String,
-              size: 48,
-            ),
+            Avatar.of(item, size: 48),
             const SizedBox(width: 16),
             Expanded(
               child: Text(
@@ -1656,7 +1754,8 @@ class _ItemPaneState extends State<ItemPane> {
                   semanticLabel: 'Favorite',
                 ),
               ),
-            // Some kinds are the web vault's to edit, for now.
+            // Some kinds are the web vault's to edit, for now, and some
+            // items the person's shared folder lets them see only.
             if (item['editable'] != false)
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 4),
@@ -1665,11 +1764,12 @@ class _ItemPaneState extends State<ItemPane> {
                   child: const Text('Edit'),
                 ),
               ),
-            IconButton(
-              tooltip: 'Move to trash',
-              icon: const Icon(Icons.delete_outline_rounded),
-              onPressed: () => widget.onTrash(item['name'] as String),
-            ),
+            if (may(item, 'delete'))
+              IconButton(
+                tooltip: 'Move to trash',
+                icon: const Icon(Icons.delete_outline_rounded),
+                onPressed: () => widget.onTrash(item['name'] as String),
+              ),
           ],
           const SizedBox(width: 8),
         ],
@@ -1737,6 +1837,8 @@ class _ItemPaneState extends State<ItemPane> {
           copyGlyph,
           () => copy(label, what, secret: secret),
         );
+    // Whether the person's shared folder lets them see the item's secrets.
+    final sees = may(item, 'seePasswords');
     Widget secretRow(String label, String what, {bool canCopy = true}) => row(
       label,
       // Google Sans Flex, like everything else: no system font, so it looks the same everywhere.
@@ -1745,16 +1847,17 @@ class _ItemPaneState extends State<ItemPane> {
         style: TextStyle(fontSize: valueSize, letterSpacing: 0.6),
       ),
       actions: [
-        IconButton(
-          tooltip: revealed.containsKey(what) ? 'Hide' : 'Reveal',
-          icon: Glyph(
-            revealed.containsKey(what) ? Glyphs.eyeOff : Glyphs.eye,
-            size: 20,
-            color: c.muted,
+        if (sees || what == 'notes')
+          IconButton(
+            tooltip: revealed.containsKey(what) ? 'Hide' : 'Reveal',
+            icon: Glyph(
+              revealed.containsKey(what) ? Glyphs.eyeOff : Glyphs.eye,
+              size: 20,
+              color: c.muted,
+            ),
+            onPressed: () => toggle(what),
           ),
-          onPressed: () => toggle(what),
-        ),
-        if (canCopy) copyButton(label.toLowerCase(), what),
+        if (canCopy && sees) copyButton(label.toLowerCase(), what),
       ],
     );
 
@@ -1774,7 +1877,9 @@ class _ItemPaneState extends State<ItemPane> {
       rows.add(secretRow('Password', 'password'));
     }
     final code = totp?['code'] as String?;
-    if (item['hasTotp'] == true && code != null) {
+    if (item['hasTotp'] == true && !sees) {
+      rows.add(secretRow('One-time code', 'totp'));
+    } else if (item['hasTotp'] == true && code != null) {
       final left = (totp!['secondsLeft'] as num).toInt();
       final period = (totp!['period'] as num).toInt();
       rows.add(
@@ -1914,11 +2019,38 @@ class _ItemPaneState extends State<ItemPane> {
         rows.add(secretRow('License number', 'licenseNumber'));
       }
     }
+    // A bank account's, driver's license's, or passport's values.
+    for (final d
+        in ((item['details'] as List?) ?? const [])
+            .cast<Map<String, dynamic>>()) {
+      if (d['secret'] == true) {
+        rows.add(secretRow(d['label'] as String, d['key'] as String));
+      } else {
+        plainRow(
+          d['label'] as String,
+          d['value'] as String?,
+          d['key'] as String,
+        );
+      }
+    }
     final fields = (item['fields'] as List).cast<Map<String, dynamic>>();
     for (var i = 0; i < fields.length; i++) {
       final f = fields[i];
       // Our own data (fill rules, an expiration date) isn't a custom field.
       if (f['reserved'] == true) continue;
+      if (f['type'] == 2) {
+        rows.add(
+          row(
+            f['name'] as String,
+            Text(
+              f['value'] == 'true' ? 'Yes' : 'No',
+              style: TextStyle(fontSize: valueSize),
+            ),
+          ),
+        );
+        continue;
+      }
+      if (f['type'] == 3) continue;
       rows.add(
         f['hidden'] == true
             ? secretRow(f['name'] as String, 'field:$i')
@@ -1987,10 +2119,29 @@ class _ItemPaneState extends State<ItemPane> {
     }
 
     final kind = ItemKind.of(item['kind'] as String);
-    final where = [
-      item['organization'],
-      item['folder'],
-    ].whereType<String>().join(phone ? ' › ' : ' · ');
+    // What it is: its template's name, if it came from one, else its kind's;
+    // a custom template says so.
+    final template = (item['template'] as Map?)?['name'] as String?;
+    final definition = item['definition'] as Map?;
+    final what = definition != null
+        ? 'Template for ${definition['base'] == 'login' ? 'logins' : 'notes'}'
+        : template ?? kind.one;
+    final where = whereIs(item, widget.places);
+    final jewel = item['category'] == null
+        ? kind
+        : Categories.of(item['category'] as String);
+    // Someone whose shared folder hides passwords is told why they can't see them.
+    if (!sees) {
+      rows.add(
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+          child: Text(
+            'Your organization hides this item\'s passwords from you.',
+            style: TextStyle(color: c.muted, fontSize: 13),
+          ),
+        ),
+      );
+    }
     final card = RestingCard(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -2013,11 +2164,7 @@ class _ItemPaneState extends State<ItemPane> {
                 borderRadius: BorderRadius.circular(20),
                 boxShadow: c.lifted,
               ),
-              child: Avatar(
-                name: item['name'] as String,
-                kind: item['kind'] as String,
-                size: 72,
-              ),
+              child: Avatar.of(item, size: 72),
             ),
           ),
           const SizedBox(height: 14),
@@ -2034,12 +2181,10 @@ class _ItemPaneState extends State<ItemPane> {
                   alignment: PlaceholderAlignment.middle,
                   child: Padding(
                     padding: const EdgeInsets.only(right: 6),
-                    child: JewelTile(jewel: kind, size: 18),
+                    child: JewelTile(jewel: jewel, size: 18),
                   ),
                 ),
-                TextSpan(
-                  text: '${kind.one} in ${where.isEmpty ? 'My vault' : where}',
-                ),
+                TextSpan(text: '$what in $where'),
               ],
             ),
             textAlign: TextAlign.center,
@@ -2076,11 +2221,7 @@ class _ItemPaneState extends State<ItemPane> {
                           borderRadius: BorderRadius.circular(15),
                           boxShadow: c.lifted,
                         ),
-                        child: Avatar(
-                          name: item['name'] as String,
-                          kind: item['kind'] as String,
-                          size: 56,
-                        ),
+                        child: Avatar.of(item, size: 56),
                       ),
                       const SizedBox(width: 14),
                       Expanded(
@@ -2096,7 +2237,7 @@ class _ItemPaneState extends State<ItemPane> {
                             ),
                             const SizedBox(height: 2),
                             Text(
-                              '${kind.one} · ${where.isEmpty ? 'My vault' : where}',
+                              '$what · $where',
                               style: TextStyle(color: c.muted, fontSize: 13),
                             ),
                           ],
@@ -2114,7 +2255,9 @@ class _ItemPaneState extends State<ItemPane> {
                             semanticLabel: 'Favorite',
                           ),
                         ),
-                      // Some kinds are the web vault's to edit, for now.
+                      // Some kinds are the web vault's to edit, for now,
+                      // and some items the person's shared folder lets
+                      // them see only.
                       if (item['editable'] != false)
                         Padding(
                           padding: const EdgeInsets.only(left: 4),
@@ -2123,11 +2266,13 @@ class _ItemPaneState extends State<ItemPane> {
                             child: const Text('Edit'),
                           ),
                         ),
-                      IconButton(
-                        tooltip: 'Move to trash',
-                        icon: const Icon(Icons.delete_outline_rounded),
-                        onPressed: () => widget.onTrash(item['name'] as String),
-                      ),
+                      if (may(item, 'delete'))
+                        IconButton(
+                          tooltip: 'Move to trash',
+                          icon: const Icon(Icons.delete_outline_rounded),
+                          onPressed: () =>
+                              widget.onTrash(item['name'] as String),
+                        ),
                     ],
                   ),
                   if (rows.isNotEmpty) ...[

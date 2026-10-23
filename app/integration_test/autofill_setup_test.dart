@@ -94,7 +94,7 @@ void main() {
             w.value,
       ),
     );
-    await tester.tap(find.byTooltip('Vault'));
+    await tester.tap(find.byTooltip('Items'));
     await tester.pump(const Duration(milliseconds: 400));
     await tester.tap(find.byTooltip('Lock'));
     await pumpUntil(tester, find.text(unlockWith));
@@ -115,7 +115,7 @@ void main() {
       find.widgetWithText(TextField, 'not-a-real-password-new'),
       findsOneWidget,
     );
-    expect(find.text('New item'), findsOneWidget);
+    expect(find.text('New login'), findsOneWidget);
     await tester.tap(find.text('Save'));
     await pumpUntil(tester, find.text('Saved'));
     // Saved for the app it was signed in to (checked in the vault: on a small
@@ -135,7 +135,7 @@ void main() {
       find.widgetWithText(TextField, 'not-a-real-password-changed'),
       timeout: const Duration(minutes: 6),
     );
-    expect(find.text('Edit item'), findsOneWidget);
+    expect(find.text('Edit login'), findsOneWidget);
     expect(find.widgetWithText(TextField, 'new@example.test'), findsOneWidget);
     await tester.tap(find.text('Save'));
     await pumpUntil(tester, find.text('Saved the changes'));
@@ -181,7 +181,7 @@ void main() {
         }
       }
       expect(find.text('Browsers you trust for autofill'), findsNothing);
-      await tester.tap(find.byTooltip('Vault'));
+      await tester.tap(find.byTooltip('Items'));
       await tester.pump(const Duration(milliseconds: 400));
       File('$dir/autofill-untrusted').writeAsStringSync('');
     }

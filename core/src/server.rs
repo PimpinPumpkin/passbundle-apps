@@ -563,6 +563,23 @@ impl Server {
         }
     }
 
+    /// Puts an organization's item in these of its shared folders (and out
+    /// of the others the person reaches), as upstream's apps do.
+    pub fn set_item_collections(
+        &self,
+        session: &mut Session,
+        id: &str,
+        collection_ids: &[String],
+    ) -> Result<()> {
+        self.call(
+            session,
+            "PUT",
+            &format!("/api/ciphers/{id}/collections_v2"),
+            Some(json!({ "collectionIds": collection_ids })),
+        )
+        .map(|_| ())
+    }
+
     /// An attachment's file, as the server stores it (still encrypted).
     pub fn attachment(
         &self,

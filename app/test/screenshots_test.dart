@@ -1,7 +1,9 @@
 // Screenshots for people to look at, not checks: run with --update-goldens
 // to (re)draw them in test/screenshots/. Desktop and phone width, light and
 // dark; the phone's at 390 wide, and Settings also at 360 with the text 1.3
-// times its size, as a phone set to large text draws it.
+// times its size, as a phone set to large text draws it. With PB_SHOWCASE
+// (core/examples/showcase.rs), on a fuller vault: folders in folders,
+// shared folders, and items made from templates.
 @Tags(['screenshots'])
 library;
 
@@ -102,7 +104,7 @@ void main() {
 
     shots('unlock, vault, item, editor, desktop, $b', (tester) async {
       await size(tester, const Size(1280, 800));
-      openSample();
+      openShowcase();
       await tester.pumpWidget(PassBundleApp(themeMode: theme));
       await shoot('unlock-$b');
       await unlock(tester);
@@ -114,6 +116,37 @@ void main() {
       await tester.tap(find.widgetWithText(OutlinedButton, 'Edit'));
       await tester.pumpAndSettle();
       await shoot('editor-desktop-$b');
+      await tester.tap(find.byTooltip('Cancel'));
+      await tester.pumpAndSettle();
+
+      if (Platform.environment['PB_SHOWCASE'] != null) {
+        Future<void> open(String search, String name) async {
+          await tester.enterText(find.byType(TextField).first, search);
+          await tester.pump();
+          await tester.tap(find.text(name).first);
+          await tester.pump();
+        }
+
+        // An item made from a template, in an organization's shared folder.
+        await open('office', 'Office server');
+        await shoot('template-item-desktop-$b');
+        // One in a shared folder that hides its passwords.
+        await open('vpn', 'Fabrikam VPN');
+        await shoot('hidden-passwords-desktop-$b');
+        await tester.enterText(find.byType(TextField).first, '');
+        await tester.pump();
+      }
+
+      // New item: the kinds, then More categories' templates.
+      await tester.tap(find.text('New'));
+      await tester.pumpAndSettle();
+      await shoot('new-item-desktop-$b');
+      await tester.tap(find.text('More categories'));
+      await tester.pumpAndSettle();
+      await shoot('new-item-more-desktop-$b');
+      await tester.tap(find.text('Wi-Fi network'));
+      await tester.pumpAndSettle();
+      await shoot('editor-template-desktop-$b');
     });
 
     shots('unlocking with Windows Hello or Touch ID, $b', (tester) async {
@@ -170,7 +203,7 @@ void main() {
     shots('vault, item, editor, and the offer, phone, $b', (tester) async {
       await size(tester, const Size(390, 844));
       PhoneStandIn(tester);
-      openSample();
+      openShowcase();
       await tester.pumpWidget(PassBundleApp(themeMode: theme));
       await unlock(tester, phone: true);
       // Unlocked with the master password, on a phone with a fingerprint.
@@ -180,6 +213,17 @@ void main() {
       await tester.tap(find.text('Not now'));
       await tester.pumpAndSettle();
       await shoot('vault-phone-$b');
+      // Its folders: Personal's, then each organization's shared folders.
+      await tester.scrollUntilVisible(
+        find.text('Folders'),
+        200,
+        scrollable: find.byType(Scrollable).last,
+      );
+      await tester.drag(find.byType(Scrollable).last, const Offset(0, -260));
+      await tester.pumpAndSettle();
+      await shoot('folders-phone-$b');
+      await tester.drag(find.byType(Scrollable).last, const Offset(0, 4000));
+      await tester.pumpAndSettle();
 
       await tester.enterText(find.byType(TextField), 'backup');
       await tester.pumpAndSettle();
@@ -190,6 +234,9 @@ void main() {
       await tester.pumpAndSettle();
 
       await tester.tap(find.byTooltip('New item'));
+      await tester.pumpAndSettle();
+      await shoot('new-item-phone-$b');
+      await tester.tap(find.text('Login'));
       await tester.pumpAndSettle();
       await shoot('editor-phone-$b');
     });

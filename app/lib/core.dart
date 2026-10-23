@@ -148,6 +148,7 @@ class Core {
   late final _sleeping = _lib.lookupFunction<_Str0, _Str0>('pb_sleeping');
   late final _left = _lib.lookupFunction<_Str0, _Str0>('pb_left');
   late final _places = _lib.lookupFunction<_Str0, _Str0>('pb_places');
+  late final _templates = _lib.lookupFunction<_Str0, _Str0>('pb_templates');
   late final _list = _lib.lookupFunction<_Str1, _Str1>('pb_list');
   late final _item = _lib.lookupFunction<_Str1, _Str1>('pb_item');
   late final _reveal = _lib.lookupFunction<_Str2, _Str2>('pb_reveal');
@@ -466,8 +467,17 @@ class Core {
   Map<String, dynamic> sleeping() =>
       _answer(_sleeping()) as Map<String, dynamic>;
 
-  /// Folders, and organizations with their collections.
+  /// Where items live (core/src/places.rs): `folders`, the person's own,
+  /// and `organizations`, each with its shared folders (`collections`), each
+  /// `{id, name, label, depth, parentId}`, nested by name, and a shared
+  /// folder with what the person can do in it (`grid`, `canCreate`).
   Map<String, dynamic> places() => _answer(_places()) as Map<String, dynamic>;
+
+  /// Templates for New item, grouped as the web vault groups them
+  /// (core/src/templates.rs): `[{name, templates: [{id, name, base,
+  /// category, fields: [{label, kind, value}]}]}]`.
+  List<Map<String, dynamic>> templates() =>
+      (_answer(_templates()) as List).cast<Map<String, dynamic>>();
 
   List<Map<String, dynamic>> list(String query) =>
       (_with([query], (p) => _answer(_list(p[0]))) as List)

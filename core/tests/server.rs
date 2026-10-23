@@ -92,6 +92,7 @@ fn signs_in_syncs_saves_edits_and_trashes() {
             name: "PIN".into(),
             value: Zeroizing::new("8642".into()),
             hidden: true,
+            boolean: false,
         }],
         favorite: true,
         ..ItemDraft::default()
@@ -799,4 +800,397 @@ fn the_generators_settings_follow_the_account_to_another_device() {
     first.sync().unwrap();
     assert_eq!(first.generator_options().length, 50);
     assert_eq!(first.generator_options().words, 9);
+}
+
+/// A device of the app's own, on a folder of its own, signed in.
+fn signed_in_app(url: &str, email: &str) -> App {
+    let dir = std::env::temp_dir().join(format!("pb-core-app-{}", uuid::Uuid::new_v4().simple()));
+    let mut app = App::open(Store::new(&dir), Box::new(MemorySecretStore::default()));
+    assert_eq!(app.sign_in(url, email, PASSWORD).unwrap(), Step::Done);
+    app
+}
+
+/// A new organization, as an app makes one (its key sealed to the owner's
+/// public key, its own key pair, and a first shared folder, "IT"): its id
+/// and key.
+fn new_organization(server: &Server, session: &mut Session, email: &str) -> (String, SymmetricKey) {
+    let vault = open(server, session);
+    let org_key = SymmetricKey::generate();
+    let org_private = PrivateKey::generate().unwrap();
+    let created = server
+        .raw(
+            session,
+            "POST",
+            "/api/organizations",
+            Some(json!({
+                "name": "Contoso",
+                "billingEmail": email,
+                "collectionName": org_key.encrypt_str("IT").to_string(),
+                "key": encrypt_for(&vault.public_key_der(), &org_key.to_bytes()).unwrap().to_string(),
+                "keys": {
+                    "publicKey": STANDARD.encode(org_private.public_key_der()),
+                    "encryptedPrivateKey": org_key.encrypt(&org_private.to_pkcs8_der()).to_string(),
+                },
+                "planType": 0,
+            })),
+        )
+        .unwrap();
+    (created["id"].as_str().unwrap().to_owned(), org_key)
+}
+
+/// Templates (src/templates.rs): an item the web vault made from one (its
+/// fields, then the field that records the template) keeps the template
+/// and every field, in order, when the app edits it, a yes-or-no field
+/// included; and one the app makes from a template is recorded as the web
+/// vault records it.
+#[test]
+fn templated_items_keep_their_template_and_fields_through_the_apps_edits() {
+    use passbundle_core::templates::{self, TEMPLATE_FIELD};
+
+    let Some(server) = server() else { return };
+    let url = std::env::var("PB_TEST_SERVER").unwrap();
+    let email = new_email("templates");
+    sign_up(&server, &email);
+    let mut session = sign_in(&server, &email);
+    let user_key = session.user_key().clone();
+    let user_id = open(&server, &mut session).user_id;
+    let enc = |text: &str| json!(user_key.encrypt_str(text).to_string());
+
+    // As the web vault saves a Wi-Fi network (a note) and a domain (a login).
+    let marker = |id: &str, name: &str| format!(r#"{{"id":"{id}","name":"{name}","v":1}}"#);
+    let wifi = server
+        .raw(
+            &mut session,
+            "POST",
+            "/api/ciphers",
+            Some(json!({
+                "type": 2,
+                "name": enc("Office Wi-Fi"),
+                "notes": enc("The guest network is separate."),
+                "secureNote": { "type": 0 },
+                "fields": [
+                    { "name": enc("Network name"), "value": enc("Contoso"), "type": 0, "linkedId": null },
+                    { "name": enc("Password"), "value": enc("not-a-real-password-wifi"), "type": 1, "linkedId": null },
+                    { "name": enc("Security type"), "value": enc("WPA2"), "type": 0, "linkedId": null },
+                    { "name": enc(TEMPLATE_FIELD), "value": enc(&marker("wifi", "Wi-Fi network")), "type": 0, "linkedId": null },
+                ],
+                "favorite": false,
+                "reprompt": 0,
+                "encryptedFor": user_id,
+            })),
+        )
+        .unwrap();
+    let wifi_id = wifi["id"].as_str().unwrap().to_owned();
+    let domain = server
+        .raw(
+            &mut session,
+            "POST",
+            "/api/ciphers",
+            Some(json!({
+                "type": 1,
+                "name": enc("contoso.example"),
+                "login": { "username": enc("hostmaster"), "password": enc("not-a-real-password-dns"), "uris": [] },
+                "fields": [
+                    { "name": enc("Domain name"), "value": enc("contoso.example"), "type": 0, "linkedId": null },
+                    { "name": enc("Registrar"), "value": enc("Example Registrar"), "type": 0, "linkedId": null },
+                    { "name": enc("Auto-renew"), "value": enc("true"), "type": 2, "linkedId": null },
+                    { "name": enc(TEMPLATE_FIELD), "value": enc(&marker("domain", "Domain")), "type": 0, "linkedId": null },
+                ],
+                "favorite": false,
+                "reprompt": 0,
+                "encryptedFor": user_id,
+            })),
+        )
+        .unwrap();
+    let domain_id = domain["id"].as_str().unwrap().to_owned();
+
+    let mut app = signed_in_app(&url, &email);
+    let vault = app.vault().unwrap();
+    let item = vault.item(&wifi_id).unwrap();
+    assert_eq!(templates::category(item), "wifi");
+    assert_eq!(
+        templates::template_of(item).map(|(id, name, _)| (id, name)),
+        Some(("wifi".to_owned(), "Wi-Fi network".to_owned()))
+    );
+    // The editor gets the template's fields, not the record of the template.
+    let mut draft = ItemDraft::of(item);
+    let names: Vec<&str> = draft.fields.iter().map(|f| f.name.as_str()).collect();
+    assert_eq!(names, ["Network name", "Password", "Security type"]);
+    draft.fields[2].value = Zeroizing::new("WPA3".into());
+    draft.name = "Office Wi-Fi (5 GHz)".into();
+    app.save(Some(&wifi_id), &draft, &[]).unwrap();
+
+    let item = app.vault().unwrap().item(&domain_id).unwrap();
+    assert_eq!(templates::category(item), "domain");
+    let mut draft = ItemDraft::of(item);
+    assert!(draft.fields[2].boolean);
+    draft.fields[2].value = Zeroizing::new("false".into());
+    app.save(Some(&domain_id), &draft, &[]).unwrap();
+
+    // As the server keeps them: every field, in order, of the same kinds,
+    // the template still recorded, last, as it was.
+    let (sync, _) = server.sync(&mut session).unwrap();
+    let saved = |id: &str| -> Vec<(String, String, u8)> {
+        let cipher = sync.ciphers.iter().find(|c| c.id == id).unwrap();
+        cipher
+            .fields
+            .iter()
+            .flatten()
+            .map(|f| {
+                let open = |t: &Option<String>| {
+                    t.as_deref()
+                        .map(|t| {
+                            passbundle_core::crypto::EncString::parse(t)
+                                .unwrap()
+                                .decrypt_string(&user_key)
+                                .unwrap()
+                                .to_string()
+                        })
+                        .unwrap_or_default()
+                };
+                (open(&f.name), open(&f.value), f.kind)
+            })
+            .collect()
+    };
+    let field = |n: &str, v: &str, k: u8| (n.to_owned(), v.to_owned(), k);
+    assert_eq!(
+        saved(&wifi_id),
+        [
+            field("Network name", "Contoso", 0),
+            field("Password", "not-a-real-password-wifi", 1),
+            field("Security type", "WPA3", 0),
+            field(TEMPLATE_FIELD, &marker("wifi", "Wi-Fi network"), 0),
+        ]
+    );
+    assert_eq!(
+        saved(&domain_id),
+        [
+            field("Domain name", "contoso.example", 0),
+            field("Registrar", "Example Registrar", 0),
+            field("Auto-renew", "false", 2),
+            field(TEMPLATE_FIELD, &marker("domain", "Domain"), 0),
+        ]
+    );
+    let item = app.vault().unwrap().item(&wifi_id).unwrap();
+    assert_eq!(item.name, "Office Wi-Fi (5 GHz)");
+    assert_eq!(templates::category(item), "wifi");
+
+    // A new server from the app's New item picker: recorded as the web vault records it.
+    let draft = ItemDraft {
+        name: "Build server".into(),
+        username: Some("deploy".into()),
+        password: secret("not-a-real-password-build"),
+        fields: ["Hostname", "Port", "Operating system"]
+            .iter()
+            .zip(["10.0.4.12", "22", "Debian"])
+            .map(|(name, value)| Field {
+                name: (*name).into(),
+                value: Zeroizing::new(value.into()),
+                hidden: false,
+                boolean: false,
+            })
+            .collect(),
+        template: Some(("server".into(), "Server".into())),
+        ..ItemDraft::default()
+    };
+    app.save(None, &draft, &[]).unwrap();
+    let made = app
+        .vault()
+        .unwrap()
+        .items
+        .iter()
+        .find(|i| i.name == "Build server")
+        .unwrap();
+    let id = made.id.clone();
+    assert_eq!(templates::category(made), "server");
+    let fields = {
+        let (sync, _) = server.sync(&mut session).unwrap();
+        let cipher = sync.ciphers.into_iter().find(|c| c.id == id).unwrap();
+        cipher.fields.unwrap()
+    };
+    let last = fields.last().unwrap();
+    let open = |t: &Option<String>| {
+        passbundle_core::crypto::EncString::parse(t.as_deref().unwrap())
+            .unwrap()
+            .decrypt_string(&user_key)
+            .unwrap()
+            .to_string()
+    };
+    assert_eq!(open(&last.name), TEMPLATE_FIELD);
+    assert_eq!(open(&last.value), marker("server", "Server"));
+    assert_eq!(last.kind, 0);
+    assert_eq!(fields.len(), 4);
+}
+
+/// Shared folders' permissions (docs/core.md, "Folders and permissions"):
+/// a member whose shared folder hides passwords gets an organization's item
+/// to see, but not its secrets, nor to edit or delete it; in one where they
+/// can edit, they can; and moving an item into a folder they can't add to
+/// is refused by the server, with the item left where it was.
+#[test]
+fn a_shared_folders_permissions_hold_in_the_app() {
+    let Some(server) = server() else { return };
+    let url = std::env::var("PB_TEST_SERVER").unwrap();
+    let owner = new_email("owner");
+    let member = new_email("member");
+    sign_up(&server, &owner);
+    sign_up(&server, &member);
+    let mut session = sign_in(&server, &owner);
+    let (org_id, org_key) = new_organization(&server, &mut session, &owner);
+    let vault = open(&server, &mut session);
+    let it = vault.collections.keys().next().unwrap().clone();
+    let projects = server
+        .raw(
+            &mut session,
+            "POST",
+            &format!("/api/organizations/{org_id}/collections"),
+            Some(json!({ "name": org_key.encrypt_str("Projects/Web").to_string(), "groups": [], "users": [] })),
+        )
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    // The member: invited with "can view, except passwords" in IT and "can
+    // edit" in Projects/Web (accepted at once, as a server without email
+    // does for an account that exists), then confirmed with the
+    // organization's key sealed to their public key.
+    server
+        .raw(
+            &mut session,
+            "POST",
+            &format!("/api/organizations/{org_id}/users/invite"),
+            Some(json!({
+                "emails": [member],
+                "groups": [],
+                "type": 2,
+                "collections": [
+                    { "id": it, "readOnly": true, "hidePasswords": true, "manage": false },
+                    { "id": projects, "readOnly": false, "hidePasswords": false, "manage": false },
+                ],
+                "permissions": {},
+            })),
+        )
+        .unwrap();
+    let members = server
+        .raw(
+            &mut session,
+            "GET",
+            &format!("/api/organizations/{org_id}/users"),
+            None,
+        )
+        .unwrap();
+    let joined = members["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["email"] == member.as_str())
+        .unwrap();
+    let public = server
+        .raw(
+            &mut session,
+            "GET",
+            &format!(
+                "/api/users/{}/public-key",
+                joined["userId"].as_str().unwrap()
+            ),
+            None,
+        )
+        .unwrap();
+    let public = STANDARD
+        .decode(public["publicKey"].as_str().unwrap())
+        .unwrap();
+    server
+        .raw(
+            &mut session,
+            "POST",
+            &format!(
+                "/api/organizations/{org_id}/users/{}/confirm",
+                joined["id"].as_str().unwrap()
+            ),
+            Some(json!({ "key": encrypt_for(&public, &org_key.to_bytes()).unwrap().to_string() })),
+        )
+        .unwrap();
+
+    // The owner's items, one in each shared folder.
+    let vault = open(&server, &mut session);
+    for (name, password, folder) in [
+        ("Office Wi-Fi", "not-a-real-password-it", &it),
+        ("Project wiki", "not-a-real-password-wiki", &projects),
+    ] {
+        let draft = ItemDraft {
+            name: name.into(),
+            password: secret(password),
+            organization_id: Some(org_id.clone()),
+            ..ItemDraft::default()
+        };
+        server
+            .save_item(
+                &mut session,
+                None,
+                vault.encrypt_item(&draft, None).unwrap(),
+                std::slice::from_ref(folder),
+            )
+            .unwrap();
+    }
+
+    let mut app = signed_in_app(&url, &member);
+    let vault = app.vault().unwrap();
+    let find = |name: &str| vault.items.iter().find(|i| i.name == name).unwrap();
+    let wifi = find("Office Wi-Fi");
+    let wiki = find("Project wiki");
+    let (wifi_id, wiki_id) = (wifi.id.clone(), wiki.id.clone());
+    let hidden = vault.grid(wifi);
+    assert!(!hidden.see_passwords && !hidden.edit && !hidden.delete);
+    assert!(hidden.view_history);
+    let editable = vault.grid(wiki);
+    assert!(editable.see_passwords && editable.edit && editable.delete);
+    assert!(!vault.collection_grids[&it].create);
+    assert!(vault.collection_grids[&projects].create);
+    // "Projects/Web" has no "Projects" to sit in: it stays whole, at the top.
+    let collections: Vec<(String, String)> = vault
+        .collections
+        .iter()
+        .map(|(id, name)| (id.clone(), name.clone()))
+        .collect();
+    let nested = passbundle_core::places::nest(&collections);
+    assert!(nested.iter().all(|n| n.depth == 0));
+
+    // Its secrets aren't copied, and it isn't edited.
+    assert!(matches!(
+        app.copy(&wifi_id, "password"),
+        Err(Error::Refused(_))
+    ));
+    let draft = ItemDraft::of(app.vault().unwrap().item(&wifi_id).unwrap());
+    assert!(app
+        .save(Some(&wifi_id), &draft, std::slice::from_ref(&it))
+        .is_err());
+
+    // The wiki is edited; moving it into IT, where the member can't add
+    // items, is refused, and it stays in Projects/Web.
+    let mut draft = ItemDraft::of(app.vault().unwrap().item(&wiki_id).unwrap());
+    draft.name = "Project wiki (team)".into();
+    let moved = app.save(Some(&wiki_id), &draft, std::slice::from_ref(&it));
+    assert!(moved.is_err(), "{moved:?}");
+    let wiki = app.vault().unwrap().item(&wiki_id).unwrap();
+    assert_eq!(wiki.name, "Project wiki (team)");
+    assert_eq!(wiki.collection_ids, std::slice::from_ref(&projects));
+
+    // The owner moves it, and it goes.
+    let mut owner_app = signed_in_app(&url, &owner);
+    let draft = ItemDraft::of(owner_app.vault().unwrap().item(&wiki_id).unwrap());
+    owner_app
+        .save(Some(&wiki_id), &draft, &[it.clone(), projects.clone()])
+        .unwrap();
+    let mut held = owner_app
+        .vault()
+        .unwrap()
+        .item(&wiki_id)
+        .unwrap()
+        .collection_ids
+        .clone();
+    held.sort();
+    let mut both = vec![it.clone(), projects.clone()];
+    both.sort();
+    assert_eq!(held, both);
 }

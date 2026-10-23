@@ -221,11 +221,78 @@ class ItemKind extends Jewel {
     Color(0xFF4A5266),
   );
 
+  /// Upstream's newer kinds, which the web vault makes where the server
+  /// offers them: emerald for a bank account, an identity's turquoise for
+  /// the others.
+  static const bankAccount = ItemKind(
+    'bankAccount',
+    'Bank account',
+    'Bank accounts',
+    Glyphs.bank,
+    Color(0xFF0E7A47),
+    Color(0xFF128752),
+  );
+
+  static const driversLicense = ItemKind(
+    'driversLicense',
+    'Driver\'s license',
+    'Driver\'s licenses',
+    Glyphs.identity,
+    Color(0xFF08788A),
+    Color(0xFF0A8599),
+  );
+
+  static const passport = ItemKind(
+    'passport',
+    'Passport',
+    'Passports',
+    Glyphs.identity,
+    Color(0xFF08788A),
+    Color(0xFF0A8599),
+  );
+
   /// In the order the vault lists them.
-  static const all = [login, card, identity, note, sshKey];
+  static const all = [
+    login,
+    card,
+    identity,
+    note,
+    sshKey,
+    bankAccount,
+    driversLicense,
+    passport,
+  ];
 
   static ItemKind of(String kind) =>
       all.where((k) => k.kind == kind).firstOrNull ?? login;
+}
+
+/// The web vault's categories (passbundle-clients, categories.ts): each kind
+/// of item's look, and the templates that bring their own (Wi-Fi
+/// aquamarine, servers garnet, licenses ruby), as the core names them
+/// (core/src/templates.rs). An item's tile shows its category's jewel.
+abstract final class Categories {
+  static const _looks = <String, Jewel>{
+    'login': ItemKind.login,
+    'note': ItemKind.note,
+    'card': ItemKind.card,
+    'identity': ItemKind.identity,
+    'sshKey': ItemKind.sshKey,
+    'bank': ItemKind.bankAccount,
+    // Aquamarine.
+    'wifi': Jewel(Glyphs.wifi, Color(0xFF1C7FB8), Color(0xFF1F86C2)),
+    // Garnet.
+    'server': Jewel(Glyphs.server, Color(0xFFA8291F), Color(0xFFB83328)),
+    // Ruby.
+    'license': Jewel(Glyphs.license, Color(0xFFB01E54), Color(0xFFC0275F)),
+    'apiKey': Jewel(Glyphs.key, Color(0xFF353B4A), Color(0xFF4A5266)),
+    'domain': Jewel(Glyphs.globe, Color(0xFF1C7FB8), Color(0xFF1F86C2)),
+    'email': Jewel(Glyphs.envelope, Color(0xFF2448B8), Color(0xFF2E55C9)),
+    'certificate': Jewel(Glyphs.badge, Color(0xFFB01E54), Color(0xFFC0275F)),
+  };
+
+  /// A category's jewel; a note's for one the app doesn't know.
+  static Jewel of(String? category) => _looks[category] ?? ItemKind.note;
 }
 
 ThemeData passBundleTheme(Brightness brightness) {

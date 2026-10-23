@@ -114,12 +114,13 @@ fn editing_keeps_the_item_key_reprompt_passkeys_other_fields_and_history() {
     let item = vault.item(&id).unwrap();
     assert_eq!(item.kept.reprompt, 1);
 
-    // The editor edits the text and hidden fields only. A new password, and
-    // the hidden "API key" field removed.
+    // The editor edits the text, hidden, and yes-or-no fields, not linked
+    // ones. A new password, and the hidden "API key" field removed.
     let mut draft = ItemDraft::of(item);
-    assert_eq!(draft.fields.len(), 1);
+    assert_eq!(draft.fields.len(), 2);
+    assert!(draft.fields[1].boolean && draft.fields[1].value.as_str() == "true");
     draft.password = Some("a-new-password".to_owned().into());
-    draft.fields.clear();
+    draft.fields.retain(|f| !f.hidden);
     let body = vault.encrypt_item(&draft, Some(item)).unwrap();
     assert_eq!(body["reprompt"], 1, "still asks for the master password");
     assert_eq!(body["key"], item_key_as_sent, "keeps its own key");

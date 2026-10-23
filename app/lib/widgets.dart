@@ -131,10 +131,7 @@ class Wordmark extends StatelessWidget {
                 ),
                 TextSpan(
                   text: 'bundle',
-                  style: style(
-                    450,
-                    dark ? const Color(0xFF6FD4B4) : _emerald,
-                  ),
+                  style: style(450, dark ? const Color(0xFF6FD4B4) : _emerald),
                 ),
               ],
             ),
@@ -149,19 +146,34 @@ class Wordmark extends StatelessWidget {
 }
 
 /// An item's tile: a login's first letter on a tint of the login color (a
-/// site's own icon is for later), and for the other kinds their kind's jewel
-/// tile, so a list is never a column of identical keys. The same on a phone,
-/// a computer, and in the web vault.
+/// site's own icon is for later), and everything else, items made from a
+/// template with a look of its own included, its category's jewel tile
+/// (passbundle-clients, item-tile.component.ts), so a list is never a column
+/// of identical keys. The same on a phone, a computer, and in the web vault.
 class Avatar extends StatelessWidget {
   const Avatar({
     super.key,
     required this.name,
     required this.kind,
+    this.category,
     this.size = 36,
   });
 
+  /// Its summary from the core (`name`, `kind`, `category`), as lists have it.
+  Avatar.of(Map<String, dynamic> item, {Key? key, double size = 36})
+    : this(
+        key: key,
+        name: item['name'] as String,
+        kind: item['kind'] as String,
+        category: item['category'] as String?,
+        size: size,
+      );
+
   final String name;
   final String kind;
+
+  /// Its category (core/src/templates.rs), its kind's when null.
+  final String? category;
   final double size;
 
   /// The first letter or digit of a name, or nothing when it has none.
@@ -176,8 +188,12 @@ class Avatar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    if (kind != 'login') {
-      return JewelTile(jewel: ItemKind.of(kind), size: size);
+    final category = this.category ?? (kind == 'login' ? 'login' : null);
+    if (category != 'login') {
+      return JewelTile(
+        jewel: category == null ? ItemKind.of(kind) : Categories.of(category),
+        size: size,
+      );
     }
     final dark = Theme.of(context).brightness == Brightness.dark;
     return Container(

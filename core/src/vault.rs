@@ -56,6 +56,110 @@ pub struct CollectionData {
     pub id: String,
     pub organization_id: String,
     pub name: String,
+    /// Upstream's three fields on the person's grant, the closest preset
+    /// of their grid (`keykeeper`), for a server that sends no grid.
+    #[serde(default)]
+    pub read_only: Option<bool>,
+    #[serde(default)]
+    pub hide_passwords: Option<bool>,
+    #[serde(default)]
+    pub manage: Option<bool>,
+    /// What the person can do in this shared folder (docs/core.md, "Folders
+    /// and permissions"), as PassBundle's server sends it.
+    #[serde(default)]
+    pub keykeeper: Option<Grid>,
+}
+
+/// What someone can do in a shared folder, or with an item: PassBundle's
+/// grid of capabilities (passbundle-server's keykeeper_folder_permissions.rs,
+/// passbundle-clients' folder-permissions.ts). Having the folder at all is
+/// "see items". The server enforces creating, editing, deleting, managing,
+/// and viewing history; the apps keep to seeing passwords and sharing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Grid {
+    pub see_passwords: bool,
+    pub create: bool,
+    pub edit: bool,
+    pub delete: bool,
+    pub export: bool,
+    pub share: bool,
+    pub print: bool,
+    pub view_history: bool,
+    pub manage: bool,
+}
+
+impl Grid {
+    /// Everything: the person's own items.
+    pub const ALL: Grid = Grid {
+        see_passwords: true,
+        create: true,
+        edit: true,
+        delete: true,
+        export: true,
+        share: true,
+        print: true,
+        view_history: true,
+        manage: true,
+    };
+
+    /// The preset upstream's three fields name, as the server reads a grant
+    /// saved without a grid.
+    pub fn preset(read_only: bool, hide_passwords: bool, manage: bool) -> Grid {
+        if manage {
+            return Grid::ALL;
+        }
+        let edit = !read_only;
+        let see_passwords = !hide_passwords;
+        Grid {
+            see_passwords,
+            create: edit,
+            edit,
+            delete: edit,
+            export: false,
+            share: edit && see_passwords,
+            print: see_passwords,
+            view_history: true,
+            manage: false,
+        }
+    }
+
+    /// For each capability, the more open of the two: an item in several
+    /// shared folders, as the server decides.
+    pub fn or(self, other: Grid) -> Grid {
+        Grid {
+            see_passwords: self.see_passwords || other.see_passwords,
+            create: self.create || other.create,
+            edit: self.edit || other.edit,
+            delete: self.delete || other.delete,
+            export: self.export || other.export,
+            share: self.share || other.share,
+            print: self.print || other.print,
+            view_history: self.view_history || other.view_history,
+            manage: self.manage || other.manage,
+        }
+    }
+}
+
+impl CollectionData {
+    /// The person's grid here: the server's, or the preset of upstream's fields.
+    pub fn grid(&self) -> Grid {
+        self.keykeeper.unwrap_or_else(|| {
+            Grid::preset(
+                self.read_only.unwrap_or(false),
+                self.hide_passwords.unwrap_or(false),
+                self.manage.unwrap_or(false),
+            )
+        })
+    }
+}
+
+/// What an item's upstream fields say the person may do with it, as the
+/// server works them out from their shared folders.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct CipherPermissions {
+    pub delete: Option<bool>,
+    pub restore: Option<bool>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -77,6 +181,13 @@ pub struct CipherData {
     #[serde(default)]
     pub collection_ids: Vec<String>,
     pub revision_date: Option<String>,
+    pub creation_date: Option<String>,
+    /// The person may change it (upstream's `edit`), see its passwords
+    /// (`viewPassword`), and move it to the trash (`permissions.delete`);
+    /// all yes when the server doesn't say.
+    pub edit: Option<bool>,
+    pub view_password: Option<bool>,
+    pub permissions: Option<CipherPermissions>,
     // What an edit keeps as the server sent it (Kept).
     pub reprompt: Option<u8>,
     pub password_history: Option<serde_json::Value>,
@@ -84,6 +195,10 @@ pub struct CipherData {
     pub ssh_key: Option<SshKeyData>,
     pub card: Option<CardData>,
     pub identity: Option<IdentityData>,
+    /// Upstream's newer kinds (6, 7, 8), as sent: shown, not edited.
+    pub bank_account: Option<serde_json::Value>,
+    pub drivers_license: Option<serde_json::Value>,
+    pub passport: Option<serde_json::Value>,
     #[serde(default)]
     pub attachments: Option<Vec<AttachmentData>>,
 }
@@ -187,6 +302,11 @@ pub enum ItemKind {
     Card,
     Identity,
     SshKey,
+    /// Upstream's newer kinds, which the web vault makes where the server
+    /// offers them: the apps show them.
+    BankAccount,
+    DriversLicense,
+    Passport,
     Other(u8),
 }
 
@@ -198,17 +318,76 @@ impl From<u8> for ItemKind {
             3 => ItemKind::Card,
             4 => ItemKind::Identity,
             5 => ItemKind::SshKey,
+            6 => ItemKind::BankAccount,
+            7 => ItemKind::DriversLicense,
+            8 => ItemKind::Passport,
             other => ItemKind::Other(other),
         }
     }
 }
 
-/// A custom field. Hidden ones are secrets.
+/// A custom field. Hidden ones are secrets; yes-or-no ones hold "true" or
+/// "false".
 pub struct Field {
     pub name: String,
     pub value: Zeroizing<String>,
     pub hidden: bool,
+    pub boolean: bool,
 }
+
+/// One of a bank account's, a driver's license's, or a passport's values
+/// (upstream's newer kinds): what the view calls it, and whether it's a
+/// secret, shown only when revealed, like a password.
+pub struct Detail {
+    /// Upstream's name for it, as `kind.property` ("bankAccount.iban").
+    pub key: String,
+    pub label: &'static str,
+    pub value: Zeroizing<String>,
+    pub secret: bool,
+}
+
+/// The values of upstream's newer kinds, in the order the web vault shows
+/// them (passbundle-clients, item-versions.ts): (property, label, secret).
+pub const BANK_ACCOUNT_DETAILS: [(&str, &str, bool); 10] = [
+    ("bankName", "Bank name", false),
+    ("nameOnAccount", "Name on account", false),
+    ("accountType", "Account type", false),
+    ("accountNumber", "Account number", true),
+    ("routingNumber", "Routing number", false),
+    ("branchNumber", "Branch number", false),
+    ("pin", "PIN", true),
+    ("swiftCode", "SWIFT code", true),
+    ("iban", "IBAN", true),
+    ("bankContactPhone", "Bank's phone", false),
+];
+pub const DRIVERS_LICENSE_DETAILS: [(&str, &str, bool); 11] = [
+    ("firstName", "First name", false),
+    ("middleName", "Middle name", false),
+    ("lastName", "Last name", false),
+    ("dateOfBirth", "Date of birth", false),
+    ("licenseNumber", "License number", true),
+    ("issuingCountry", "Issuing country", false),
+    ("issuingState", "Issuing state", false),
+    ("issueDate", "Issue date", false),
+    ("expirationDate", "Expiration date", false),
+    ("issuingAuthority", "Issuing authority", false),
+    ("licenseClass", "License class", false),
+];
+pub const PASSPORT_DETAILS: [(&str, &str, bool); 13] = [
+    ("givenName", "First name", false),
+    ("surname", "Last name", false),
+    ("dateOfBirth", "Date of birth", false),
+    ("sex", "Sex", false),
+    ("birthPlace", "Place of birth", false),
+    ("nationality", "Nationality", false),
+    ("issuingCountry", "Issuing country", false),
+    ("passportNumber", "Passport number", true),
+    ("passportType", "Passport type", false),
+    ("nationalIdentificationNumber", "National ID number", true),
+    ("issuingAuthority", "Issuing authority", false),
+    ("issueDate", "Issue date", false),
+    ("expirationDate", "Expiration date", false),
+];
 
 /// Our own data on an item, in custom fields named "keykeeper.<something>":
 /// fill rules, an expiration date, a template marker (DESIGN.md, "Choosing
@@ -224,10 +403,22 @@ impl Field {
         self.name.starts_with(RESERVED_FIELD_PREFIX)
     }
 
-    /// Whether the app's editor edits it: a named text or hidden field of
-    /// the person's own (`kind`, upstream's field type, from `Kept`).
+    /// Whether the app's editor edits it: a named text, hidden, or yes-or-no
+    /// field of the person's own (`kind`, upstream's field type, from
+    /// `Kept`). Linked fields, nameless ones, and our own data stay as they are.
     pub fn edited_by_the_app(&self, kind: u8) -> bool {
-        kind <= 1 && !self.reserved() && !self.name.is_empty()
+        kind <= 2 && !self.reserved() && !self.name.is_empty()
+    }
+
+    /// Upstream's field type: 0 text, 1 hidden, 2 yes or no.
+    pub fn kind(&self) -> u8 {
+        if self.hidden {
+            1
+        } else if self.boolean {
+            2
+        } else {
+            0
+        }
     }
 }
 
@@ -253,6 +444,13 @@ pub struct Item {
     pub fields: Vec<Field>,
     /// The server's revision, which an edit names so it can't overwrite a newer one.
     pub revision_date: Option<String>,
+    /// When it was made, as the server says (ISO 8601).
+    pub creation_date: Option<String>,
+    /// What the server lets the person do with it (upstream's fields; see
+    /// `Vault::grid`): change it, see its secrets, and move it to the trash.
+    pub editable: bool,
+    pub view_password: bool,
+    pub deletable: bool,
     /// A card's details, for a card.
     pub card: Option<Card>,
     /// An identity's details, for an identity.
@@ -263,6 +461,8 @@ pub struct Item {
     pub attachments: Vec<Attachment>,
     /// A login's passkey, if it has one (docs/core.md, "Passkeys").
     pub passkey: Option<Passkey>,
+    /// A bank account's, driver's license's, or passport's values.
+    pub details: Vec<Detail>,
     /// What an edit keeps that the app doesn't show or change.
     pub kept: Kept,
 }
@@ -661,6 +861,10 @@ pub struct ItemDraft {
     pub folder_id: Option<String>,
     pub organization_id: Option<String>,
     pub favorite: bool,
+    /// A new item from a template (templates.rs): its id and name, which go
+    /// with the item as the web vault records them. An edit keeps whatever
+    /// template the item came from.
+    pub template: Option<(String, String)>,
 }
 
 impl ItemDraft {
@@ -703,11 +907,13 @@ impl ItemDraft {
                     name: f.name.clone(),
                     value: Zeroizing::new(f.value.as_str().to_owned()),
                     hidden: f.hidden,
+                    boolean: f.boolean,
                 })
                 .collect(),
             folder_id: item.folder_id.clone(),
             organization_id: item.organization_id.clone(),
             favorite: item.favorite,
+            template: None,
         }
     }
 }
@@ -725,6 +931,8 @@ pub struct Vault {
     pub collections: HashMap<String, String>,
     /// Each collection's organization.
     pub collection_orgs: HashMap<String, String>,
+    /// What the person can do in each collection (shared folder).
+    pub collection_grids: HashMap<String, Grid>,
     pub organizations: HashMap<String, String>,
     pub items: Vec<Item>,
     pub damaged: Vec<DamagedItem>,
@@ -832,6 +1040,11 @@ impl Vault {
             .iter()
             .map(|c| (c.id.clone(), c.organization_id.clone()))
             .collect();
+        let collection_grids = sync
+            .collections
+            .iter()
+            .map(|c| (c.id.clone(), c.grid()))
+            .collect();
         let mut items = Vec::new();
         let mut damaged = Vec::new();
         for cipher in &sync.ciphers {
@@ -851,11 +1064,62 @@ impl Vault {
             folders,
             collections,
             collection_orgs,
+            collection_grids,
             organizations,
             items,
             damaged,
             keys,
         })
+    }
+
+    /// What the person may do with an item (docs/core.md, "Folders and
+    /// permissions"): everything with their own; with an organization's, the
+    /// most open of its shared folders they have, as the server decides,
+    /// held to what the server says of the item itself. An organization's
+    /// item in none of the person's shared folders (an admin's view of one
+    /// with no folder) goes by the item's own fields.
+    pub fn grid(&self, item: &Item) -> Grid {
+        if item.organization_id.is_none() {
+            return Grid::ALL;
+        }
+        let folders = self.item_grids(item);
+        let mut grid = folders.iter().copied().reduce(Grid::or).unwrap_or(Grid {
+            see_passwords: item.view_password,
+            create: false,
+            edit: item.editable,
+            delete: item.deletable,
+            export: false,
+            share: item.editable && item.view_password,
+            print: item.view_password,
+            view_history: true,
+            manage: false,
+        });
+        grid.edit &= item.editable;
+        grid.see_passwords &= item.view_password;
+        grid.delete &= item.deletable;
+        grid
+    }
+
+    /// The person's grid in each of an item's shared folders they have.
+    fn item_grids(&self, item: &Item) -> Vec<Grid> {
+        item.collection_ids
+            .iter()
+            .filter_map(|c| self.collection_grids.get(c).copied())
+            .collect()
+    }
+
+    /// Whether the person may clear an item's history, or delete one of its
+    /// versions: as the server decides, view item history and delete in the
+    /// same shared folder (or their own item).
+    pub fn may_clear_history(&self, item: &Item) -> bool {
+        if item.organization_id.is_none() {
+            return true;
+        }
+        let folders = self.item_grids(item);
+        if folders.is_empty() {
+            return item.deletable;
+        }
+        folders.iter().any(|g| g.view_history && g.delete)
     }
 
     /// Encrypts a draft as the server takes it (upstream's cipher request):
@@ -964,11 +1228,21 @@ impl Vault {
                 json!({
                     "name": enc(&f.name),
                     "value": enc(&f.value),
-                    "type": if f.hidden { 1 } else { 0 },
+                    "type": f.kind(),
                     "linkedId": null,
                 })
             })
             .collect();
+        // A new item from a template records it, as the web vault does
+        // (passbundle-clients, templates.ts): a text field after the rest.
+        if let (None, Some((id, name))) = (editing, &draft.template) {
+            fields.push(json!({
+                "name": enc(crate::templates::TEMPLATE_FIELD),
+                "value": enc(&crate::templates::marker(id, name)),
+                "type": 0,
+                "linkedId": null,
+            }));
+        }
         // Yes-or-no and linked fields, and our own data, which the editor
         // doesn't edit, stay, each where it was among the item's fields.
         if let Some(item) = editing {
@@ -1185,6 +1459,7 @@ impl Keyring {
                 name: plain(open_text(&f.name, &key)?).unwrap_or_default(),
                 value: open_text(&f.value, &key)?.unwrap_or_else(|| Zeroizing::new(String::new())),
                 hidden: f.kind == 1,
+                boolean: f.kind == 2,
             });
             field_kinds.push((f.kind, f.linked_id.clone()));
         }
@@ -1255,6 +1530,38 @@ impl Keyring {
             }),
             _ => None,
         };
+        // A bank account's, driver's license's, or passport's values, each
+        // under the item's key; one that doesn't open fails the item, as
+        // any other value does.
+        let mut details = Vec::new();
+        let newer = match ItemKind::from(c.kind) {
+            ItemKind::BankAccount => {
+                Some(("bankAccount", &c.bank_account, &BANK_ACCOUNT_DETAILS[..]))
+            }
+            ItemKind::DriversLicense => Some((
+                "driversLicense",
+                &c.drivers_license,
+                &DRIVERS_LICENSE_DETAILS[..],
+            )),
+            ItemKind::Passport => Some(("passport", &c.passport, &PASSPORT_DETAILS[..])),
+            _ => None,
+        };
+        if let Some((part, Some(values), specs)) = newer {
+            for (property, label, secret) in specs {
+                let raw = values
+                    .get(property)
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned);
+                if let Some(value) = open_text(&raw, &key)?.filter(|v| !v.is_empty()) {
+                    details.push(Detail {
+                        key: format!("{part}.{property}"),
+                        label,
+                        value,
+                        secret: *secret,
+                    });
+                }
+            }
+        }
         let login = c.login.as_ref();
         let passkey = login
             .filter(|_| ItemKind::from(c.kind) == ItemKind::Login)
@@ -1292,11 +1599,16 @@ impl Keyring {
             totp,
             fields,
             revision_date: c.revision_date.clone(),
+            creation_date: c.creation_date.clone(),
+            editable: c.edit != Some(false),
+            view_password: c.view_password != Some(false),
+            deletable: c.permissions.as_ref().and_then(|p| p.delete) != Some(false),
             card,
             identity,
             ssh_key,
             attachments,
             passkey,
+            details,
             kept,
         })
     }
