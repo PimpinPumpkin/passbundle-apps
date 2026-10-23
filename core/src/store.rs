@@ -14,6 +14,7 @@ use crate::autolock::Preferences;
 use crate::error::{Error, Result};
 use crate::generator;
 use crate::kdf::Prelogin;
+use crate::synced_settings;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -116,6 +117,19 @@ impl Store {
         self.write(
             "generator.json",
             &serde_json::to_string_pretty(options).expect("options always serialize"),
+        )
+    }
+
+    /// What the server has of the generator's settings, as far as this
+    /// device knows (synced_settings).
+    pub fn synced_settings(&self) -> Option<synced_settings::Known> {
+        serde_json::from_str(&self.read("generator-synced.json")?).ok()
+    }
+
+    pub fn save_synced_settings(&self, known: &synced_settings::Known) -> Result<()> {
+        self.write(
+            "generator-synced.json",
+            &serde_json::to_string_pretty(known).expect("settings always serialize"),
         )
     }
 

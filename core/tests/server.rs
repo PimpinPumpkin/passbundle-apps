@@ -737,3 +737,66 @@ fn an_account_is_made_in_the_app_and_opens_elsewhere() {
     let _ = std::fs::remove_dir_all(dir);
     let _ = std::fs::remove_dir_all(other_dir);
 }
+
+/// The generator's settings follow the account (core/src/synced_settings.rs):
+/// chosen on one device, they're the choices on another once it signs in;
+/// the server has them only encrypted; and a change on the second comes back
+/// to the first at its next sync.
+#[test]
+fn the_generators_settings_follow_the_account_to_another_device() {
+    use passbundle_core::generator::{Kind, Options};
+
+    let Some(server) = server() else { return };
+    let url = std::env::var("PB_TEST_SERVER").unwrap();
+    let email = new_email("generator");
+    sign_up(&server, &email);
+    let device = || {
+        let dir = std::env::temp_dir().join(format!(
+            "pb-core-generator-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        App::open(Store::new(&dir), Box::new(MemorySecretStore::default()))
+    };
+
+    let mut first = device();
+    first.sign_in(&url, &email, PASSWORD).unwrap();
+    let chosen = Options {
+        kind: Kind::Passphrase,
+        length: 33,
+        symbols: false,
+        words: 9,
+        separator: ".".into(),
+        ..Options::default()
+    };
+    first.generate(&chosen).unwrap();
+    first.sync_settings().unwrap();
+
+    let mut session = sign_in(&server, &email);
+    let saved = server
+        .raw(&mut session, "GET", "/api/keykeeper/settings", None)
+        .unwrap();
+    let data = saved["data"].as_str().unwrap();
+    assert!(data.starts_with("2."), "{data}");
+    assert!(!data.contains("passphrase"));
+
+    let mut second = device();
+    second.sign_in(&url, &email, PASSWORD).unwrap();
+    second.sync().unwrap();
+    let there = second.generator_options();
+    assert_eq!(there.kind, Kind::Passphrase);
+    assert_eq!(there.length, 33);
+    assert!(!there.symbols);
+    assert_eq!(there.words, 9);
+    assert_eq!(there.separator, ".");
+
+    second
+        .generate(&Options {
+            length: 50,
+            ..there
+        })
+        .unwrap();
+    second.sync_settings().unwrap();
+    first.sync().unwrap();
+    assert_eq!(first.generator_options().length, 50);
+    assert_eq!(first.generator_options().words, 9);
+}

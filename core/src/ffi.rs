@@ -430,6 +430,13 @@ pub extern "C" fn pb_sync() -> *mut c_char {
     with_app_waiting(|app| done(app.sync()))
 }
 
+/// Saves the generator's settings to the server now, or takes its newer ones
+/// (synced_settings): the apps call it when the generator closes.
+#[no_mangle]
+pub extern "C" fn pb_sync_settings() -> *mut c_char {
+    with_app_waiting(|app| done(app.sync_settings()))
+}
+
 #[no_mangle]
 pub extern "C" fn pb_lock() -> *mut c_char {
     with_app(|app| {

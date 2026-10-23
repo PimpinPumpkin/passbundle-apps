@@ -520,6 +520,24 @@ impl Server {
         Ok((Sync::from_json(&text)?, text))
     }
 
+    /// The account's settings document (synced_settings), still encrypted,
+    /// or none saved yet.
+    pub fn settings(&self, session: &mut Session) -> Result<Option<String>> {
+        let body = self.call(session, "GET", "/api/keykeeper/settings", None)?;
+        Ok(body["data"].as_str().map(str::to_owned))
+    }
+
+    /// Saves the account's settings document, already encrypted.
+    pub fn save_settings(&self, session: &mut Session, data: &str) -> Result<()> {
+        self.call(
+            session,
+            "PUT",
+            "/api/keykeeper/settings",
+            Some(json!({ "data": data })),
+        )
+        .map(|_| ())
+    }
+
     /// Saves an item `Vault::encrypt_item` made: new when it has no id.
     pub fn save_item(
         &self,

@@ -1,18 +1,25 @@
 // The generator (core/src/generator.rs): a password of random characters or
 // a passphrase of random words, made by the core with the choices the person
-// made last time on this device. What it makes goes into the editor's field,
-// so the person sees it.
+// made last time, on this device or another (core/src/synced_settings.rs).
+// What it makes goes into the editor's field, so the person sees it.
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import 'core.dart';
 
 /// Opens the generator; resolves to the password or passphrase to use, or
 /// null if cancelled.
-Future<String?> openGenerator(BuildContext context, Core core) =>
-    showDialog<String>(
-      context: context,
-      builder: (_) => GeneratorDialog(core: core),
-    );
+Future<String?> openGenerator(BuildContext context, Core core) async {
+  final made = await showDialog<String>(
+    context: context,
+    builder: (_) => GeneratorDialog(core: core),
+  );
+  // The choices it made with go to the person's other devices too. Not
+  // waited for: offline, they go at the next sync.
+  unawaited(Core.syncSettings());
+  return made;
+}
 
 /// The character kinds a password draws from, with what each shows.
 const _kinds = {

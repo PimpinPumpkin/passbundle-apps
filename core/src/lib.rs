@@ -20,6 +20,7 @@ pub mod secrets;
 pub mod server;
 pub mod signup;
 pub mod store;
+pub mod synced_settings;
 pub mod totp;
 pub mod vault;
 
