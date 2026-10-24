@@ -9,6 +9,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:passbundle/core.dart';
+import 'package:passbundle/icons.dart';
 
 /// The sample vault's master password (the core's test vectors).
 const samplePassword = 'correct horse battery staple 1';
@@ -72,9 +73,12 @@ String openSample({
 
 /// For screenshots: the fuller sample vault core/examples/showcase.rs
 /// writes (folders in folders, shared folders, templates), from the folder
-/// PB_SHOWCASE names; the sample vault without it. The same account and
-/// master password either way.
+/// PB_SHOWCASE names, with the websites' icons in its `icons` folder, if
+/// any (`<host>.png`), which the core then answers with as if its server
+/// had sent them ([showcaseIcons]); the sample vault without it. The same
+/// account and master password either way.
 String openShowcase() {
+  showcaseIcons.clear();
   final from = Platform.environment['PB_SHOWCASE'];
   if (from == null) return openSample();
   final dir = Directory.systemTemp.createTempSync('pb-app-test-').path;
@@ -83,8 +87,23 @@ String openShowcase() {
   }
   Core().openAt(dir);
   machineDoesntLock(false);
+  final icons = Directory('$from/icons');
+  if (icons.existsSync()) {
+    final found = {
+      for (final f in icons.listSync().whereType<File>())
+        if (f.path.endsWith('.png'))
+          f.uri.pathSegments.last.replaceFirst(RegExp(r'\.png$'), ''): f
+              .readAsBytesSync(),
+    };
+    Core().testIcons(found);
+    showcaseIcons.addAll(found.keys);
+    showIcons(true);
+  }
   return dir;
 }
+
+/// The hosts whose icons [openShowcase] gave the core.
+final showcaseIcons = <String>[];
 
 /// The core reads the real computer's screen: on a test machine whose screen
 /// is locked (no one at it), the vault would lock in the middle of a test. So
@@ -95,6 +114,18 @@ void machineDoesntLock(bool lockOnSleep) {
     'lockOnSleep': lockOnSleep,
   });
   if (!answer.ok) throw StateError('${answer.error}');
+  // And no websites' icons, which would ask the sample's server (which
+  // isn't there): tests that want them turn them on, and say what the
+  // server would send (Core.testIcons).
+  Core().testIcons(const {});
+  showIcons(false);
+}
+
+/// Websites' icons on or off, as Settings turns them.
+void showIcons(bool on) {
+  final answer = Core().setAppearance({'showIcons': on});
+  if (!answer.ok) throw StateError('${answer.error}');
+  siteIcons.turn(on);
 }
 
 /// Pumps until something shows up, giving slow core calls real time.
@@ -140,6 +171,9 @@ class PhoneStandIn {
         case 'biometricRemove':
           status = 'notSetUp';
           return {'ok': true};
+        case 'copy':
+          copied.add(Map<String, dynamic>.from(call.arguments as Map));
+          return true;
         default:
           return null;
       }
@@ -154,4 +188,7 @@ class PhoneStandIn {
 
   /// What the person does at each biometric prompt: true gives it.
   final biometricAnswers = <bool>[];
+
+  /// What was copied, as the phone's code was asked: `{id, what}`.
+  final copied = <Map<String, dynamic>>[];
 }

@@ -1,10 +1,15 @@
 // The app against the real core (PB_CORE_LIB): signing in with nothing kept,
 // unlocking the sample vault kept on this device, browsing, search, revealing,
 // the editor, and locking.
+import 'dart:io';
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:passbundle/core.dart';
 import 'package:passbundle/editor.dart';
+import 'package:passbundle/icons.dart';
 import 'package:passbundle/main.dart';
 import 'package:passbundle/new_item.dart';
 import 'package:passbundle/vault.dart';
@@ -209,9 +214,8 @@ void main() {
       // The generator: a password, then a passphrase, which it remembers.
       await tester.tap(find.byTooltip('Generate a password'));
       await tester.pumpAndSettle();
-      String generated() => tester
-          .widget<SelectableText>(find.byKey(const Key('generated')))
-          .data!;
+      String generated() =>
+          tester.widget<Text>(find.byKey(const Key('generated'))).data!;
       expect(generated(), hasLength(20));
       await tester.tap(find.text('0-9'));
       await tester.pumpAndSettle();
@@ -312,7 +316,7 @@ void main() {
       );
       await tester.pumpAndSettle();
       final made = tester
-          .widget<SelectableText>(find.byKey(const Key('generated')))
+          .widget<Text>(find.byKey(const Key('generated')))
           .data!;
       expect(made.split(' '), hasLength(8));
       expect(made, matches(RegExp(r'^([A-Z][a-z-]+ ){7}[A-Z][a-z-]+$')));
@@ -599,8 +603,9 @@ void main() {
   Future<void> unlockOnComputer(
     WidgetTester tester, {
     Map<String, Map<String, dynamic>> changed = const {},
+    Size size = const Size(1280, 800),
   }) async {
-    setSize(tester, const Size(1280, 800));
+    setSize(tester, size);
     openSample(changed: changed);
     await tester.pumpWidget(const PassBundleApp());
     await tester.enterText(find.byType(TextField), samplePassword);
@@ -619,7 +624,8 @@ void main() {
   testWidgets(
     'the menu\'s folders are Personal\'s, then each organization\'s shared folders, each with its count, and each shows its items',
     (tester) async {
-      await unlockOnComputer(tester);
+      // Tall enough for the whole menu.
+      await unlockOnComputer(tester, size: const Size(1280, 1100));
       final menu = find.byType(Sidebar);
       Finder entry(String label) =>
           find.descendant(of: menu, matching: find.text(label));
@@ -639,6 +645,8 @@ void main() {
       );
 
       Future<void> pick(Finder f) async {
+        await tester.ensureVisible(f);
+        await tester.pumpAndSettle();
         await tester.tap(f);
         await tester.pump();
       }
@@ -798,6 +806,168 @@ void main() {
     },
   );
 
+  testWidgets(
+    'an item favorites from its page, a login says how strong its password is and when it changed, opens its website, and has its version history',
+    (tester) async {
+      await unlockOnComputer(tester);
+      await tester.tap(find.text('Example Mail'));
+      await tester.pump();
+      expect(find.textContaining('Password strong'), findsOneWidget);
+      expect(
+        find.textContaining(RegExp(r'^Changed \w+ \d+, \d{4}')),
+        findsOneWidget,
+      );
+      expect(find.byTooltip('Open website'), findsOneWidget);
+      // A favorite: the star takes it off, which needs the server.
+      await tester.tap(find.byTooltip('Remove from favorites'));
+      await pumpUntil(
+        tester,
+        find.text('You\'ve been signed out. Sign in again.'),
+      );
+      await tester.tap(find.text('Backup service'));
+      await tester.pump();
+      expect(find.byTooltip('Add to favorites'), findsOneWidget);
+      // Its history is the server's to send.
+      await tester.ensureVisible(find.text('Version history'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Version history'));
+      await pumpUntil(
+        tester,
+        find.textContaining('Sign in again to see its history'),
+      );
+      await tester.tap(find.byTooltip('Close'));
+      await tester.pumpAndSettle();
+    },
+  );
+
+  testWidgets('Health lists what to fix, and the menu has the generator', (
+    tester,
+  ) async {
+    await unlockOnComputer(tester, size: const Size(1280, 1100));
+    final menu = find.byType(Sidebar);
+    await tester.tap(find.descendant(of: menu, matching: find.text('Health')));
+    await tester.pump();
+    // The sample's passwords are strong, each used once.
+    expect(find.text('Nothing here'), findsOneWidget);
+    await tester.tap(
+      find.descendant(of: menu, matching: find.text('Generator')),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Copy password'), findsOneWidget);
+    await tester.tap(find.text('Copy password'));
+    await tester.pump();
+    // Copied through the core, which clears it in 30 seconds; a computer
+    // with no clipboard (CI's Linux, with no display) says it couldn't.
+    expect(
+      find.textContaining(
+        Platform.isLinux
+            ? RegExp('clears in 30 seconds|clipboard')
+            : RegExp('It clears in 30 seconds'),
+      ),
+      findsWidgets,
+    );
+    await tester.tap(find.byTooltip('Close'));
+    await tester.pumpAndSettle();
+  });
+
+  /// A PNG whose header says it's [side] pixels a side, with no picture in
+  /// it: enough for a header to be read, and no more.
+  Uint8List pngClaiming(int side) {
+    int crc(List<int> bytes) {
+      var c = 0xFFFFFFFF;
+      for (final b in bytes) {
+        c ^= b;
+        for (var k = 0; k < 8; k++) {
+          c = (c & 1) != 0 ? 0xEDB88320 ^ (c >> 1) : c >> 1;
+        }
+      }
+      return c ^ 0xFFFFFFFF;
+    }
+
+    List<int> be32(int v) => [
+      v >> 24 & 255,
+      v >> 16 & 255,
+      v >> 8 & 255,
+      v & 255,
+    ];
+    List<int> chunk(String kind, List<int> data) {
+      final body = [...kind.codeUnits, ...data];
+      return [...be32(data.length), ...body, ...be32(crc(body))];
+    }
+
+    return Uint8List.fromList([
+      0x89,
+      0x50,
+      0x4E,
+      0x47,
+      0x0D,
+      0x0A,
+      0x1A,
+      0x0A,
+      ...chunk('IHDR', [...be32(side), ...be32(side), 1, 0, 0, 0, 0]),
+      ...chunk('IDAT', ZLibEncoder().convert([0])),
+      ...chunk('IEND', const []),
+    ]);
+  }
+
+  testWidgets(
+    'an icon is drawn no larger than a tile needs, and one that says it\'s larger than an icon isn\'t drawn',
+    (tester) async {
+      final icon = File('linux/icons/com.passbundle.app.png').readAsBytesSync();
+      final drawn = await tester.runAsync(() => SiteIcons.draw(icon));
+      expect(drawn!.width, SiteIcons.drawn);
+      // 12000 by 12000 pixels would take 576 MB drawn.
+      expect(
+        await tester.runAsync(() => SiteIcons.draw(pngClaiming(12000))),
+        isNull,
+      );
+      expect(
+        await tester.runAsync(() => SiteIcons.draw(pngClaiming(257))),
+        isNull,
+      );
+      final svg = Uint8List.fromList(
+        '<svg xmlns="http://www.w3.org/2000/svg"/>'.codeUnits,
+      );
+      expect(await tester.runAsync(() => SiteIcons.draw(svg)), isNull);
+    },
+  );
+
+  testWidgets(
+    'a login shows its website\'s icon, kept in memory only, until Settings turns icons off',
+    (tester) async {
+      setSize(tester, const Size(1280, 800));
+      final dir = openSample();
+      // What the server's icon service sends (core/src/icons.rs): Example
+      // Mail's icon, and, for Backup service, one far larger than an icon.
+      Core().testIcons({
+        'mail.example.test': File('linux/icons/com.passbundle.app.png')
+            .readAsBytesSync(),
+        'backup.example.test': pngClaiming(12000),
+      });
+      showIcons(true);
+      await tester.pumpWidget(const PassBundleApp());
+      await tester.enterText(find.byType(TextField), samplePassword);
+      await tester.tap(find.text('Unlock'));
+      await pumpUntil(tester, find.text('Example Mail'));
+      await pumpUntil(tester, find.byType(RawImage));
+      // Example Mail's, drawn in place of its letter; Backup service keeps
+      // its letter.
+      expect(find.byType(RawImage), findsOneWidget);
+      expect(find.text('E'), findsNothing);
+      expect(find.text('B'), findsOneWidget);
+      await tester.tap(find.byTooltip('Settings'));
+      await tester.pump();
+      await pumpUntil(tester, find.byKey(const ValueKey('show-icons')));
+      await tester.tap(find.byKey(const ValueKey('show-icons')));
+      await tester.pump();
+      await tester.tap(find.text('Close'));
+      await tester.pumpAndSettle();
+      expect(find.byType(RawImage), findsNothing);
+      // Nothing of them was written to the device.
+      expect(Directory('$dir/icons').existsSync(), isFalse);
+    },
+  );
+
   Future<void> unlockOnPhone(WidgetTester tester, Size size) async {
     setSize(tester, size);
     openSample();
@@ -921,6 +1091,30 @@ void main() {
     },
   );
 
+  testWidgets(
+    'on a phone, the Generator is a tab, and its Copy goes through the phone\'s own code',
+    (tester) async {
+      final phone = PhoneStandIn(tester, status: 'setUp');
+      await unlockOnPhone(tester, const Size(390, 844));
+      await tester.tap(find.byTooltip('Generator'));
+      await tester.pumpAndSettle();
+      final made = tester
+          .widget<Text>(find.byKey(const Key('generated')))
+          .data!;
+      expect(made, hasLength(20));
+      await tester.tap(find.text('Copy password'));
+      await tester.pump();
+      // The value never passes through here: the phone's code takes it from the core.
+      expect(phone.copied, [
+        {'id': '', 'what': 'generated'},
+      ]);
+      expect(find.textContaining('It clears in 30 seconds'), findsOneWidget);
+      await tester.tap(find.byTooltip('Items'));
+      await tester.pumpAndSettle();
+      expect(find.text('Logins'), findsOneWidget);
+    },
+  );
+
   // Nothing overflows on a narrow phone with large text: a layout that
   // doesn't fit fails the test.
   for (final size in [const Size(360, 780), const Size(320, 640)]) {
@@ -1018,6 +1212,14 @@ void main() {
         await tester.tap(find.text('Dark'));
         await tester.pumpAndSettle();
         expect(find.text('Dark'), findsOneWidget);
+
+        // The Generator tab, both kinds.
+        await tester.tap(find.byTooltip('Generator'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Passphrase'));
+        await tester.pumpAndSettle();
+        await tester.drag(find.byType(Scrollable).last, const Offset(0, -1000));
+        await tester.pumpAndSettle();
       },
     );
   }

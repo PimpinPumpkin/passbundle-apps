@@ -7,6 +7,7 @@
 import 'package:flutter/material.dart';
 
 import 'core.dart';
+import 'icons.dart';
 import 'theme.dart';
 import 'unlock_offer.dart';
 import 'updates.dart';
@@ -300,10 +301,23 @@ class _SettingsListState extends State<SettingsList> {
             ),
           ],
         ),
-        if (mode != null && onMode != null)
-          SettingsGroup(
-            title: 'Appearance',
-            children: [
+        SettingsGroup(
+          title: 'Appearance',
+          children: [
+            // Each icon tells the server a website the person has a login
+            // for; upstream's apps let them turn that off.
+            SwitchListTile(
+              key: const ValueKey('show-icons'),
+              value: siteIcons.on,
+              onChanged: (on) {
+                final answer = core.setAppearance({'showIcons': on});
+                if (!answer.ok) return;
+                setState(() => siteIcons.turn(on));
+              },
+              title: const Text('Show website icons'),
+              subtitle: const Text('From your server, beside each login'),
+            ),
+            if (mode != null && onMode != null)
               ListTile(
                 title: const Text('Theme'),
                 subtitle: Text(themeName(mode)),
@@ -321,8 +335,8 @@ class _SettingsListState extends State<SettingsList> {
                   onMode(chosen);
                 },
               ),
-            ],
-          ),
+          ],
+        ),
         if (browsers.isNotEmpty)
           SettingsGroup(
             title: 'Browsers you trust for autofill',

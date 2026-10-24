@@ -98,6 +98,23 @@ class MainActivity : FlutterActivity() {
                             Attachments.saveToDownloads(this, id, attachment, name) { answer -> result.success(answer) }
                         }
                     }
+                    // A login's website, in the browser: only http and https.
+                    "openUrl" -> {
+                        val uri = call.argument<String>("url")?.let { android.net.Uri.parse(it) }
+                        val web = uri != null && (uri.scheme == "https" || uri.scheme == "http")
+                        result.success(
+                            web &&
+                                try {
+                                    startActivity(
+                                        android.content.Intent(android.content.Intent.ACTION_VIEW, uri)
+                                            .addCategory(android.content.Intent.CATEGORY_BROWSABLE),
+                                    )
+                                    true
+                                } catch (e: android.content.ActivityNotFoundException) {
+                                    false
+                                },
+                        )
+                    }
                     // Browsers the person trusted for autofill (Browsers.kt), and stopping.
                     "trustedBrowsers" -> result.success(Browsers.trusted(this))
                     "untrustBrowser" -> {

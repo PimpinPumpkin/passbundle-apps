@@ -1256,4 +1256,136 @@ fn a_shared_folders_permissions_hold_in_the_app() {
     let mut both = vec![it.clone(), projects.clone()];
     both.sort();
     assert_eq!(held, both);
+
+    // An earlier version of the Wi-Fi: the member, who can't see its
+    // passwords, gets when it was saved and by whom, and no contents; nor
+    // may they clear its history.
+    let mut draft = ItemDraft::of(owner_app.vault().unwrap().item(&wifi_id).unwrap());
+    draft.password = secret("not-a-real-password-it-2");
+    owner_app.save(Some(&wifi_id), &draft, &[]).unwrap();
+    app.sync().unwrap();
+    let history = app.history(&wifi_id).unwrap();
+    assert!(history.hide_passwords);
+    assert!(!history.versions.is_empty());
+    assert!(history.versions.iter().all(|v| v.item.is_none()));
+    assert!(matches!(
+        app.delete_history(&wifi_id, None),
+        Err(Error::Refused(_))
+    ));
+    // The owner sees the version, with the password it had.
+    let history = owner_app.history(&wifi_id).unwrap();
+    assert!(!history.hide_passwords);
+    let old = history.versions[0].item.as_ref().unwrap();
+    assert_eq!(
+        old.password.as_deref().map(String::as_str),
+        Some("not-a-real-password-it")
+    );
+}
+
+/// Item history (history.rs): an item's earlier versions come back opened,
+/// compared field by field with the item now; restoring one is a normal
+/// edit, which keeps its template and puts the replaced password in the
+/// password history; and clearing it leaves none.
+#[test]
+fn an_items_versions_compare_restore_and_clear() {
+    use passbundle_core::history;
+    use passbundle_core::templates::{self, TEMPLATE_FIELD};
+
+    let Some(server) = server() else { return };
+    let url = std::env::var("PB_TEST_SERVER").unwrap();
+    let email = new_email("history");
+    sign_up(&server, &email);
+    let mut app = signed_in_app(&url, &email);
+
+    // A server's login, from the template, then two edits.
+    let field = |name: &str, value: &str| Field {
+        name: name.into(),
+        value: Zeroizing::new(value.into()),
+        hidden: false,
+        boolean: false,
+    };
+    let draft = ItemDraft {
+        name: "Build server".into(),
+        username: Some("deploy".into()),
+        password: secret("not-a-real-password-v1"),
+        fields: vec![field("Hostname", "10.0.4.12"), field("Port", "22")],
+        template: Some(("server".into(), "Server".into())),
+        ..ItemDraft::default()
+    };
+    app.save(None, &draft, &[]).unwrap();
+    let id = app.vault().unwrap().items[0].id.clone();
+    let mut draft = ItemDraft::of(app.vault().unwrap().item(&id).unwrap());
+    draft.password = secret("not-a-real-password-v2");
+    draft.fields[1].value = Zeroizing::new("2222".into());
+    app.save(Some(&id), &draft, &[]).unwrap();
+    let mut draft = ItemDraft::of(app.vault().unwrap().item(&id).unwrap());
+    draft.name = "Build server (new)".into();
+    draft.password = secret("not-a-real-password-v3");
+    app.save(Some(&id), &draft, &[]).unwrap();
+
+    // Newest first: the second, then the first.
+    let versions: Vec<(String, String)> = app
+        .history(&id)
+        .unwrap()
+        .versions
+        .iter()
+        .map(|v| {
+            let item = v.item.as_ref().unwrap();
+            (v.id.clone(), item.password.as_deref().unwrap().to_string())
+        })
+        .collect();
+    assert_eq!(
+        versions.iter().map(|(_, p)| p.as_str()).collect::<Vec<_>>(),
+        ["not-a-real-password-v2", "not-a-real-password-v1"]
+    );
+    let first = versions[1].0.clone();
+    let vault = app.vault().unwrap();
+    let current = vault.item(&id).unwrap();
+    let history = app.kept_history(&id).unwrap();
+    let old = history.versions[1].item.as_ref().unwrap();
+    let rows = history::rows(old, current, false);
+    let changed: Vec<&str> = rows
+        .iter()
+        .filter(|r| r.changed)
+        .map(|r| r.label.as_str())
+        .collect();
+    assert_eq!(changed, ["Name", "Password", "Port"]);
+    // Secrets stay out until asked for.
+    let password = rows.iter().find(|r| r.label == "Password").unwrap();
+    assert!(password.secret && password.version.is_none());
+    let shown = history::rows(old, current, true);
+    let password = shown.iter().find(|r| r.label == "Password").unwrap();
+    assert_eq!(password.version.as_deref(), Some("not-a-real-password-v1"));
+    assert_eq!(password.current.as_deref(), Some("not-a-real-password-v3"));
+    let opened: Vec<_> = history
+        .versions
+        .iter()
+        .map(|v| v.item.as_ref().unwrap())
+        .collect();
+    assert_eq!(history::distinct(&opened, current), [true, true]);
+
+    // Restored: the first version's contents, as a normal edit.
+    app.restore_version(&id, &first).unwrap();
+    let item = app.vault().unwrap().item(&id).unwrap();
+    assert_eq!(item.name, "Build server");
+    assert_eq!(
+        item.password.as_deref().map(String::as_str),
+        Some("not-a-real-password-v1")
+    );
+    assert_eq!(item.fields[1].value.as_str(), "22");
+    assert_eq!(templates::category(item), "server");
+    assert_eq!(item.fields.last().unwrap().name, TEMPLATE_FIELD);
+    // The password it replaced is first in its password history.
+    let session = sign_in(&server, &email);
+    let opened = passbundle_core::crypto::EncString::parse(
+        item.kept.password_history[0]["password"].as_str().unwrap(),
+    )
+    .unwrap()
+    .decrypt_string(session.user_key())
+    .unwrap();
+    assert_eq!(opened.as_str(), "not-a-real-password-v3");
+
+    // Cleared, for everyone: nothing left.
+    app.delete_history(&id, None).unwrap();
+    assert!(app.history(&id).unwrap().versions.is_empty());
 }

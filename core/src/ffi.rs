@@ -261,6 +261,8 @@ fn summary(vault: &Vault, item: &Item) -> Value {
             .or_else(|| item.uris.first().cloned())
             .unwrap_or_default(),
         "website": item.uris.first(),
+        // The host its tile's icon is for (icons.rs), for a login.
+        "iconHost": (item.kind == ItemKind::Login).then(|| item.uris.first().and_then(|u| crate::icons::host_of(u))).flatten(),
         "favorite": item.favorite,
         "folderId": item.folder_id,
         "folder": item.folder_id.as_ref().and_then(|f| vault.folders.get(f)),
@@ -907,6 +909,19 @@ pub unsafe extern "C" fn pb_item(id: *const c_char) -> *mut c_char {
         view["permissions"] = permissions(vault, item);
         view["created"] = json!(item.creation_date);
         view["revisionDate"] = json!(item.revision_date);
+        view["passwordChanged"] = json!(item.kept.password_revision_date);
+        // How strong its password is (health.rs), for someone who may see it.
+        if let Some(password) = item.password.as_ref().filter(|p| {
+            !p.is_empty() && item.kind == ItemKind::Login && vault.grid(item).see_passwords
+        }) {
+            let hints: Vec<&str> = [item.username.as_deref(), Some(item.name.as_str())]
+                .into_iter()
+                .flatten()
+                .collect();
+            view["strength"] = json!(crate::health::word(crate::health::strength(
+                password, &hints
+            )));
+        }
         if let Some((id, name, category)) = templates::template_of(item) {
             view["template"] = json!({ "id": id, "name": name, "category": category });
         }
@@ -1010,6 +1025,287 @@ pub unsafe extern "C" fn pb_item(id: *const c_char) -> *mut c_char {
                 && vault.grid(item).see_passwords
         );
         view
+    })
+}
+
+/// Favorites an item or not (`favorite` "true" or "false"), then syncs:
+/// `{ok}`, or the words to show.
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_set_favorite(
+    id: *const c_char,
+    favorite: *const c_char,
+) -> *mut c_char {
+    let (id, favorite) = (text(id), text(favorite) == "true");
+    with_app_waiting(|app| done(app.set_favorite(&id, favorite)))
+}
+
+/// How the app looks on this device: `{showIcons}`.
+#[no_mangle]
+pub extern "C" fn pb_appearance() -> *mut c_char {
+    with_app(|app| json!(app.appearance()))
+}
+
+/// Changes how the app looks: `{showIcons}`. Turning icons off forgets the
+/// ones kept.
+///
+/// # Safety
+/// `appearance` is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_set_appearance(appearance: *const c_char) -> *mut c_char {
+    let appearance = serde_json::from_str::<crate::store::Appearance>(&text(appearance));
+    with_app(|app| match appearance {
+        Ok(a) => done(app.set_appearance(a)),
+        Err(_) => failed(Error::Damaged("those choices")),
+    })
+}
+
+/// A website's icon for a login's tile (icons.rs): `{ok, icon}`, the image
+/// in base64, or `{ok, icon: null}` where there's none (or icons are off,
+/// or the vault is locked). From the server's icon service the first time,
+/// away from the app's other calls, then from memory while the vault stays
+/// open; nothing of it is written to the device.
+///
+/// # Safety
+/// `host` is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_icon(host: *const c_char) -> *mut c_char {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let host = text(host);
+    // Only a host name the core would make.
+    if crate::icons::host_of(&format!("https://{host}")).as_deref() != Some(host.as_str()) {
+        return out(json!({ "ok": false, "error": "not a website's host" }));
+    }
+    #[cfg(feature = "test-hooks")]
+    if let Some(icon) = TEST_ICONS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&host)
+    {
+        return out(json!({ "ok": true, "icon": STANDARD.encode(icon) }));
+    }
+    let mut source = None;
+    let mut kept = None;
+    let _ = app_value(|app| {
+        source = app.icon_source();
+        kept = app
+            .kept_icon(&host)
+            .map(|icon| icon.map(|bytes| STANDARD.encode(bytes)));
+        Value::Null
+    });
+    let Some((server, session)) = source else {
+        return out(json!({ "ok": true, "icon": null }));
+    };
+    if let Some(kept) = kept {
+        return out(json!({ "ok": true, "icon": kept }));
+    }
+    out(waiting(|| {
+        let fetched = crate::server::Server::new(&server, crate::server::Device::this_one(""))
+            .and_then(|s| s.icon(&host));
+        match fetched {
+            Ok(icon) => {
+                let encoded = icon.as_deref().map(|bytes| STANDARD.encode(bytes));
+                let _ = app_value(|app| {
+                    app.keep_icon(session, &host, icon);
+                    Value::Null
+                });
+                json!({ "ok": true, "icon": encoded })
+            }
+            Err(e) => failed(e),
+        }
+    }))
+}
+
+/// Websites' icons `pb_icon` answers with instead of asking a server, for
+/// tests (the test-hooks feature): `{"<host>": "<base64>"}`, replacing any
+/// given before; `{}` for none.
+#[cfg(feature = "test-hooks")]
+static TEST_ICONS: std::sync::Mutex<std::collections::BTreeMap<String, Vec<u8>>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// # Safety
+/// `icons` is null or a NUL-terminated UTF-8 string, valid for the call.
+#[cfg(feature = "test-hooks")]
+#[no_mangle]
+pub unsafe extern "C" fn pb_test_icons(icons: *const c_char) -> *mut c_char {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let given: std::collections::BTreeMap<String, String> =
+        serde_json::from_str(&text(icons)).unwrap_or_default();
+    let decoded = given
+        .into_iter()
+        .filter_map(|(host, icon)| Some((host, STANDARD.decode(icon).ok()?)))
+        .collect();
+    *TEST_ICONS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = decoded;
+    out(json!({ "ok": true }))
+}
+
+/// The logins with something to fix (health.rs): `{ok, items: [{id, weak,
+/// reused, unsecured}]}`. Judged away from the app's other calls.
+#[no_mangle]
+pub extern "C" fn pb_health() -> *mut c_char {
+    let mut logins = None;
+    let _ = app_value(|app| {
+        logins = app.vault().map(crate::health::logins);
+        Value::Null
+    });
+    let Some(logins) = logins else {
+        return out(json!({ "ok": true, "items": [] }));
+    };
+    out(waiting(
+        || json!({ "ok": true, "items": crate::health::report(&logins) }),
+    ))
+}
+
+/// An item's past versions (history.rs), from the server: `{ok,
+/// hidePasswords, canRestore, canClear, unreadable, versions: [{id,
+/// revisionDate, savedBy, opens, restorable, changes, rows}]}`, newest
+/// first, without the versions that look the same as the one before
+/// (`history::distinct`). A secret's values in `rows` are null
+/// (`pb_item_version` shows them).
+///
+/// # Safety
+/// `id` is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_history(id: *const c_char) -> *mut c_char {
+    let id = text(id);
+    with_app_waiting(|app| match app.history(&id) {
+        Ok(_) => history_view(app, &id),
+        Err(e) => failed(e),
+    })
+}
+
+fn history_view(app: &App, id: &str) -> Value {
+    let (Some(vault), Some(history)) = (app.vault(), app.kept_history(id)) else {
+        return failed(Error::Damaged("no such item"));
+    };
+    let Some(current) = vault.item(id) else {
+        return failed(Error::Damaged("no such item"));
+    };
+    let grid = vault.grid(current);
+    let editable = matches!(
+        current.kind,
+        ItemKind::Login | ItemKind::SecureNote | ItemKind::Card | ItemKind::Identity
+    );
+    let can_restore = editable && grid.edit && grid.see_passwords && !current.deleted;
+    let opened: Vec<&Item> = history
+        .versions
+        .iter()
+        .filter_map(|v| v.item.as_ref())
+        .collect();
+    let listed = crate::history::distinct(&opened, current);
+    let mut opened_at = 0;
+    let mut versions = Vec::new();
+    for v in &history.versions {
+        let saved_by = crate::history::saved_by(&v.saved_by, &vault.user_id);
+        let base = json!({ "id": v.id, "revisionDate": v.revision_date, "savedBy": saved_by });
+        match &v.item {
+            None if history.hide_passwords => versions.push(base),
+            None => {}
+            Some(item) => {
+                let show = listed[opened_at];
+                opened_at += 1;
+                if !show {
+                    continue;
+                }
+                let rows = crate::history::rows(item, current, false);
+                let mut view = base;
+                view["opens"] = json!(true);
+                view["changes"] = json!(rows.iter().filter(|r| r.changed).count());
+                view["restorable"] = json!(
+                    can_restore
+                        && item.kind == current.kind
+                        && item.organization_id == current.organization_id
+                        && item.kept.key == current.kept.key
+                );
+                view["rows"] = json!(rows);
+                versions.push(view);
+            }
+        }
+    }
+    let unreadable = if history.hide_passwords {
+        0
+    } else {
+        history.versions.iter().filter(|v| v.item.is_none()).count()
+    };
+    json!({
+        "ok": true,
+        "hidePasswords": history.hide_passwords,
+        "canRestore": can_restore,
+        "canClear": grid.view_history && vault.may_clear_history(current),
+        "unreadable": unreadable,
+        "versions": versions,
+    })
+}
+
+/// One version beside the item now, with its secrets when `reveal` is
+/// "true" (and the person may see them): `{ok, rows}`. From the history
+/// `pb_history` asked for last. `dropsPasskeys` says who each passkey is for
+/// that restoring it would take from the item (`Vault::restore_drops`).
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_item_version(
+    id: *const c_char,
+    version_id: *const c_char,
+    reveal: *const c_char,
+) -> *mut c_char {
+    let (id, version_id, reveal) = (text(id), text(version_id), text(reveal) == "true");
+    with_app(|app| {
+        let (Some(vault), Some(history)) = (app.vault(), app.kept_history(&id)) else {
+            return failed(Error::Damaged("no such version"));
+        };
+        let Some(current) = vault.item(&id) else {
+            return failed(Error::Damaged("no such item"));
+        };
+        let Some(version) = history
+            .versions
+            .iter()
+            .find(|v| v.id == version_id)
+            .and_then(|v| v.item.as_ref())
+        else {
+            return failed(Error::Damaged("no such version"));
+        };
+        let reveal = reveal && vault.grid(current).see_passwords && app.may_use(current);
+        json!({
+            "ok": true,
+            "rows": crate::history::rows(version, current, reveal),
+            "dropsPasskeys": vault.restore_drops(version, current),
+        })
+    })
+}
+
+/// Restores one of an item's versions as a normal edit, then syncs: `{ok}`,
+/// or the words to show. From the history `pb_history` asked for last.
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_restore_version(
+    id: *const c_char,
+    version_id: *const c_char,
+) -> *mut c_char {
+    let (id, version_id) = (text(id), text(version_id));
+    with_app_waiting(|app| done(app.restore_version(&id, &version_id)))
+}
+
+/// Clears an item's history (`version_id` empty) or deletes one version:
+/// `{ok}`, or the words to show.
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_delete_history(
+    id: *const c_char,
+    version_id: *const c_char,
+) -> *mut c_char {
+    let (id, version_id) = (text(id), text(version_id));
+    with_app_waiting(|app| {
+        done(app.delete_history(&id, Some(version_id.as_str()).filter(|v| !v.is_empty())))
     })
 }
 
@@ -1563,6 +1859,17 @@ pub unsafe extern "C" fn pb_generate(options: *const c_char) -> *mut c_char {
             Err(e) => failed(e),
         }
     })
+}
+
+/// Takes what the generator shows as its last value, which Copy then copies
+/// (`App::keep_generated`): `{ok}`.
+///
+/// # Safety
+/// `shown` is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_keep_generated(shown: *const c_char) -> *mut c_char {
+    let shown = Zeroizing::new(text(shown));
+    with_app(|app| done(app.keep_generated(&shown)))
 }
 
 /// The generator's last choices on this device (`generator::Options`), held

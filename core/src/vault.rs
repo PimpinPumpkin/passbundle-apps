@@ -568,6 +568,35 @@ impl Passkey {
     }
 }
 
+/// A login's passkeys as stored (upstream's encrypted `fido2Credentials`):
+/// each one's credential ID and counter, opened with `key`, and the entry
+/// itself; one whose ID doesn't open is left out.
+fn stored_passkeys(
+    stored: Option<&serde_json::Value>,
+    key: &SymmetricKey,
+) -> Vec<(String, u32, serde_json::Value)> {
+    let open = |entry: &serde_json::Value, name: &str| {
+        entry
+            .get(name)
+            .and_then(|v| v.as_str())
+            .and_then(|raw| EncString::parse(raw).ok())
+            .and_then(|e| e.decrypt_string(key).ok())
+            .map(|v| v.as_str().to_owned())
+    };
+    stored
+        .and_then(|s| s.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| {
+            let id = open(entry, "credentialId")?;
+            let counter = open(entry, "counter")
+                .and_then(|c| c.trim().parse().ok())
+                .unwrap_or(0);
+            Some((id, counter, entry.clone()))
+        })
+        .collect()
+}
+
 /// What an attachment whose name or key doesn't open is called.
 pub const CANT_OPEN_ATTACHMENT: &str = "An attachment that can't be opened";
 
@@ -1192,6 +1221,124 @@ impl Vault {
         editing: Option<&Item>,
         passkeys: Option<serde_json::Value>,
     ) -> Result<serde_json::Value> {
+        self.encrypt_item_from(draft, editing, editing, passkeys)
+    }
+
+    /// One of an item's past versions (history.rs), as the server sent it,
+    /// opened as the item is: under its own key, or its owner's.
+    pub fn open_version(&self, cipher: &serde_json::Value) -> Result<Item> {
+        let data: CipherData = serde_json::from_value(cipher.clone())
+            .map_err(|e| Error::Malformed(format!("a version the core can't read ({e})")))?;
+        self.keys.open_item(&data)
+    }
+
+    /// Puts an item back as one of its versions had it, as a normal edit
+    /// (passbundle-clients, item-versions.ts, `restoredView`): the version's
+    /// contents (its name, notes, fields, websites and how they match, its
+    /// passkeys, and whether it asks for the master password), and the item
+    /// as it is now for the rest (its folder, favorite, owner, shared
+    /// folders, attachments, and key). The password it replaces goes into
+    /// its history, as any edit's does. Refused for a version of another
+    /// kind, owner, or key, which only the web vault restores.
+    ///
+    /// A passkey the item still has is kept as it is now, with the higher
+    /// of its counters (signing in raises it, and a site refuses one that
+    /// goes back); one the version doesn't have goes (`restore_drops`).
+    pub fn encrypt_restore(&self, version: &Item, current: &Item) -> Result<serde_json::Value> {
+        if version.kind != current.kind
+            || version.organization_id != current.organization_id
+            || version.kept.key != current.kept.key
+        {
+            return Err(Error::Refused(
+                "this version is of another kind, owner, or key; restore it in the web vault",
+            ));
+        }
+        let mut draft = ItemDraft::of(version);
+        draft.folder_id = current.folder_id.clone();
+        draft.favorite = current.favorite;
+        let key = self.item_value_key(current)?;
+        let now = stored_passkeys(current.kept.fido2_credentials.as_ref(), key);
+        let passkeys = version
+            .kept
+            .fido2_credentials
+            .as_ref()
+            .and_then(|stored| stored.as_array())
+            .map(|then| {
+                serde_json::Value::Array(
+                    then.iter()
+                        .map(|entry| {
+                            let opened = stored_passkeys(Some(&serde_json::json!([entry])), key);
+                            let still = opened.first().and_then(|(id, counter, _)| {
+                                now.iter().find(|(now_id, now_counter, _)| {
+                                    now_id == id && now_counter >= counter
+                                })
+                            });
+                            match still {
+                                Some((_, _, now_entry)) => now_entry.clone(),
+                                None => entry.clone(),
+                            }
+                        })
+                        .collect(),
+                )
+            });
+        self.encrypt_item_from(&draft, Some(current), Some(version), passkeys)
+    }
+
+    /// The passkeys restoring `version` would take from the item, which it
+    /// has now and the version doesn't: who each is for ("shop.example.test,
+    /// ana"), to warn before restoring.
+    pub fn restore_drops(&self, version: &Item, current: &Item) -> Vec<String> {
+        let Ok(key) = self.item_value_key(current) else {
+            return Vec::new();
+        };
+        let then = stored_passkeys(version.kept.fido2_credentials.as_ref(), key);
+        stored_passkeys(current.kept.fido2_credentials.as_ref(), key)
+            .into_iter()
+            .filter(|(id, _, _)| !then.iter().any(|(then_id, _, _)| then_id == id))
+            .map(|(_, _, entry)| {
+                let text = |name: &str| {
+                    entry
+                        .get(name)
+                        .and_then(|v| v.as_str())
+                        .and_then(|raw| EncString::parse(raw).ok())
+                        .and_then(|e| e.decrypt_string(key).ok())
+                        .map(|v| v.as_str().to_owned())
+                        .filter(|v| !v.is_empty())
+                };
+                [text("rpName").or_else(|| text("rpId")), text("userName")]
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .collect()
+    }
+
+    /// The key an item's values are under: its own, or its owner's.
+    fn item_value_key<'a>(&'a self, item: &'a Item) -> Result<&'a SymmetricKey> {
+        if let Some(key) = item.kept.item_key.as_ref() {
+            return Ok(key);
+        }
+        match &item.organization_id {
+            Some(org) => self
+                .keys
+                .organizations
+                .get(org)
+                .ok_or(Error::Damaged("that organization's key doesn't open")),
+            None => Ok(&self.keys.user),
+        }
+    }
+
+    /// `encrypt_item_with`, keeping what the editor doesn't edit (the kept
+    /// values, the fields it doesn't show, and how each website matches)
+    /// from `source`: the item itself, or, to restore one, its version.
+    fn encrypt_item_from(
+        &self,
+        draft: &ItemDraft,
+        editing: Option<&Item>,
+        source: Option<&Item>,
+        passkeys: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value> {
         use serde_json::json;
         if let Some(item) = editing {
             if !matches!(
@@ -1211,7 +1358,10 @@ impl Vault {
                 ));
             }
         }
+        // The item's own: its key, its history, and when its password changed.
         let kept = editing.map(|i| &i.kept);
+        // What the editor doesn't edit, from the item or the version restored.
+        let from = source.map(|i| &i.kept);
         let key = self.value_key(draft, editing)?;
         let enc = |text: &str| key.encrypt_str(text).to_string();
         let enc_opt = |text: Option<&str>| text.filter(|t| !t.is_empty()).map(enc);
@@ -1270,9 +1420,9 @@ impl Vault {
                 "linkedId": null,
             }));
         }
-        // Yes-or-no and linked fields, and our own data, which the editor
+        // Linked fields, nameless ones, and our own data, which the editor
         // doesn't edit, stay, each where it was among the item's fields.
-        if let Some(item) = editing {
+        if let Some(item) = source {
             let kinds = &item.kept.field_kinds;
             for (at, (field, (kind, linked))) in item.fields.iter().zip(kinds).enumerate() {
                 if !field.edited_by_the_app(*kind) {
@@ -1301,7 +1451,7 @@ impl Vault {
             "name": enc(&draft.name),
             "notes": enc_opt(draft.notes.as_deref().map(String::as_str)),
             "favorite": draft.favorite,
-            "reprompt": kept.map_or(0, |k| k.reprompt),
+            "reprompt": from.map_or(0, |k| k.reprompt),
             "key": kept.and_then(|k| k.key.clone()),
             "fields": fields,
             "passwordHistory": if history.is_empty() { serde_json::Value::Null } else { history.into() },
@@ -1342,7 +1492,7 @@ impl Vault {
                 "licenseNumber": secret(&id.license_number),
             });
         } else if draft.note {
-            body["secureNote"] = kept
+            body["secureNote"] = from
                 .and_then(|k| k.secure_note.clone())
                 .unwrap_or_else(|| json!({ "type": 0 }));
         } else {
@@ -1358,10 +1508,10 @@ impl Vault {
                 "uris": draft.uris.iter().map(|u| json!({
                     "uri": enc(u),
                     "uriChecksum": enc(&uri_checksum(u)),
-                    "match": editing.and_then(|i| i.uris.iter().position(|kept| kept == u).and_then(|at| i.uri_matches.get(at).copied().flatten())),
+                    "match": source.and_then(|i| i.uris.iter().position(|kept| kept == u).and_then(|at| i.uri_matches.get(at).copied().flatten())),
                 })).collect::<Vec<_>>(),
-                "fido2Credentials": passkeys.or_else(|| kept.and_then(|k| k.fido2_credentials.clone())),
-                "autofillOnPageLoad": kept.and_then(|k| k.autofill_on_page_load),
+                "fido2Credentials": passkeys.or_else(|| from.and_then(|k| k.fido2_credentials.clone())),
+                "autofillOnPageLoad": from.and_then(|k| k.autofill_on_page_load),
                 "passwordRevisionDate": if password_changed {
                     Some(now.clone())
                 } else {

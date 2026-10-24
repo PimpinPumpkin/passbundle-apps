@@ -1,9 +1,13 @@
 // Small pieces every screen uses: the mark, item avatars, the busy flag, and
 // the theme menu.
+import 'dart:async';
+import 'dart:ui' as ui;
+
 import 'package:flutter/material.dart';
 
 import 'core.dart';
 import 'glyphs.dart';
+import 'icons.dart';
 import 'theme.dart';
 
 /// True while a slow core call runs; the screens don't read from the core then.
@@ -145,27 +149,31 @@ class Wordmark extends StatelessWidget {
   }
 }
 
-/// An item's tile: a login's first letter on a tint of the login color (a
-/// site's own icon is for later), and everything else, items made from a
-/// template with a look of its own included, its category's jewel tile
-/// (passbundle-clients, item-tile.component.ts), so a list is never a column
-/// of identical keys. The same on a phone, a computer, and in the web vault.
+/// An item's tile: a login's website's icon on a white tile, or its first
+/// letter on a tint of the login color where there's none, and everything
+/// else, items made from a template with a look of its own included, its
+/// category's jewel tile (passbundle-clients, item-tile.component.ts), so a
+/// list is never a column of identical keys. The same on a phone, a
+/// computer, and in the web vault.
 class Avatar extends StatelessWidget {
   const Avatar({
     super.key,
     required this.name,
     required this.kind,
     this.category,
+    this.iconHost,
     this.size = 36,
   });
 
-  /// Its summary from the core (`name`, `kind`, `category`), as lists have it.
+  /// Its summary from the core (`name`, `kind`, `category`, `iconHost`), as
+  /// lists have it.
   Avatar.of(Map<String, dynamic> item, {Key? key, double size = 36})
     : this(
         key: key,
         name: item['name'] as String,
         kind: item['kind'] as String,
         category: item['category'] as String?,
+        iconHost: item['iconHost'] as String?,
         size: size,
       );
 
@@ -174,6 +182,9 @@ class Avatar extends StatelessWidget {
 
   /// Its category (core/src/templates.rs), its kind's when null.
   final String? category;
+
+  /// A login's website, for its icon (core/src/icons.rs).
+  final String? iconHost;
   final double size;
 
   /// The first letter or digit of a name, or nothing when it has none.
@@ -195,6 +206,14 @@ class Avatar extends StatelessWidget {
         size: size,
       );
     }
+    final host = iconHost;
+    if (host != null) {
+      return _SiteIcon(host: host, size: size, letter: letterTile(context));
+    }
+    return letterTile(context);
+  }
+
+  Widget letterTile(BuildContext context) {
     final dark = Theme.of(context).brightness == Brightness.dark;
     return Container(
       width: size,
@@ -213,6 +232,88 @@ class Avatar extends StatelessWidget {
           fontWeight: FontWeight.w700,
           fontSize: size * 0.44,
         ),
+      ),
+    );
+  }
+}
+
+/// A login's website's icon on a white tile, once the core has it; its
+/// letter until then, and where there's none.
+class _SiteIcon extends StatefulWidget {
+  const _SiteIcon({
+    required this.host,
+    required this.size,
+    required this.letter,
+  });
+
+  final String host;
+  final double size;
+  final Widget letter;
+
+  @override
+  State<_SiteIcon> createState() => _SiteIconState();
+}
+
+class _SiteIconState extends State<_SiteIcon> {
+  ui.Image? icon;
+  StreamSubscription<void>? changes;
+
+  @override
+  void initState() {
+    super.initState();
+    ask();
+    changes = siteIcons.changes.stream.listen((_) => ask());
+  }
+
+  @override
+  void didUpdateWidget(_SiteIcon old) {
+    super.didUpdateWidget(old);
+    if (old.host != widget.host) ask();
+  }
+
+  void ask() {
+    final known = siteIcons.now(widget.host);
+    if (!identical(known, SiteIcons.unknown)) {
+      setState(() => icon = known as ui.Image?);
+      return;
+    }
+    icon = null;
+    final host = widget.host;
+    siteIcons.of(host).then((found) {
+      if (mounted && widget.host == host) setState(() => icon = found);
+    });
+  }
+
+  @override
+  void dispose() {
+    changes?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final icon = this.icon;
+    if (icon == null || !siteIcons.on) return widget.letter;
+    final dark = Theme.of(context).brightness == Brightness.dark;
+    final size = widget.size;
+    return Container(
+      width: size,
+      height: size,
+      decoration: BoxDecoration(
+        color: dark ? const Color(0xFFF4F7F6) : Colors.white,
+        borderRadius: BorderRadius.circular(size * 0.28),
+        border: Border.all(
+          color: dark ? const Color(0xFFF4F7F6) : const Color(0xFFDCE5E1),
+        ),
+      ),
+      alignment: Alignment.center,
+      // Drawn already, no larger than a tile needs (icons.dart).
+      child: RawImage(
+        image: icon,
+        width: size * 0.58,
+        height: size * 0.58,
+        fit: BoxFit.contain,
+        filterQuality: FilterQuality.medium,
       ),
     );
   }

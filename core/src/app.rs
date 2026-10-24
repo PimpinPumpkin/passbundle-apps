@@ -71,6 +71,35 @@ pub struct App {
     /// opened before can't save over an item's secrets (`grant`).
     grant: u64,
     autolock: AutoLock,
+    /// The last item whose history was asked for, as the server sent it and
+    /// opened (history.rs): to show a version's secrets, or restore it,
+    /// without asking again. Forgotten when the vault locks.
+    history: Option<History>,
+    /// The generator's last password or passphrase, which its Copy copies
+    /// (as `value("", "generated")`), so it clears like any secret. Forgotten
+    /// when the vault locks.
+    generated: Option<Zeroizing<String>>,
+    /// Websites' icons, in memory while the vault is open (icons.rs).
+    icons: crate::icons::Cache,
+    /// Counts each time the icons are emptied (locking, signing out,
+    /// turning them off), so one fetched before isn't kept after.
+    icon_session: u64,
+}
+
+/// An item's past versions, opened (`App::history`).
+pub struct History {
+    pub id: String,
+    /// The person can't see the item's passwords: only when and by whom.
+    pub hide_passwords: bool,
+    /// Newest first; a version that doesn't open has no item.
+    pub versions: Vec<Version>,
+}
+
+pub struct Version {
+    pub id: String,
+    pub revision_date: Option<String>,
+    pub saved_by: serde_json::Value,
+    pub item: Option<Item>,
 }
 
 impl App {
@@ -80,6 +109,7 @@ impl App {
             .as_ref()
             .and_then(|s| Server::new(&s.server, Device::this_one(&s.device_identifier)).ok());
         let preferences = store.preferences();
+        crate::icons::forget_kept(store.dir());
         App {
             store,
             secrets,
@@ -95,6 +125,10 @@ impl App {
             reprompted: None,
             grant: 0,
             autolock: AutoLock::new(Instant::now(), SystemTime::now()),
+            history: None,
+            generated: None,
+            icons: crate::icons::Cache::default(),
+            icon_session: 0,
         }
     }
 
@@ -507,7 +541,22 @@ impl App {
         let held = self.generator_policy.apply(options);
         let made = generator::generate(&held)?;
         self.store.save_generator_options(&held)?;
+        if self.vault.is_some() {
+            self.generated = Some(Zeroizing::new(made.as_str().to_owned()));
+        }
         Ok((made, held))
+    }
+
+    /// Takes what the generator shows as its last value, for its Copy to
+    /// copy (`value("", "generated")`): what the person sees, even if
+    /// something else made one since (Android's offer to save a sign-in
+    /// opens an editor with a generator of its own). Only while unlocked.
+    pub fn keep_generated(&mut self, shown: &str) -> Result<()> {
+        if self.vault.is_none() {
+            return Err(Error::SignedOut);
+        }
+        self.generated = Some(Zeroizing::new(shown.to_owned()));
+        Ok(())
     }
 
     pub fn set_preferences(&mut self, preferences: Preferences) -> Result<()> {
@@ -567,6 +616,9 @@ impl App {
     pub fn lock(&mut self) {
         self.reprompted = None;
         self.grant += 1;
+        self.history = None;
+        self.generated = None;
+        self.forget_icons();
         self.vault = None;
         self.session = None;
         self.pending = None;
@@ -1029,6 +1081,149 @@ impl App {
         })
     }
 
+    /// Favorites an item or not, then syncs: the person's own mark, as
+    /// upstream's partial update keeps it, so an item they can't edit takes
+    /// it too.
+    pub fn set_favorite(&mut self, id: &str, favorite: bool) -> Result<()> {
+        let vault = self.vault.as_ref().ok_or(Error::SignedOut)?;
+        let item = vault.item(id).ok_or(Error::Damaged("no such item"))?;
+        let folder = item.folder_id.clone();
+        let (Some(server), Some(session)) = (&self.server, self.session.as_mut()) else {
+            return Err(Error::SignedOut);
+        };
+        server.set_favorite(session, id, folder.as_deref(), favorite)?;
+        self.sync()
+    }
+
+    /// How the app looks on this device: whether logins show their
+    /// websites' icons.
+    pub fn appearance(&self) -> crate::store::Appearance {
+        self.store.appearance()
+    }
+
+    pub fn set_appearance(&mut self, appearance: crate::store::Appearance) -> Result<()> {
+        self.store.save_appearance(&appearance)?;
+        if !appearance.show_icons {
+            self.forget_icons();
+        }
+        Ok(())
+    }
+
+    /// What fetching a website's icon needs, away from the app (ffi.rs,
+    /// `pb_icon`): the server's address, and which emptying of the icons
+    /// it's for (`keep_icon`), while the vault is open and icons are on.
+    pub fn icon_source(&self) -> Option<(String, u64)> {
+        self.vault.as_ref()?;
+        if !self.store.appearance().show_icons {
+            return None;
+        }
+        let server = self.settings.as_ref()?.server.clone();
+        Some((server, self.icon_session))
+    }
+
+    /// A host's icon as the server gave it while the vault's been open:
+    /// Some(Some(icon)), Some(None) when it had none, None to ask it.
+    pub fn kept_icon(&mut self, host: &str) -> Option<Option<&[u8]>> {
+        self.icon_source()?;
+        self.icons.get(host)
+    }
+
+    /// Keeps what the server answered for a host, if the icons haven't been
+    /// emptied since `icon_source` said `session`.
+    pub fn keep_icon(&mut self, session: u64, host: &str, icon: Option<Vec<u8>>) {
+        if self.icon_source().is_some_and(|(_, now)| now == session) {
+            self.icons.put(host, icon);
+        }
+    }
+
+    fn forget_icons(&mut self) {
+        self.icons.clear();
+        self.icon_session += 1;
+    }
+
+    /// An item's past versions (history.rs), from the server, opened: kept
+    /// until another item's are asked for, or the vault locks.
+    pub fn history(&mut self, id: &str) -> Result<&History> {
+        let vault = self.vault.as_ref().ok_or(Error::SignedOut)?;
+        let item = vault.item(id).ok_or(Error::Damaged("no such item"))?;
+        if !self.may_use(item) {
+            return Err(Error::MasterPasswordFirst);
+        }
+        let (Some(server), Some(session)) = (&self.server, self.session.as_mut()) else {
+            return Err(Error::SignedOut);
+        };
+        let answer = server.item_history(session, id)?;
+        let hide_passwords = answer["hidePasswords"].as_bool() != Some(false);
+        let versions = answer["data"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|v| Version {
+                id: v["id"].as_str().unwrap_or_default().to_owned(),
+                revision_date: v["revisionDate"].as_str().map(str::to_owned),
+                saved_by: v["savedBy"].clone(),
+                // Without the item's passwords, the server sends no contents.
+                item: (!hide_passwords && v["cipher"].is_object())
+                    .then(|| vault.open_version(&v["cipher"]).ok())
+                    .flatten(),
+            })
+            .collect();
+        self.history = Some(History {
+            id: id.to_owned(),
+            hide_passwords,
+            versions,
+        });
+        Ok(self.history.as_ref().expect("just kept"))
+    }
+
+    /// The kept history of an item, if it's the one asked for last.
+    pub fn kept_history(&self, id: &str) -> Option<&History> {
+        self.history.as_ref().filter(|h| h.id == id)
+    }
+
+    /// Puts an item back as one of its versions had it (asked for with
+    /// `history`), as a normal edit, then syncs.
+    pub fn restore_version(&mut self, id: &str, version_id: &str) -> Result<()> {
+        let vault = self.vault.as_ref().ok_or(Error::SignedOut)?;
+        let current = vault.item(id).ok_or(Error::Damaged("no such item"))?;
+        if !self.may_use(current) {
+            return Err(Error::MasterPasswordFirst);
+        }
+        let grid = vault.grid(current);
+        if !grid.edit || !grid.see_passwords || current.deleted {
+            return Err(Error::Refused("you can't restore this item's versions"));
+        }
+        let version = self
+            .kept_history(id)
+            .and_then(|h| h.versions.iter().find(|v| v.id == version_id))
+            .and_then(|v| v.item.as_ref())
+            .ok_or(Error::Damaged("no such version"))?;
+        let body = vault.encrypt_restore(version, current)?;
+        let collections = current.collection_ids.clone();
+        let (Some(server), Some(session)) = (&self.server, self.session.as_mut()) else {
+            return Err(Error::SignedOut);
+        };
+        server.save_item(session, Some(id), body, &collections)?;
+        self.history = None;
+        self.sync()
+    }
+
+    /// Clears an item's history for everyone (no `version_id`), or deletes
+    /// one version, where the person may (the server decides too).
+    pub fn delete_history(&mut self, id: &str, version_id: Option<&str>) -> Result<()> {
+        let vault = self.vault.as_ref().ok_or(Error::SignedOut)?;
+        let item = vault.item(id).ok_or(Error::Damaged("no such item"))?;
+        if !vault.may_clear_history(item) {
+            return Err(Error::Refused("you can't clear this item's history"));
+        }
+        let (Some(server), Some(session)) = (&self.server, self.session.as_mut()) else {
+            return Err(Error::SignedOut);
+        };
+        server.delete_history(session, id, version_id)?;
+        self.history = None;
+        Ok(())
+    }
+
     pub fn trash(&mut self, id: &str) -> Result<()> {
         let (Some(server), Some(session)) = (&self.server, self.session.as_mut()) else {
             return Err(Error::SignedOut);
@@ -1041,6 +1236,9 @@ impl App {
     /// current code), "notes", "field:<index>", or a card's or an identity's
     /// (`Item::detail`). Secrets clear after 30 seconds.
     pub fn copy(&self, id: &str, what: &str) -> Result<()> {
+        if id.is_empty() && what == "generated" {
+            return clipboard::copy_secret(&self.value(id, what)?, clipboard::CLEAR_AFTER);
+        }
         let item = self
             .vault
             .as_ref()
@@ -1072,6 +1270,15 @@ impl App {
     /// The value `copy` copies. On phones the app's native piece puts it on
     /// the clipboard itself (docs/phones.md, "Copying").
     pub fn value(&self, id: &str, what: &str) -> Result<zeroize::Zeroizing<String>> {
+        // The generator's last password, for its Copy.
+        if id.is_empty() && what == "generated" {
+            return self
+                .generated
+                .as_ref()
+                .filter(|_| self.vault.is_some())
+                .map(|g| Zeroizing::new(g.as_str().to_owned()))
+                .ok_or(Error::Damaged("nothing to copy"));
+        }
         let item = self
             .vault
             .as_ref()

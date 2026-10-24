@@ -15,7 +15,10 @@ import 'package:flutter/services.dart';
 
 import 'core.dart';
 import 'editor.dart';
+import 'generator.dart';
 import 'glyphs.dart';
+import 'history.dart';
+import 'icons.dart';
 import 'new_item.dart';
 import 'places.dart';
 import 'settings.dart';
@@ -69,10 +72,14 @@ class VaultScreenState extends State<VaultScreen> {
   /// Every item, whatever the search: the menu's counts.
   List<Map<String, dynamic>> everything = [];
   Places places = Places.empty;
+
+  /// The logins with something to fix, by id (core/src/health.rs): judged
+  /// on a background isolate after each change.
+  Map<String, Map<String, dynamic>> health = const {};
   bool syncing = false;
   bool signedOut = false;
 
-  /// On a phone: the vault (0) or Settings (1).
+  /// On a phone: the items (0), the generator (1), or Settings (2).
   int tab = 0;
 
   /// On a phone, the search field, kept across the tabs.
@@ -114,6 +121,9 @@ class VaultScreenState extends State<VaultScreen> {
     updates?.removeListener(updateFound);
     lifecycle.dispose();
     search.dispose();
+    // The vault closed (it locked, or the person signed out): its websites'
+    // icons go, as the core's do.
+    siteIcons.forget();
     super.dispose();
   }
 
@@ -144,6 +154,24 @@ class VaultScreenState extends State<VaultScreen> {
         selected = null;
       }
     });
+    judge();
+  }
+
+  /// Health, once the vault changes: on its own isolate, as zxcvbn takes a
+  /// moment for each password.
+  int _judging = 0;
+  Future<void> judge() async {
+    final asked = ++_judging;
+    final answer = await Core.health();
+    if (!mounted || asked != _judging || !answer.ok) return;
+    setState(() {
+      health = {
+        for (final i
+            in ((answer.body['items'] as List?) ?? const [])
+                .cast<Map<String, dynamic>>())
+          i['id'] as String: i,
+      };
+    });
   }
 
   Future<void> sync() async {
@@ -161,13 +189,21 @@ class VaultScreenState extends State<VaultScreen> {
     reload();
   }
 
-  List<Map<String, dynamic>> get shown =>
-      all.where((i) => shows(i, filter, filterId)).toList();
+  List<Map<String, dynamic>> get shown => [
+    for (final i in all)
+      if (shows(i, filter, filterId, health: health))
+        // Health says what each login has to fix.
+        if (filter == Filter.health)
+          {...i, 'subtitle': healthIssues(health[i['id']]!)}
+        else
+          i,
+  ];
 
   /// What the list shows, by name, for its header.
   String? get placeName => switch (filter) {
     Filter.all => null,
     Filter.favorites => 'Favorites',
+    Filter.health => 'Health',
     Filter.kind => ItemKind.of(filterId ?? '').many,
     Filter.personal => 'Personal',
     Filter.noFolder => 'No folder',
@@ -245,6 +281,39 @@ class VaultScreenState extends State<VaultScreen> {
     reload();
     setState(() => selected = saved.isEmpty ? selected : saved);
     showMessage(context, id == null ? 'Saved' : 'Saved the changes');
+  }
+
+  /// The generator on its own, in a dialog (a computer's Tools).
+  Future<void> openGeneratorTool() => showDialog<void>(
+    context: context,
+    builder: (context) => Dialog(
+      clipBehavior: Clip.antiAlias,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 480, maxHeight: 720),
+        child: Scaffold(
+          appBar: AppBar(
+            title: const Text('Generator'),
+            automaticallyImplyLeading: false,
+            leading: IconButton(
+              tooltip: 'Close',
+              icon: const Icon(Icons.close_rounded),
+              onPressed: () => Navigator.of(context).pop(),
+            ),
+          ),
+          body: GeneratorPage(core: widget.core, title: false),
+        ),
+      ),
+    ),
+  );
+
+  /// Import and export are the web vault's: it opens there.
+  Future<void> openImport() async {
+    final server = widget.server;
+    final opened =
+        server != null && await Core.openWebsite('$server/#/tools/import');
+    if (!opened && mounted) {
+      showMessage(context, 'Couldn\'t open the web vault.');
+    }
   }
 
   /// Moves an item to the trash, once the person says so: true if it went.
@@ -344,6 +413,7 @@ class VaultScreenState extends State<VaultScreen> {
         places: places,
         phone: true,
         onEdit: () => edit(id),
+        onChanged: reload,
         onTrash: (name) async {
           if (await trash(id, name) && mounted) Navigator.of(context).pop();
         },
@@ -378,6 +448,7 @@ class VaultScreenState extends State<VaultScreen> {
             id: selected!,
             places: places,
             onEdit: () => edit(selected),
+            onChanged: reload,
             onTrash: (name) => trash(selected!, name),
           );
     return Scaffold(
@@ -393,6 +464,9 @@ class VaultScreenState extends State<VaultScreen> {
                   filterId: filterId,
                   places: places,
                   items: everything,
+                  toFix: health.length,
+                  onGenerator: openGeneratorTool,
+                  onImport: openImport,
                   onChoose: choose,
                   onNewFolder: newFolder,
                   onRenameFolder: renameFolder,
@@ -401,8 +475,7 @@ class VaultScreenState extends State<VaultScreen> {
                   onMode: widget.onMode,
                   onLock: widget.onLock,
                 ),
-                SizedBox(
-                  width: 360,
+                Expanded(
                   child: ItemList(
                     title: placeName ?? 'All items',
                     items: shown,
@@ -422,7 +495,13 @@ class VaultScreenState extends State<VaultScreen> {
                     onSelect: (id) => setState(() => selected = id),
                   ),
                 ),
-                Expanded(
+                // The item, beside the list, as the web vault's side panel:
+                // up to 520 wide, the list taking the rest.
+                SizedBox(
+                  width: (MediaQuery.sizeOf(context).width * 0.42).clamp(
+                    380,
+                    552,
+                  ),
                   child:
                       pane ??
                       Center(
@@ -469,8 +548,12 @@ class VaultScreenState extends State<VaultScreen> {
                   index: tab,
                   children: [
                     phoneVault(context),
-                    // Built each time it's chosen, so it shows what's so now.
+                    // Built each time it's chosen, so it makes a new one,
+                    // and shows what's so now.
                     tab == 1
+                        ? GeneratorPage(core: widget.core)
+                        : const SizedBox.shrink(),
+                    tab == 2
                         ? SettingsPage(
                             email: widget.email,
                             server: widget.server,
@@ -498,11 +581,16 @@ class VaultScreenState extends State<VaultScreen> {
         bottomNavigationBar: NavigationBar(
           selectedIndex: tab,
           onDestinationSelected: (i) => setState(() => tab = i),
-          // The web vault's glyphs: all items, and the gear.
+          // The web vault's glyphs: all items, the generator, and the gear.
+          // Send, the extension's fourth, isn't in the apps yet.
           destinations: const [
             NavigationDestination(
               icon: Glyph(Glyphs.grid, size: 22),
               label: 'Items',
+            ),
+            NavigationDestination(
+              icon: Glyph(Glyphs.generator, size: 22),
+              label: 'Generator',
             ),
             NavigationDestination(
               icon: Glyph(Glyphs.settings, size: 22),
@@ -1009,6 +1097,62 @@ class PhoneItemRow extends StatelessWidget {
   }
 }
 
+/// The favorite star beside an item's name: filled when it's a favorite,
+/// and it toggles.
+class FavoriteButton extends StatelessWidget {
+  const FavoriteButton({
+    super.key,
+    required this.on,
+    required this.onChanged,
+    this.size = 20,
+  });
+
+  final bool on;
+  final ValueChanged<bool> onChanged;
+  final double size;
+
+  @override
+  Widget build(BuildContext context) => Semantics(
+    checked: on,
+    child: IconButton(
+      tooltip: on ? 'Remove from favorites' : 'Add to favorites',
+      onPressed: () => onChanged(!on),
+      icon: Glyph(
+        Glyphs.star,
+        size: size,
+        color: on ? favoriteEdge : context.colors.muted,
+        fill: on ? favoriteColor : null,
+        strokeWidth: 1.6,
+      ),
+    ),
+  );
+}
+
+/// How long ago a date the server gave was, in the largest whole unit, as
+/// the extension says it: "3 weeks ago", "yesterday", "just now".
+String? ago(String? iso, [DateTime? now]) {
+  final then = iso == null ? null : DateTime.tryParse(iso);
+  if (then == null) return null;
+  final seconds = (now ?? DateTime.now()).difference(then).inSeconds;
+  if (seconds < 60) return 'just now';
+  const units = [
+    ('year', 365 * 24 * 3600, 'last year'),
+    ('month', 30 * 24 * 3600, 'last month'),
+    ('week', 7 * 24 * 3600, 'last week'),
+    ('day', 24 * 3600, 'yesterday'),
+    ('hour', 3600, null),
+    ('minute', 60, null),
+  ];
+  for (final (unit, size, one) in units) {
+    final n = seconds ~/ size;
+    if (n >= 1) {
+      if (n == 1) return one ?? '1 $unit ago';
+      return '$n ${unit}s ago';
+    }
+  }
+  return 'just now';
+}
+
 /// A favorite's star, and its edge.
 const favoriteColor = Color(0xFFE8B23A);
 const favoriteEdge = Color(0xFFC9921B);
@@ -1027,6 +1171,9 @@ class Sidebar extends StatelessWidget {
     required this.filterId,
     required this.places,
     required this.items,
+    this.toFix = 0,
+    this.onGenerator,
+    this.onImport,
     required this.onChoose,
     required this.onNewFolder,
     required this.onRenameFolder,
@@ -1044,6 +1191,13 @@ class Sidebar extends StatelessWidget {
 
   /// Every item, for the counts beside each entry.
   final List<Map<String, dynamic>> items;
+
+  /// How many logins Health has something to fix for.
+  final int toFix;
+
+  /// The Tools: the generator, and import and export (the web vault's).
+  final VoidCallback? onGenerator;
+  final VoidCallback? onImport;
   final void Function(Filter, [String?]) onChoose;
   final VoidCallback onNewFolder;
   final void Function(String id, String name) onRenameFolder;
@@ -1066,6 +1220,7 @@ class Sidebar extends StatelessWidget {
       Widget? trailing,
       int depth = 0,
       bool strong = false,
+      String? note,
     }) => Padding(
       padding: EdgeInsets.only(top: 1, bottom: 1, left: 20.0 * depth),
       child: Material(
@@ -1096,9 +1251,9 @@ class Sidebar extends StatelessWidget {
                       ),
                     ),
                   ),
-                  if (count != null)
+                  if (note != null || count != null)
                     Text(
-                      '$count',
+                      note ?? '$count',
                       style: TextStyle(color: c.muted, fontSize: 12),
                     ),
                   ?trailing,
@@ -1181,6 +1336,14 @@ class Sidebar extends StatelessWidget {
                   tap: () => onChoose(Filter.favorites),
                   count: count(Filter.favorites),
                 ),
+                // Weak, reused, and unsecured passwords, as the web vault's Health.
+                entry(
+                  tile: const JewelTile(jewel: Jewel.health, size: 24),
+                  label: 'Health',
+                  on: filter == Filter.health,
+                  tap: () => onChoose(Filter.health),
+                  note: toFix == 0 ? null : '$toFix to fix',
+                ),
                 if (kinds.isNotEmpty) heading('Categories'),
                 for (final k in kinds)
                   entry(
@@ -1228,6 +1391,26 @@ class Sidebar extends StatelessWidget {
                           )
                         : null,
                   ),
+                if (onGenerator != null || onImport != null) ...[
+                  const Padding(
+                    padding: EdgeInsets.symmetric(horizontal: 6, vertical: 10),
+                    child: Divider(),
+                  ),
+                  if (onGenerator != null)
+                    entry(
+                      tile: outline(Glyphs.generator),
+                      label: 'Generator',
+                      on: false,
+                      tap: onGenerator!,
+                    ),
+                  if (onImport != null)
+                    entry(
+                      tile: outline(Glyphs.download),
+                      label: 'Import and export',
+                      on: false,
+                      tap: onImport!,
+                    ),
+                ],
                 const SizedBox(height: 8),
               ],
             ),
@@ -1529,8 +1712,12 @@ class ItemPane extends StatefulWidget {
     required this.places,
     required this.onEdit,
     required this.onTrash,
+    this.onChanged,
     this.phone = false,
   });
+
+  /// It changed here (favorited, a version restored): the list reads again.
+  final VoidCallback? onChanged;
 
   final Core core;
   final String id;
@@ -1603,6 +1790,47 @@ class _ItemPaneState extends State<ItemPane> {
     item = fresh;
     revealed.clear();
     return true;
+  }
+
+  /// Favorites it or not: the person's own mark, which even an item they
+  /// can't edit takes.
+  Future<void> favorite(bool on) async {
+    final answer = await whileBusy(() => Core.setFavorite(widget.id, on));
+    if (!mounted) return;
+    if (!answer.ok) {
+      showMessage(context, answer.error ?? 'Couldn\'t change that.');
+      return;
+    }
+    setState(() => item = widget.core.item(widget.id));
+    widget.onChanged?.call();
+  }
+
+  /// Its version history; a version restored is the item now.
+  Future<void> history() async {
+    if (asksAgain()) {
+      setState(() {});
+      return;
+    }
+    final restored = await openHistory(
+      context,
+      core: widget.core,
+      id: widget.id,
+      name: item?['name'] as String? ?? '',
+      asDialog: !widget.phone,
+    );
+    if (!restored || !mounted) return;
+    setState(() {
+      item = widget.core.item(widget.id);
+      revealed.clear();
+    });
+    widget.onChanged?.call();
+    showMessage(context, 'Version restored');
+  }
+
+  Future<void> openSite(String uri) async {
+    if (!await Core.openWebsite(uri) && mounted) {
+      showMessage(context, 'Couldn\'t open $uri.');
+    }
   }
 
   /// Whether the person may do something with the item (`edit`,
@@ -1742,18 +1970,11 @@ class _ItemPaneState extends State<ItemPane> {
       appBar: AppBar(
         actions: [
           if (!asking) ...[
-            if (item['favorite'] == true)
-              const Padding(
-                padding: EdgeInsets.symmetric(horizontal: 10),
-                child: Glyph(
-                  Glyphs.star,
-                  size: 22,
-                  color: favoriteEdge,
-                  fill: favoriteColor,
-                  strokeWidth: 1.6,
-                  semanticLabel: 'Favorite',
-                ),
-              ),
+            FavoriteButton(
+              on: item['favorite'] == true,
+              size: 22,
+              onChanged: favorite,
+            ),
             // Some kinds are the web vault's to edit, for now, and some
             // items the person's shared folder lets them see only.
             if (item['editable'] != false)
@@ -1841,8 +2062,11 @@ class _ItemPaneState extends State<ItemPane> {
     final sees = may(item, 'seePasswords');
     Widget secretRow(String label, String what, {bool canCopy = true}) => row(
       label,
-      // Google Sans Flex, like everything else: no system font, so it looks the same everywhere.
-      SelectableText(
+      // Google Sans Flex, like everything else: no system font, so it looks
+      // the same everywhere. Not selectable: the system's own Copy would put
+      // a secret on the clipboard for good, past the 30 seconds; its Copy
+      // button copies it.
+      Text(
         revealed[what] ?? '••••••••••••',
         style: TextStyle(fontSize: valueSize, letterSpacing: 0.6),
       ),
@@ -1939,6 +2163,13 @@ class _ItemPaneState extends State<ItemPane> {
             style: TextStyle(color: scheme.primary, fontSize: valueSize),
           ),
           actions: [
+            if (!uri.startsWith('androidapp://') &&
+                !uri.startsWith('iosapp://'))
+              IconButton(
+                tooltip: 'Open website',
+                icon: Glyph(Glyphs.open, size: 20, color: c.muted),
+                onPressed: () => openSite(uri),
+              ),
             action('Copy website', copyGlyph, () {
               Clipboard.setData(ClipboardData(text: uri));
               showMessage(context, 'Copied the website');
@@ -2142,6 +2373,65 @@ class _ItemPaneState extends State<ItemPane> {
         ),
       );
     }
+    // Under the details, as the web vault's panel and the extension have
+    // them: how strong the password is and when it changed, when the item
+    // changed and was made, and its version history.
+    final strength = item['strength'] as String?;
+    final since =
+        (item['passwordChanged'] as String?) ?? (item['created'] as String?);
+    final healthLine = strength == null
+        ? null
+        : [
+            'Password $strength',
+            if (ago(since) case final at?)
+              item['passwordChanged'] != null ? 'changed $at' : 'added $at',
+          ].join(' · ');
+    final dates = [
+      if (madeOn(item['revisionDate'] as String?) case final d?) 'Changed $d',
+      if (madeOn(item['created'] as String?) case final d?) 'created $d',
+    ].join(' · ');
+    final extras = <Widget>[
+      if (healthLine != null)
+        Padding(
+          padding: const EdgeInsets.fromLTRB(4, 14, 4, 0),
+          child: Row(
+            children: [
+              Glyph(
+                Glyphs.health,
+                size: 18,
+                color: strength == 'weak' ? scheme.error : scheme.primary,
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  healthLine,
+                  style: TextStyle(
+                    color: strength == 'weak' ? scheme.error : c.muted,
+                    fontSize: 13,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      if (may(item, 'viewHistory'))
+        Padding(
+          padding: const EdgeInsets.only(top: 10),
+          child: Align(
+            alignment: Alignment.centerLeft,
+            child: TextButton.icon(
+              onPressed: history,
+              icon: Glyph(Glyphs.history, size: 18, color: scheme.primary),
+              label: const Text('Version history'),
+            ),
+          ),
+        ),
+      if (dates.isNotEmpty)
+        Padding(
+          padding: const EdgeInsets.fromLTRB(4, 4, 4, 0),
+          child: Text(dates, style: TextStyle(color: c.muted, fontSize: 12)),
+        ),
+    ];
     final card = RestingCard(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -2192,6 +2482,7 @@ class _ItemPaneState extends State<ItemPane> {
           ),
           const SizedBox(height: 22),
           if (rows.isNotEmpty) card,
+          ...extras,
         ],
       );
     }
@@ -2243,18 +2534,11 @@ class _ItemPaneState extends State<ItemPane> {
                           ],
                         ),
                       ),
-                      if (item['favorite'] == true)
-                        const Padding(
-                          padding: EdgeInsets.symmetric(horizontal: 8),
-                          child: Glyph(
-                            Glyphs.star,
-                            size: 20,
-                            color: favoriteEdge,
-                            fill: favoriteColor,
-                            strokeWidth: 1.6,
-                            semanticLabel: 'Favorite',
-                          ),
-                        ),
+                      FavoriteButton(
+                        on: item['favorite'] == true,
+                        size: 20,
+                        onChanged: favorite,
+                      ),
                       // Some kinds are the web vault's to edit, for now,
                       // and some items the person's shared folder lets
                       // them see only.
@@ -2294,6 +2578,7 @@ class _ItemPaneState extends State<ItemPane> {
                       ),
                     ),
                   ],
+                  ...extras,
                 ],
               ),
             ),
