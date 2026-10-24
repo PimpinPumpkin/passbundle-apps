@@ -1200,7 +1200,7 @@ fn a_shared_folders_permissions_hold_in_the_app() {
         "not-a-real-user"
     );
     // The template's hidden default isn't handed to them; its plain one is.
-    let groups = passbundle_core::templates::groups(app.vault().unwrap());
+    let groups = passbundle_core::templates::groups(app.vault().unwrap(), |item| app.may_use(item));
     let router = groups
         .iter()
         .flat_map(|g| &g.templates)

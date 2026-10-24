@@ -1,6 +1,7 @@
 //! A fuller sample vault for the app's screenshots (app/test/screenshots_test.dart):
-//! the test vectors' vault (tests/vectors/core-v1.json), the same account and
-//! master password, with more in it, encrypted as the web vault would save
+//! the app's sample vault (app/test/sample, the test vectors' vault with what
+//! the server says of each item's permissions), the same account and master
+//! password (tests/vectors/core-v1.json), with more in it, encrypted as the web vault would save
 //! it: nested folders, shared folders with different permissions, items made
 //! from templates, a website for its icon, and a bank account. Not committed:
 //!
@@ -13,6 +14,7 @@ use passbundle_core::crypto::{EncString, PrivateKey, SymmetricKey};
 use serde_json::{json, Value};
 
 const SETTINGS: &str = include_str!("../../app/test/sample/settings.json");
+const SYNC: &str = include_str!("../../app/test/sample/sync.json");
 
 fn main() {
     let out = std::env::args().nth(1).unwrap_or_else(|| {
@@ -32,7 +34,7 @@ fn main() {
             .unwrap(),
     )
     .unwrap();
-    let mut sync = v["sync"].clone();
+    let mut sync: Value = serde_json::from_str(SYNC).unwrap();
     let org_id = sync["profile"]["organizations"][0]["id"]
         .as_str()
         .unwrap()

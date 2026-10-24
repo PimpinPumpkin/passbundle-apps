@@ -369,17 +369,20 @@ pub fn custom(item: &Item) -> Option<Template> {
 /// groups them (templates.ts, `templateGroups`): each MSP's (once each,
 /// however many of its clients the person sees), then each organization's
 /// own (by the organization's name), then the person's own, then the
-/// built-in ones. Empty groups are left out.
-pub fn groups(vault: &Vault) -> Vec<Group> {
+/// built-in ones. Empty groups are left out. `may_use` says whether a
+/// template note's secrets may leave the core now (`App::may_use`: it
+/// doesn't ask for the master password again, or it was given).
+pub fn groups(vault: &Vault, may_use: impl Fn(&Item) -> bool) -> Vec<Group> {
     let by_name = |a: &Template, b: &Template| a.name.to_lowercase().cmp(&b.name.to_lowercase());
     // A hidden field's default is a secret like any other: someone the
-    // template's folder hides passwords from gets the field, empty.
+    // template's folder hides passwords from gets the field, empty, and so
+    // does everyone while the template asks for the master password.
     let mut all: Vec<Template> = vault
         .items
         .iter()
         .filter_map(|item| {
             let mut template = custom(item)?;
-            if !vault.grid(item).see_passwords {
+            if !vault.grid(item).see_passwords || !may_use(item) {
                 for field in &mut template.fields {
                     if field.kind == FieldKind::Hidden {
                         field.value = None;

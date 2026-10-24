@@ -142,12 +142,15 @@ impl Grid {
 }
 
 impl CollectionData {
-    /// The person's grid here: the server's, or the preset of upstream's fields.
+    /// The person's grid here: the server's, or the preset of upstream's
+    /// fields. A field the server leaves out counts as the least access
+    /// (read only, passwords hidden, no managing): the server decides, and
+    /// the app never offers more than it said.
     pub fn grid(&self) -> Grid {
         self.keykeeper.unwrap_or_else(|| {
             Grid::preset(
-                self.read_only.unwrap_or(false),
-                self.hide_passwords.unwrap_or(false),
+                self.read_only.unwrap_or(true),
+                self.hide_passwords.unwrap_or(true),
                 self.manage.unwrap_or(false),
             )
         })
@@ -183,8 +186,9 @@ pub struct CipherData {
     pub revision_date: Option<String>,
     pub creation_date: Option<String>,
     /// The person may change it (upstream's `edit`), see its passwords
-    /// (`viewPassword`), and move it to the trash (`permissions.delete`);
-    /// all yes when the server doesn't say.
+    /// (`viewPassword`), and move it to the trash (`permissions.delete`).
+    /// For an organization's item, each is no when the server doesn't say;
+    /// the person's own items are theirs to do anything with.
     pub edit: Option<bool>,
     pub view_password: Option<bool>,
     pub permissions: Option<CipherPermissions>,
@@ -618,19 +622,23 @@ impl Item {
     /// ("password", "field:2", "cardNumber", "bankAccount.iban"), is one of
     /// the item's secrets, which someone whose shared folder hides
     /// passwords is never given (docs/core.md, "Folders and permissions").
-    /// Its username, notes, and plain fields and details aren't.
+    /// Only the values known to be plain aren't: the username, the notes, a
+    /// card's, an identity's, or an SSH key's plain details
+    /// (`PLAIN_DETAILS`), a newer kind's plain ones, and plain text or
+    /// yes-or-no custom fields. Anything else, a name added later included,
+    /// is a secret.
     pub fn is_secret(&self, what: &str) -> bool {
-        match what {
-            "username" | "notes" => false,
-            "password" | "totp" => true,
-            what if SECRET_DETAILS.contains(&what) => true,
-            what if what.contains('.') => self.details.iter().any(|d| d.key == what && d.secret),
+        let plain = match what {
+            "username" | "notes" => true,
+            what if PLAIN_DETAILS.contains(&what) => true,
+            what if what.contains('.') => self.details.iter().any(|d| d.key == what && !d.secret),
             other => other
                 .strip_prefix("field:")
                 .and_then(|i| i.parse::<usize>().ok())
                 .and_then(|i| self.fields.get(i))
-                .is_some_and(|f| f.hidden),
-        }
+                .is_some_and(|f| !f.hidden),
+        };
+        !plain
     }
 
     /// One of a card's or an identity's values (`SECRET_DETAILS`,
@@ -1454,6 +1462,7 @@ impl Keyring {
 
     fn open_item(&self, c: &CipherData) -> Result<Item> {
         let key = self.key_for(c)?;
+        let own = c.organization_id.is_none();
         let name = open_text(&c.name, &key)?
             .map(|n| n.as_str().to_owned())
             .unwrap_or_default();
@@ -1619,9 +1628,10 @@ impl Keyring {
             fields,
             revision_date: c.revision_date.clone(),
             creation_date: c.creation_date.clone(),
-            editable: c.edit != Some(false),
-            view_password: c.view_password != Some(false),
-            deletable: c.permissions.as_ref().and_then(|p| p.delete) != Some(false),
+            // The least access where the server doesn't say (CipherData).
+            editable: c.edit.unwrap_or(own),
+            view_password: c.view_password.unwrap_or(own),
+            deletable: c.permissions.as_ref().and_then(|p| p.delete).unwrap_or(own),
             card,
             identity,
             ssh_key,

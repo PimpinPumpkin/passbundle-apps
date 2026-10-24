@@ -31,6 +31,9 @@ String openEmpty({bool lockOnSleep = false}) {
 }
 
 /// The core on a new folder holding the sample vault (test/sample): locked.
+/// It's the core's test vectors' vault, with what PassBundle's server says
+/// with each item and shared folder (`edit`, `viewPassword`, `permissions`,
+/// `readOnly`, `hidePasswords`, `manage`): the person may do anything.
 /// With `policies`, its kept sync has them, as the server sends them; the
 /// items in `asking` ask for the master password again, as the web vault
 /// sets it; and `changed` items (by id) and shared folders have those of

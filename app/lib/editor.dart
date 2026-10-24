@@ -289,11 +289,11 @@ class _ItemEditorState extends State<ItemEditor> {
   /// refuses it too).
   bool get placeLocked {
     if (!editing || organizationId == null) return false;
-    if (permissions['edit'] == false || permissions['share'] == false) {
+    if (permissions['edit'] != true || permissions['share'] != true) {
       return true;
     }
     final from = shown == null ? null : widget.places.collection(shown!);
-    return (from?['grid'] as Map?)?['share'] == false;
+    return (from?['grid'] as Map?)?['share'] != true;
   }
 
   /// The Folder picker's choices, grouped by owner: (value, label, glyph,

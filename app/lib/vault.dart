@@ -1606,10 +1606,10 @@ class _ItemPaneState extends State<ItemPane> {
   }
 
   /// Whether the person may do something with the item (`edit`,
-  /// `seePasswords`, `delete`, ...), as their shared folders allow; yes for
-  /// their own items, and when the core doesn't say.
+  /// `seePasswords`, `delete`, ...), as their shared folders allow (the
+  /// core says yes for their own items); no when the core doesn't say.
   bool may(Map<String, dynamic> item, String what) =>
-      (item['permissions'] as Map?)?[what] != false;
+      (item['permissions'] as Map?)?[what] == true;
 
   /// Downloads, opens, and saves an attachment to Downloads, through the core.
   Future<void> saveAttachment(String attachmentId, String name) async {

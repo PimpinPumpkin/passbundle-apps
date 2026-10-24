@@ -859,7 +859,7 @@ pub extern "C" fn pb_places() -> *mut c_char {
 #[no_mangle]
 pub extern "C" fn pb_templates() -> *mut c_char {
     with_app(|app| match app.vault() {
-        Some(vault) => json!(templates::groups(vault)),
+        Some(vault) => json!(templates::groups(vault, |item| app.may_use(item))),
         None => json!([{ "name": "Built-in", "templates": templates::built_in() }]),
     })
 }
