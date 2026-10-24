@@ -27,6 +27,8 @@ pub mod store;
 pub mod synced_settings;
 pub mod templates;
 pub mod totp;
+#[cfg(not(phone))]
+pub mod updates;
 pub mod vault;
 
 #[cfg(target_os = "android")]

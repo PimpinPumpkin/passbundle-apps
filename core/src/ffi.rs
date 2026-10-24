@@ -1889,6 +1889,80 @@ pub extern "C" fn pb_generator_policy() -> *mut c_char {
     with_app(|app| json!(app.generator_policy()))
 }
 
+/// Updates from PassBundle's releases on Windows and Linux (src/updates), for
+/// Settings' Updates (app/lib/updates.dart): each call on a thread of the
+/// core's own, since checking and downloading wait on the network (see
+/// `with_app_waiting`). Where the app doesn't update itself this way (the
+/// Mac has its own updater), each says so.
+#[cfg(not(phone))]
+fn on_updates(call: impl FnOnce(&crate::updates::Context) -> Value + Send) -> *mut c_char {
+    let stopped = || json!({ "ok": false, "error": "The core stopped unexpectedly." });
+    out(std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                catch_unwind(AssertUnwindSafe(|| {
+                    match crate::updates::Context::for_this_app() {
+                        Some(ctx) => call(&ctx),
+                        None => json!({ "ok": false, "error": "PassBundle doesn't update itself here." }),
+                    }
+                }))
+                .unwrap_or_else(|_| stopped())
+            })
+            .join()
+            .unwrap_or_else(|_| stopped())
+    }))
+}
+
+/// This copy's version, whether it checks once a day, why it can't update
+/// itself if it can't (`installNote`), and an update that didn't happen
+/// (`failed`).
+#[cfg(not(phone))]
+#[no_mangle]
+pub extern "C" fn pb_update_status() -> *mut c_char {
+    on_updates(crate::updates::status)
+}
+
+/// Looks for a newer release: `{ok, available, version, notes}`; `quiet`
+/// is the check as the app opens, at most once a day.
+#[cfg(not(phone))]
+#[no_mangle]
+pub extern "C" fn pb_update_check(quiet: bool) -> *mut c_char {
+    on_updates(|ctx| crate::updates::check(ctx, quiet))
+}
+
+/// Downloads and checks the update the last check found, and starts
+/// putting it in place: `{ok, restart}`, and then the app quits.
+#[cfg(not(phone))]
+#[no_mangle]
+pub extern "C" fn pb_update_install() -> *mut c_char {
+    on_updates(crate::updates::install)
+}
+
+/// How far the download is: `{percent}`.
+#[cfg(not(phone))]
+#[no_mangle]
+pub extern "C" fn pb_update_progress() -> *mut c_char {
+    out(crate::updates::progress())
+}
+
+/// Turns the daily check on or off.
+#[cfg(not(phone))]
+#[no_mangle]
+pub extern "C" fn pb_update_auto(on: bool) -> *mut c_char {
+    on_updates(|ctx| {
+        crate::updates::set_auto(ctx, on);
+        json!({ "ok": true })
+    })
+}
+
+/// The app has drawn its first frame: `{updated}` or `{failed}` when an
+/// update just finished, either way.
+#[cfg(not(phone))]
+#[no_mangle]
+pub extern "C" fn pb_update_started() -> *mut c_char {
+    on_updates(crate::updates::started)
+}
+
 /// Frees a string the core returned.
 ///
 /// # Safety

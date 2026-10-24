@@ -70,6 +70,45 @@ jobs:
           export PB_TEST_AGENT="$GITHUB_WORKSPACE/agent/target/debug/passbundle-agent$( [ "$RUNNER_OS" = Windows ] && echo .exe)"
           cargo test --locked
 
+  vectors:
+    # The test vectors in core/tests/vectors are copies of the meta repo's
+    # (docs/vectors): on a pull request, its branch of the same name if it
+    # has one (a change that spans the two), else its main.
+    name: Vectors as the meta repo has them
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: core/tests/vectors
+          persist-credentials: false
+      - name: The meta repo's branch
+        id: meta
+        env:
+          BRANCH: ${{ github.head_ref }}
+        run: |
+          ref=main
+          if [ -n "$BRANCH" ] && git ls-remote --exit-code --heads https://github.com/PimpinPumpkin/Passbundle.git "refs/heads/$BRANCH" > /dev/null; then
+            ref=$BRANCH
+          fi
+          echo "Comparing with the meta repo's $ref."
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: PimpinPumpkin/Passbundle
+          ref: ${{ steps.meta.outputs.ref }}
+          path: meta
+          sparse-checkout: docs/vectors
+          persist-credentials: false
+      - name: Each copy is the meta repo's
+        run: |
+          for name in core-v1.json desktop-update-v1.json; do
+            cmp "core/tests/vectors/$name" "meta/docs/vectors/$name"
+          done
+
   android:
     # The core and the app on Android (docs/phones.md): the core built for
     # phones and the emulator with the NDK, its lints for Android, its tests,
@@ -519,6 +558,8 @@ jobs:
           case "${{ matrix.platform }}" in
             linux)
               cp "${{ matrix.lib }}" "${{ matrix.bundle }}/lib/"
+              # The updater (core/src/updates/swap.rs), as in the releases.
+              cp core/target/release/passbundle-update "${{ matrix.bundle }}/"
               test -f "${{ matrix.bundle }}/data/com.passbundle.app.png" ;;
             macos)
               # Named PassBundle, and not sandboxed: a sandboxed app can't
@@ -545,7 +586,7 @@ jobs:
               pkill -x passbundle
               kill "$agent" ;;
             windows)
-              cp "${{ matrix.lib }}" "${{ matrix.bundle }}/"
+              cp "${{ matrix.lib }}" core/target/release/passbundle-update.exe "${{ matrix.bundle }}/"
               cp agent/target/release/passbundle-agent.exe agent/target/release/passbundle-agent-host.exe "${{ matrix.bundle }}/" ;;
           esac
           ls "${{ matrix.bundle }}" | head -20
@@ -577,6 +618,22 @@ jobs:
         if: matrix.platform == 'windows'
         shell: pwsh
         run: tools/window-test.ps1 -Exe "${{ matrix.exe }}"
+      # The Windows and Linux updater with the real app (core/src/updates):
+      # an older build updates itself to a newer one, signed with a
+      # throwaway key and served from a stand-in for GitHub on the runner,
+      # and opens again as the new version; then a newer one that doesn't
+      # start is taken out, and the older one opens again.
+      - name: The app updates itself, and goes back from an update that doesn't start (Linux)
+        if: matrix.platform == 'linux'
+        timeout-minutes: 15
+        run: |
+          Xvfb :97 -screen 0 1440x900x24 &
+          sleep 2
+          DISPLAY=:97 tools/desktop-update-test.sh "${{ matrix.bundle }}" core/target/release
+      - name: The app updates itself, and goes back from an update that doesn't start (Windows)
+        if: matrix.platform == 'windows'
+        timeout-minutes: 15
+        run: tools/desktop-update-test.sh "${{ matrix.bundle }}" core/target/release
       - name: Pack the build
         run: tar -czf "passbundle-${{ matrix.platform }}.tar.gz" -C "$(dirname "${{ matrix.bundle }}")" "$(basename "${{ matrix.bundle }}")"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
