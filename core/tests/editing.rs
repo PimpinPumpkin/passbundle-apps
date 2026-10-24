@@ -560,3 +560,50 @@ fn a_second_passkey_shows_in_an_items_history() {
     assert_eq!(two, "backup.example.test, ana and 1 more");
     assert_ne!(one_compared, two_compared);
 }
+
+/// Restoring a version (Vault::encrypt_restore) keeps a passkey the item
+/// still has as it is now, with its raised counter, since a site refuses a
+/// counter that goes back; and says first which passkey it would take away.
+#[test]
+fn restoring_a_version_keeps_the_passkeys_counters_and_says_what_it_drops() {
+    let (mut v, prelogin, password) = sample();
+    let id = v["ids"]["withKey"].as_str().unwrap().to_owned();
+    let item_key = open(&v, &prelogin, &password)
+        .item(&id)
+        .unwrap()
+        .kept
+        .item_key
+        .clone()
+        .expect("the vectors' item has its own key");
+    let enc = |text: &str| serde_json::Value::from(item_key.encrypt_str(text).to_string());
+    let passkey = |id: &str, user: &str, counter: u32| {
+        serde_json::json!({
+            "credentialId": enc(id),
+            "keyType": enc("public-key"),
+            "rpId": enc("backup.example.test"),
+            "userName": enc(user),
+            "counter": enc(&counter.to_string()),
+        })
+    };
+    // The version: one passkey, counted 1.
+    cipher(&mut v, &id)["login"]["fido2Credentials"] =
+        serde_json::json!([passkey("one", "ana", 1)]);
+    let then = open(&v, &prelogin, &password);
+    let version = then.item(&id).unwrap();
+    // Now: that passkey counted 5, and a second one since.
+    cipher(&mut v, &id)["login"]["fido2Credentials"] =
+        serde_json::json!([passkey("one", "ana", 5), passkey("two", "ana.work", 0)]);
+    let vault = open(&v, &prelogin, &password);
+    let current = vault.item(&id).unwrap();
+
+    assert_eq!(
+        vault.restore_drops(version, current),
+        ["backup.example.test, ana.work"]
+    );
+    let body = vault.encrypt_restore(version, current).unwrap();
+    let restored = body["login"]["fido2Credentials"].as_array().unwrap();
+    assert_eq!(restored.len(), 1);
+    assert_eq!(opened(&item_key, &restored[0]["credentialId"]), "one");
+    assert_eq!(opened(&item_key, &restored[0]["counter"]), "5");
+    assert!(vault.restore_drops(current, current).is_empty());
+}

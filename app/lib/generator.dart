@@ -92,7 +92,9 @@ class GeneratorPage extends StatefulWidget {
 
 class _GeneratorPageState extends State<GeneratorPage> {
   bool passphrase = false;
-  bool made = false;
+
+  /// What the panel shows: what Copy copies.
+  String? made;
 
   @override
   void dispose() {
@@ -102,7 +104,9 @@ class _GeneratorPageState extends State<GeneratorPage> {
   }
 
   Future<void> copy() async {
-    final answer = await widget.core.copy('', 'generated');
+    final shown = made;
+    if (shown == null) return;
+    final answer = await widget.core.copyGenerated(shown);
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
@@ -130,7 +134,7 @@ class _GeneratorPageState extends State<GeneratorPage> {
                 child: GeneratorPanel(
                   core: widget.core,
                   onMade: (made, passphrase) => setState(() {
-                    this.made = made != null;
+                    this.made = made;
                     this.passphrase = passphrase;
                   }),
                 ),
@@ -138,7 +142,7 @@ class _GeneratorPageState extends State<GeneratorPage> {
             ),
             const SizedBox(height: 16),
             FilledButton.icon(
-              onPressed: made ? copy : null,
+              onPressed: made != null ? copy : null,
               icon: const Icon(Icons.copy_rounded, size: 18),
               label: Text(passphrase ? 'Copy passphrase' : 'Copy password'),
             ),
@@ -276,7 +280,9 @@ class _GeneratorPanelState extends State<GeneratorPanel> {
           child: Row(
             children: [
               Expanded(
-                child: SelectableText(
+                // Not selectable: the system's own Copy would keep it on the
+                // clipboard for good; Copy copies it, for 30 seconds.
+                child: Text(
                   made ?? '',
                   key: const Key('generated'),
                   style: const TextStyle(fontFamily: 'monospace', fontSize: 16),

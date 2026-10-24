@@ -568,6 +568,35 @@ impl Passkey {
     }
 }
 
+/// A login's passkeys as stored (upstream's encrypted `fido2Credentials`):
+/// each one's credential ID and counter, opened with `key`, and the entry
+/// itself; one whose ID doesn't open is left out.
+fn stored_passkeys(
+    stored: Option<&serde_json::Value>,
+    key: &SymmetricKey,
+) -> Vec<(String, u32, serde_json::Value)> {
+    let open = |entry: &serde_json::Value, name: &str| {
+        entry
+            .get(name)
+            .and_then(|v| v.as_str())
+            .and_then(|raw| EncString::parse(raw).ok())
+            .and_then(|e| e.decrypt_string(key).ok())
+            .map(|v| v.as_str().to_owned())
+    };
+    stored
+        .and_then(|s| s.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| {
+            let id = open(entry, "credentialId")?;
+            let counter = open(entry, "counter")
+                .and_then(|c| c.trim().parse().ok())
+                .unwrap_or(0);
+            Some((id, counter, entry.clone()))
+        })
+        .collect()
+}
+
 /// What an attachment whose name or key doesn't open is called.
 pub const CANT_OPEN_ATTACHMENT: &str = "An attachment that can't be opened";
 
@@ -1211,6 +1240,10 @@ impl Vault {
     /// folders, attachments, and key). The password it replaces goes into
     /// its history, as any edit's does. Refused for a version of another
     /// kind, owner, or key, which only the web vault restores.
+    ///
+    /// A passkey the item still has is kept as it is now, with the higher
+    /// of its counters (signing in raises it, and a site refuses one that
+    /// goes back); one the version doesn't have goes (`restore_drops`).
     pub fn encrypt_restore(&self, version: &Item, current: &Item) -> Result<serde_json::Value> {
         if version.kind != current.kind
             || version.organization_id != current.organization_id
@@ -1223,7 +1256,77 @@ impl Vault {
         let mut draft = ItemDraft::of(version);
         draft.folder_id = current.folder_id.clone();
         draft.favorite = current.favorite;
-        self.encrypt_item_from(&draft, Some(current), Some(version), None)
+        let key = self.item_value_key(current)?;
+        let now = stored_passkeys(current.kept.fido2_credentials.as_ref(), key);
+        let passkeys = version
+            .kept
+            .fido2_credentials
+            .as_ref()
+            .and_then(|stored| stored.as_array())
+            .map(|then| {
+                serde_json::Value::Array(
+                    then.iter()
+                        .map(|entry| {
+                            let opened = stored_passkeys(Some(&serde_json::json!([entry])), key);
+                            let still = opened.first().and_then(|(id, counter, _)| {
+                                now.iter().find(|(now_id, now_counter, _)| {
+                                    now_id == id && now_counter >= counter
+                                })
+                            });
+                            match still {
+                                Some((_, _, now_entry)) => now_entry.clone(),
+                                None => entry.clone(),
+                            }
+                        })
+                        .collect(),
+                )
+            });
+        self.encrypt_item_from(&draft, Some(current), Some(version), passkeys)
+    }
+
+    /// The passkeys restoring `version` would take from the item, which it
+    /// has now and the version doesn't: who each is for ("shop.example.test,
+    /// ana"), to warn before restoring.
+    pub fn restore_drops(&self, version: &Item, current: &Item) -> Vec<String> {
+        let Ok(key) = self.item_value_key(current) else {
+            return Vec::new();
+        };
+        let then = stored_passkeys(version.kept.fido2_credentials.as_ref(), key);
+        stored_passkeys(current.kept.fido2_credentials.as_ref(), key)
+            .into_iter()
+            .filter(|(id, _, _)| !then.iter().any(|(then_id, _, _)| then_id == id))
+            .map(|(_, _, entry)| {
+                let text = |name: &str| {
+                    entry
+                        .get(name)
+                        .and_then(|v| v.as_str())
+                        .and_then(|raw| EncString::parse(raw).ok())
+                        .and_then(|e| e.decrypt_string(key).ok())
+                        .map(|v| v.as_str().to_owned())
+                        .filter(|v| !v.is_empty())
+                };
+                [text("rpName").or_else(|| text("rpId")), text("userName")]
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .collect()
+    }
+
+    /// The key an item's values are under: its own, or its owner's.
+    fn item_value_key<'a>(&'a self, item: &'a Item) -> Result<&'a SymmetricKey> {
+        if let Some(key) = item.kept.item_key.as_ref() {
+            return Ok(key);
+        }
+        match &item.organization_id {
+            Some(org) => self
+                .keys
+                .organizations
+                .get(org)
+                .ok_or(Error::Damaged("that organization's key doesn't open")),
+            None => Ok(&self.keys.user),
+        }
     }
 
     /// `encrypt_item_with`, keeping what the editor doesn't edit (the kept

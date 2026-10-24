@@ -270,7 +270,11 @@ impl Server {
                 "PassBundle only talks to servers over HTTPS",
             ));
         }
+        // A server reached over HTTPS is only ever left for HTTPS: no
+        // redirect, or link it gives, goes to plain HTTP. (Plain HTTP is
+        // only for a server on this computer, `allowed`.)
         let agent = Agent::config_builder()
+            .https_only(base.starts_with("https://"))
             .http_status_as_error(false)
             .timeout_global(Some(Duration::from_secs(30)))
             .user_agent(format!("PassBundle/{}", crate::version()))
@@ -627,14 +631,17 @@ impl Server {
 
     /// A website's icon from the server's icon service (`<server>/icons/<host>/icon.png`),
     /// as the web vault shows it: no session, at most 512 KB and 10 seconds,
-    /// and None where there's none (the server's 19 by 19 fallback counts as
-    /// none).
+    /// and None where there's none. The server's 19 by 19 fallback counts as
+    /// none, and so do a redirect and an image the tiles don't draw or that's
+    /// larger than an icon (icons.rs, `acceptable`).
     pub fn icon(&self, host: &str) -> Result<Option<Vec<u8>>> {
         let mut response = self
             .agent
             .get(self.url(&format!("/icons/{host}/icon.png")))
             .config()
             .timeout_global(Some(Duration::from_secs(10)))
+            // An icon comes from the server itself: a redirect is none.
+            .max_redirects(0)
             .build()
             .call()
             .map_err(|e| Error::Network(e.to_string()))?;
@@ -647,7 +654,7 @@ impl Server {
             .limit(512 * 1024)
             .read_to_vec()
             .map_err(|e| Error::Network(e.to_string()))?;
-        Ok(Some(bytes).filter(|b| !crate::icons::is_fallback(b)))
+        Ok(Some(bytes).filter(|b| !crate::icons::is_fallback(b) && crate::icons::acceptable(b)))
     }
 
     /// An attachment's file, as the server stores it (still encrypted).
@@ -803,6 +810,85 @@ impl Server {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A server on this computer that answers each request with the next
+    /// of `answers`, and says which paths were asked for.
+    fn answering(answers: Vec<Vec<u8>>) -> (String, std::thread::JoinHandle<Vec<String>>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let served = std::thread::spawn(move || {
+            let mut asked = Vec::new();
+            for answer in answers {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    break;
+                };
+                let mut request = Vec::new();
+                let mut byte = [0u8; 1];
+                while !request.ends_with(b"\r\n\r\n") && stream.read(&mut byte).unwrap_or(0) == 1 {
+                    request.push(byte[0]);
+                }
+                let line = String::from_utf8_lossy(&request);
+                asked.push(line.split(' ').nth(1).unwrap_or_default().to_owned());
+                let _ = stream.write_all(&answer);
+            }
+            asked
+        });
+        (url, served)
+    }
+
+    fn answer(status: &str, headers: &str, body: &[u8]) -> Vec<u8> {
+        let mut answer = format!(
+            "HTTP/1.1 {status}\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        answer.extend_from_slice(body);
+        answer
+    }
+
+    fn png(side: u32) -> Vec<u8> {
+        let mut png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
+        png.extend_from_slice(&side.to_be_bytes());
+        png.extend_from_slice(&side.to_be_bytes());
+        png.extend_from_slice(&[8, 6, 0, 0, 0]);
+        png
+    }
+
+    #[test]
+    fn an_icon_is_the_servers_own_and_icon_sized() {
+        // A redirect, even to the same server, is no icon, and isn't
+        // followed: the next request is the next host's.
+        let small = png(32);
+        let (url, served) = answering(vec![
+            answer(
+                "302 Found",
+                "Location: /icons/elsewhere.example/icon.png\r\n",
+                b"",
+            ),
+            answer("200 OK", "Content-Type: image/png\r\n", &small),
+        ]);
+        let server = Server::new(&url, Device::this_one("")).unwrap();
+        assert_eq!(server.icon("shop.example").unwrap(), None);
+        assert_eq!(server.icon("next.example").unwrap(), Some(small.clone()));
+        assert_eq!(
+            served.join().unwrap(),
+            [
+                "/icons/shop.example/icon.png",
+                "/icons/next.example/icon.png"
+            ]
+        );
+
+        // A picture far larger than an icon (a small file that would take
+        // 576 MB to draw) is none.
+        let (url, _) = answering(vec![answer(
+            "200 OK",
+            "Content-Type: image/png\r\n",
+            &png(12000),
+        )]);
+        let server = Server::new(&url, Device::this_one("")).unwrap();
+        assert_eq!(server.icon("big.example").unwrap(), None);
+    }
 
     #[test]
     fn https_anywhere_and_plain_http_only_to_this_computer() {

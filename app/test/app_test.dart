@@ -2,11 +2,14 @@
 // unlocking the sample vault kept on this device, browsing, search, revealing,
 // the editor, and locking.
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:passbundle/core.dart';
 import 'package:passbundle/editor.dart';
+import 'package:passbundle/icons.dart';
 import 'package:passbundle/main.dart';
 import 'package:passbundle/new_item.dart';
 import 'package:passbundle/vault.dart';
@@ -211,9 +214,8 @@ void main() {
       // The generator: a password, then a passphrase, which it remembers.
       await tester.tap(find.byTooltip('Generate a password'));
       await tester.pumpAndSettle();
-      String generated() => tester
-          .widget<SelectableText>(find.byKey(const Key('generated')))
-          .data!;
+      String generated() =>
+          tester.widget<Text>(find.byKey(const Key('generated'))).data!;
       expect(generated(), hasLength(20));
       await tester.tap(find.text('0-9'));
       await tester.pumpAndSettle();
@@ -314,7 +316,7 @@ void main() {
       );
       await tester.pumpAndSettle();
       final made = tester
-          .widget<SelectableText>(find.byKey(const Key('generated')))
+          .widget<Text>(find.byKey(const Key('generated')))
           .data!;
       expect(made.split(' '), hasLength(8));
       expect(made, matches(RegExp(r'^([A-Z][a-z-]+ ){7}[A-Z][a-z-]+$')));
@@ -868,31 +870,91 @@ void main() {
     await tester.pumpAndSettle();
   });
 
+  /// A PNG whose header says it's [side] pixels a side, with no picture in
+  /// it: enough for a header to be read, and no more.
+  Uint8List pngClaiming(int side) {
+    int crc(List<int> bytes) {
+      var c = 0xFFFFFFFF;
+      for (final b in bytes) {
+        c ^= b;
+        for (var k = 0; k < 8; k++) {
+          c = (c & 1) != 0 ? 0xEDB88320 ^ (c >> 1) : c >> 1;
+        }
+      }
+      return c ^ 0xFFFFFFFF;
+    }
+
+    List<int> be32(int v) => [
+      v >> 24 & 255,
+      v >> 16 & 255,
+      v >> 8 & 255,
+      v & 255,
+    ];
+    List<int> chunk(String kind, List<int> data) {
+      final body = [...kind.codeUnits, ...data];
+      return [...be32(data.length), ...body, ...be32(crc(body))];
+    }
+
+    return Uint8List.fromList([
+      0x89,
+      0x50,
+      0x4E,
+      0x47,
+      0x0D,
+      0x0A,
+      0x1A,
+      0x0A,
+      ...chunk('IHDR', [...be32(side), ...be32(side), 1, 0, 0, 0, 0]),
+      ...chunk('IDAT', ZLibEncoder().convert([0])),
+      ...chunk('IEND', const []),
+    ]);
+  }
+
   testWidgets(
-    'a login shows its website\'s icon, kept on this device, until Settings turns icons off',
+    'an icon is drawn no larger than a tile needs, and one that says it\'s larger than an icon isn\'t drawn',
+    (tester) async {
+      final icon = File('linux/icons/com.passbundle.app.png').readAsBytesSync();
+      final drawn = await tester.runAsync(() => SiteIcons.draw(icon));
+      expect(drawn!.width, SiteIcons.drawn);
+      // 12000 by 12000 pixels would take 576 MB drawn.
+      expect(
+        await tester.runAsync(() => SiteIcons.draw(pngClaiming(12000))),
+        isNull,
+      );
+      expect(
+        await tester.runAsync(() => SiteIcons.draw(pngClaiming(257))),
+        isNull,
+      );
+      final svg = Uint8List.fromList(
+        '<svg xmlns="http://www.w3.org/2000/svg"/>'.codeUnits,
+      );
+      expect(await tester.runAsync(() => SiteIcons.draw(svg)), isNull);
+    },
+  );
+
+  testWidgets(
+    'a login shows its website\'s icon, kept in memory only, until Settings turns icons off',
     (tester) async {
       setSize(tester, const Size(1280, 800));
       final dir = openSample();
-      // As the core keeps one it fetched (core/src/icons.rs), at the path
-      // it gives.
-      final sep = Platform.pathSeparator;
-      Directory('$dir${sep}icons').createSync();
-      final kept = '$dir${sep}icons${sep}mail.example.test.png';
-      File('linux/icons/com.passbundle.app.png').copySync(kept);
+      // What the server's icon service sends (core/src/icons.rs): Example
+      // Mail's icon, and, for Backup service, one far larger than an icon.
+      Core().testIcons({
+        'mail.example.test': File('linux/icons/com.passbundle.app.png')
+            .readAsBytesSync(),
+        'backup.example.test': pngClaiming(12000),
+      });
       showIcons(true);
       await tester.pumpWidget(const PassBundleApp());
-      // Read in real time, as the app reads it: a read left waiting in the
-      // test's fake time would keep the file open, and Windows doesn't
-      // delete an open file.
-      final context = tester.element(find.byType(MaterialApp));
-      await tester.runAsync(
-        () => precacheImage(FileImage(File(kept)), context),
-      );
       await tester.enterText(find.byType(TextField), samplePassword);
       await tester.tap(find.text('Unlock'));
       await pumpUntil(tester, find.text('Example Mail'));
-      await pumpUntil(tester, find.byType(Image));
-      expect(find.byType(Image), findsWidgets);
+      await pumpUntil(tester, find.byType(RawImage));
+      // Example Mail's, drawn in place of its letter; Backup service keeps
+      // its letter.
+      expect(find.byType(RawImage), findsOneWidget);
+      expect(find.text('E'), findsNothing);
+      expect(find.text('B'), findsOneWidget);
       await tester.tap(find.byTooltip('Settings'));
       await tester.pump();
       await pumpUntil(tester, find.byKey(const ValueKey('show-icons')));
@@ -900,19 +962,9 @@ void main() {
       await tester.pump();
       await tester.tap(find.text('Close'));
       await tester.pumpAndSettle();
-      expect(find.byType(Image), findsNothing);
-      // Turning them off forgets them.
-      final icons = Directory('$dir/icons');
-      String? why;
-      if (icons.existsSync()) {
-        why = 'still kept: ${icons.listSync().map((e) => e.path).join(', ')}';
-        try {
-          icons.deleteSync(recursive: true);
-        } on FileSystemException catch (e) {
-          why = '$why; deleting it: ${e.osError ?? e.message}';
-        }
-      }
-      expect(why, isNull);
+      expect(find.byType(RawImage), findsNothing);
+      // Nothing of them was written to the device.
+      expect(Directory('$dir/icons').existsSync(), isFalse);
     },
   );
 
@@ -1047,7 +1099,7 @@ void main() {
       await tester.tap(find.byTooltip('Generator'));
       await tester.pumpAndSettle();
       final made = tester
-          .widget<SelectableText>(find.byKey(const Key('generated')))
+          .widget<Text>(find.byKey(const Key('generated')))
           .data!;
       expect(made, hasLength(20));
       await tester.tap(find.text('Copy password'));

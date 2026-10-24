@@ -13,6 +13,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:passbundle/core.dart';
+import 'package:passbundle/icons.dart';
 import 'package:passbundle/main.dart';
 import 'package:passbundle/updates.dart';
 
@@ -77,18 +78,11 @@ class _Updates implements UpdatePlatform {
 /// The switch for unlocking with Windows Hello or Touch ID, in Settings.
 const biometric = ValueKey('biometric');
 
-/// The showcase's websites' icons, decoded ahead (outside the test's clock,
-/// where images load), so tiles draw them rather than waiting.
-Future<void> precacheIcons(WidgetTester tester, String dir) async {
-  final icons = Directory('$dir/icons');
-  if (!icons.existsSync()) return;
-  final context = tester.element(find.byType(MaterialApp));
-  await tester.runAsync(() async {
-    for (final f in icons.listSync().whereType<File>()) {
-      if (f.path.endsWith('.png')) await precacheImage(FileImage(f), context);
-    }
-  });
-}
+/// The showcase's websites' icons, drawn ahead (outside the test's clock,
+/// where images draw), so tiles show them rather than waiting.
+Future<void> precacheIcons(WidgetTester tester) => tester.runAsync(
+  () => Future.wait([for (final host in showcaseIcons) siteIcons.of(host)]),
+);
 
 /// A screenshot test, with shadows drawn as a phone or computer draws them:
 /// tests otherwise draw them as solid blocks, which keeps checks steady, but
@@ -122,9 +116,9 @@ void main() {
 
     shots('unlock, vault, item, editor, desktop, $b', (tester) async {
       await size(tester, const Size(1280, 800));
-      final dir = openShowcase();
+      openShowcase();
       await tester.pumpWidget(PassBundleApp(themeMode: theme));
-      await precacheIcons(tester, dir);
+      await precacheIcons(tester);
       await shoot('unlock-$b', tester);
       await unlock(tester);
       await tester.tap(find.text('Example Mail').first);
@@ -282,9 +276,9 @@ void main() {
     shots('vault, item, editor, and the offer, phone, $b', (tester) async {
       await size(tester, const Size(390, 844));
       PhoneStandIn(tester);
-      final dir = openShowcase();
+      openShowcase();
       await tester.pumpWidget(PassBundleApp(themeMode: theme));
-      await precacheIcons(tester, dir);
+      await precacheIcons(tester);
       await unlock(tester, phone: true);
       // Unlocked with the master password, on a phone with a fingerprint.
       await pumpUntil(tester, find.text('Unlock with fingerprint next time?'));

@@ -347,12 +347,24 @@ class _VersionViewState extends State<VersionView> {
   }
 
   Future<void> restore() async {
+    // Passkeys it has now that this version doesn't: restoring takes them
+    // away, so it says so first.
+    final drops =
+        ((widget.core.itemVersion(widget.id, versionId).body['dropsPasskeys']
+                    as List?) ??
+                const [])
+            .cast<String>();
+    final passkeys = drops.isEmpty
+        ? ''
+        : drops.length == 1
+        ? ' This version doesn\'t have its passkey for ${drops.single}: restoring removes it, and you can\'t sign in with it after.'
+        : ' This version doesn\'t have ${drops.length} of its passkeys (for ${drops.join('; ')}): restoring removes them, and you can\'t sign in with them after.';
     final go = await _sure(
       context,
       title: 'Restore this version?',
       content:
-          'The item goes back to how it was on $when. How it is now stays in its version history, so you can come back to it.',
-      action: 'Restore',
+          'The item goes back to how it was on $when. How it is now stays in its version history, so you can come back to it.$passkeys',
+      action: drops.isEmpty ? 'Restore' : 'Restore anyway',
     );
     if (!go || !mounted) return;
     setState(() => working = true);
@@ -413,15 +425,24 @@ class _VersionViewState extends State<VersionView> {
             return v.isEmpty ? '(empty)' : v;
           }
 
-          Widget cell(String text, {bool strong = false, bool muted = false}) =>
-              SelectableText(
-                text,
-                style: TextStyle(
-                  fontSize: 14,
-                  fontWeight: strong ? FontWeight.w600 : FontWeight.w400,
-                  color: muted ? c.muted : null,
-                ),
-              );
+          // A secret's value isn't selectable: the system's own Copy would
+          // put it on the clipboard for good, past the 30 seconds.
+          Widget cell(
+            String text, {
+            bool strong = false,
+            bool muted = false,
+            bool secret = false,
+          }) {
+            final style = TextStyle(
+              fontSize: 14,
+              fontWeight: strong ? FontWeight.w600 : FontWeight.w400,
+              color: muted ? c.muted : null,
+            );
+            return secret
+                ? Text(text, style: style)
+                : SelectableText(text, style: style);
+          }
+
           Widget changed() => Container(
             margin: const EdgeInsets.only(top: 4),
             padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
@@ -481,11 +502,17 @@ class _VersionViewState extends State<VersionView> {
                             ),
                             Expanded(
                               flex: 3,
-                              child: cell(value(rows[i], 'version')),
+                              child: cell(
+                                value(rows[i], 'version'),
+                                secret: rows[i]['secret'] == true,
+                              ),
                             ),
                             Expanded(
                               flex: 3,
-                              child: cell(value(rows[i], 'current')),
+                              child: cell(
+                                value(rows[i], 'current'),
+                                secret: rows[i]['secret'] == true,
+                              ),
                             ),
                           ],
                         )
@@ -504,10 +531,14 @@ class _VersionViewState extends State<VersionView> {
                               ],
                             ),
                             const SizedBox(height: 4),
-                            cell('This version: ${value(rows[i], 'version')}'),
+                            cell(
+                              'This version: ${value(rows[i], 'version')}',
+                              secret: rows[i]['secret'] == true,
+                            ),
                             cell(
                               'Now: ${value(rows[i], 'current')}',
                               muted: true,
+                              secret: rows[i]['secret'] == true,
                             ),
                           ],
                         ),

@@ -98,9 +98,6 @@ class VaultScreenState extends State<VaultScreen> {
   @override
   void initState() {
     super.initState();
-    // What was known of icons before (another sign-in, or a locked vault's
-    // empty answers) is asked again.
-    siteIcons.forget();
     reload();
     lifecycle;
     updates?.addListener(updateFound);
@@ -124,6 +121,9 @@ class VaultScreenState extends State<VaultScreen> {
     updates?.removeListener(updateFound);
     lifecycle.dispose();
     search.dispose();
+    // The vault closed (it locked, or the person signed out): its websites'
+    // icons go, as the core's do.
+    siteIcons.forget();
     super.dispose();
   }
 
@@ -2062,8 +2062,11 @@ class _ItemPaneState extends State<ItemPane> {
     final sees = may(item, 'seePasswords');
     Widget secretRow(String label, String what, {bool canCopy = true}) => row(
       label,
-      // Google Sans Flex, like everything else: no system font, so it looks the same everywhere.
-      SelectableText(
+      // Google Sans Flex, like everything else: no system font, so it looks
+      // the same everywhere. Not selectable: the system's own Copy would put
+      // a secret on the clipboard for good, past the 30 seconds; its Copy
+      // button copies it.
+      Text(
         revealed[what] ?? '••••••••••••',
         style: TextStyle(fontSize: valueSize, letterSpacing: 0.6),
       ),

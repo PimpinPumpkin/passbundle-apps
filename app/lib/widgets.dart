@@ -1,7 +1,7 @@
 // Small pieces every screen uses: the mark, item avatars, the busy flag, and
 // the theme menu.
 import 'dart:async';
-import 'dart:io';
+import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 
@@ -255,7 +255,7 @@ class _SiteIcon extends StatefulWidget {
 }
 
 class _SiteIconState extends State<_SiteIcon> {
-  String? path;
+  ui.Image? icon;
   StreamSubscription<void>? changes;
 
   @override
@@ -274,13 +274,13 @@ class _SiteIconState extends State<_SiteIcon> {
   void ask() {
     final known = siteIcons.now(widget.host);
     if (!identical(known, SiteIcons.unknown)) {
-      setState(() => path = known as String?);
+      setState(() => icon = known as ui.Image?);
       return;
     }
-    path = null;
+    icon = null;
     final host = widget.host;
     siteIcons.of(host).then((found) {
-      if (mounted && widget.host == host) setState(() => path = found);
+      if (mounted && widget.host == host) setState(() => icon = found);
     });
   }
 
@@ -292,8 +292,8 @@ class _SiteIconState extends State<_SiteIcon> {
 
   @override
   Widget build(BuildContext context) {
-    final path = this.path;
-    if (path == null || !siteIcons.on) return widget.letter;
+    final icon = this.icon;
+    if (icon == null || !siteIcons.on) return widget.letter;
     final dark = Theme.of(context).brightness == Brightness.dark;
     final size = widget.size;
     return Container(
@@ -307,19 +307,13 @@ class _SiteIconState extends State<_SiteIcon> {
         ),
       ),
       alignment: Alignment.center,
-      child: Image.file(
-        File(path),
+      // Drawn already, no larger than a tile needs (icons.dart).
+      child: RawImage(
+        image: icon,
         width: size * 0.58,
         height: size * 0.58,
         fit: BoxFit.contain,
         filterQuality: FilterQuality.medium,
-        // Not an image Flutter reads (an SVG, say): the letter.
-        errorBuilder: (_, _, _) {
-          WidgetsBinding.instance.addPostFrameCallback((_) {
-            if (mounted) setState(() => this.path = null);
-          });
-          return const SizedBox.shrink();
-        },
       ),
     );
   }

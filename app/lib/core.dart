@@ -150,6 +150,10 @@ class Core {
   late final _places = _lib.lookupFunction<_Str0, _Str0>('pb_places');
   late final _templates = _lib.lookupFunction<_Str0, _Str0>('pb_templates');
   late final _icon = _lib.lookupFunction<_Str1, _Str1>('pb_icon');
+  late final _testIcons = _lib.lookupFunction<_Str1, _Str1>('pb_test_icons');
+  late final _keepGenerated = _lib.lookupFunction<_Str1, _Str1>(
+    'pb_keep_generated',
+  );
   late final _appearance = _lib.lookupFunction<_Str0, _Str0>('pb_appearance');
   late final _setAppearance = _lib.lookupFunction<_Str1, _Str1>(
     'pb_set_appearance',
@@ -492,14 +496,35 @@ class Core {
   /// folder with what the person can do in it (`grid`, `canCreate`).
   Map<String, dynamic> places() => _answer(_places()) as Map<String, dynamic>;
 
-  /// A website's icon for a login's tile (core/src/icons.rs): the file
-  /// it's kept in, or null where there's none, icons are off, or the vault
-  /// is locked. Waits on the server the first time, on a background isolate.
-  static Future<String?> icon(String host) async {
+  /// A website's icon for a login's tile (core/src/icons.rs): the image,
+  /// or null where there's none, icons are off, or the vault is locked. The
+  /// core keeps it in memory while the vault is open; it waits on the
+  /// server the first time, on a background isolate.
+  static Future<Uint8List?> icon(String host) async {
     final answer = await _background(
       (c) => c._with([host], (p) => c._answer(c._icon(p[0]))),
     );
-    return answer.ok ? answer.body['path'] as String? : null;
+    final icon = answer.ok ? answer.body['icon'] as String? : null;
+    return icon == null ? null : base64Decode(icon);
+  }
+
+  /// Websites' icons the core answers [icon] with, without a server: for
+  /// tests, with a core built with its test hooks.
+  @visibleForTesting
+  void testIcons(Map<String, List<int>> icons) => _with([
+    jsonEncode({for (final e in icons.entries) e.key: base64Encode(e.value)}),
+  ], (p) => _answer(_testIcons(p[0])));
+
+  /// Copies what the generator shows: the core takes it as the generator's
+  /// last value, then copies that as it copies any secret, which clears in
+  /// 30 seconds (on a phone, through the phone's own code).
+  Future<Answer> copyGenerated(String shown) async {
+    final kept = Answer(
+      _with([shown], (p) => _answer(_keepGenerated(p[0])))
+          as Map<String, dynamic>,
+    );
+    if (!kept.ok) return kept;
+    return copy('', 'generated');
   }
 
   /// How the app looks on this device: `showIcons`.

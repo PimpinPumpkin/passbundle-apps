@@ -2,7 +2,8 @@
 //! last password or passphrase it made is what copying `("", "generated")`
 //! gives, through the same path as an item's secrets (so phones clear it
 //! after 30 seconds), only while the vault is open, and locking forgets it.
-//! On the vectors' sample vault kept on this device.
+//! On the vectors' sample vault kept on this device. And an icons folder an
+//! earlier build kept is deleted when the app opens.
 
 use passbundle_core::app::App;
 use passbundle_core::generator::Options;
@@ -43,8 +44,20 @@ fn the_generators_copy_is_its_last_password_until_the_vault_locks() {
     assert_eq!(app.value("", "generated").unwrap().as_str(), made.as_str());
     // Not an item's: another "what" for no item is none.
     assert!(app.value("", "password").is_err());
+    // What the generator shows is what it copies, even if another was made
+    // since (an editor's generator, say).
+    app.keep_generated(first.as_str()).unwrap();
+    assert_eq!(app.value("", "generated").unwrap().as_str(), first.as_str());
 
     app.lock();
     assert!(app.value("", "generated").is_err());
+    assert!(app.keep_generated("anything").is_err());
+
+    // An icons folder an earlier build kept next to the vault goes when the
+    // app opens: icons are in memory only.
+    std::fs::create_dir_all(dir.join("icons")).unwrap();
+    std::fs::write(dir.join("icons").join("mail.example.test.png"), b"icon").unwrap();
+    let _app = App::open(Store::new(&dir), Box::new(MemorySecretStore::default()));
+    assert!(!dir.join("icons").exists());
     let _ = std::fs::remove_dir_all(dir);
 }

@@ -1062,51 +1062,85 @@ pub unsafe extern "C" fn pb_set_appearance(appearance: *const c_char) -> *mut c_
     })
 }
 
-/// A website's icon for a login's tile (icons.rs): `{ok, path}`, the file
-/// it's kept in, or `{ok, path: null}` where there's none (or icons are off,
+/// A website's icon for a login's tile (icons.rs): `{ok, icon}`, the image
+/// in base64, or `{ok, icon: null}` where there's none (or icons are off,
 /// or the vault is locked). From the server's icon service the first time,
-/// away from the app's other calls, then from this device for a week.
+/// away from the app's other calls, then from memory while the vault stays
+/// open; nothing of it is written to the device.
 ///
 /// # Safety
 /// `host` is null or a NUL-terminated UTF-8 string, valid for the call.
 #[no_mangle]
 pub unsafe extern "C" fn pb_icon(host: *const c_char) -> *mut c_char {
+    use base64::{engine::general_purpose::STANDARD, Engine};
     let host = text(host);
-    // Only a host name the core would make, so it's a safe file name too.
+    // Only a host name the core would make.
     if crate::icons::host_of(&format!("https://{host}")).as_deref() != Some(host.as_str()) {
         return out(json!({ "ok": false, "error": "not a website's host" }));
     }
+    #[cfg(feature = "test-hooks")]
+    if let Some(icon) = TEST_ICONS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&host)
+    {
+        return out(json!({ "ok": true, "icon": STANDARD.encode(icon) }));
+    }
     let mut source = None;
+    let mut kept = None;
     let _ = app_value(|app| {
         source = app.icon_source();
+        kept = app
+            .kept_icon(&host)
+            .map(|icon| icon.map(|bytes| STANDARD.encode(bytes)));
         Value::Null
     });
-    let Some((server, folder)) = source else {
-        return out(json!({ "ok": true, "path": null }));
+    let Some((server, session)) = source else {
+        return out(json!({ "ok": true, "icon": null }));
     };
-    if let Some(kept) = crate::icons::kept(&folder, &host) {
-        return out(json!({ "ok": true, "path": kept.map(|p| p.to_string_lossy().into_owned()) }));
+    if let Some(kept) = kept {
+        return out(json!({ "ok": true, "icon": kept }));
     }
     out(waiting(|| {
         let fetched = crate::server::Server::new(&server, crate::server::Device::this_one(""))
             .and_then(|s| s.icon(&host));
         match fetched {
             Ok(icon) => {
-                // Kept only while icons are still on for this vault: signing
-                // out or turning them off while it was fetched removed the
-                // folder, which mustn't come back.
-                let mut path = None;
+                let encoded = icon.as_deref().map(|bytes| STANDARD.encode(bytes));
                 let _ = app_value(|app| {
-                    if app.icon_source().as_ref() == Some(&(server.clone(), folder.clone())) {
-                        path = crate::icons::keep(&folder, &host, icon.as_deref());
-                    }
+                    app.keep_icon(session, &host, icon);
                     Value::Null
                 });
-                json!({ "ok": true, "path": path.map(|p| p.to_string_lossy().into_owned()) })
+                json!({ "ok": true, "icon": encoded })
             }
             Err(e) => failed(e),
         }
     }))
+}
+
+/// Websites' icons `pb_icon` answers with instead of asking a server, for
+/// tests (the test-hooks feature): `{"<host>": "<base64>"}`, replacing any
+/// given before; `{}` for none.
+#[cfg(feature = "test-hooks")]
+static TEST_ICONS: std::sync::Mutex<std::collections::BTreeMap<String, Vec<u8>>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// # Safety
+/// `icons` is null or a NUL-terminated UTF-8 string, valid for the call.
+#[cfg(feature = "test-hooks")]
+#[no_mangle]
+pub unsafe extern "C" fn pb_test_icons(icons: *const c_char) -> *mut c_char {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let given: std::collections::BTreeMap<String, String> =
+        serde_json::from_str(&text(icons)).unwrap_or_default();
+    let decoded = given
+        .into_iter()
+        .filter_map(|(host, icon)| Some((host, STANDARD.decode(icon).ok()?)))
+        .collect();
+    *TEST_ICONS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = decoded;
+    out(json!({ "ok": true }))
 }
 
 /// The logins with something to fix (health.rs): `{ok, items: [{id, weak,
@@ -1209,7 +1243,8 @@ fn history_view(app: &App, id: &str) -> Value {
 
 /// One version beside the item now, with its secrets when `reveal` is
 /// "true" (and the person may see them): `{ok, rows}`. From the history
-/// `pb_history` asked for last.
+/// `pb_history` asked for last. `dropsPasskeys` says who each passkey is for
+/// that restoring it would take from the item (`Vault::restore_drops`).
 ///
 /// # Safety
 /// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
@@ -1236,7 +1271,11 @@ pub unsafe extern "C" fn pb_item_version(
             return failed(Error::Damaged("no such version"));
         };
         let reveal = reveal && vault.grid(current).see_passwords && app.may_use(current);
-        json!({ "ok": true, "rows": crate::history::rows(version, current, reveal) })
+        json!({
+            "ok": true,
+            "rows": crate::history::rows(version, current, reveal),
+            "dropsPasskeys": vault.restore_drops(version, current),
+        })
     })
 }
 
@@ -1820,6 +1859,17 @@ pub unsafe extern "C" fn pb_generate(options: *const c_char) -> *mut c_char {
             Err(e) => failed(e),
         }
     })
+}
+
+/// Takes what the generator shows as its last value, which Copy then copies
+/// (`App::keep_generated`): `{ok}`.
+///
+/// # Safety
+/// `shown` is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_keep_generated(shown: *const c_char) -> *mut c_char {
+    let shown = Zeroizing::new(text(shown));
+    with_app(|app| done(app.keep_generated(&shown)))
 }
 
 /// The generator's last choices on this device (`generator::Options`), held

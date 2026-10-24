@@ -74,9 +74,11 @@ String openSample({
 /// For screenshots: the fuller sample vault core/examples/showcase.rs
 /// writes (folders in folders, shared folders, templates), from the folder
 /// PB_SHOWCASE names, with the websites' icons in its `icons` folder, if
-/// any (`<host>.png`); the sample vault without it. The same account and
-/// master password either way.
+/// any (`<host>.png`), which the core then answers with as if its server
+/// had sent them ([showcaseIcons]); the sample vault without it. The same
+/// account and master password either way.
 String openShowcase() {
+  showcaseIcons.clear();
   final from = Platform.environment['PB_SHOWCASE'];
   if (from == null) return openSample();
   final dir = Directory.systemTemp.createTempSync('pb-app-test-').path;
@@ -85,17 +87,23 @@ String openShowcase() {
   }
   Core().openAt(dir);
   machineDoesntLock(false);
-  // Websites' icons, as the core keeps the ones it fetched, if the folder has some.
   final icons = Directory('$from/icons');
   if (icons.existsSync()) {
-    Directory('$dir/icons').createSync();
-    for (final f in icons.listSync().whereType<File>()) {
-      f.copySync('$dir/icons/${f.uri.pathSegments.last}');
-    }
+    final found = {
+      for (final f in icons.listSync().whereType<File>())
+        if (f.path.endsWith('.png'))
+          f.uri.pathSegments.last.replaceFirst(RegExp(r'\.png$'), ''): f
+              .readAsBytesSync(),
+    };
+    Core().testIcons(found);
+    showcaseIcons.addAll(found.keys);
     showIcons(true);
   }
   return dir;
 }
+
+/// The hosts whose icons [openShowcase] gave the core.
+final showcaseIcons = <String>[];
 
 /// The core reads the real computer's screen: on a test machine whose screen
 /// is locked (no one at it), the vault would lock in the middle of a test. So
@@ -107,7 +115,9 @@ void machineDoesntLock(bool lockOnSleep) {
   });
   if (!answer.ok) throw StateError('${answer.error}');
   // And no websites' icons, which would ask the sample's server (which
-  // isn't there): tests that want them turn them on.
+  // isn't there): tests that want them turn them on, and say what the
+  // server would send (Core.testIcons).
+  Core().testIcons(const {});
   showIcons(false);
 }
 

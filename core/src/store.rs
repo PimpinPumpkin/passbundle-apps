@@ -162,8 +162,6 @@ impl Store {
     /// Signing out forgets the vault; the server and email stay, to sign in again.
     pub fn forget_vault(&self) {
         let _ = fs::remove_file(self.path("sync.json"));
-        // Its websites' icons say which sites it has logins for.
-        crate::icons::forget(&crate::icons::folder(&self.dir));
     }
 
     /// How the app looks on this device (`Appearance`); the defaults until

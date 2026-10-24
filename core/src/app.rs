@@ -79,6 +79,11 @@ pub struct App {
     /// (as `value("", "generated")`), so it clears like any secret. Forgotten
     /// when the vault locks.
     generated: Option<Zeroizing<String>>,
+    /// Websites' icons, in memory while the vault is open (icons.rs).
+    icons: crate::icons::Cache,
+    /// Counts each time the icons are emptied (locking, signing out,
+    /// turning them off), so one fetched before isn't kept after.
+    icon_session: u64,
 }
 
 /// An item's past versions, opened (`App::history`).
@@ -104,6 +109,7 @@ impl App {
             .as_ref()
             .and_then(|s| Server::new(&s.server, Device::this_one(&s.device_identifier)).ok());
         let preferences = store.preferences();
+        crate::icons::forget_kept(store.dir());
         App {
             store,
             secrets,
@@ -121,6 +127,8 @@ impl App {
             autolock: AutoLock::new(Instant::now(), SystemTime::now()),
             history: None,
             generated: None,
+            icons: crate::icons::Cache::default(),
+            icon_session: 0,
         }
     }
 
@@ -311,12 +319,6 @@ impl App {
             .map(GeneratorPolicy::from_sync)
             .unwrap_or_default();
         self.autolock = AutoLock::new(Instant::now(), SystemTime::now());
-        // Icons left behind when they were turned off (a file that couldn't
-        // be deleted then) go now.
-        let icons = crate::icons::folder(self.store.dir());
-        if !self.store.appearance().show_icons && icons.exists() {
-            crate::icons::forget(&icons);
-        }
     }
 
     /// The account's id: the open vault's, or the kept sync's.
@@ -545,6 +547,18 @@ impl App {
         Ok((made, held))
     }
 
+    /// Takes what the generator shows as its last value, for its Copy to
+    /// copy (`value("", "generated")`): what the person sees, even if
+    /// something else made one since (Android's offer to save a sign-in
+    /// opens an editor with a generator of its own). Only while unlocked.
+    pub fn keep_generated(&mut self, shown: &str) -> Result<()> {
+        if self.vault.is_none() {
+            return Err(Error::SignedOut);
+        }
+        self.generated = Some(Zeroizing::new(shown.to_owned()));
+        Ok(())
+    }
+
     pub fn set_preferences(&mut self, preferences: Preferences) -> Result<()> {
         preferences.check()?;
         self.store.save_preferences(&preferences)?;
@@ -604,6 +618,7 @@ impl App {
         self.grant += 1;
         self.history = None;
         self.generated = None;
+        self.forget_icons();
         self.vault = None;
         self.session = None;
         self.pending = None;
@@ -1089,21 +1104,41 @@ impl App {
     pub fn set_appearance(&mut self, appearance: crate::store::Appearance) -> Result<()> {
         self.store.save_appearance(&appearance)?;
         if !appearance.show_icons {
-            crate::icons::forget(&crate::icons::folder(self.store.dir()));
+            self.forget_icons();
         }
         Ok(())
     }
 
     /// What fetching a website's icon needs, away from the app (ffi.rs,
-    /// `pb_icon`): the server's address and where icons are kept, while
-    /// the vault is open and icons are on.
-    pub fn icon_source(&self) -> Option<(String, PathBuf)> {
+    /// `pb_icon`): the server's address, and which emptying of the icons
+    /// it's for (`keep_icon`), while the vault is open and icons are on.
+    pub fn icon_source(&self) -> Option<(String, u64)> {
         self.vault.as_ref()?;
         if !self.store.appearance().show_icons {
             return None;
         }
         let server = self.settings.as_ref()?.server.clone();
-        Some((server, crate::icons::folder(self.store.dir())))
+        Some((server, self.icon_session))
+    }
+
+    /// A host's icon as the server gave it while the vault's been open:
+    /// Some(Some(icon)), Some(None) when it had none, None to ask it.
+    pub fn kept_icon(&mut self, host: &str) -> Option<Option<&[u8]>> {
+        self.icon_source()?;
+        self.icons.get(host)
+    }
+
+    /// Keeps what the server answered for a host, if the icons haven't been
+    /// emptied since `icon_source` said `session`.
+    pub fn keep_icon(&mut self, session: u64, host: &str, icon: Option<Vec<u8>>) {
+        if self.icon_source().is_some_and(|(_, now)| now == session) {
+            self.icons.put(host, icon);
+        }
+    }
+
+    fn forget_icons(&mut self) {
+        self.icons.clear();
+        self.icon_session += 1;
     }
 
     /// An item's past versions (history.rs), from the server, opened: kept
