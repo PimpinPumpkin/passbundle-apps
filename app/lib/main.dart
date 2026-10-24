@@ -46,9 +46,12 @@ Future<void> main() async {
   if (!measuring && (Platform.isWindows || Platform.isMacOS)) {
     Core.startAgent();
   }
-  // On Android and the Mac, a newer release, at most once a day; the vault
-  // says so quietly. Not while measuring (tools/measure.sh), which stays offline.
+  // A newer release, at most once a day; the vault says so quietly. Not
+  // while measuring (tools/measure.sh), which stays offline.
   if (!measuring) checkForUpdatesOnStart();
+  // On Windows and Linux, an update waiting for this version to start hears
+  // it did, once it's drawn (updates.dart).
+  SchedulerBinding.instance.addPostFrameCallback((_) => updateStarted());
   runApp(const PassBundleApp());
 }
 

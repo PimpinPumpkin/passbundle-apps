@@ -519,6 +519,8 @@ jobs:
           case "${{ matrix.platform }}" in
             linux)
               cp "${{ matrix.lib }}" "${{ matrix.bundle }}/lib/"
+              # The updater (core/src/updates/swap.rs), as in the releases.
+              cp core/target/release/passbundle-update "${{ matrix.bundle }}/"
               test -f "${{ matrix.bundle }}/data/com.passbundle.app.png" ;;
             macos)
               # Named PassBundle, and not sandboxed: a sandboxed app can't
@@ -545,7 +547,7 @@ jobs:
               pkill -x passbundle
               kill "$agent" ;;
             windows)
-              cp "${{ matrix.lib }}" "${{ matrix.bundle }}/"
+              cp "${{ matrix.lib }}" core/target/release/passbundle-update.exe "${{ matrix.bundle }}/"
               cp agent/target/release/passbundle-agent.exe agent/target/release/passbundle-agent-host.exe "${{ matrix.bundle }}/" ;;
           esac
           ls "${{ matrix.bundle }}" | head -20
@@ -577,6 +579,22 @@ jobs:
         if: matrix.platform == 'windows'
         shell: pwsh
         run: tools/window-test.ps1 -Exe "${{ matrix.exe }}"
+      # The Windows and Linux updater with the real app (core/src/updates):
+      # an older build updates itself to a newer one, signed with a
+      # throwaway key and served from a stand-in for GitHub on the runner,
+      # and opens again as the new version; then a newer one that doesn't
+      # start is taken out, and the older one opens again.
+      - name: The app updates itself, and goes back from an update that doesn't start (Linux)
+        if: matrix.platform == 'linux'
+        timeout-minutes: 15
+        run: |
+          Xvfb :97 -screen 0 1440x900x24 &
+          sleep 2
+          DISPLAY=:97 tools/desktop-update-test.sh "${{ matrix.bundle }}" core/target/release
+      - name: The app updates itself, and goes back from an update that doesn't start (Windows)
+        if: matrix.platform == 'windows'
+        timeout-minutes: 15
+        run: tools/desktop-update-test.sh "${{ matrix.bundle }}" core/target/release
       - name: Pack the build
         run: tar -czf "passbundle-${{ matrix.platform }}.tar.gz" -C "$(dirname "${{ matrix.bundle }}")" "$(basename "${{ matrix.bundle }}")"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

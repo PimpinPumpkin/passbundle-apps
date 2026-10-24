@@ -2,10 +2,14 @@
 // stand-in for the app's native code, which does the checking and installing
 // (Android: update/Updater.kt, tested on its own in app/android/app/src/test;
 // the Mac: macos/Runner/Updater.swift, tested on its own by
-// tools/mac-update-test.sh).
+// tools/mac-update-test.sh; Windows and Linux: the core, tested in
+// core/src/updates and by tools/desktop-update-test.sh).
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:passbundle/core.dart';
 import 'package:passbundle/theme.dart';
 import 'package:passbundle/updates.dart';
 
@@ -18,6 +22,8 @@ class StandIn implements UpdatePlatform {
 
   final String? store;
   final bool restarts;
+  String? installNote;
+  Map<String, dynamic>? failed;
   Map<String, dynamic> checkAnswer;
   Map<String, dynamic> installAnswer = {'ok': true};
   final checks = <bool>[];
@@ -32,6 +38,8 @@ class StandIn implements UpdatePlatform {
     'store': store,
     'auto': true,
     'restarts': restarts,
+    'installNote': ?installNote,
+    'failed': ?failed,
   };
 
   @override
@@ -286,6 +294,75 @@ void main() {
       expect(find.text('PassBundle 0.1.5 is out.'), findsNothing);
     },
   );
+
+  testWidgets("where PassBundle can't replace itself, an update is only news", (
+    tester,
+  ) async {
+    const words =
+        'PassBundle is in a folder only an administrator can change '
+        '(/opt/passbundle), so it can\'t update itself. Update it the way '
+        'it was installed.';
+    final standIn = StandIn(restarts: true, checkAnswer: newer)
+      ..installNote = words;
+    final u = Updates(standIn);
+    await showSection(tester, u);
+    await tester.tap(find.text('Check for updates'));
+    await tester.pumpAndSettle();
+    expect(find.text('PassBundle 0.1.5 is out.'), findsOneWidget);
+    expect(find.text("What's new in 0.1.5"), findsOneWidget);
+    expect(find.text(words), findsOneWidget);
+    expect(find.text('Update to 0.1.5'), findsNothing);
+    expect(standIn.installs, 0);
+  });
+
+  testWidgets(
+    "an update that didn't start says so once, and isn't tried again at once",
+    (tester) async {
+      const words =
+          "PassBundle 0.1.5 didn't start, so PassBundle went back to 0.1.4.";
+      final standIn = StandIn(restarts: true, checkAnswer: newer)
+        ..failed = {'version': '0.1.5', 'reason': words};
+      updates = Updates(standIn);
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: passBundleTheme(Brightness.light),
+          home: Scaffold(
+            body: Builder(
+              builder: (context) => TextButton(
+                onPressed: () => showUpdateNotice(context),
+                child: const Text('Vault'),
+              ),
+            ),
+          ),
+        ),
+      );
+      await checkForUpdatesOnStart();
+      expect(updates!.cameBack, isTrue);
+      await tester.tap(find.text('Vault'));
+      await tester.pumpAndSettle();
+      expect(find.text(words), findsOneWidget);
+      // Nothing installs without the person, as ever.
+      expect(standIn.installs, 0);
+      ScaffoldMessenger.of(tester.element(find.text('Vault')))
+          .removeCurrentSnackBar();
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Vault'));
+      await tester.pumpAndSettle();
+      // The check's own notice, after.
+      expect(find.text(words), findsNothing);
+      expect(find.text('PassBundle 0.1.5 is out.'), findsOneWidget);
+    },
+  );
+
+  test('the core answers for updates on this computer', () {
+    final answer = CoreUpdatePlatform(Core()).started();
+    if (Platform.isWindows || Platform.isLinux) {
+      // The test runner isn't a release, so it never updates itself.
+      expect(answer, isEmpty);
+    } else {
+      expect(answer['ok'], false);
+    }
+  });
 
   testWidgets('a manual check never shows the notice', (tester) async {
     final standIn = StandIn(checkAnswer: newer);

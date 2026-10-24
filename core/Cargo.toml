@@ -31,6 +31,13 @@ test-hooks = []
 name = "interop"
 required-features = ["test-trust"]
 
+# Finishes a Windows or Linux update once the app has quit: puts the new
+# version in the old one's place, opens it, and puts the old one back if it
+# doesn't start (src/updates/swap.rs).
+[[bin]]
+name = "passbundle-update"
+path = "src/bin/passbundle-update.rs"
+
 # RustCrypto, as the desktop agent uses. Never a Bitwarden crate (docs/core.md).
 [dependencies]
 # The desktop agent's socket, shared with the agent (../ipc).
@@ -63,6 +70,12 @@ zxcvbn = "3"
 # The clipboard on computers; phones copy through the app (docs/phones.md, "Copying").
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 arboard = { version = "3", default-features = false }
+# Windows and Linux test releases (src/updates): each release's manifest is
+# signed with Ed25519, and names a zip (Windows) or a tarball (Linux).
+ed25519-dalek = "2"
+flate2 = "1"
+tar = { version = "0.4", default-features = false }
+zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
 
 # The OS's secret store: Keychain, Credential Manager, Secret Service. Android
 # keeps the refresh token with the Keystore instead (docs/phones.md).
@@ -95,15 +108,24 @@ plist = "1"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_Registry",
     "Win32_System_RemoteDesktop",
     "Win32_System_SystemInformation",
+    "Win32_System_Threading",
     "Win32_System_WindowsProgramming",
     "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
 ] }
 
 [build-dependencies]
 serde_json = "1"
+
+# A stand-in for GitHub's releases, for the updater's tests (src/updates).
+[dev-dependencies]
+tiny_http = "0.12"
 
 # The KDFs at full strength in tests, so they take milliseconds, not minutes.
 [profile.dev.package."*"]
