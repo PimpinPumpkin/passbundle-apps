@@ -26,7 +26,7 @@ object Clipboard {
 
     /** False when there's nothing to copy, or the vault is locked or busy. */
     fun copy(context: Context, id: String, what: String): Boolean {
-        val bytes = Core.value(id, what) ?: return false
+        val bytes = Core.copyValue(id, what) ?: return false
         val text = try {
             String(bytes, Charsets.UTF_8)
         } finally {

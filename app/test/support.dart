@@ -31,23 +31,35 @@ String openEmpty({bool lockOnSleep = false}) {
 }
 
 /// The core on a new folder holding the sample vault (test/sample): locked.
+/// It's the core's test vectors' vault, with what PassBundle's server says
+/// with each item and shared folder (`edit`, `viewPassword`, `permissions`,
+/// `readOnly`, `hidePasswords`, `manage`): the person may do anything.
 /// With `policies`, its kept sync has them, as the server sends them; the
-/// items in `asking` ask for the master password again, as the web vault sets it.
+/// items in `asking` ask for the master password again, as the web vault
+/// sets it; and `changed` items (by id) and shared folders have those of
+/// the server's plain fields (`edit`, `viewPassword`, `permissions`, a
+/// shared folder's `keykeeper` grid) set as given.
 String openSample({
   bool lockOnSleep = false,
   List<Map<String, dynamic>>? policies,
   Set<String> asking = const {},
+  Map<String, Map<String, dynamic>> changed = const {},
 }) {
   final dir = Directory.systemTemp.createTempSync('pb-app-test-').path;
   for (final name in ['settings.json', 'sync.json']) {
     File('test/sample/$name').copySync('$dir/$name');
   }
-  if (policies != null || asking.isNotEmpty) {
+  if (policies != null || asking.isNotEmpty || changed.isNotEmpty) {
     final sync = File('$dir/sync.json');
     final json = jsonDecode(sync.readAsStringSync()) as Map<String, dynamic>;
     for (final cipher
         in (json['ciphers'] as List).cast<Map<String, dynamic>>()) {
       if (asking.contains(cipher['id'])) cipher['reprompt'] = 1;
+      cipher.addAll(changed[cipher['id']] ?? const {});
+    }
+    for (final collection
+        in (json['collections'] as List).cast<Map<String, dynamic>>()) {
+      collection.addAll(changed[collection['id']] ?? const {});
     }
     sync.writeAsStringSync(
       jsonEncode({...json, 'policies': policies ?? json['policies']}),
@@ -55,6 +67,22 @@ String openSample({
   }
   Core().openAt(dir);
   machineDoesntLock(lockOnSleep);
+  return dir;
+}
+
+/// For screenshots: the fuller sample vault core/examples/showcase.rs
+/// writes (folders in folders, shared folders, templates), from the folder
+/// PB_SHOWCASE names; the sample vault without it. The same account and
+/// master password either way.
+String openShowcase() {
+  final from = Platform.environment['PB_SHOWCASE'];
+  if (from == null) return openSample();
+  final dir = Directory.systemTemp.createTempSync('pb-app-test-').path;
+  for (final name in ['settings.json', 'sync.json']) {
+    File('$from/$name').copySync('$dir/$name');
+  }
+  Core().openAt(dir);
+  machineDoesntLock(false);
   return dir;
 }
 

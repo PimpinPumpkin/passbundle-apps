@@ -22,6 +22,7 @@ use crate::error::Error;
 use crate::generator;
 use crate::secrets::{MemorySecretStore, OsSecretStore, SecretStore};
 use crate::store::Store;
+use crate::templates;
 use crate::totp::Totp;
 use crate::vault::{
     Card, Field, Identity, Item, ItemDraft, ItemKind, Vault, EXPIRES_FIELD, SECRET_DETAILS,
@@ -200,18 +201,62 @@ fn kind(kind: ItemKind) -> &'static str {
         ItemKind::Card => "card",
         ItemKind::Identity => "identity",
         ItemKind::SshKey => "sshKey",
+        ItemKind::BankAccount => "bankAccount",
+        ItemKind::DriversLicense => "driversLicense",
+        ItemKind::Passport => "passport",
         ItemKind::Other(_) => "other",
     }
 }
 
+/// Where an item is, as the web vault's list shows it beside each item: an
+/// organization's item by its first shared folder (or the organization), a
+/// person's own by its folder, or Personal.
+fn place(vault: &Vault, item: &Item) -> String {
+    if let Some(org) = &item.organization_id {
+        let mut folders: Vec<&String> = item
+            .collection_ids
+            .iter()
+            .filter_map(|c| vault.collections.get(c))
+            .collect();
+        folders.sort_by_key(|n| n.to_lowercase());
+        return folders
+            .first()
+            .map(|n| (*n).clone())
+            .or_else(|| vault.organizations.get(org).cloned())
+            .unwrap_or_default();
+    }
+    item.folder_id
+        .as_ref()
+        .and_then(|f| vault.folders.get(f))
+        .cloned()
+        .unwrap_or_else(|| "Personal".to_owned())
+}
+
+/// What the person may do with an item, for the screens to offer only what
+/// the server allows (docs/core.md, "Folders and permissions").
+fn permissions(vault: &Vault, item: &Item) -> Value {
+    let grid = vault.grid(item);
+    json!({
+        "edit": grid.edit,
+        "seePasswords": grid.see_passwords,
+        "delete": grid.delete,
+        "share": grid.share,
+        "viewHistory": grid.view_history,
+        "clearHistory": grid.view_history && vault.may_clear_history(item),
+    })
+}
+
 fn summary(vault: &Vault, item: &Item) -> Value {
+    let template = templates::template_of(item);
     json!({
         "id": item.id,
         "kind": kind(item.kind),
+        "category": templates::category(item),
         "name": item.name,
         "subtitle": item.card.as_ref().map(|c| c.summary())
             .or_else(|| item.identity.as_ref().map(|i| i.full_name()))
             .or_else(|| item.ssh_key.as_ref().and_then(|k| k.fingerprint.clone()))
+            .or_else(|| item.details.iter().find(|d| !d.secret).map(|d| d.value.as_str().to_owned()))
             .or_else(|| item.username.clone())
             .or_else(|| item.uris.first().cloned())
             .unwrap_or_default(),
@@ -221,6 +266,14 @@ fn summary(vault: &Vault, item: &Item) -> Value {
         "folder": item.folder_id.as_ref().and_then(|f| vault.folders.get(f)),
         "organizationId": item.organization_id,
         "organization": item.organization_id.as_ref().and_then(|o| vault.organizations.get(o)),
+        "collectionIds": item.collection_ids,
+        "where": place(vault, item),
+        "template": template.map(|(_, name, _)| name),
+        // A custom template (a note that defines one), and a copy an MSP
+        // keeps in its clients' Templates folder, which lists show only
+        // while that folder is open.
+        "isTemplate": templates::definition_of(item).is_some(),
+        "mspCopy": templates::is_msp_copy(item),
     })
 }
 
@@ -447,10 +500,24 @@ pub extern "C" fn pb_lock() -> *mut c_char {
 }
 
 /// An item's value for the clipboard, for the phone app's native piece
-/// (android.rs, or `pb_secret` for iOS's Swift). None while locked, while a
-/// slow call has the app, or if there's nothing to copy.
+/// (android.rs, or `pb_secret` for iOS's Swift): never a secret the
+/// person's shared folder hides from them (`App::value_to_copy`). None while
+/// locked, while a slow call has the app, or if there's nothing to copy.
 #[cfg(phone)]
 pub(crate) fn value_for_copy(id: &str, what: &str) -> Option<Zeroizing<String>> {
+    let guard = match APP.try_lock() {
+        Ok(guard) => guard,
+        Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        Err(TryLockError::WouldBlock) => return None,
+    };
+    guard.as_ref()?.value_to_copy(id, what).ok()
+}
+
+/// An item's value for Android's autofill to fill (android.rs): as for
+/// copying, except that a secret a shared folder hides still fills, as
+/// upstream's apps fill it, without the person seeing it.
+#[cfg(target_os = "android")]
+pub(crate) fn value_for_fill(id: &str, what: &str) -> Option<Zeroizing<String>> {
     let guard = match APP.try_lock() {
         Ok(guard) => guard,
         Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
@@ -734,41 +801,66 @@ pub extern "C" fn pb_sign_out() -> *mut c_char {
     })
 }
 
-/// Folders, and organizations with their collections, for the screens and the editor.
+/// Where items live, as the web vault's menu has it (places.rs): the
+/// person's own folders (Personal's), and each organization with its shared
+/// folders, by name, each nested inside the one its name starts with, with
+/// what the person can do there (`grid`; `canCreate` means new items may go
+/// in it). Each has `id`, `name` (the whole name), `label` (what it's called
+/// where it sits), `depth`, and `parentId`.
 #[no_mangle]
 pub extern "C" fn pb_places() -> *mut c_char {
     with_app(|app| {
         let Some(vault) = app.vault() else {
             return json!({ "folders": [], "organizations": [] });
         };
-        let by_name = |v: &Value| v["name"].as_str().unwrap_or_default().to_lowercase();
-        let mut folders: Vec<Value> = vault
-            .folders
-            .iter()
-            .map(|(id, name)| json!({ "id": id, "name": name }))
-            .collect();
-        folders.sort_by_key(by_name);
-        let mut organizations: Vec<Value> = vault
-            .organizations
-            .iter()
+        let nested = |entries: Vec<(String, String)>| crate::places::nest(&entries);
+        let folders: Vec<Value> = nested(
+            vault
+                .folders
+                .iter()
+                .map(|(id, name)| (id.clone(), name.clone()))
+                .collect(),
+        )
+        .into_iter()
+        .map(|n| json!({ "id": n.id, "name": n.name, "label": n.label, "depth": n.depth, "parentId": n.parent }))
+        .collect();
+        let mut organizations: Vec<(&String, &String)> = vault.organizations.iter().collect();
+        organizations.sort_by_key(|(_, name)| name.to_lowercase());
+        let organizations: Vec<Value> = organizations
+            .into_iter()
             .map(|(id, name)| {
-                let mut collections: Vec<Value> = vault
-                    .collection_orgs
-                    .iter()
-                    .filter(|(_, org)| *org == id)
-                    .filter_map(|(c, _)| {
-                        vault
-                            .collections
-                            .get(c)
-                            .map(|name| json!({ "id": c, "name": name }))
+                let collections: Vec<Value> = nested(
+                    vault
+                        .collection_orgs
+                        .iter()
+                        .filter(|(_, org)| *org == id)
+                        .filter_map(|(c, _)| vault.collections.get(c).map(|n| (c.clone(), n.clone())))
+                        .collect(),
+                )
+                .into_iter()
+                .map(|n| {
+                    let grid = vault.collection_grids.get(&n.id).copied().unwrap_or_default();
+                    json!({
+                        "id": n.id, "name": n.name, "label": n.label, "depth": n.depth, "parentId": n.parent,
+                        "grid": grid, "canCreate": grid.create,
                     })
-                    .collect();
-                collections.sort_by_key(by_name);
+                })
+                .collect();
                 json!({ "id": id, "name": name, "collections": collections })
             })
             .collect();
-        organizations.sort_by_key(by_name);
         json!({ "folders": folders, "organizations": organizations })
+    })
+}
+
+/// Templates to make new items from, grouped as the web vault's New item
+/// picker groups them (templates.rs): `[{name, templates: [{id, name, base,
+/// category, fields: [{label, kind, value}], source, from}]}]`.
+#[no_mangle]
+pub extern "C" fn pb_templates() -> *mut c_char {
+    with_app(|app| match app.vault() {
+        Some(vault) => json!(templates::groups(vault, |item| app.may_use(item))),
+        None => json!([{ "name": "Built-in", "templates": templates::built_in() }]),
     })
 }
 
@@ -812,6 +904,22 @@ pub unsafe extern "C" fn pb_item(id: *const c_char) -> *mut c_char {
             return view;
         }
         view["grant"] = json!(app.grant());
+        view["permissions"] = permissions(vault, item);
+        view["created"] = json!(item.creation_date);
+        view["revisionDate"] = json!(item.revision_date);
+        if let Some((id, name, category)) = templates::template_of(item) {
+            view["template"] = json!({ "id": id, "name": name, "category": category });
+        }
+        if let Some(d) = templates::definition_of(item) {
+            view["definition"] = json!({ "base": d.base, "from": d.from });
+        }
+        // A bank account's, driver's license's, or passport's values; the
+        // secrets show only when revealed (`pb_reveal` with their key).
+        view["details"] = item
+            .details
+            .iter()
+            .map(|d| json!({ "key": d.key, "label": d.label, "secret": d.secret, "value": if d.secret { None } else { Some(d.value.as_str()) } }))
+            .collect();
         view["username"] = json!(item.username);
         view["uris"] = json!(item.uris);
         view["collectionIds"] = json!(item.collection_ids);
@@ -892,11 +1000,15 @@ pub unsafe extern "C" fn pb_item(id: *const c_char) -> *mut c_char {
                 "hasLicenseNumber": has(&identity.license_number),
             });
         }
-        // The app edits logins, notes, cards, and identities; the web vault edits SSH keys.
-        view["editable"] = json!(matches!(
-            item.kind,
-            ItemKind::Login | ItemKind::SecureNote | ItemKind::Card | ItemKind::Identity
-        ));
+        // The app edits logins, notes, cards, and identities, where the
+        // person may; the web vault edits SSH keys and the newer kinds.
+        view["editable"] = json!(
+            matches!(
+                item.kind,
+                ItemKind::Login | ItemKind::SecureNote | ItemKind::Card | ItemKind::Identity
+            ) && vault.grid(item).edit
+                && vault.grid(item).see_passwords
+        );
         view
     })
 }
@@ -1209,6 +1321,13 @@ pub unsafe extern "C" fn pb_reveal(id: *const c_char, what: *const c_char) -> *m
         if !app.may_use(item) {
             return Value::Null;
         }
+        // Never a secret someone may not see (their shared folder hides passwords).
+        if item.is_secret(&what) && app.vault().is_some_and(|v| !v.grid(item).see_passwords) {
+            return Value::Null;
+        }
+        if let Some(detail) = item.details.iter().find(|d| d.key == what) {
+            return json!(detail.value.as_str());
+        }
         let secret = match what.as_str() {
             "password" => item.password.as_ref().map(|p| p.as_str()),
             "notes" => item.notes.as_ref().map(|n| n.as_str()),
@@ -1246,9 +1365,10 @@ pub unsafe extern "C" fn pb_copy(id: *const c_char, what: *const c_char) -> *mut
 pub unsafe extern "C" fn pb_totp(id: *const c_char) -> *mut c_char {
     let id = text(id);
     with_app(|app| {
+        // Not for someone whose shared folder hides the item's passwords.
         let Some(secret) = app
             .vault()
-            .and_then(|v| v.item(&id))
+            .and_then(|v| v.item(&id).filter(|i| v.grid(i).see_passwords))
             .filter(|i| app.may_use(i))
             .and_then(|i| i.totp.as_ref())
         else {
@@ -1269,7 +1389,11 @@ pub unsafe extern "C" fn pb_totp(id: *const c_char) -> *mut c_char {
 
 /// Saves an item from the editor: `id` empty for a new one. The draft is
 /// `{name, note, username, password, totp, notes, uris, fields: [{name,
-/// value, hidden}], folderId, organizationId, collectionIds, favorite}`.
+/// value, type}], folderId, organizationId, collectionIds, favorite,
+/// template: {id, name}}`: a field's `type` is upstream's (0 text, 1
+/// hidden, 2 yes or no), and `template` names the template a new item is
+/// made from. For an organization's item being edited, `collectionIds` are
+/// the shared folders it's to be in.
 ///
 /// # Safety
 /// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
@@ -1344,15 +1468,38 @@ pub unsafe extern "C" fn pb_save(id: *const c_char, draft: *const c_char) -> *mu
                 .as_array()
                 .into_iter()
                 .flatten()
-                .map(|f| Field {
-                    name: f["name"].as_str().unwrap_or_default().to_owned(),
-                    value: Zeroizing::new(f["value"].as_str().unwrap_or_default().to_owned()),
-                    hidden: f["hidden"].as_bool().unwrap_or(false),
+                .map(|f| {
+                    // Upstream's field type (0 text, 1 hidden, 2 yes or no), or `hidden`.
+                    let kind =
+                        f["type"]
+                            .as_u64()
+                            .unwrap_or(if f["hidden"].as_bool() == Some(true) {
+                                1
+                            } else {
+                                0
+                            });
+                    let value = f["value"].as_str().unwrap_or_default().to_owned();
+                    Field {
+                        name: f["name"].as_str().unwrap_or_default().to_owned(),
+                        value: Zeroizing::new(if kind == 2 && value != "true" {
+                            "false".to_owned()
+                        } else {
+                            value
+                        }),
+                        hidden: kind == 1,
+                        boolean: kind == 2,
+                    }
                 })
                 .collect(),
             folder_id: string("folderId"),
             organization_id: string("organizationId"),
             favorite: d["favorite"].as_bool().unwrap_or(false),
+            template: match (d["template"]["id"].as_str(), d["template"]["name"].as_str()) {
+                (Some(id), Some(name)) if !id.is_empty() && !name.trim().is_empty() => {
+                    Some((id.to_owned(), name.trim().to_owned()))
+                }
+                _ => None,
+            },
         };
         if draft.name.trim().is_empty() {
             return failed(Error::Refused("an item needs a name"));

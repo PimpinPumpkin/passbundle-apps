@@ -16,11 +16,13 @@ pub mod lock_policy;
 pub mod managed;
 pub mod matching;
 pub mod passkey;
+pub mod places;
 pub mod secrets;
 pub mod server;
 pub mod signup;
 pub mod store;
 pub mod synced_settings;
+pub mod templates;
 pub mod totp;
 pub mod vault;
 

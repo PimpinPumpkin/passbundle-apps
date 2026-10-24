@@ -4,7 +4,10 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:passbundle/editor.dart';
 import 'package:passbundle/main.dart';
+import 'package:passbundle/new_item.dart';
+import 'package:passbundle/vault.dart';
 
 import 'support.dart';
 
@@ -183,7 +186,7 @@ void main() {
       }
 
       await tester.enterText(
-        find.widgetWithText(TextField, 'Search'),
+        find.widgetWithText(TextField, 'Search items'),
         'backup',
       );
       await tester.pump();
@@ -201,7 +204,7 @@ void main() {
       // The editor opens with the item's values; saving without a server says so.
       await tester.tap(find.widgetWithText(OutlinedButton, 'Edit'));
       await tester.pumpAndSettle();
-      expect(find.text('Edit item'), findsOneWidget);
+      expect(find.text('Edit login'), findsOneWidget);
       expect(find.widgetWithText(TextField, 'Backup service'), findsOneWidget);
       // The generator: a password, then a passphrase, which it remembers.
       await tester.tap(find.byTooltip('Generate a password'));
@@ -313,7 +316,11 @@ void main() {
           .data!;
       expect(made.split(' '), hasLength(8));
       expect(made, matches(RegExp(r'^([A-Z][a-z-]+ ){7}[A-Z][a-z-]+$')));
-      expect(find.text('8'), findsOneWidget);
+      // The generator's count, not the one-time code's seconds behind it.
+      expect(
+        tester.widget<Text>(find.byKey(const Key('Words count'))).data,
+        '8',
+      );
       final capitalize = tester.widget<SwitchListTile>(
         find.widgetWithText(SwitchListTile, 'Capitalize'),
       );
@@ -585,7 +592,209 @@ void main() {
         tester,
         find.text('You\'ve been signed out. Sign in again.'),
       );
-      expect(find.text('Personal'), findsOneWidget);
+      expect(find.byTooltip('More for Personal'), findsOneWidget);
+    },
+  );
+
+  Future<void> unlockOnComputer(
+    WidgetTester tester, {
+    Map<String, Map<String, dynamic>> changed = const {},
+  }) async {
+    setSize(tester, const Size(1280, 800));
+    openSample(changed: changed);
+    await tester.pumpWidget(const PassBundleApp());
+    await tester.enterText(find.byType(TextField), samplePassword);
+    await tester.tap(find.text('Unlock'));
+    await pumpUntil(tester, find.text('Example Mail'));
+    await pumpUntil(
+      tester,
+      find.textContaining('Sign in again to get changes'),
+    );
+  }
+
+  /// The sample's organization item and its shared folder (the core's vectors).
+  const officeWifi = '4e5f6071-8293-4a41-bcd2-e3f405162738';
+  const it = '2c3d4e5f-6071-4829-9ab0-c1d2e3f40516';
+
+  testWidgets(
+    'the menu\'s folders are Personal\'s, then each organization\'s shared folders, each with its count, and each shows its items',
+    (tester) async {
+      await unlockOnComputer(tester);
+      final menu = find.byType(Sidebar);
+      Finder entry(String label) =>
+          find.descendant(of: menu, matching: find.text(label));
+      // In order: Personal, its folder (called Personal too), No folder,
+      // then Contoso and its IT.
+      double top(Finder f) => tester.getTopLeft(f).dy;
+      final personal = entry('Personal');
+      expect(personal, findsNWidgets(2));
+      expect(top(personal.first), lessThan(top(personal.last)));
+      expect(top(personal.last), lessThan(top(entry('No folder'))));
+      expect(top(entry('No folder')), lessThan(top(entry('Contoso'))));
+      expect(top(entry('Contoso')), lessThan(top(entry('IT'))));
+      // A folder sits a step in from its owner.
+      expect(
+        tester.getTopLeft(personal.last).dx,
+        greaterThan(tester.getTopLeft(personal.first).dx),
+      );
+
+      Future<void> pick(Finder f) async {
+        await tester.tap(f);
+        await tester.pump();
+      }
+
+      await pick(entry('IT'));
+      expect(find.text('Office Wi-Fi'), findsOneWidget);
+      expect(find.text('Example Mail'), findsNothing);
+      await pick(entry('No folder'));
+      expect(find.text('Gate code'), findsOneWidget);
+      expect(find.text('Example Mail'), findsNothing);
+      expect(find.text('Office Wi-Fi'), findsNothing);
+      await pick(personal.first);
+      expect(find.text('Example Mail'), findsOneWidget);
+      expect(find.text('Office Wi-Fi'), findsNothing);
+      // Where each item is, beside it in the list.
+      await pick(entry('All items'));
+      expect(find.widgetWithText(WhereBadge, 'IT'), findsOneWidget);
+    },
+  );
+
+  testWidgets(
+    'an item whose shared folder hides passwords shows none of its secrets, and offers no edit or trash',
+    (tester) async {
+      await unlockOnComputer(
+        tester,
+        changed: {
+          officeWifi: {
+            'edit': false,
+            'viewPassword': false,
+            'permissions': {'delete': false, 'restore': false},
+          },
+          it: {'readOnly': true, 'hidePasswords': true},
+        },
+      );
+      await tester.tap(find.text('Office Wi-Fi'));
+      await tester.pump();
+      expect(
+        find.text('Your organization hides this item\'s passwords from you.'),
+        findsOneWidget,
+      );
+      expect(find.byTooltip('Reveal'), findsNothing);
+      expect(find.byTooltip('Copy password'), findsNothing);
+      expect(find.byTooltip('Copy username'), findsOneWidget);
+      expect(find.widgetWithText(OutlinedButton, 'Edit'), findsNothing);
+      expect(find.byTooltip('Move to trash'), findsNothing);
+      // The person's own items are as ever.
+      await tester.tap(find.text('Example Mail'));
+      await tester.pump();
+      expect(find.byTooltip('Reveal'), findsWidgets);
+      expect(find.widgetWithText(OutlinedButton, 'Edit'), findsOneWidget);
+      expect(find.byTooltip('Move to trash'), findsOneWidget);
+    },
+  );
+
+  testWidgets(
+    'New item offers the main kinds, then templates, and a template\'s editor starts with its fields',
+    (tester) async {
+      await unlockOnComputer(tester);
+      await tester.tap(find.text('New'));
+      await tester.pumpAndSettle();
+      expect(find.text('What are you saving?'), findsOneWidget);
+      for (final kind in ['Login', 'Secure note', 'Card', 'Identity']) {
+        expect(find.text(kind), findsOneWidget);
+      }
+      expect(find.text('Wi-Fi network'), findsNothing);
+      await tester.tap(find.text('More categories'));
+      await tester.pumpAndSettle();
+      for (final t in ['API key', 'Server', 'Domain', 'Software license']) {
+        expect(find.text(t), findsOneWidget);
+      }
+      await tester.enterText(
+        find.widgetWithText(TextField, 'Find a category'),
+        'wi-fi',
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Server'), findsNothing);
+      await tester.tap(find.text('Wi-Fi network'));
+      await tester.pumpAndSettle();
+      expect(find.text('New Wi-Fi network'), findsOneWidget);
+      for (final field in ['Network name', 'Password', 'Security type']) {
+        expect(find.widgetWithText(TextField, field), findsOneWidget);
+      }
+      // A note: no username or websites.
+      expect(find.widgetWithText(TextField, 'Username'), findsNothing);
+      await tester.tap(find.byTooltip('Cancel'));
+      await tester.pumpAndSettle();
+
+      // A domain's yes-or-no field is a switch.
+      await tester.tap(find.text('New'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('More categories'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Domain'));
+      await tester.pumpAndSettle();
+      expect(find.text('New domain'), findsOneWidget);
+      expect(find.widgetWithText(SwitchListTile, 'Auto-renew'), findsOneWidget);
+      expect(find.widgetWithText(TextField, 'Username'), findsOneWidget);
+      await tester.tap(find.byTooltip('Cancel'));
+      await tester.pumpAndSettle();
+    },
+  );
+
+  testWidgets(
+    'the editor\'s Folder picker groups places by owner, and an item stays with its owner',
+    (tester) async {
+      await unlockOnComputer(tester);
+      Future<List<String>> choices() async {
+        await tester.ensureVisible(find.byKey(const ValueKey('folder-picker')));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const ValueKey('folder-picker')));
+        await tester.pumpAndSettle();
+        final shown = find
+            .descendant(
+              of: find.byType(Scrollable).last,
+              matching: find.byType(Text),
+            )
+            .evaluate()
+            .map((e) => (e.widget as Text).data!)
+            .toList();
+        await tester.tapAt(const Offset(5, 5));
+        await tester.pumpAndSettle();
+        return shown;
+      }
+
+      // A new item may go to Personal's folders or the organization's.
+      await tester.tap(find.text('New'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Login'));
+      await tester.pumpAndSettle();
+      expect(await choices(), [
+        'Personal',
+        'No folder',
+        'Personal',
+        'Contoso',
+        'IT',
+      ]);
+      await tester.tap(find.byTooltip('Cancel'));
+      await tester.pumpAndSettle();
+
+      // The organization's item: its own shared folders only.
+      await tester.tap(find.text('Office Wi-Fi'));
+      await tester.pump();
+      await tester.tap(find.widgetWithText(OutlinedButton, 'Edit'));
+      await tester.pumpAndSettle();
+      expect(await choices(), ['Contoso', 'IT']);
+      await tester.tap(find.byTooltip('Cancel'));
+      await tester.pumpAndSettle();
+
+      // A person's own item: Personal's.
+      await tester.tap(find.text('Example Mail'));
+      await tester.pump();
+      await tester.tap(find.widgetWithText(OutlinedButton, 'Edit'));
+      await tester.pumpAndSettle();
+      expect(await choices(), ['Personal', 'No folder', 'Personal']);
+      await tester.tap(find.byTooltip('Cancel'));
+      await tester.pumpAndSettle();
     },
   );
 
@@ -618,11 +827,11 @@ void main() {
 
       await tester.tap(find.text('Office Wi-Fi'));
       await tester.pumpAndSettle();
-      expect(find.textContaining('Login in Contoso'), findsOneWidget);
+      expect(find.textContaining('Login in Contoso › IT'), findsOneWidget);
       expect(find.byTooltip('Copy password'), findsOneWidget);
       await tester.pageBack();
       await tester.pumpAndSettle();
-      await tester.tap(find.byTooltip('Back to the vault'));
+      await tester.tap(find.byTooltip('Back to all items'));
       await tester.pumpAndSettle();
       expect(find.text('Favorites'), findsOneWidget);
 
@@ -630,7 +839,7 @@ void main() {
       await tester.pump();
       await pumpUntil(tester, find.text('Lock after'));
       expect(find.text('Theme'), findsOneWidget);
-      await tester.tap(find.byTooltip('Vault'));
+      await tester.tap(find.byTooltip('Items'));
       await tester.pumpAndSettle();
 
       await tester.tap(find.byTooltip('Lock'));
@@ -640,38 +849,60 @@ void main() {
   );
 
   testWidgets(
-    'on a phone, the vault lists folders and organizations, the header names the one shown, and search finds items',
+    'on a phone, the folders are Personal\'s, then each organization\'s shared folders, the header names the one shown, and search finds items',
     (tester) async {
       await unlockOnPhone(tester, const Size(390, 844));
 
-      Future<void> choose(String place) async {
-        // Below the kinds and favorites: the vault's list, not the search's field.
+      // The sample's folder is called Personal too: the owner comes first,
+      // its folder after it.
+      Future<void> choose(String place, {bool last = false}) async {
+        // Below the kinds and favorites: the vault's list, not the search's
+        // field, scrolled past the folders.
         await tester.scrollUntilVisible(
-          find.text(place),
+          find.text('All items'),
           100,
           scrollable: find.byType(Scrollable).last,
         );
-        await tester.tap(find.text(place));
+        await tester.tap(last ? find.text(place).last : find.text(place).first);
         await tester.pumpAndSettle();
       }
 
       Future<void> back() async {
-        await tester.tap(find.byTooltip('Back to the vault'));
+        await tester.tap(find.byTooltip('Back to all items'));
         await tester.pumpAndSettle();
       }
 
+      // Personal: everything of the person's own.
       await choose('Personal');
-      expect(find.text('Personal'), findsOneWidget);
       expect(find.text('Example Mail'), findsOneWidget);
+      expect(find.text('Gate code'), findsOneWidget);
       expect(find.text('Office Wi-Fi'), findsNothing);
+      expect(find.byTooltip('More for Personal'), findsNothing);
+      await back();
+
+      // Its folder.
+      await choose('Personal', last: true);
+      expect(find.text('Example Mail'), findsOneWidget);
+      expect(find.text('Gate code'), findsNothing);
       // Its Rename and Delete are in the header while it's shown.
       expect(find.byTooltip('More for Personal'), findsOneWidget);
       await back();
 
+      // Personal's items in no folder.
+      await choose('No folder');
+      expect(find.text('Gate code'), findsOneWidget);
+      expect(find.text('Example Mail'), findsNothing);
+      await back();
+
+      // The organization, and its shared folder.
       await choose('Contoso');
       expect(find.text('Contoso'), findsOneWidget);
       expect(find.text('Office Wi-Fi'), findsOneWidget);
       expect(find.text('Example Mail'), findsNothing);
+      await back();
+      await choose('IT');
+      expect(find.text('IT'), findsOneWidget);
+      expect(find.text('Office Wi-Fi'), findsOneWidget);
       await back();
 
       await tester.enterText(find.byType(TextField), 'gate');
@@ -708,7 +939,7 @@ void main() {
         await tester.pumpAndSettle();
         await tester.pageBack();
         await tester.pumpAndSettle();
-        await tester.tap(find.byTooltip('Back to the vault'));
+        await tester.tap(find.byTooltip('Back to all items'));
         await tester.pumpAndSettle();
 
         await tester.enterText(find.byType(TextField), 'backup');
@@ -728,14 +959,47 @@ void main() {
         await tester.pageBack();
         await tester.pumpAndSettle();
 
-        await tester.tap(find.byTooltip('New item'));
-        await tester.pumpAndSettle();
-        for (final kind in ['Card', 'Identity', 'Note', 'Login']) {
+        // New item's picker, and the editor for each kind and a template.
+        for (final kind in [
+          'Card',
+          'Identity',
+          'Secure note',
+          'Login',
+          'Domain',
+        ]) {
+          await tester.tap(find.byTooltip('New item'));
+          await tester.pumpAndSettle();
+          if (kind == 'Domain') {
+            await tester.tap(find.text('More categories'));
+            await tester.pumpAndSettle();
+            await tester.scrollUntilVisible(
+              find.text(kind),
+              100,
+              scrollable: find
+                  .descendant(
+                    of: find.byType(NewItemPicker),
+                    matching: find.byType(Scrollable),
+                  )
+                  .first,
+            );
+          }
+          await tester.ensureVisible(find.text(kind));
+          await tester.pumpAndSettle();
           await tester.tap(find.text(kind));
           await tester.pumpAndSettle();
+          await tester.drag(
+            find
+                .descendant(
+                  of: find.byType(ItemEditor),
+                  matching: find.byType(Scrollable),
+                )
+                .first,
+            const Offset(0, -2000),
+          );
+          await tester.pumpAndSettle();
+          await tester.tap(find.byTooltip('Cancel'));
+          await tester.pumpAndSettle();
         }
-        await tester.tap(find.byTooltip('Cancel'));
-        await tester.pumpAndSettle();
 
         await tester.tap(find.byTooltip('Settings'));
         await tester.pump();

@@ -186,7 +186,7 @@ void main() {
       );
       expect(phone.status, 'notSetUp');
 
-      await tester.tap(find.byTooltip('Vault'));
+      await tester.tap(find.byTooltip('Items'));
       await tester.pumpAndSettle();
       await lock(tester);
       await unlockWithPassword(tester);

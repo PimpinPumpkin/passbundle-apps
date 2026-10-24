@@ -92,6 +92,7 @@ fn main() {
                     name: f["name"].as_str().unwrap_or_default().to_owned(),
                     value: Zeroizing::new(f["value"].as_str().unwrap_or_default().to_owned()),
                     hidden: f["hidden"].as_bool().unwrap_or(false),
+                    boolean: false,
                 })
                 .collect(),
             organization_id: text("organizationId"),

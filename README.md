@@ -17,6 +17,7 @@ Early, and not released.
 - **The core** opens a vault (PBKDF2 and Argon2id accounts, organization keys, item keys) and refuses weak KDF settings and tampered data, checked against the vectors.
 - **On a real server**, the core signs in (with two-step login), syncs, saves, edits, and trashes items. It keeps the vault on the device to unlock offline, with the refresh token in the OS's secret store.
 - **The app** signs in, unlocks, browses, searches, copies through the core (cleared after 30 seconds), and adds, edits, and trashes items. Its generator makes passwords or passphrases (EFF's long word list, `core/src/words/`) and remembers the last choices on the device.
+- **Folders and templates as in the web vault:** Personal and its folders, then each organization and its shared folders, nested by name, with counts; the editor's one Folder picker, grouped by owner; what each shared folder lets the person do (no secrets shown where it hides passwords, no edit or trash where it doesn't allow them). New item offers the web vault's kinds and templates (Wi-Fi, servers, databases, licenses, API keys, domains, and the person's and their organizations' own), each with its category's jewel, and an edit keeps an item's template and every field (`core/src/templates.rs`, `core/src/places.rs`).
 - **Windows Hello** (Touch ID once the agent has it) unlocks the app through the desktop agent, sharing the browser extension's enrollment. The agent's tray opens the app, and the app starts the agent.
 - **Not yet:** passkeys, attachments, the macOS and Linux installs, phones, and code signing.
 
@@ -35,7 +36,7 @@ Against a real server (`tools/test-server.sh` starts a throwaway one from a pass
 PB_TEST_SERVER=$(tools/test-server.sh <passbundle-server binary> 8591 /tmp/pb-server) cargo test --test server
 ```
 
-`flutter test --tags screenshots --update-goldens` redraws `app/test/screenshots/`.
+`flutter test --tags screenshots --update-goldens` redraws `app/test/screenshots/`. With `PB_SHOWCASE` set to a folder `cargo run --example showcase -- <folder>` filled, they're drawn on a fuller sample vault (folders in folders, shared folders, items from templates), which isn't committed.
 
 The Mac updater on its own, against bundles signed as the Mac test releases are (with a built app, that app too; `--launch` opens it):
 
