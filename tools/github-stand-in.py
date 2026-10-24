@@ -14,6 +14,7 @@ on (on 127.0.0.1 only) to the file named second.
 
 import http.server
 import os
+import socketserver
 import sys
 
 REPO = "PimpinPumpkin/passbundle-apps"
@@ -57,7 +58,15 @@ class StandIn(http.server.BaseHTTPRequestHandler):
         self.send(404)
 
 
-server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), StandIn)
+class Server(http.server.ThreadingHTTPServer):
+    def server_bind(self):
+        # Not HTTPServer's own, which looks up this computer's name, and can
+        # wait a long while for DNS to answer.
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = "127.0.0.1", self.server_address[1]
+
+
+server = Server(("127.0.0.1", 0), StandIn)
 with open(sys.argv[2], "w", encoding="utf-8") as f:
     f.write(str(server.server_address[1]))
 server.serve_forever()

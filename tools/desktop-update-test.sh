@@ -14,7 +14,8 @@
 # opens, without a click). A release reads none of them. The core folder has
 # the core and passbundle-update (core/target/release). On Linux, it needs a
 # display (DISPLAY); CI runs it under Xvfb.
-set -euo pipefail
+set -Eeuo pipefail
+trap 'echo "Failed at line $LINENO: $BASH_COMMAND" >&2' ERR
 
 bundle=$(cd "$1" && pwd)
 core=$(cd "$2" && pwd)
@@ -37,8 +38,10 @@ case "$(openssl version)" in
   *) echo "Signing needs OpenSSL 3 ($(openssl version))." >&2; exit 1 ;;
 esac
 
-work=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/desktop-update-test.XXXXXX")
 native() { if [ "$os" = windows ]; then cygpath -w "$1"; else printf '%s' "$1"; fi; }
+temp=${RUNNER_TEMP:-${TMPDIR:-/tmp}}
+[ "$os" = windows ] && temp=$(cygpath -u "$temp")
+work=$(mktemp -d "$temp/desktop-update-test.XXXXXX")
 install="$work/install/PassBundle"
 updating="$work/install/.PassBundle-update"
 serve="$work/serve"
@@ -58,10 +61,11 @@ base="http://127.0.0.1:$port"
 echo "The stand-in for GitHub is at $base."
 
 # The PIDs of the processes running a program from the app's folder, as the
-# OS says (on Windows, Windows' own PIDs).
+# OS says (on Windows, Windows' own PIDs). A process that ends while it's
+# asked about is just left out.
 running() {
   if [ "$os" = windows ]; then
-    powershell -NoProfile -Command "\$f = '$(native "$install")\\'; Get-Process | Where-Object { \$_.Path -and \$_.Path.StartsWith(\$f, [StringComparison]::OrdinalIgnoreCase) } | ForEach-Object { \$_.Id }" | tr -d '\r' | sort
+    { powershell -NoProfile -Command "\$f = '$(native "$install")\\'; Get-Process -ErrorAction SilentlyContinue | Where-Object { \$_.Path -and \$_.Path.StartsWith(\$f, [StringComparison]::OrdinalIgnoreCase) } | ForEach-Object { \$_.Id }; exit 0" 2> /dev/null || true; } | tr -d '\r' | grep -E '^[0-9]+$' | sort || true
   else
     for exe in /proc/[0-9]*/exe; do
       target=$(readlink "$exe" 2> /dev/null) || continue
