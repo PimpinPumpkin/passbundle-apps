@@ -22,6 +22,10 @@ ROOT = os.path.abspath(sys.argv[1])
 
 
 class StandIn(http.server.BaseHTTPRequestHandler):
+    # As GitHub: connections stay open for the next request, each answer
+    # with its length.
+    protocol_version = "HTTP/1.1"
+
     def log_message(self, format, *args):
         with open(os.path.join(ROOT, "requests.log"), "a", encoding="utf-8") as log:
             log.write(f"{self.command} {self.path}\n")

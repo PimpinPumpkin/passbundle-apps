@@ -105,6 +105,11 @@ pub fn get(
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .http_status_as_error(false)
         .max_redirects(0)
+        // A connection of its own for each request, redirects too: a server
+        // that hangs up after answering, without saying it will, can't make
+        // the next request fail on a connection that's gone.
+        .max_idle_connections(0)
+        .max_idle_connections_per_host(0)
         .https_only(!hosts.loopback)
         .timeout_connect(Some(Duration::from_secs(15)))
         .timeout_global(Some(Duration::from_secs(seconds.max(1) + 5)))
@@ -326,6 +331,46 @@ mod tests {
         server2.join().unwrap();
         // The first server's /a, a redirect with no address.
         assert!(get_bytes(&format!("{base}/a"), &TEST, 100, 10).is_err());
+        server.join().unwrap();
+    }
+
+    /// A server that answers each connection once, in HTTP/1.0, and hangs
+    /// up without saying it will (as Python's own server does): a redirect
+    /// to the same server is followed on a new connection, not on the one
+    /// the server is closing (which, on Windows, failed now and then).
+    #[test]
+    fn a_redirect_is_followed_on_a_connection_of_its_own() {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let here = base.clone();
+        let server = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let (stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                // The rest of the request.
+                let mut header = String::new();
+                while reader.read_line(&mut header).unwrap() > 2 {
+                    header.clear();
+                }
+                let mut stream = stream;
+                let answer = if line.starts_with("GET /a ") {
+                    format!("HTTP/1.0 302 Found\r\nLocation: {here}/b\r\nContent-Length: 0\r\n\r\n")
+                } else {
+                    "HTTP/1.0 200 OK\r\nContent-Length: 8\r\n\r\nthe file".to_owned()
+                };
+                stream.write_all(answer.as_bytes()).unwrap();
+                // Hangs up, having said nothing of it.
+                drop(stream);
+                drop(reader);
+            }
+        });
+        assert_eq!(
+            get_bytes(&format!("{base}/a"), &TEST, 100, 10).unwrap(),
+            b"the file"
+        );
         server.join().unwrap();
     }
 
