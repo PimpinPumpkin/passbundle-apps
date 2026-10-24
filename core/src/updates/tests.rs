@@ -26,6 +26,12 @@ fn temp(name: &str) -> PathBuf {
         rand::random::<u32>()
     ));
     fs::create_dir_all(&dir).unwrap();
+    // As a person's own folders are, whatever the umask.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+    }
     dir
 }
 
@@ -34,13 +40,11 @@ fn temp(name: &str) -> PathBuf {
 /// Windows, which runs only programs, this test program (which, given
 /// `finish <folder>`, runs no tests, taking them for test names).
 fn release_folder(dir: &Path, version: &str) {
-    let mut files = vec![bundle::RELEASE.to_owned()];
     for name in bundle::required() {
         let path = dir.join(&name);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         if name == swap::helper_name() && cfg!(windows) {
             fs::copy(std::env::current_exe().unwrap(), &path).unwrap();
-            files.push(name);
             continue;
         }
         let body = if name == swap::helper_name() {
@@ -54,10 +58,14 @@ fn release_folder(dir: &Path, version: &str) {
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
         }
-        files.push(name.split('/').next().unwrap().to_owned());
     }
-    files.sort();
-    files.dedup();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    // Every path in it, as tools/release-folder.sh lists them.
+    let files = bundle::listing(dir).unwrap();
     let release =
         json!({ "app": manifest::APP, "version": version, "platform": PLATFORM, "files": files });
     fs::write(dir.join(bundle::RELEASE), release.to_string()).unwrap();
@@ -224,6 +232,8 @@ fn context(base: &Path, stand: &Stand, key: &SigningKey) -> Context {
         data_dir: base.join("data"),
         os: OS,
         platform: PLATFORM,
+        // CI's Windows machines run tests elevated.
+        trust_admin: cfg!(windows),
     }
 }
 
@@ -479,8 +489,10 @@ fn starting_after_an_update_says_how_it_went_and_cleans_up() {
     let ctx = context(&base, &stand, &key);
     // Nothing going on.
     assert_eq!(started(&ctx), json!({}));
-    // An update that didn't happen, its updater finished.
+    // An update that didn't happen, its updater finished, in the work
+    // folder the updater made.
     let work = ctx.work_dir();
+    access::make_private_dir(&work).unwrap();
     fs::create_dir_all(work.join(swap::OLD)).unwrap();
     let failed = swap::Failed {
         version: "0.1.5".into(),
@@ -501,6 +513,84 @@ fn starting_after_an_update_says_how_it_went_and_cleans_up() {
         std::thread::sleep(Duration::from_millis(100));
     }
     assert!(!work.exists());
+    *lock(&FAILED) = None;
+    fs::remove_dir_all(&base).unwrap();
+}
+
+#[test]
+fn a_release_that_doesnt_check_out_doesnt_hide_the_ones_behind_it() {
+    let _one = one_at_a_time();
+    let base = temp("bogus");
+    let key = key();
+    let theirs = SigningKey::from_bytes(&[7; 32]);
+    // The newest, made up (signed with another key), above a real one.
+    let bogus = signed(&theirs, "0.1.99", tarball("0.1.99"));
+    let real = signed(&key, "0.1.5", tarball("0.1.5"));
+    let stand = stand_in(&[&real, &bogus], own_urls);
+    let ctx = context(&base, &stand, &key);
+    let answer = check(&ctx, false);
+    assert_eq!(answer["available"], true, "{answer}");
+    assert_eq!(answer["version"], "0.1.5");
+    drop(stand);
+    // With nothing real behind it, the check says why.
+    let stand = stand_in(&[&bogus], own_urls);
+    let ctx = context(&base, &stand, &key);
+    let answer = check(&ctx, false);
+    assert_eq!(answer["ok"], false, "{answer}");
+    assert!(answer["error"].as_str().unwrap().contains("0.1.99"));
+    fs::remove_dir_all(&base).unwrap();
+}
+
+/// A work folder someone else made (not this updater's: shared, or a link
+/// to somewhere) is never read, written, or removed.
+#[cfg(unix)]
+#[test]
+fn a_work_folder_this_updater_didnt_make_is_left_alone() {
+    use std::os::unix::fs::PermissionsExt;
+    let _one = one_at_a_time();
+    let base = temp("planted");
+    let key = key();
+    let newer = signed(&key, "0.1.5", tarball("0.1.5"));
+    let stand = stand_in(&[&newer], own_urls);
+    let ctx = context(&base, &stand, &key);
+    let work = ctx.work_dir();
+    let failed = json!({ "version": "0.1.5", "reason": "Go to evil.example to update." });
+    // A folder anyone can read and change, with a note in it.
+    fs::create_dir(&work).unwrap();
+    fs::set_permissions(&work, fs::Permissions::from_mode(0o777)).unwrap();
+    fs::write(work.join(swap::FAILED), failed.to_string()).unwrap();
+    *lock(&FAILED) = None;
+    assert!(status(&ctx).get("failed").is_none());
+    assert_eq!(started(&ctx), json!({}));
+    assert!(!work.join(swap::STARTED).exists());
+    assert_eq!(check(&ctx, false)["available"], true);
+    let answer = install(&ctx);
+    assert!(
+        answer["error"]
+            .as_str()
+            .unwrap()
+            .contains("isn't PassBundle's"),
+        "{answer}"
+    );
+    assert!(work.join(swap::FAILED).exists());
+    fs::remove_dir_all(&work).unwrap();
+    // A link to a folder elsewhere, with what it'd be tricked into writing over.
+    let elsewhere = base.join("elsewhere");
+    fs::create_dir(&elsewhere).unwrap();
+    fs::set_permissions(&elsewhere, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(elsewhere.join(swap::STARTED), b"theirs").unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &work).unwrap();
+    assert_eq!(started(&ctx), json!({}));
+    assert_eq!(fs::read(elsewhere.join(swap::STARTED)).unwrap(), b"theirs");
+    let answer = install(&ctx);
+    assert!(
+        answer["error"]
+            .as_str()
+            .unwrap()
+            .contains("isn't PassBundle's"),
+        "{answer}"
+    );
+    assert!(elsewhere.join(swap::STARTED).exists());
     *lock(&FAILED) = None;
     fs::remove_dir_all(&base).unwrap();
 }

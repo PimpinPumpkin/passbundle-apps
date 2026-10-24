@@ -190,11 +190,14 @@ jobs:
           tools/release-folder.sh app/build/windows/x64/runner/Release core/target/release agent/target/release stage "$VERSION" windows-x64
           dir=stage/PassBundle
           # A release reads no test settings from its environment (the
-          # core's test-hooks feature, which only CI's builds have).
-          if grep -a -q -E 'PB_DATA_DIR|PB_SECRETS|PB_UPDATE_SOURCE|PB_UPDATE_KEY' "$dir/passbundle_core.dll"; then
-            echo "The core was built with its test hooks." >&2
-            exit 1
-          fi
+          # core's test-hooks feature, which only CI's builds have): not the
+          # core, nor the updater, which is built from it.
+          for program in "$dir/passbundle_core.dll" "$dir/passbundle-update.exe"; do
+            if grep -a -q -E 'PB_DATA_DIR|PB_SECRETS|PB_UPDATE_SOURCE|PB_UPDATE_KEY|PB_UPDATE_ELEVATED_OK' "$program"; then
+              echo "$program was built with the core's test hooks." >&2
+              exit 1
+            fi
+          done
           # The program says this version (its version resource).
           product=$(powershell -NoProfile -Command "(Get-Item '$dir/passbundle.exe').VersionInfo.ProductVersion" | tr -d '\r')
           echo "passbundle.exe is $product"
@@ -236,27 +239,9 @@ jobs:
         with:
           name: passbundle-windows-${{ needs.plan.outputs.version }}-unsigned
           path: unsigned
-      - name: The release key, from the repository's secrets
-        id: key
-        env:
-          UPDATE_KEY: ${{ secrets.PASSBUNDLE_DESKTOP_UPDATE_KEY }}
-        run: |
-          if [ -z "$UPDATE_KEY" ]; then
-            echo "::notice::No release key in this repository's secrets: the zip stays unsigned (the build's artifact), and nothing is published."
-            echo "signed=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          umask 077
-          printf '%s\n' "$UPDATE_KEY" > "$RUNNER_TEMP/update-key.pem"
-          # The key the app trusts, and no other.
-          public=$(openssl pkey -in "$RUNNER_TEMP/update-key.pem" -pubout -outform DER | tail -c 32 | od -An -tx1 | tr -d ' \n')
-          if [ "$public" != "$UPDATE_PUBLIC_KEY" ]; then
-            echo "The secret isn't the release key the app pins ($public)." >&2
-            exit 1
-          fi
-          echo "signed=true" >> "$GITHUB_OUTPUT"
-      - name: Write the manifest, sign it, and check it
-        if: steps.key.outputs.signed == 'true'
+      # Everything about the build's archives, before the key is anywhere
+      # near: the key is written only once there's a manifest to sign.
+      - name: Check the zip, and write their manifest
         env:
           SHA: ${{ needs.plan.outputs.sha }}
           NOTES: ${{ needs.plan.outputs.notes }}
@@ -283,15 +268,38 @@ jobs:
             '{format: 1, app: "com.passbundle.app", tag: $tag, version: $version, commit: $commit, notes: $notes,
               files: [{name: $name, platform: "windows-x64", size: $size, sha256: $sha}]}' > dist/manifest.json
           cat dist/manifest.json
+      - name: The release key, from the repository's secrets
+        id: key
+        env:
+          UPDATE_KEY: ${{ secrets.PASSBUNDLE_DESKTOP_UPDATE_KEY }}
+        run: |
+          if [ -z "$UPDATE_KEY" ]; then
+            echo "::notice::No release key in this repository's secrets: the zip stays unsigned (the build's artifact), and nothing is published."
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          umask 077
+          printf '%s\n' "$UPDATE_KEY" > "$RUNNER_TEMP/update-key.pem"
+          # The key the app trusts, and no other.
+          public=$(openssl pkey -in "$RUNNER_TEMP/update-key.pem" -pubout -outform DER | tail -c 32 | od -An -tx1 | tr -d ' \n')
+          if [ "$public" != "$UPDATE_PUBLIC_KEY" ]; then
+            echo "The secret isn't the release key the app pins ($public)." >&2
+            exit 1
+          fi
+          echo "signed=true" >> "$GITHUB_OUTPUT"
+      - name: Sign the manifest, and check the signature
+        if: steps.key.outputs.signed == 'true'
+        run: |
           { printf 'PassBundle desktop release v1\n'; cat dist/manifest.json; } > "$RUNNER_TEMP/signed"
           openssl pkeyutl -sign -inkey "$RUNNER_TEMP/update-key.pem" -rawin -in "$RUNNER_TEMP/signed" -out "$RUNNER_TEMP/signature"
+          rm -f "$RUNNER_TEMP/update-key.pem"
           openssl base64 -A -in "$RUNNER_TEMP/signature" > dist/manifest.json.sig
           # Checked as the app checks it: with the pinned public key alone.
           printf "$(printf '302a300506032b6570032100%s' "$UPDATE_PUBLIC_KEY" | sed 's/../\\x&/g')" > "$RUNNER_TEMP/public.der"
           openssl base64 -d -A -in dist/manifest.json.sig > "$RUNNER_TEMP/check"
           openssl pkeyutl -verify -pubin -keyform DER -inkey "$RUNNER_TEMP/public.der" -rawin \
             -in "$RUNNER_TEMP/signed" -sigfile "$RUNNER_TEMP/check"
-          (cd dist && sha256sum "$zip" manifest.json manifest.json.sig > SHA256SUMS && cat SHA256SUMS)
+          (cd dist && sha256sum "PassBundle-$VERSION-windows-x64.zip" manifest.json manifest.json.sig > SHA256SUMS && cat SHA256SUMS)
           ls -l dist
       - name: Remove the key
         if: always()

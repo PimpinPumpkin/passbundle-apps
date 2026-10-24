@@ -90,13 +90,43 @@ fn plain_part(part: &str) -> bool {
     {
         return false;
     }
-    // Windows' device names, with or without an extension.
-    let stem = part.split('.').next().unwrap_or("").to_ascii_uppercase();
-    let device = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
-        || ((stem.starts_with("COM") || stem.starts_with("LPT"))
-            && stem.len() == 4
-            && stem.as_bytes()[3].is_ascii_digit());
+    // Windows' device names, with or without an extension (and the spaces
+    // Windows drops before one): CON, PRN, AUX, NUL, CONIN$, CONOUT$, and
+    // COM and LPT with a digit, superscript ones too.
+    let stem = part
+        .split('.')
+        .next()
+        .unwrap_or("")
+        .trim_end()
+        .to_uppercase();
+    let numbered = |prefix: &str| {
+        stem.strip_prefix(prefix).is_some_and(|rest| {
+            let mut chars = rest.chars();
+            matches!(
+                (chars.next(), chars.next()),
+                (Some('0'..='9' | '\u{b9}' | '\u{b2}' | '\u{b3}'), None)
+            )
+        })
+    };
+    let device = matches!(
+        stem.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) || numbered("COM")
+        || numbered("LPT");
     !device
+}
+
+/// Makes `dir` and any folders above it, readable by all and changeable
+/// only by this person (0755 on Linux and macOS), whatever the umask lets.
+fn make_dirs(dir: &Path) -> Result<(), UnpackError> {
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o755);
+    }
+    builder.create(dir).map_err(write_error)
 }
 
 /// Counts what's unpacked against the limits.
@@ -123,7 +153,7 @@ impl Budget {
         executable: bool,
     ) -> Result<(), UnpackError> {
         if let Some(parent) = to.parent() {
-            fs::create_dir_all(parent).map_err(write_error)?;
+            make_dirs(parent)?;
         }
         let mut options = fs::OpenOptions::new();
         options.write(true).create_new(true);
@@ -201,7 +231,7 @@ pub fn zip(archive: &Path, into: &Path, limits: Limits) -> Result<(), UnpackErro
             return Err(UnpackError::Entry(name));
         }
         if entry.is_dir() {
-            fs::create_dir_all(&to).map_err(write_error)?;
+            make_dirs(&to)?;
             continue;
         }
         if !entry.is_file() {
@@ -246,7 +276,7 @@ pub fn tar_gz(archive: &Path, into: &Path, limits: Limits) -> Result<(), UnpackE
         let to = place(&name, into).ok_or_else(|| UnpackError::Entry(name.clone()))?;
         budget.file()?;
         match kind {
-            tar::EntryType::Directory => fs::create_dir_all(&to).map_err(write_error)?,
+            tar::EntryType::Directory => make_dirs(&to)?,
             tar::EntryType::Regular | tar::EntryType::Continuous => {
                 let mode = entry.header().mode().unwrap_or(0o644);
                 let declared = entry.header().size().unwrap_or(0);
@@ -286,6 +316,14 @@ mod tests {
             Some(into.join("PassBundle").join("data").join("app.so"))
         );
         assert_eq!(place("PassBundle/", into), Some(into.join("PassBundle")));
+        // Names that only look like devices are names.
+        for fine in [
+            "PassBundle/COM10",
+            "PassBundle/console.txt",
+            "PassBundle/LPT",
+        ] {
+            assert!(place(fine, into).is_some(), "{fine}");
+        }
         for bad in [
             "Other/passbundle.exe",
             "passbundle.exe",
@@ -298,6 +336,11 @@ mod tests {
             "PassBundle/x:stream",
             "PassBundle/NUL",
             "PassBundle/com1.txt",
+            "PassBundle/CONIN$",
+            "PassBundle/conout$.log",
+            "PassBundle/COM\u{b9}",
+            "PassBundle/lpt\u{b3}.txt",
+            "PassBundle/nul .txt",
             "PassBundle/trailing.",
             "PassBundle/new\nline",
             "../PassBundle/x",
@@ -432,7 +475,8 @@ mod tests {
         make_tar_gz(&archive, |b| {
             let mut folder = tar::Header::new_gnu();
             folder.set_entry_type(tar::EntryType::Directory);
-            folder.set_mode(0o755);
+            // Whatever a folder's entry says, it's made 0755.
+            folder.set_mode(0o777);
             folder.set_size(0);
             b.append_data(&mut folder, "PassBundle/", io::empty())
                 .unwrap();
@@ -461,6 +505,9 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             let mode = |p: &str| fs::metadata(into.join(p)).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode("PassBundle/passbundle") & 0o111, 0o111);
+            for folder in ["PassBundle", "PassBundle/lib"] {
+                assert_eq!(mode(folder) & 0o022, 0, "{folder}");
+            }
             assert_eq!(mode("PassBundle/lib/libpassbundle_core.so") & 0o111, 0);
         }
         fs::remove_dir_all(&dir).unwrap();

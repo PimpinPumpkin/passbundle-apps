@@ -16,6 +16,8 @@
 # display (DISPLAY); CI runs it under Xvfb.
 set -Eeuo pipefail
 trap 'echo "Failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+# Folders as a person's own are: theirs to change, and no one else's.
+umask 022
 
 bundle=$(cd "$1" && pwd)
 core=$(cd "$2" && pwd)
@@ -46,6 +48,19 @@ install="$work/install/PassBundle"
 updating="$work/install/.PassBundle-update"
 serve="$work/serve"
 mkdir -p "$serve" "$work/install" "$work/data"
+# The folder the app is installed in is the person's alone, as their own
+# folders are (the updater won't replace itself in one others can change).
+# On Windows, its access list as in a profile's folders: them, SYSTEM, and
+# Administrators, and nothing inherited from the runner's own folders. CI's
+# Windows machines run everything elevated, which the updater refuses (it
+# only says there's an update when it runs as an administrator): builds with
+# test hooks let PB_UPDATE_ELEVATED_OK=1 have it go on, as only here.
+elevated_ok=
+if [ "$os" = windows ]; then
+  MSYS_NO_PATHCONV=1 icacls "$(native "$work/install")" /inheritance:r \
+    /grant:r "$USERNAME:(OI)(CI)F" /grant:r "*S-1-5-18:(OI)(CI)F" /grant:r "*S-1-5-32-544:(OI)(CI)F" > /dev/null
+  elevated_ok=1
+fi
 
 # This run's key: the throwaway one the app trusts here, in place of the
 # release key (only builds with test hooks take PB_UPDATE_KEY).
@@ -152,6 +167,7 @@ install_old() {
 open_app() {
   PB_DATA_DIR=$(native "$work/data") PB_SECRETS=memory \
     PB_UPDATE_SOURCE="$base" PB_UPDATE_KEY="$public" PB_UPDATE_NOW=1 \
+    PB_UPDATE_ELEVATED_OK="$elevated_ok" \
     "$install/$program" > "$work/app.log" 2>&1 &
   opened=$!
   if [ "$os" = windows ]; then

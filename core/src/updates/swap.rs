@@ -6,8 +6,11 @@
 //!
 //! 1. waits for the app to end, and stops its desktop agent (which runs
 //!    from the same folder, and which the new version starts again);
-//! 2. renames the app's folder aside, and the new version's into its place
-//!    (both next to it, on the same disk, so each step is a rename);
+//! 2. puts the new version's folder in the app's folder's place (both next
+//!    to each other, on the same disk): on Linux (and macOS) by exchanging
+//!    the two at once, so the app's path is never free for anyone else to
+//!    take; elsewhere, or where the disk can't, by renaming the old one
+//!    aside and the new one into its place;
 //! 3. opens the new version, and waits for it to say it has started (its
 //!    first frame, [`STARTED`]);
 //! 4. then removes the old version; or, if the new one ended or didn't say
@@ -16,7 +19,9 @@
 //!
 //! Everything it uses is in the work folder ([`super::bundle::work_dir`]),
 //! which the app that opens last removes once this has finished ([`DONE`]),
-//! so no old version or download is left behind.
+//! so no old version or download is left behind. That folder must be one
+//! the app made for itself, this person's alone ([`access::is_private`]),
+//! and what it says must be about the app next to it, or this does nothing.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -24,7 +29,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use super::process;
+use super::{access, bundle, process};
 
 /// What the app leaves for this program: where it is, and what's going on.
 pub const STATE: &str = "update.json";
@@ -116,7 +121,7 @@ fn write_failed(work: &Path, state: &State, reason: &str) {
         reason: reason.to_owned(),
     };
     if let Ok(text) = serde_json::to_string(&failed) {
-        let _ = fs::write(work.join(FAILED), text);
+        let _ = access::write_file(&work.join(FAILED), text.as_bytes());
     }
 }
 
@@ -125,8 +130,8 @@ fn wait_started(work: &Path, child: &mut std::process::Child, limit: Duration) -
     let deadline = Instant::now() + limit;
     let pid = child.id().to_string();
     loop {
-        if let Ok(text) = fs::read_to_string(work.join(STARTED)) {
-            if text.trim() == pid {
+        if let Some(text) = access::read_file(&work.join(STARTED), 64) {
+            if String::from_utf8_lossy(&text).trim() == pid {
                 return true;
             }
         }
@@ -138,6 +143,83 @@ fn wait_started(work: &Path, child: &mut std::process::Child, limit: Duration) -
             return false;
         }
         std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// Exchanges the folders `a` and `b` at once, where the OS and the disk
+/// can: Linux's renameat2 with RENAME_EXCHANGE, macOS's renamex_np with
+/// RENAME_SWAP. Unsupported elsewhere, and where the disk can't.
+pub fn exchange(a: &Path, b: &Path) -> std::io::Result<()> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        let a = CString::new(a.as_os_str().as_bytes())?;
+        let b = CString::new(b.as_os_str().as_bytes())?;
+        #[cfg(target_os = "linux")]
+        let done = unsafe {
+            libc::renameat2(
+                libc::AT_FDCWD,
+                a.as_ptr(),
+                libc::AT_FDCWD,
+                b.as_ptr(),
+                libc::RENAME_EXCHANGE,
+            )
+        };
+        #[cfg(target_os = "macos")]
+        let done = unsafe { libc::renamex_np(a.as_ptr(), b.as_ptr(), libc::RENAME_SWAP) };
+        if done == 0 {
+            return Ok(());
+        }
+        let error = std::io::Error::last_os_error();
+        return Err(match error.raw_os_error() {
+            Some(libc::EINVAL) | Some(libc::ENOSYS) | Some(libc::ENOTSUP) => {
+                std::io::Error::new(std::io::ErrorKind::Unsupported, error)
+            }
+            _ => error,
+        });
+    }
+    #[allow(unreachable_code)]
+    {
+        let _ = (a, b);
+        Err(std::io::ErrorKind::Unsupported.into())
+    }
+}
+
+/// Exchanges `a` and `b` (see [`exchange`]), trying again for a while as
+/// [`rename`] does; Unsupported where it can't be done at once.
+fn exchange_patiently(a: &Path, b: &Path, patience: Duration) -> std::io::Result<()> {
+    let deadline = Instant::now() + patience;
+    loop {
+        match exchange(a, b) {
+            Ok(()) => return Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::Unsupported => return Err(e),
+            Err(e) if Instant::now() < deadline && e.kind() != std::io::ErrorKind::NotFound => {
+                let _ = e;
+                std::thread::sleep(Duration::from_millis(250));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Puts the folder at `from` in `to`'s place, and what was at `to` at
+/// `aside`: at once where the OS can (`to` is never free), else by two
+/// renames.
+fn replace(from: &Path, to: &Path, aside: &Path, patience: Duration) -> std::io::Result<()> {
+    match exchange_patiently(from, to, patience) {
+        // `from` now holds what was at `to`.
+        Ok(()) => rename(from, aside, patience),
+        Err(e) if e.kind() == std::io::ErrorKind::Unsupported => {
+            rename(to, aside, patience)?;
+            if let Err(e) = rename(from, to, patience) {
+                // Put it back rather than leave nothing.
+                let _ = rename(aside, to, Duration::from_secs(60));
+                return Err(e);
+            }
+            Ok(())
+        }
+        Err(e) => Err(e),
     }
 }
 
@@ -161,16 +243,41 @@ fn reopen(work: &Path, state: &State) {
     }
 }
 
+/// Why `state` isn't about the app next to `work`, or None: the work
+/// folder is the app's own ([`bundle::work_dir`]), the program is the
+/// app's, and its folder is a release of this app.
+fn not_ours(work: &Path, state: &State) -> Option<&'static str> {
+    if bundle::work_dir(&state.install) != work {
+        return Some("the update's details are for another folder");
+    }
+    if state.program != bundle::program_name() {
+        return Some("the update's details name another program");
+    }
+    if !bundle::read_release(&state.install).is_some_and(|r| r.app == super::manifest::APP) {
+        return Some("the update's details aren't about PassBundle");
+    }
+    None
+}
+
 /// The whole update, from the work folder `work` that the app made.
 pub fn finish(work: &Path) -> Outcome {
-    let _ = fs::write(work.join(HELPER), std::process::id().to_string());
-    let state: State = match fs::read(work.join(STATE))
-        .ok()
+    // A folder the app made for itself, or nothing here is touched.
+    if !access::is_private(work) {
+        return Outcome::Kept("the work folder isn't PassBundle's own".into());
+    }
+    let _ = access::write_file(
+        &work.join(HELPER),
+        std::process::id().to_string().as_bytes(),
+    );
+    let state: State = match access::read_file(&work.join(STATE), 64 << 10)
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
     {
         Some(state) => state,
         None => return Outcome::Kept("the update's details are missing".into()),
     };
+    if let Some(why) = not_ours(work, &state) {
+        return Outcome::Kept(why.into());
+    }
     let install = &state.install;
     let new = work.join(NEW).join(super::unpack::TOP);
     let old = work.join(OLD);
@@ -181,7 +288,7 @@ pub fn finish(work: &Path) -> Outcome {
         if reopen_it && process::under(install).is_empty() {
             reopen(work, &state);
         }
-        let _ = fs::write(work.join(DONE), "");
+        let _ = access::write_file(&work.join(DONE), b"");
         Outcome::Kept(reason.to_owned())
     };
 
@@ -205,18 +312,12 @@ pub fn finish(work: &Path) -> Outcome {
         std::thread::sleep(Duration::from_millis(250));
     }
 
-    // 2. The old version aside, the new one in its place.
+    // 2. The new version in the old one's place, the old one aside.
     if !new.is_dir() {
         return kept("The update wasn't there to put in place.", true);
     }
-    if rename(install, &old, Duration::from_secs(20)).is_err() {
-        return kept(
-            "Something had PassBundle's folder open, so it wasn't updated. Try again in a moment.",
-            true,
-        );
-    }
-    if rename(&new, install, Duration::from_secs(20)).is_err() {
-        if rename(&old, install, Duration::from_secs(60)).is_err() {
+    if replace(&new, install, &old, Duration::from_secs(20)).is_err() {
+        if !install.is_dir() {
             // Nothing more to try: say where the old version is.
             write_failed(
                 work,
@@ -229,7 +330,7 @@ pub fn finish(work: &Path) -> Outcome {
             return Outcome::Kept("the old version couldn't be put back".into());
         }
         return kept(
-            "The new version couldn't be put in place, so PassBundle wasn't updated.",
+            "Something had PassBundle's folder open, so it wasn't updated. Try again in a moment.",
             true,
         );
     }
@@ -252,21 +353,19 @@ pub fn finish(work: &Path) -> Outcome {
     if started {
         remove(&old, Duration::from_secs(60));
         remove(&work.join(NEW), Duration::from_secs(10));
-        let _ = fs::write(work.join(DONE), "");
+        let _ = access::write_file(&work.join(DONE), b"");
         return Outcome::Updated;
     }
     // Whatever the new version left running from its folder (its agent).
     process::stop(&process::under(install), Duration::from_secs(10));
-    let back = rename(install, &broken, Duration::from_secs(20))
-        .and_then(|()| rename(&old, install, Duration::from_secs(60)));
-    if back.is_err() {
+    if replace(&old, install, &broken, Duration::from_secs(60)).is_err() {
         write_failed(
             work,
             &state,
             &format!(
                 "PassBundle {} didn't start, and the old version couldn't be put back. It's in {}.",
                 state.to,
-                old.display()
+                if old.is_dir() { &old } else { &broken }.display()
             ),
         );
         return Outcome::Kept("the old version couldn't be put back".into());
@@ -290,6 +389,11 @@ mod tests {
     fn app(dir: &Path, work: &Path, version: &str, starts: bool) {
         fs::create_dir_all(dir).unwrap();
         fs::write(dir.join("version"), version).unwrap();
+        let release = serde_json::json!({
+            "app": super::super::manifest::APP, "version": version,
+            "platform": "linux-x64", "files": [],
+        });
+        fs::write(dir.join(bundle::RELEASE), release.to_string()).unwrap();
         let script = if starts {
             format!(
                 "#!/bin/sh\necho $$ > '{}/started'\nexec sleep 30\n",
@@ -312,6 +416,8 @@ mod tests {
         ));
         let install = base.join("PassBundle");
         let work = base.join(".PassBundle-update");
+        fs::create_dir_all(&base).unwrap();
+        access::make_private_dir(&work).unwrap();
         app(&install, &work, "0.1.1", true);
         app(
             &work.join(NEW).join("PassBundle"),
@@ -377,6 +483,78 @@ mod tests {
         assert!(work.join(STARTED).exists());
         assert!(!work.join(OLD).exists() && !work.join(BROKEN).exists());
         stop_apps(&work);
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn a_work_folder_that_isnt_private_or_details_about_another_app_touch_nothing() {
+        use std::os::unix::fs::PermissionsExt;
+        let (base, install, work) = setup("shared", true);
+        fs::set_permissions(&work, fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(matches!(finish(&work), Outcome::Kept(_)));
+        assert_eq!(
+            fs::read_to_string(install.join("version")).unwrap(),
+            "0.1.1"
+        );
+        assert!(!work.join(HELPER).exists() && !work.join(FAILED).exists());
+        fs::set_permissions(&work, fs::Permissions::from_mode(0o700)).unwrap();
+        // Details naming another folder (whose work folder this isn't),
+        // another program, or a folder that isn't PassBundle's.
+        let state: State = serde_json::from_slice(&fs::read(work.join(STATE)).unwrap()).unwrap();
+        let other = base.join("Other");
+        fs::create_dir_all(&other).unwrap();
+        for changed in [
+            State {
+                install: other.clone(),
+                ..state.clone()
+            },
+            State {
+                program: "sh".into(),
+                ..state.clone()
+            },
+        ] {
+            fs::write(work.join(STATE), serde_json::to_vec(&changed).unwrap()).unwrap();
+            assert!(matches!(finish(&work), Outcome::Kept(_)));
+            assert_eq!(
+                fs::read_to_string(install.join("version")).unwrap(),
+                "0.1.1"
+            );
+        }
+        fs::write(work.join(STATE), serde_json::to_vec(&state).unwrap()).unwrap();
+        fs::remove_file(install.join(bundle::RELEASE)).unwrap();
+        assert!(matches!(finish(&work), Outcome::Kept(_)));
+        assert_eq!(
+            fs::read_to_string(install.join("version")).unwrap(),
+            "0.1.1"
+        );
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn two_folders_are_exchanged_at_once() {
+        let base = std::env::temp_dir().join(format!(
+            "pb-exchange-{}-{}",
+            std::process::id(),
+            rand::random::<u32>()
+        ));
+        fs::create_dir_all(base.join("a")).unwrap();
+        fs::create_dir_all(base.join("b")).unwrap();
+        fs::write(base.join("a/which"), "a").unwrap();
+        fs::write(base.join("b/which"), "b").unwrap();
+        exchange(&base.join("a"), &base.join("b")).unwrap();
+        assert_eq!(fs::read_to_string(base.join("a/which")).unwrap(), "b");
+        assert_eq!(fs::read_to_string(base.join("b/which")).unwrap(), "a");
+        // One put in the other's place, the other aside.
+        replace(
+            &base.join("a"),
+            &base.join("b"),
+            &base.join("c"),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        assert_eq!(fs::read_to_string(base.join("b/which")).unwrap(), "b");
+        assert_eq!(fs::read_to_string(base.join("c/which")).unwrap(), "a");
+        assert!(!base.join("a").exists());
         fs::remove_dir_all(&base).unwrap();
     }
 

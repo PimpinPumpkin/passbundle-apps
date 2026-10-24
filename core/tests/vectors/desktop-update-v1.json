@@ -139,6 +139,78 @@
         "runningBuild": 4
       },
       "refused": "tooLarge"
+    },
+    {
+      "name": "signed, but its version is written with a leading zero (0.1.05 for 0.1.5)",
+      "manifest": "{\"format\":1,\"app\":\"com.passbundle.app\",\"tag\":\"windows-v0.1.5\",\"version\":\"0.1.05\",\"commit\":\"0123456789abcdef0123456789abcdef01234567\",\"notes\":\"What's new since 0.1.4:\\n\\n- Faster sync\\n- Updates on Windows\",\"files\":[{\"name\":\"PassBundle-0.1.05-windows-x64.zip\",\"platform\":\"windows-x64\",\"size\":15728640,\"sha256\":\"6e99bdc9e9c0ca27f9fe89b30a1077d7d184700c4aebc14fd344ee265ba42aeb\"}]}",
+      "signature": "w+bD0iJKM+0CvNCivtzL6W88yM2PHr3fxJQv9/OLgLJ4jHvhuhY+dw19lw5Sq8FAS7Qng8kS2OgX8iub40C6Dw==",
+      "expect": {
+        "tag": "windows-v0.1.5",
+        "os": "windows",
+        "platform": "windows-x64",
+        "runningBuild": 4
+      },
+      "refused": "version"
+    },
+    {
+      "name": "a Windows manifest, read by a Linux copy",
+      "manifest": "{\"format\":1,\"app\":\"com.passbundle.app\",\"tag\":\"windows-v0.1.5\",\"version\":\"0.1.5\",\"commit\":\"0123456789abcdef0123456789abcdef01234567\",\"notes\":\"What's new since 0.1.4:\\n\\n- Faster sync\\n- Updates on Windows\",\"files\":[{\"name\":\"PassBundle-0.1.5-windows-x64.zip\",\"platform\":\"windows-x64\",\"size\":15728640,\"sha256\":\"4205efb8521eb9764352808ab759bf00825f93099922a847fade582e06fa2af4\"}]}",
+      "signature": "SbWDGiyXxVGbq6s4AMJTDp+bK6uafcVEKbNGjmIuUe80vddsxWsy7yxj28dTmXkVsmrlgsvjp5wnJR8mPl07DA==",
+      "expect": {
+        "tag": "linux-v0.1.5",
+        "os": "linux",
+        "platform": "linux-x64",
+        "runningBuild": 4
+      },
+      "refused": "tag"
+    },
+    {
+      "name": "a Linux manifest with only the x64 file, read by an arm64 copy",
+      "manifest": "{\"format\":1,\"app\":\"com.passbundle.app\",\"tag\":\"linux-v0.1.5\",\"version\":\"0.1.5\",\"commit\":\"0123456789abcdef0123456789abcdef01234567\",\"notes\":\"What's new since 0.1.4:\\n\\n- Faster sync\\n- Updates on Linux\",\"files\":[{\"name\":\"PassBundle-0.1.5-linux-x64.tar.gz\",\"platform\":\"linux-x64\",\"size\":11534336,\"sha256\":\"6a86912040a972c9192e4f9f373210da4f67484e785cb65d6db5d85b6cc2ee31\"}]}",
+      "signature": "aWrF70Gm824r5L9Hy70LaD3zVxE6Rqr7ilEaJ1gnza9MS38GsAT9cSUnpdgkxC2/8wqKf3sLLNsIMoJjlFo1Aw==",
+      "expect": {
+        "tag": "linux-v0.1.5",
+        "os": "linux",
+        "platform": "linux-arm64",
+        "runningBuild": 4
+      },
+      "refused": "noFile"
+    },
+    {
+      "name": "signed, but for another app",
+      "manifest": "{\"format\":1,\"app\":\"com.example.other\",\"tag\":\"windows-v0.1.5\",\"version\":\"0.1.5\",\"commit\":\"0123456789abcdef0123456789abcdef01234567\",\"notes\":\"What's new since 0.1.4:\\n\\n- Faster sync\\n- Updates on Windows\",\"files\":[{\"name\":\"PassBundle-0.1.5-windows-x64.zip\",\"platform\":\"windows-x64\",\"size\":15728640,\"sha256\":\"4205efb8521eb9764352808ab759bf00825f93099922a847fade582e06fa2af4\"}]}",
+      "signature": "oRl+Qiq6sh4PUN557uEjXPuMFKW2YXK16SEBGxAYyRmbyoP/LDPZyLXOkdlZn/WUxR9+Dpg4S/VH75kC6+O9BQ==",
+      "expect": {
+        "tag": "windows-v0.1.5",
+        "os": "windows",
+        "platform": "windows-x64",
+        "runningBuild": 4
+      },
+      "refused": "app"
+    },
+    {
+      "name": "signed, but in a format this app doesn't read",
+      "manifest": "{\"format\":2,\"app\":\"com.passbundle.app\",\"tag\":\"windows-v0.1.5\",\"version\":\"0.1.5\",\"commit\":\"0123456789abcdef0123456789abcdef01234567\",\"notes\":\"What's new since 0.1.4:\\n\\n- Faster sync\\n- Updates on Windows\",\"files\":[{\"name\":\"PassBundle-0.1.5-windows-x64.zip\",\"platform\":\"windows-x64\",\"size\":15728640,\"sha256\":\"4205efb8521eb9764352808ab759bf00825f93099922a847fade582e06fa2af4\"}]}",
+      "signature": "fr4IdfL5o79vtJZfHHM97DMM/kGYg59bQ7gfuM4vn8SwoXOOp6zYIcPYzAQhWkD2lfeKCB/H8krqg5x9Sa9GBw==",
+      "expect": {
+        "tag": "windows-v0.1.5",
+        "os": "windows",
+        "platform": "windows-x64",
+        "runningBuild": 4
+      },
+      "refused": "malformed"
+    },
+    {
+      "name": "signed, but naming another release's file",
+      "manifest": "{\"format\":1,\"app\":\"com.passbundle.app\",\"tag\":\"windows-v0.1.5\",\"version\":\"0.1.5\",\"commit\":\"0123456789abcdef0123456789abcdef01234567\",\"notes\":\"What's new since 0.1.4:\\n\\n- Faster sync\\n- Updates on Windows\",\"files\":[{\"name\":\"PassBundle-0.1.4-windows-x64.zip\",\"platform\":\"windows-x64\",\"size\":15728640,\"sha256\":\"4205efb8521eb9764352808ab759bf00825f93099922a847fade582e06fa2af4\"}]}",
+      "signature": "NLpMECBNPa+rsPRlaOYh8W5bS/06tbW34ivlAL/Zem/tIPSqYpqXvdn41FrYc0eXjXvESGP/ChgXt3WI1EFPBg==",
+      "expect": {
+        "tag": "windows-v0.1.5",
+        "os": "windows",
+        "platform": "windows-x64",
+        "runningBuild": 4
+      },
+      "refused": "name"
     }
   ]
 }

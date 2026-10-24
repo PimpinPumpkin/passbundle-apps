@@ -19,6 +19,7 @@
 //! administrator can change, as a system-wide install or a package's), it
 //! only says there's a new version.
 
+pub mod access;
 pub mod bundle;
 pub mod fetch;
 pub mod manifest;
@@ -148,13 +149,18 @@ pub struct Context {
     pub data_dir: PathBuf,
     pub os: &'static str,
     pub platform: &'static str,
+    /// Running as an administrator doesn't stop it, and a folder
+    /// Administrators own counts as this person's: only in builds with test
+    /// hooks, on CI's Windows machines, which run everything elevated.
+    pub trust_admin: bool,
 }
 
 impl Context {
     /// The running app's, on Windows and Linux; None elsewhere. Builds with
     /// test hooks (never a release) take PB_UPDATE_SOURCE (a stand-in for
-    /// GitHub on this computer) and PB_UPDATE_KEY (the public key, in hex)
-    /// from their environment, for tools/desktop-update-test.sh.
+    /// GitHub on this computer), PB_UPDATE_KEY (the public key, in hex), and
+    /// PB_UPDATE_ELEVATED_OK=1 (`trust_admin`) from their environment, for
+    /// tools/desktop-update-test.sh.
     pub fn for_this_app() -> Option<Context> {
         let (os, platform) = (os()?, platform()?);
         let program = std::env::current_exe().ok()?;
@@ -162,6 +168,10 @@ impl Context {
         let mut source = Source::github();
         #[allow(unused_mut)]
         let mut keys = PINNED_KEYS.to_vec();
+        #[cfg(feature = "test-hooks")]
+        let trust_admin = std::env::var("PB_UPDATE_ELEVATED_OK").as_deref() == Ok("1");
+        #[cfg(not(feature = "test-hooks"))]
+        let trust_admin = false;
         #[cfg(feature = "test-hooks")]
         {
             if let Some(base) = std::env::var("PB_UPDATE_SOURCE")
@@ -184,6 +194,7 @@ impl Context {
             data_dir: crate::store::Store::default_dir(),
             os,
             platform,
+            trust_admin,
         })
     }
 
@@ -270,15 +281,22 @@ fn fail(error: impl Into<String>) -> Value {
 /// Why this copy can't update itself (the person is told there's a new
 /// version, and how to get it), or None.
 fn install_note(ctx: &Context) -> Option<String> {
-    bundle::why_not(&ctx.installed, ctx.platform, &ctx.data_dir)
+    bundle::why_not(&ctx.installed, ctx.platform, &ctx.data_dir, ctx.trust_admin)
+}
+
+/// The work folder, if it's one this updater made (`access::is_private`):
+/// anything else there is no one's to trust, and is never read or written.
+fn own_work_dir(ctx: &Context) -> Option<PathBuf> {
+    let work = ctx.work_dir();
+    access::is_private(&work).then_some(work)
 }
 
 /// The last update that didn't happen, from its work folder or as heard.
 fn failed_note(ctx: &Context) -> Option<swap::Failed> {
     let mut kept = lock(&FAILED);
     if kept.is_none() {
-        *kept = fs::read(ctx.work_dir().join(swap::FAILED))
-            .ok()
+        *kept = own_work_dir(ctx)
+            .and_then(|work| access::read_file(&work.join(swap::FAILED), 64 << 10))
             .and_then(|b| serde_json::from_slice(&b).ok());
     }
     kept.clone()
@@ -359,8 +377,21 @@ fn network(e: FetchError) -> String {
     }
 }
 
-/// The newest release for this platform, if it's newer than this copy, its
-/// manifest signed and saying what this copy needs.
+/// How many of the newest releases a check tries, newest first.
+const CANDIDATES: usize = 10;
+
+/// Why a release wasn't taken: something about it (tried no further), or
+/// the network (no use trying others now).
+enum Skip {
+    Refused(String),
+    Network(String),
+}
+
+/// The newest release for this platform that's newer than this copy and
+/// whose manifest is signed and says what this copy needs. Releases are
+/// tried newest first, at most [`CANDIDATES`]: one that doesn't check out
+/// (a release someone with access to GitHub made up, say) can't keep the
+/// real ones behind it from being offered.
 fn newer(ctx: &Context) -> Result<Option<Offer>, String> {
     let list = fetch::get_bytes(&ctx.source.list, &ctx.source.api_hosts, MAX_LIST_BYTES, 60)
         .map_err(network)?;
@@ -370,25 +401,40 @@ fn newer(ctx: &Context) -> Result<Option<Offer>, String> {
         .iter()
         .filter(|r| r["draft"] != true && r["prerelease"] != true)
         .collect();
-    let Some(tag) = manifest::newest(
-        shipped.iter().filter_map(|r| r["tag_name"].as_str()),
-        ctx.os,
-    ) else {
-        return Ok(None);
-    };
-    let version = manifest::version_of(tag, ctx.os).expect("newest is a version");
     let running_build = ctx.installed.build(ctx.platform);
-    if version.build <= running_build {
-        return Ok(None);
-    }
-    let release = shipped
+    let mut candidates: Vec<(&str, manifest::Version, &Value)> = shipped
         .iter()
-        .find(|r| r["tag_name"] == tag)
-        .expect("newest is one of them");
+        .filter_map(|r| {
+            let tag = r["tag_name"].as_str()?;
+            let version = manifest::version_of(tag, ctx.os)?;
+            (version.build > running_build).then_some((tag, version, *r))
+        })
+        .collect();
+    candidates.sort_by_key(|c| std::cmp::Reverse(c.1.build));
+    let mut refused = None;
+    for (tag, version, release) in candidates.into_iter().take(CANDIDATES) {
+        match offer_for(ctx, release, tag, version, running_build) {
+            Ok(Some(offer)) => return Ok(Some(offer)),
+            Ok(None) => {}
+            Err(Skip::Refused(why)) => {
+                refused.get_or_insert(why);
+            }
+            Err(Skip::Network(why)) => return Err(why),
+        }
+    }
+    refused.map_or(Ok(None), Err)
+}
+
+/// The release tagged `tag` (the list's `release`), if its manifest checks
+/// out for this copy.
+fn offer_for(
+    ctx: &Context,
+    release: &Value,
+    tag: &str,
+    version: manifest::Version,
+    running_build: u32,
+) -> Result<Option<Offer>, Skip> {
     let assets = release["assets"].as_array().cloned().unwrap_or_default();
-    let no_files = || {
-        format!("PassBundle {version}'s files aren't on PassBundle's releases, so it can't be installed from here.")
-    };
     // Exactly these files, on this release.
     let asset = |name: &str| -> Option<(&Value, String)> {
         let url = ctx.source.asset(tag, name)?;
@@ -400,12 +446,20 @@ fn newer(ctx: &Context) -> Result<Option<Offer>, String> {
     let (Some((_, manifest_url)), Some((_, signature_url))) =
         (asset("manifest.json"), asset("manifest.json.sig"))
     else {
-        return Err(format!(
+        return Err(Skip::Refused(format!(
             "PassBundle {version} has no signed manifest, so it can't be installed from here."
-        ));
+        )));
     };
     let get = |url: &str, max| {
-        fetch::get_bytes(url, &ctx.source.download_hosts, max, 60).map_err(network)
+        fetch::get_bytes(url, &ctx.source.download_hosts, max, 60).map_err(|e| match e {
+            // Nothing there, or somewhere it may not go: about this release.
+            FetchError::NotFound | FetchError::Refused(_) | FetchError::TooLong => {
+                Skip::Refused(format!(
+                    "PassBundle {version}'s manifest can't be read, so it can't be installed from here."
+                ))
+            }
+            e => Skip::Network(network(e)),
+        })
     };
     let manifest_bytes = get(&manifest_url, manifest::MAX_MANIFEST_BYTES)?;
     let signature = get(&signature_url, manifest::MAX_SIGNATURE_BYTES)?;
@@ -420,13 +474,15 @@ fn newer(ctx: &Context) -> Result<Option<Offer>, String> {
         Ok(release) => release,
         Err(Refused::NotNewer { .. }) => return Ok(None),
         Err(refused) => {
-            return Err(format!(
+            return Err(Skip::Refused(format!(
                 "PassBundle {version} can't be installed from here: {refused}."
-            ))
+            )))
         }
     };
     let Some((file, url)) = asset(&release.file.name) else {
-        return Err(no_files());
+        return Err(Skip::Refused(format!(
+            "PassBundle {version}'s files aren't on PassBundle's releases, so it can't be installed from here."
+        )));
     };
     // What GitHub says of the file, where it says it, agrees.
     let size = file["size"].as_u64().unwrap_or(0);
@@ -435,9 +491,9 @@ fn newer(ctx: &Context) -> Result<Option<Offer>, String> {
         .and_then(|d| d.strip_prefix("sha256:"))
         .and_then(manifest::sha256_of);
     if (size > 0 && size != release.file.size) || digest.is_some_and(|d| d != release.file.sha256) {
-        return Err(format!(
+        return Err(Skip::Refused(format!(
             "PassBundle {version}'s file isn't the one its manifest names, so it can't be installed from here."
-        ));
+        )));
     }
     Ok(Some(Offer { release, url }))
 }
@@ -476,10 +532,20 @@ fn prepare(ctx: &Context, offer: &Offer) -> Result<(), String> {
         return Err("PassBundle is open in another window. Close it, then update.".into());
     }
     let work = ctx.work_dir();
-    if helper_at_work(&work) {
-        return Err("An update is already being put in place.".into());
+    if fs::symlink_metadata(&work).is_ok() {
+        // Only ever a folder this updater made, left behind: never anything
+        // else (it isn't PassBundle's to remove, and could be a trap).
+        if !access::is_private(&work) {
+            return Err(format!(
+                "Something that isn't PassBundle's is where it puts an update together ({}), so it won't update until that's gone.",
+                work.display()
+            ));
+        }
+        if helper_at_work(&work) {
+            return Err("An update is already being put in place.".into());
+        }
+        swap::remove(&work, Duration::from_secs(10));
     }
-    swap::remove(&work, Duration::from_secs(10));
     let release = &offer.release;
     let size = release.file.size;
     let limits = unpack::limits(size);
@@ -488,7 +554,7 @@ fn prepare(ctx: &Context, offer: &Offer) -> Result<(), String> {
     {
         return Err("There isn't enough space on this computer for the update.".into());
     }
-    make_private_dir(&work).map_err(|_| "Couldn't make room for the update.".to_owned())?;
+    access::make_private_dir(&work).map_err(|_| "Couldn't make room for the update.".to_owned())?;
     // Whatever goes wrong from here, nothing of it stays.
     let mut cleanup = Cleanup(Some(work.clone()));
 
@@ -575,9 +641,9 @@ fn prepare(ctx: &Context, offer: &Offer) -> Result<(), String> {
         to: version,
         app: me,
     };
-    fs::write(
-        work.join(swap::STATE),
-        serde_json::to_vec(&state).expect("a state is JSON"),
+    access::write_file(
+        &work.join(swap::STATE),
+        &serde_json::to_vec(&state).expect("a state is JSON"),
     )
     .map_err(|_| "Couldn't make room for the update.".to_owned())?;
     process::let_next_come_forward();
@@ -601,21 +667,10 @@ impl Drop for Cleanup {
 
 /// Whether a `passbundle-update` is still at work in `work`.
 fn helper_at_work(work: &Path) -> bool {
-    fs::read_to_string(work.join(swap::HELPER))
-        .ok()
-        .and_then(|pid| pid.trim().parse::<u32>().ok())
+    access::read_file(&work.join(swap::HELPER), 64)
+        .and_then(|pid| String::from_utf8_lossy(&pid).trim().parse::<u32>().ok())
         .is_some_and(process::alive)
         && !work.join(swap::DONE).exists()
-}
-
-fn make_private_dir(dir: &Path) -> std::io::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        fs::DirBuilder::new().mode(0o700).create(dir)
-    }
-    #[cfg(not(unix))]
-    fs::create_dir(dir)
 }
 
 /// The space free for this user on the disk `dir` is on, where the OS says.
@@ -654,15 +709,17 @@ fn free_space(dir: &Path) -> Option<u64> {
 /// is a new version just put in place; `{failed: {version, reason}}` when an
 /// update didn't happen.
 pub fn started(ctx: &Context) -> Value {
-    let work = ctx.work_dir();
-    if !work.exists() {
+    // Nothing going on, or something there that isn't this updater's.
+    let Some(work) = own_work_dir(ctx) else {
         return json!({});
-    }
-    let state: Option<swap::State> = fs::read(work.join(swap::STATE))
-        .ok()
+    };
+    let state: Option<swap::State> = access::read_file(&work.join(swap::STATE), 64 << 10)
         .and_then(|b| serde_json::from_slice(&b).ok());
     let failed = failed_note(ctx);
-    let _ = fs::write(work.join(swap::STARTED), std::process::id().to_string());
+    let _ = access::write_file(
+        &work.join(swap::STARTED),
+        std::process::id().to_string().as_bytes(),
+    );
     std::thread::spawn(move || {
         // The updater sees this, finishes, and says so; or isn't there.
         for _ in 0..240 {

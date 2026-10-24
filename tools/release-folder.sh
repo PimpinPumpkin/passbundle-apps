@@ -2,8 +2,9 @@
 # Makes a Windows or Linux build into a release's folder (README, "Windows
 # and Linux test releases"): copies the app's bundle into <out>/PassBundle
 # with the core, the updater (passbundle-update), and on Windows the desktop
-# agent, and writes release.json, which says which release it is and every
-# name in the folder (the only ones an update may move; core/src/updates).
+# agent, and writes release.json, which says which release it is and lists
+# every path in the folder, folders too, with / between names: the only
+# ones an update may move or remove (core/src/updates/bundle.rs).
 #
 #   tools/release-folder.sh <bundle> <core folder> <agent folder or -> <out> <version> <platform>
 #
@@ -30,8 +31,14 @@ case "$platform" in
     test -x "$dir/passbundle" && test -x "$dir/passbundle-update" ;;
   *) echo "No releases for $platform." >&2; exit 1 ;;
 esac
-# Every name in the folder, and release.json itself.
-names=$( (ls -A "$dir"; echo release.json) | sort -u | jq -R -s -c 'split("\n") | map(select(length > 0))')
+# No links: no release has one, and an update never moves one.
+if [ -n "$(find "$dir" -type l)" ]; then
+  echo "The release has links in it." >&2
+  exit 1
+fi
+# Every path in the folder, and release.json itself.
+names=$( (cd "$dir" && find . -mindepth 1 | sed 's|^\./||'; echo release.json) | LC_ALL=C sort -u |
+  jq -R -s -c 'split("\n") | map(select(length > 0))')
 jq -n -c --arg version "$version" --arg platform "$platform" --argjson files "$names" \
   '{app: "com.passbundle.app", version: $version, platform: $platform, files: $files}' > "$dir/release.json"
-cat "$dir/release.json"
+jq -c '{app, version, platform, files: (.files | length)}' "$dir/release.json"
