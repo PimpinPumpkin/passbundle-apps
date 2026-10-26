@@ -109,7 +109,6 @@ class _NewItemPickerState extends State<NewItemPicker> {
         ),
     ].where((g) => g.$2.isNotEmpty).toList();
     return Scaffold(
-      backgroundColor: c.ground,
       appBar: AppBar(
         title: const Text('What are you saving?'),
         automaticallyImplyLeading: false,

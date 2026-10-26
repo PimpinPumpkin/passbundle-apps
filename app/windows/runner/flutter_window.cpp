@@ -3,6 +3,7 @@
 #include <flutter/standard_method_codec.h>
 
 #include <optional>
+#include <variant>
 
 #include "flutter/generated_plugin_registrant.h"
 
@@ -30,6 +31,32 @@ bool FlutterWindow::OnCreate() {
   computer_ = std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
       flutter_controller_->engine()->messenger(), "passbundle/computer",
       &flutter::StandardMethodCodec::GetInstance());
+  look_ = std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
+      flutter_controller_->engine()->messenger(), "passbundle/window",
+      &flutter::StandardMethodCodec::GetInstance());
+  look_->SetMethodCallHandler(
+      [this](const flutter::MethodCall<flutter::EncodableValue>& call,
+             std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>>
+                 result) {
+        const auto* arguments =
+            std::get_if<flutter::EncodableMap>(call.arguments());
+        if (call.method_name() != "look" || !arguments) {
+          result->NotImplemented();
+          return;
+        }
+        const auto dark = arguments->find(flutter::EncodableValue("dark"));
+        const auto ground = arguments->find(flutter::EncodableValue("ground"));
+        if (dark == arguments->end() || ground == arguments->end() ||
+            !std::holds_alternative<bool>(dark->second) ||
+            !(std::holds_alternative<int32_t>(ground->second) ||
+              std::holds_alternative<int64_t>(ground->second))) {
+          result->Error("arguments", "look takes dark and ground");
+          return;
+        }
+        SetLook(std::get<bool>(dark->second),
+                static_cast<unsigned int>(ground->second.LongValue()));
+        result->Success();
+      });
   SetChildContent(flutter_controller_->view()->GetNativeWindow());
 
   flutter_controller_->engine()->SetNextFrameCallback([&]() {
@@ -46,6 +73,7 @@ bool FlutterWindow::OnCreate() {
 
 void FlutterWindow::OnDestroy() {
   computer_ = nullptr;
+  look_ = nullptr;
   if (flutter_controller_) {
     flutter_controller_ = nullptr;
   }

@@ -442,7 +442,7 @@ class SettingsDialog extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Dialog(
-    backgroundColor: context.colors.ground,
+    backgroundColor: context.colors.dialogGround,
     clipBehavior: Clip.antiAlias,
     child: ConstrainedBox(
       constraints: const BoxConstraints(maxWidth: 480, maxHeight: 760),

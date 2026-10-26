@@ -479,8 +479,9 @@ class _VersionViewState extends State<VersionView> {
               for (var i = 0; i < rows.length; i++) ...[
                 if (i > 0 || wide) const Divider(indent: 16),
                 Container(
+                  // Half the tint, however see-through it is already.
                   color: rows[i]['changed'] == true
-                      ? c.tint.withValues(alpha: 0.5)
+                      ? c.tint.withValues(alpha: c.tint.a * 0.5)
                       : null,
                   padding: const EdgeInsets.fromLTRB(16, 10, 16, 10),
                   child: wide

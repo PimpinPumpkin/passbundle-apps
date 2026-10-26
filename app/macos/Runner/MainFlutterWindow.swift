@@ -12,6 +12,8 @@ class MainFlutterWindow: NSWindow {
   private let updater = Updater.forThisApp()
   private var platform: FlutterMethodChannel?
   private var updates: FlutterMethodChannel?
+  /// The app's look, for the title bar (SystemBars in app/lib/theme.dart).
+  private var look: FlutterMethodChannel?
 
   /// Where macOS keeps the window's frame between launches.
   private static let frameName = "PassBundle"
@@ -52,7 +54,36 @@ class MainFlutterWindow: NSWindow {
     self.platform = platform
     self.updates = updates
 
+    let look = FlutterMethodChannel(name: "passbundle/window", binaryMessenger: messenger)
+    look.setMethodCallHandler { [weak self] call, result in
+      guard call.method == "look", let self,
+        let arguments = call.arguments as? [String: Any],
+        let dark = arguments["dark"] as? Bool,
+        let ground = arguments["ground"] as? Int
+      else {
+        result(FlutterMethodNotImplemented)
+        return
+      }
+      self.show(dark: dark, ground: ground)
+      result(nil)
+    }
+    self.look = look
+
     super.awakeFromNib()
+  }
+
+  /// The title bar as the app is, light or dark, whatever the Mac's own
+  /// setting: in the dark, the app's ground (0xRRGGBB) right up to the top,
+  /// rather than a gray strip over it.
+  private func show(dark: Bool, ground: Int) {
+    appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+    titlebarAppearsTransparent = dark
+    backgroundColor =
+      dark
+      ? NSColor(
+        srgbRed: CGFloat((ground >> 16) & 0xff) / 255, green: CGFloat((ground >> 8) & 0xff) / 255,
+        blue: CGFloat(ground & 0xff) / 255, alpha: 1)
+      : NSColor.windowBackgroundColor
   }
 
   /// 1200 by 800 points, or as much of the screen as there is, centered.
