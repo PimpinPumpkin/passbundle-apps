@@ -33,6 +33,10 @@ class FlutterWindow : public Win32Window {
   // Tells the app the computer is about to sleep, so it can lock first
   // (docs/core.md, "Locking by itself").
   std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>> computer_;
+
+  // The app's look, for the window's frame (SystemBars in
+  // app/lib/theme.dart).
+  std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>> look_;
 };
 
 #endif  // RUNNER_FLUTTER_WINDOW_H_

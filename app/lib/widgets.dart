@@ -93,11 +93,9 @@ class Wordmark extends StatelessWidget {
 
   final double size;
 
-  static const _emerald = Color(0xFF0E7A5A);
-
   @override
   Widget build(BuildContext context) {
-    final dark = Theme.of(context).brightness == Brightness.dark;
+    final c = context.colors;
     final u = size / 42;
     final font = 31 * u;
     TextStyle style(double weight, Color color) => TextStyle(
@@ -126,17 +124,8 @@ class Wordmark extends StatelessWidget {
           Text.rich(
             TextSpan(
               children: [
-                TextSpan(
-                  text: 'pass',
-                  style: style(
-                    700,
-                    dark ? const Color(0xFFE7EFEC) : const Color(0xFF1B3A33),
-                  ),
-                ),
-                TextSpan(
-                  text: 'bundle',
-                  style: style(450, dark ? const Color(0xFF6FD4B4) : _emerald),
-                ),
+                TextSpan(text: 'pass', style: style(700, c.wordmarkPass)),
+                TextSpan(text: 'bundle', style: style(450, c.wordmarkBundle)),
               ],
             ),
             textScaler: TextScaler.noScaling,
@@ -214,12 +203,12 @@ class Avatar extends StatelessWidget {
   }
 
   Widget letterTile(BuildContext context) {
-    final dark = Theme.of(context).brightness == Brightness.dark;
+    final c = context.colors;
     return Container(
       width: size,
       height: size,
       decoration: BoxDecoration(
-        color: dark ? const Color(0xFF1C2A4A) : const Color(0xFFE3E9F8),
+        color: c.letterTile,
         borderRadius: BorderRadius.circular(size * 0.28),
       ),
       alignment: Alignment.center,
@@ -228,7 +217,7 @@ class Avatar extends StatelessWidget {
         // The tile doesn't grow with the text size, so its letter doesn't either.
         textScaler: TextScaler.noScaling,
         style: TextStyle(
-          color: dark ? const Color(0xFF9DB4F2) : const Color(0xFF1D3C99),
+          color: c.letter,
           fontWeight: FontWeight.w700,
           fontSize: size * 0.44,
         ),
@@ -294,17 +283,15 @@ class _SiteIconState extends State<_SiteIcon> {
   Widget build(BuildContext context) {
     final icon = this.icon;
     if (icon == null || !siteIcons.on) return widget.letter;
-    final dark = Theme.of(context).brightness == Brightness.dark;
+    final c = context.colors;
     final size = widget.size;
     return Container(
       width: size,
       height: size,
       decoration: BoxDecoration(
-        color: dark ? const Color(0xFFF4F7F6) : Colors.white,
+        color: c.siteTile,
         borderRadius: BorderRadius.circular(size * 0.28),
-        border: Border.all(
-          color: dark ? const Color(0xFFF4F7F6) : const Color(0xFFDCE5E1),
-        ),
+        border: Border.all(color: c.siteTileEdge),
       ),
       alignment: Alignment.center,
       // Drawn already, no larger than a tile needs (icons.dart).

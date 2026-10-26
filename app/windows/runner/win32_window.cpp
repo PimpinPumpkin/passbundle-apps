@@ -16,6 +16,15 @@ namespace {
 #define DWMWA_USE_IMMERSIVE_DARK_MODE 20
 #endif
 
+/// Window attribute for the title bar's color, and the value that gives it
+/// back to Windows (Windows 11, SDK 10.0.22000.0).
+#ifndef DWMWA_CAPTION_COLOR
+#define DWMWA_CAPTION_COLOR 35
+#endif
+#ifndef DWMWA_COLOR_DEFAULT
+#define DWMWA_COLOR_DEFAULT 0xFFFFFFFF
+#endif
+
 constexpr const wchar_t kWindowClassName[] = L"FLUTTER_RUNNER_WIN32_WINDOW";
 
 /// Registry key for app theme preference.
@@ -305,7 +314,11 @@ Win32Window::MessageHandler(HWND hwnd,
       return 0;
 
     case WM_DWMCOLORIZATIONCOLORCHANGED:
-      UpdateTheme(hwnd);
+      if (has_look_) {
+        ShowLook();
+      } else {
+        UpdateTheme(hwnd);
+      }
       return 0;
   }
 
@@ -361,6 +374,29 @@ bool Win32Window::OnCreate() {
 
 void Win32Window::OnDestroy() {
   // No-op; provided for subclasses.
+}
+
+void Win32Window::SetLook(bool dark, unsigned int ground) {
+  has_look_ = true;
+  look_dark_ = dark;
+  look_ground_ = ground;
+  ShowLook();
+}
+
+void Win32Window::ShowLook() {
+  if (!window_handle_) {
+    return;
+  }
+  BOOL dark = look_dark_ ? TRUE : FALSE;
+  DwmSetWindowAttribute(window_handle_, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark,
+                        sizeof(dark));
+  COLORREF caption =
+      look_dark_ ? RGB((look_ground_ >> 16) & 0xff, (look_ground_ >> 8) & 0xff,
+                       look_ground_ & 0xff)
+                 : DWMWA_COLOR_DEFAULT;
+  // Windows 10 has no such attribute, and refuses it: its own dark gray stays.
+  DwmSetWindowAttribute(window_handle_, DWMWA_CAPTION_COLOR, &caption,
+                        sizeof(caption));
 }
 
 void Win32Window::UpdateTheme(HWND const window) {

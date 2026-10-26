@@ -14,6 +14,7 @@ import 'package:integration_test/integration_test.dart';
 
 import 'package:passbundle/core.dart';
 import 'package:passbundle/main.dart';
+import 'package:passbundle/theme.dart';
 import 'package:passbundle/unlock_offer.dart';
 
 import 'fixtures.g.dart';
@@ -316,6 +317,58 @@ void main() {
         expect(File('$dir/biometric.sealed').existsSync(), isFalse);
       }
       expect((await Core.biometricStatus())['status'], 'notSetUp');
+    },
+  );
+
+  // Graphite glass on the phone's own renderer: the ground's washes and the
+  // translucent cards, edges, and shadows (theme.dart), drawn on each screen.
+  testWidgets(
+    'dark mode draws the vault, an item, the editor, the generator, and settings',
+    (tester) async {
+      final dir = (await Core.platform.invokeMethod<String>('filesDir'))!;
+      for (final kept in Directory(dir).listSync()) {
+        kept.deleteSync(recursive: true);
+      }
+      File('$dir/settings.json').writeAsStringSync(sampleSettings);
+      File('$dir/sync.json').writeAsStringSync(sampleSync);
+      await Core.openOnThisDevice();
+      declinedTheOffer();
+      await tester.pumpWidget(
+        PassBundleApp(key: UniqueKey(), themeMode: ThemeMode.dark),
+      );
+      await pumpUntil(tester, find.text('Unlock PassBundle'));
+      expect(find.byType(Ground), findsNWidgets(2));
+      await tester.enterText(find.byType(TextField), samplePassword);
+      await unlockWhenStill(tester);
+      await pumpUntil(tester, find.text('Logins'));
+      await tester.pump(const Duration(seconds: 1));
+
+      await openItem(tester, 'Backup service');
+      await pumpUntil(tester, find.byTooltip('Copy password'));
+      await tester.pump(const Duration(seconds: 1));
+      await tester.pageBack();
+      await pumpUntil(tester, find.byTooltip('New item').hitTestable());
+
+      await tester.tap(find.byTooltip('New item'));
+      await pumpUntil(tester, find.text('What are you saving?'));
+      await tapWhenStill(tester, find.text('Login'));
+      await pumpUntil(tester, find.text('New login'));
+      await tester.pump(const Duration(seconds: 1));
+      await tapWhenStill(tester, find.byTooltip('Cancel'));
+      await pumpUntil(tester, find.byTooltip('Generator').hitTestable());
+
+      await tester.tap(find.byTooltip('Generator'));
+      // Its Copy is below the fold on a small screen.
+      await pumpUntil(tester, find.text('Passphrase'));
+      await tester.pump(const Duration(seconds: 1));
+      await tester.tap(find.byTooltip('Settings'));
+      await pumpUntil(tester, find.text('Lock when the phone locks'));
+      await tester.pump(const Duration(seconds: 1));
+      await tester.tap(find.byTooltip('Items'));
+      await pumpUntil(tester, find.byTooltip('Lock').hitTestable());
+      await tester.tap(find.byTooltip('Lock'));
+      await pumpUntil(tester, find.text('Unlock PassBundle'));
+      expect(tester.takeException(), isNull);
     },
   );
 

@@ -816,11 +816,7 @@ class VaultScreenState extends State<VaultScreen> {
     return SliverPadding(
       padding: const EdgeInsets.symmetric(horizontal: 16),
       sliver: DecoratedSliver(
-        decoration: BoxDecoration(
-          color: c.pane,
-          borderRadius: const BorderRadius.all(r),
-          boxShadow: c.resting,
-        ),
+        decoration: c.resting.decoration(const BorderRadius.all(r)),
         sliver: SliverList.separated(
           itemCount: count,
           itemBuilder: (context, i) => row(
@@ -1302,11 +1298,7 @@ class Sidebar extends StatelessWidget {
     return Container(
       width: width,
       margin: const EdgeInsets.fromLTRB(12, 12, 0, 12),
-      decoration: BoxDecoration(
-        color: c.pane,
-        borderRadius: BorderRadius.circular(16),
-        boxShadow: c.resting,
-      ),
+      decoration: c.resting.decoration(BorderRadius.circular(16)),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -1477,7 +1469,6 @@ class ItemList extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = context.colors;
-    final dark = Theme.of(context).brightness == Brightness.dark;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -1575,24 +1566,17 @@ class ItemList extends StatelessWidget {
                     final subtitle = item['subtitle'] as String;
                     return Padding(
                       padding: const EdgeInsets.symmetric(vertical: 2),
-                      // The chosen one rises off the ground.
+                      // The chosen one rises off the ground, in the
+                      // selection's ring.
                       child: DecoratedBox(
-                        decoration: BoxDecoration(
-                          borderRadius: BorderRadius.circular(12),
-                          boxShadow: on
-                              ? [
-                                  BoxShadow(
-                                    color: dark
-                                        ? const Color(0xFF2F5247)
-                                        : const Color(0xFFCFE3DA),
-                                    spreadRadius: 1,
-                                  ),
-                                  ...c.lifted,
-                                ]
-                              : null,
-                        ),
+                        decoration: on
+                            ? c.lifted.decoration(
+                                BorderRadius.circular(12),
+                                ring: c.selectedRing,
+                              )
+                            : const BoxDecoration(),
                         child: Material(
-                          color: on ? c.pane : Colors.transparent,
+                          color: Colors.transparent,
                           borderRadius: BorderRadius.circular(12),
                           child: InkWell(
                             borderRadius: BorderRadius.circular(12),
@@ -1680,8 +1664,9 @@ class WhereBadge extends StatelessWidget {
         constraints: const BoxConstraints(maxWidth: 110),
         child: DecoratedBox(
           decoration: BoxDecoration(
-            color: c.ground,
+            color: c.chip,
             borderRadius: BorderRadius.circular(7),
+            border: c.chipEdge == null ? null : Border.all(color: c.chipEdge!),
           ),
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
@@ -1690,7 +1675,7 @@ class WhereBadge extends StatelessWidget {
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: TextStyle(
-                color: c.heading,
+                color: c.chipText,
                 fontSize: 12,
                 fontWeight: FontWeight.w600,
               ),
@@ -2452,7 +2437,7 @@ class _ItemPaneState extends State<ItemPane> {
             child: DecoratedBox(
               decoration: BoxDecoration(
                 borderRadius: BorderRadius.circular(20),
-                boxShadow: c.lifted,
+                boxShadow: c.lift,
               ),
               child: Avatar.of(item, size: 72),
             ),
@@ -2497,11 +2482,7 @@ class _ItemPaneState extends State<ItemPane> {
             constraints: const BoxConstraints(maxWidth: 600),
             child: Container(
               padding: const EdgeInsets.all(24),
-              decoration: BoxDecoration(
-                color: c.pane,
-                borderRadius: BorderRadius.circular(16),
-                boxShadow: c.lifted,
-              ),
+              decoration: c.lifted.decoration(BorderRadius.circular(16)),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
@@ -2510,7 +2491,7 @@ class _ItemPaneState extends State<ItemPane> {
                       DecoratedBox(
                         decoration: BoxDecoration(
                           borderRadius: BorderRadius.circular(15),
-                          boxShadow: c.lifted,
+                          boxShadow: c.lift,
                         ),
                         child: Avatar.of(item, size: 56),
                       ),
@@ -2565,13 +2546,13 @@ class _ItemPaneState extends State<ItemPane> {
                       decoration: BoxDecoration(
                         color: c.well,
                         borderRadius: BorderRadius.circular(12),
-                        border: Border.all(color: c.line),
+                        border: Border.all(color: c.wellEdge),
                       ),
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.stretch,
                         children: [
                           for (var i = 0; i < rows.length; i++) ...[
-                            if (i > 0) Divider(indent: 16, color: c.line),
+                            if (i > 0) Divider(indent: 16, color: c.wellEdge),
                             rows[i],
                           ],
                         ],

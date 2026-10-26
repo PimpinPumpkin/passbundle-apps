@@ -64,6 +64,12 @@ class Win32Window {
   // Returns whether there was a place to go back to.
   bool RestorePlacement();
 
+  // The window's frame as the app is (SystemBars in app/lib/theme.dart),
+  // whatever Windows' own setting: dark or light, and in the dark a title
+  // bar in the app's ground, |ground| as 0xRRGGBB (Windows 11; Windows 10
+  // keeps its own dark gray).
+  void SetLook(bool dark, unsigned int ground);
+
  protected:
   // Processes and route salient window messages for mouse handling,
   // size change and DPI. Delegates handling of these to member overloads that
@@ -99,6 +105,9 @@ class Win32Window {
   // Update the window frame's theme to match the system theme.
   static void UpdateTheme(HWND const window);
 
+  // Puts the app's look (|SetLook|) on the frame.
+  void ShowLook();
+
   // Remembers where and how big the window is, for |RestorePlacement| next time.
   void SavePlacement();
 
@@ -109,6 +118,12 @@ class Win32Window {
 
   // It was maximized when the person left it: |Show| maximizes it again.
   bool show_maximized_ = false;
+
+  // The app's look, once it has said (|SetLook|): then Windows' own theme
+  // no longer decides the frame's.
+  bool has_look_ = false;
+  bool look_dark_ = false;
+  unsigned int look_ground_ = 0;
 
   // window handle for top level window.
   HWND window_handle_ = nullptr;

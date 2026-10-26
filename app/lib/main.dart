@@ -36,6 +36,12 @@ void report(String line) {
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  // The app under see-through status and navigation bars, on every version
+  // of Android as Android 15 and later draw it, so the ground runs under
+  // them (SystemBars, theme.dart).
+  if (Platform.isAndroid) {
+    unawaited(SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge));
+  }
   await Core.openOnThisDevice();
   if (measuring) {
     SchedulerBinding.instance.addPostFrameCallback((_) {
@@ -242,6 +248,9 @@ class _PassBundleAppState extends State<PassBundleApp> {
         theme: passBundleTheme(Brightness.light),
         darkTheme: passBundleTheme(Brightness.dark),
         themeMode: mode,
+        // The ground behind everything too, so switching between light and
+        // dark never shows what's behind the app.
+        builder: (context, child) => SystemBars(child: Ground(child: child!)),
         home: home,
       ),
     );

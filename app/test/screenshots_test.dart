@@ -121,6 +121,8 @@ void main() {
       await precacheIcons(tester);
       await shoot('unlock-$b', tester);
       await unlock(tester);
+      // The menu, the list, and the item's place beside it, still empty.
+      await shoot('vault-desktop-$b', tester);
       await tester.tap(find.text('Example Mail').first);
       await tester.pump();
       await tester.tap(find.byTooltip('Reveal').first);

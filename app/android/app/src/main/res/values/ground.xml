@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Dark mode's ground (PassBundleColors.dark in app/lib/theme.dart),
+         behind the app while it starts in the dark (values-night/styles.xml). -->
+    <color name="dark_ground">#111318</color>
+</resources>
