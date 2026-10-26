@@ -358,7 +358,8 @@ void main() {
       await pumpUntil(tester, find.byTooltip('Generator').hitTestable());
 
       await tester.tap(find.byTooltip('Generator'));
-      await pumpUntil(tester, find.text('Copy password'));
+      // Its Copy is below the fold on a small screen.
+      await pumpUntil(tester, find.text('Passphrase'));
       await tester.pump(const Duration(seconds: 1));
       await tester.tap(find.byTooltip('Settings'));
       await pumpUntil(tester, find.text('Lock when the phone locks'));
