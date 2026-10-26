@@ -1,25 +1,31 @@
-// Updates from PassBundle's GitHub releases, on Android and the Mac (README,
-// "Android test releases" and "Mac test releases"); the app's own native
-// code does the work (Android: update/Updater.kt; the Mac:
-// macos/Runner/Updater.swift). In Settings: this version, checking, and
-// updating, with what's new. When the check on start (at most once a day)
-// finds one, a quiet notice over the vault. Nothing installs without the
-// person's tap, and on Android Android's own prompt; on the Mac PassBundle
-// takes the new version's place and restarts. Elsewhere there are no
-// updates here.
+// Updates from PassBundle's GitHub releases, on Android, the Mac, Windows,
+// and Linux (README, "Android test releases", "Mac test releases", and
+// "Windows and Linux test releases"); the app's own native code does the
+// work (Android: update/Updater.kt; the Mac: macos/Runner/Updater.swift;
+// Windows and Linux: the core, core/src/updates). In Settings: this
+// version, checking, and updating, with what's new. When the check on start
+// (at most once a day) finds one, a quiet notice over the vault. Nothing
+// installs without the person's tap, and on Android Android's own prompt;
+// on computers PassBundle takes the new version's place and restarts.
+// Elsewhere (iOS) there are no updates here.
+import 'dart:async';
 import 'dart:io';
+import 'dart:ui' show AppExitType;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import 'core.dart';
 import 'theme.dart';
 
 /// What the app's native code does for updates (Android: MainActivity.kt;
-/// the Mac: MainFlutterWindow.swift), as maps.
+/// the Mac: MainFlutterWindow.swift; Windows and Linux: the core), as maps.
 abstract class UpdatePlatform {
   /// `version`, `store` (the app store that installed PassBundle, or null),
-  /// `auto` (whether it checks once a day), and `restarts` (whether
-  /// updating restarts PassBundle, as on the Mac).
+  /// `auto` (whether it checks once a day), `restarts` (whether updating
+  /// restarts PassBundle, as on computers), `installNote` (why this copy
+  /// can't update itself, so an update is only news), and `failed` (an
+  /// update that didn't happen: `{version, reason}`).
   Future<Map<String, dynamic>> status();
 
   /// `{ok, available, version, notes}` or `{ok: false, error}`; `quiet` is
@@ -94,6 +100,59 @@ class ChannelUpdatePlatform implements UpdatePlatform {
       });
 }
 
+/// Windows and Linux: the core checks, downloads, and checks again (its
+/// manifest's signature too), then quits PassBundle for its updater to put
+/// the new version in place and open it (core/src/updates).
+class CoreUpdatePlatform implements UpdatePlatform {
+  CoreUpdatePlatform([Core? core]) : _core = core ?? Core();
+
+  final Core _core;
+  void Function(String, Map<String, dynamic>)? _heard;
+
+  @override
+  Future<Map<String, dynamic>> status() async => _core.updateStatus();
+
+  @override
+  Future<Map<String, dynamic>> check({required bool quiet}) =>
+      Core.updateCheck(quiet);
+
+  @override
+  Future<Map<String, dynamic>> install() async {
+    // The download is on another isolate; how far it is, from here.
+    final progress = Timer.periodic(const Duration(milliseconds: 250), (_) {
+      final percent = _core.updateProgress()['percent'];
+      if (percent is int) _heard?.call('progress', {'percent': percent});
+    });
+    final Map<String, dynamic> answer;
+    try {
+      answer = await Core.updateInstall();
+    } finally {
+      progress.cancel();
+    }
+    if (answer['ok'] == true && answer['restart'] == true) {
+      // Its updater waits for this copy to quit; long enough to say so first.
+      Timer(const Duration(milliseconds: 700), () {
+        ServicesBinding.instance.exitApplication(AppExitType.required);
+      });
+    }
+    return answer;
+  }
+
+  @override
+  Future<bool> reveal() async => false;
+
+  @override
+  Future<void> setAuto(bool on) async => _core.updateAuto(on);
+
+  @override
+  set onEvent(void Function(String, Map<String, dynamic>) handler) =>
+      _heard = handler;
+
+  /// The app's first frame is drawn: an update waiting on it to start can
+  /// finish (core/src/updates/swap.rs).
+  Map<String, dynamic> started() => _core.updateStarted();
+}
+
 /// Updates on this device: what Settings and the notice show.
 class Updates extends ChangeNotifier {
   Updates(this.platform) {
@@ -115,6 +174,17 @@ class Updates extends ChangeNotifier {
   /// The update is downloaded and checked, and can be shown in Finder.
   bool revealable = false;
 
+  /// Why this copy can't update itself (a folder only an administrator can
+  /// change, say): an update found is news, with this instead of a button.
+  String? installNote;
+
+  /// An update that didn't happen (it didn't start, and the old version
+  /// came back), in the person's words, for the notice; once.
+  String? _failure;
+
+  /// That's what happened as PassBundle opened this time.
+  bool cameBack = false;
+
   /// A newer release: `version` and `notes`.
   Map<String, dynamic>? offer;
   bool checking = false;
@@ -135,6 +205,13 @@ class Updates extends ChangeNotifier {
     store = status['store'] as String?;
     auto = status['auto'] != false;
     restarts = status['restarts'] == true;
+    installNote = status['installNote'] as String?;
+    final failed = status['failed'];
+    if (failed is Map && !cameBack) {
+      cameBack = true;
+      _failure = failed['reason'] as String?;
+      note = _failure;
+    }
     loaded = true;
     notifyListeners();
   }
@@ -195,6 +272,13 @@ class Updates extends ChangeNotifier {
     return offer?['version'] as String?;
   }
 
+  /// An update that didn't happen, once, for the notice; else null.
+  String? takeFailure() {
+    final failure = _failure;
+    _failure = null;
+    return failure;
+  }
+
   void _heard(String what, Map<String, dynamic> details) {
     if (what == 'progress' && percent != null) {
       percent = details['percent'] as int?;
@@ -206,29 +290,56 @@ class Updates extends ChangeNotifier {
   }
 }
 
-/// Updates on this device: Android and the Mac, where PassBundle updates
-/// itself. Tests (flutter test runs on a Mac too) put one with a stand-in
-/// platform here; a product build never takes FLUTTER_TEST from its
+/// Not tests: flutter test runs on computers too, and tests put one with a
+/// stand-in platform here. A product build never takes FLUTTER_TEST from its
 /// environment.
-Updates? updates =
-    Platform.isAndroid ||
-        (Platform.isMacOS &&
-            (const bool.fromEnvironment('dart.vm.product') ||
-                !Platform.environment.containsKey('FLUTTER_TEST')))
+final _notTesting =
+    const bool.fromEnvironment('dart.vm.product') ||
+    !Platform.environment.containsKey('FLUTTER_TEST');
+
+/// Updates on this device: Android, the Mac, Windows, and Linux, where
+/// PassBundle updates itself.
+Updates? updates = Platform.isAndroid
     ? Updates(ChannelUpdatePlatform())
+    : Platform.isMacOS && _notTesting
+    ? Updates(ChannelUpdatePlatform())
+    : (Platform.isWindows || Platform.isLinux) && _notTesting
+    ? Updates(CoreUpdatePlatform())
     : null;
 
-/// The once-a-day check, as the app starts; quiet, whatever it finds.
+/// The once-a-day check, as the app starts; quiet, whatever it finds. In a
+/// build with test hooks (never a release), PB_UPDATE_NOW=1 checks and
+/// updates at once, for tools/desktop-update-test.sh; not after an update
+/// that didn't happen, which would only try it again.
 Future<void> checkForUpdatesOnStart() async {
   final u = updates;
   if (u == null) return;
   await u.load();
+  if (testSetting('PB_UPDATE_NOW') == '1' && !u.cameBack) {
+    await u.check();
+    if (u.offer != null) await u.install();
+    return;
+  }
   if (u.store == null) await u.check(quiet: true);
 }
 
+/// The first frame is drawn: on Windows and Linux, an update that just put
+/// this version in place hears it started, and its leftovers go.
+void updateStarted() {
+  final platform = updates?.platform;
+  if (platform is CoreUpdatePlatform) platform.started();
+}
+
 /// The notice over the vault when the check on start found an update: once,
-/// and it only offers to show it.
+/// and it only offers to show it. Or, once, that an update didn't happen.
 void showUpdateNotice(BuildContext context) {
+  final failure = updates?.takeFailure();
+  if (failure != null) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(failure), duration: const Duration(seconds: 10)),
+    );
+    return;
+  }
   final version = updates?.takeNotice();
   if (version == null) return;
   ScaffoldMessenger.of(context).showSnackBar(
@@ -396,6 +507,9 @@ class UpdateOffer extends StatelessWidget {
             const LinearProgressIndicator(),
             const SizedBox(height: 6),
             Text('Restarting PassBundle', style: muted),
+          ] else if (updates.installNote case final installNote?) ...[
+            // It can't replace itself: the news, and how to get it.
+            Text(installNote, style: muted),
           ] else if (percent == null) ...[
             FilledButton(
               onPressed: updates.install,

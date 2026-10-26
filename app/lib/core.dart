@@ -26,6 +26,8 @@ typedef _Str5 = Pointer<Utf8> Function(
   Pointer<Utf8>,
   Pointer<Utf8>,
 );
+typedef _FlagNative = Pointer<Utf8> Function(Bool);
+typedef _Flag = Pointer<Utf8> Function(bool);
 typedef _FinishNative = Pointer<Utf8> Function(Uint8, Pointer<Utf8>, Bool);
 typedef _Finish = Pointer<Utf8> Function(int, Pointer<Utf8>, bool);
 
@@ -195,6 +197,24 @@ class Core {
   late final _generatorPolicy = _lib.lookupFunction<_Str0, _Str0>(
     'pb_generator_policy',
   );
+  late final _updateStatus = _lib.lookupFunction<_Str0, _Str0>(
+    'pb_update_status',
+  );
+  late final _updateCheck = _lib.lookupFunction<_FlagNative, _Flag>(
+    'pb_update_check',
+  );
+  late final _updateInstall = _lib.lookupFunction<_Str0, _Str0>(
+    'pb_update_install',
+  );
+  late final _updateProgress = _lib.lookupFunction<_Str0, _Str0>(
+    'pb_update_progress',
+  );
+  late final _updateAuto = _lib.lookupFunction<_FlagNative, _Flag>(
+    'pb_update_auto',
+  );
+  late final _updateStarted = _lib.lookupFunction<_Str0, _Str0>(
+    'pb_update_started',
+  );
   late final _free = _lib
       .lookupFunction<
         Void Function(Pointer<Utf8>),
@@ -231,6 +251,30 @@ class Core {
       );
 
   String version() => _answer(_version()) as String;
+
+  // Updates on Windows and Linux (core/src/updates; updates.dart): the
+  // checking and downloading on a background isolate.
+  Map<String, dynamic> _map(Pointer<Utf8> result) =>
+      Map<String, dynamic>.from(_answer(result) as Map? ?? {'ok': false});
+
+  Map<String, dynamic> updateStatus() => _map(_updateStatus());
+
+  Map<String, dynamic> updateProgress() => _map(_updateProgress());
+
+  Map<String, dynamic> updateStarted() => _map(_updateStarted());
+
+  void updateAuto(bool on) => _map(_updateAuto(on));
+
+  static Future<Map<String, dynamic>> updateCheck(bool quiet) =>
+      Isolate.run(() {
+        final core = Core();
+        return core._map(core._updateCheck(quiet));
+      });
+
+  static Future<Map<String, dynamic>> updateInstall() => Isolate.run(() {
+    final core = Core();
+    return core._map(core._updateInstall());
+  });
 
   /// The app on a folder of its own: Android's app folder, or a test's, with
   /// the refresh token in memory for tests and tools.
