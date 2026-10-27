@@ -60,6 +60,11 @@ import UniformTypeIdentifiers
         Biometric.unlock { unlocked, error in
           result(["ok": error == nil, "unlocked": unlocked, "error": error as Any])
         }
+      // Confirming it's the person, to approve a sign-in from another device.
+      case "biometricConfirmApproval":
+        Biometric.unlock(reason: "Approve sign-in", forApproval: true) { confirmed, error in
+          result(["ok": error == nil, "confirmed": confirmed, "error": error as Any])
+        }
       // Tests only: debug builds' stand-in for the Face ID prompt (false in a release build).
       case "biometricStandIn":
         let on = (call.arguments as? [String: Any])?["on"] as? Bool ?? false
@@ -258,11 +263,16 @@ enum Biometric {
 
   /// Unlocks: reading the key asks for Face ID or Touch ID, then the core
   /// opens the kept vault with it. `done(unlocked, error)`: unlocked is false
-  /// if the person cancelled.
-  static func unlock(_ done: @escaping (Bool, String?) -> Void) {
+  /// if the person cancelled. With `forApproval`, it's the person confirming
+  /// it's them to approve a sign-in from another device, and nothing else:
+  /// the core only compares the key with the open vault's
+  /// (`pb_confirm_approval_with_key`), and the prompt says `reason`.
+  static func unlock(
+    reason: String = "Unlock PassBundle", forApproval: Bool = false, _ done: @escaping (Bool, String?) -> Void
+  ) {
     DispatchQueue.global(qos: .userInitiated).async {
       let context = LAContext()
-      context.localizedReason = "Unlock PassBundle"
+      context.localizedReason = reason
       var query = item
       query[kSecUseAuthenticationContext as String] = context
       query[kSecReturnData as String] = true
@@ -273,7 +283,9 @@ enum Biometric {
         case errSecSuccess:
           guard var key = found as? Data else { return done(false, "Couldn't unlock with \(method()).") }
           let why = key.withUnsafeBytes { raw -> String in
-            guard let answer = pb_unlock_with_key(raw.bindMemory(to: UInt8.self).baseAddress, raw.count) else {
+            let bytes = raw.bindMemory(to: UInt8.self).baseAddress
+            let given = forApproval ? pb_confirm_approval_with_key(bytes, raw.count) : pb_unlock_with_key(bytes, raw.count)
+            guard let answer = given else {
               return "Couldn't unlock with \(method())."
             }
             defer { pb_free(answer) }

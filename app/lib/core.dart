@@ -117,6 +117,9 @@ class Core {
   late final _bioRemove = _lib.lookupFunction<_Str0, _Str0>(
     'pb_biometric_remove',
   );
+  late final _bioConfirmApproval = _lib.lookupFunction<_Str0, _Str0>(
+    'pb_confirm_approval_with_biometric',
+  );
   late final _state = _lib.lookupFunction<_Str0, _Str0>('pb_state');
   late final _servers = _lib.lookupFunction<_Str0, _Str0>('pb_servers');
   late final _signIn = _lib.lookupFunction<_Str3, _Str3>('pb_sign_in');
@@ -133,6 +136,19 @@ class Core {
   );
   late final _confirmMasterPassword = _lib.lookupFunction<_Str2, _Str2>(
     'pb_confirm_master_password',
+  );
+  late final _signInRequests = _lib.lookupFunction<_Str0, _Str0>(
+    'pb_sign_in_requests',
+  );
+  late final _answerSignInRequest = _lib.lookupFunction<_Str3, _Str3>(
+    'pb_answer_sign_in_request',
+  );
+  late final _confirmWithMasterPassword = _lib.lookupFunction<_Str1, _Str1>(
+    'pb_confirm_with_master_password',
+  );
+  late final _approvals = _lib.lookupFunction<_Str0, _Str0>('pb_approvals');
+  late final _setApprovals = _lib.lookupFunction<_Str1, _Str1>(
+    'pb_set_approvals',
   );
   late final _sync = _lib.lookupFunction<_Str0, _Str0>('pb_sync');
   late final _syncSettings = _lib.lookupFunction<_Str0, _Str0>(
@@ -394,6 +410,45 @@ class Core {
 
   static Future<Answer> sync() => _background((c) => c._answer(c._sync()));
 
+  /// Sign-ins waiting for this account's answer (docs/core.md, "Approving a
+  /// sign-in"), from the server: `requests`, each `{id, device, ip,
+  /// fingerprint, ageSeconds, secondsLeft}`, newest first.
+  static Future<Answer> signInRequests() =>
+      _background((c) => c._answer(c._signInRequests()));
+
+  /// Approves or denies one. Approving takes the phrase the person was
+  /// shown, and may answer `confirmFirst`: confirm it's them, then again.
+  static Future<Answer> answerSignInRequest(
+    String id,
+    String fingerprint,
+    bool approve,
+  ) => _background(
+    (c) => c._with([
+      id,
+      fingerprint,
+      approve ? 'true' : 'false',
+    ], (p) => c._answer(c._answerSignInRequest(p[0], p[1], p[2]))),
+  );
+
+  /// The master password, as the person confirming it's them to approve a
+  /// sign-in.
+  static Future<Answer> confirmWithMasterPassword(String password) =>
+      _background(
+        (c) => c._with([
+          password,
+        ], (p) => c._answer(c._confirmWithMasterPassword(p[0]))),
+      );
+
+  /// Whether approving a sign-in asks for biometrics or the master password
+  /// first, on this device.
+  bool confirmApprovals() =>
+      (_answer(_approvals()) as Map?)?['confirm'] != false;
+
+  Answer setConfirmApprovals(bool on) => Answer(
+    _with([on ? 'true' : 'false'], (p) => _answer(_setApprovals(p[0])))
+        as Map<String, dynamic>,
+  );
+
   /// Saves the generator's settings to the server, so they're the same on
   /// the person's other devices (core/src/synced_settings.rs).
   static Future<Answer> syncSettings() =>
@@ -457,6 +512,15 @@ class Core {
   static Future<Answer> unlockWithBiometric() async => isPhone
       ? Answer(await _onPhone('biometricUnlock'))
       : _background((c) => c._answer(c._bioUnlock()));
+
+  /// The same biometrics, as the person confirming it's them to approve a
+  /// sign-in (or to turn off asking for that), and nothing else: its prompt
+  /// says "Approve sign-in" where the OS shows the app's words, and the core
+  /// only compares the key with the open vault's. `confirmed` is false if
+  /// the person cancelled.
+  static Future<Answer> confirmApprovalWithBiometric() async => isPhone
+      ? Answer(await _onPhone('biometricConfirmApproval'))
+      : _background((c) => c._answer(c._bioConfirmApproval()));
 
   /// Turns it off, for the browser extension too (on a computer).
   static Future<Answer> removeBiometric() async => isPhone

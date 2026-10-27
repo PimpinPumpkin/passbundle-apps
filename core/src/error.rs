@@ -31,6 +31,10 @@ pub enum Error {
     SignedOut,
     /// The desktop agent isn't running here (or isn't installed).
     NoAgent,
+    /// Approving a sign-in asks for biometrics or the master password
+    /// first, and they weren't given just now (docs/core.md, "Approving a
+    /// sign-in").
+    ConfirmFirst,
     /// Making an account got as far as the server (`sure`: it said so;
     /// otherwise the connection dropped after the account was sent), then
     /// signing in to it didn't work, and why: sign in, rather than make it
@@ -61,6 +65,7 @@ impl fmt::Display for Error {
             Error::Server(message) => write!(f, "The server said: {message}"),
             Error::SignedOut => write!(f, "You've been signed out. Sign in again."),
             Error::NoAgent => write!(f, "PassBundle's desktop agent isn't running. Start it from the Start menu or Applications, then try again."),
+            Error::ConfirmFirst => write!(f, "Confirm it's you first."),
             Error::AccountMade { sure: true, why } => write!(f, "Your account was made, but signing in to it didn't work ({why}) Sign in with it."),
             Error::AccountMade { sure: false, why } => write!(f, "The server may have made your account before the connection dropped ({why}) Try signing in with it."),
         }

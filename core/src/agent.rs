@@ -206,7 +206,18 @@ impl Agent {
     /// Asks for Windows Hello or Touch ID and returns the user key, or None if
     /// the person cancelled (or it isn't turned on for this account).
     pub fn unlock(&mut self) -> Result<Option<SymmetricKey>> {
-        let mut reply = self.call("unlockWithBiometricsForUser", json!({}))?;
+        self.key_after("unlockWithBiometricsForUser")
+    }
+
+    /// The same key, behind a prompt that says it's to approve a sign-in
+    /// from another device (docs/core.md, "Approving a sign-in"). None if
+    /// the person cancelled.
+    pub fn unlock_to_approve(&mut self) -> Result<Option<SymmetricKey>> {
+        self.key_after("keykeeper.biometric.approve")
+    }
+
+    fn key_after(&mut self, command: &str) -> Result<Option<SymmetricKey>> {
+        let mut reply = self.call(command, json!({}))?;
         let key = match (reply["response"] == true, reply["userKeyB64"].as_str()) {
             (true, Some(b64)) => {
                 let bytes = Zeroizing::new(

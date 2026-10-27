@@ -160,6 +160,8 @@ fn failed(e: Error) -> Value {
         "signedOut": e == Error::SignedOut,
         // Making an account got to the server: signing in is what's left.
         "accountMade": matches!(e, Error::AccountMade { .. }),
+        // Approving a sign-in waits for biometrics or the master password.
+        "confirmFirst": e == Error::ConfirmFirst,
     })
 }
 
@@ -604,6 +606,24 @@ pub unsafe extern "C" fn pb_unlock_with_key(key: *const u8, len: usize) -> *mut 
     CString::new(why).unwrap_or_default().into_raw()
 }
 
+/// The user key Swift read from the Keychain after Face ID or Touch ID, given
+/// back to confirm it's the person approving a sign-in, never to unlock: ""
+/// if it's the open vault's, else the words to show. Free the answer with
+/// `pb_free`.
+///
+/// # Safety
+/// `key` points to `len` readable bytes, for the call.
+#[cfg(target_os = "ios")]
+#[no_mangle]
+pub unsafe extern "C" fn pb_confirm_approval_with_key(key: *const u8, len: usize) -> *mut c_char {
+    let key = Zeroizing::new(std::slice::from_raw_parts(key, len).to_vec());
+    let why = match confirm_approval_with_key_for_biometric(&key) {
+        Ok(()) => String::new(),
+        Err(why) => why,
+    };
+    CString::new(why).unwrap_or_default().into_raw()
+}
+
 /// What Swift does when the core turns biometric unlock off (signing out, or
 /// a key that's out of date): it deletes the Keychain item. Swift sets it at
 /// start.
@@ -687,6 +707,29 @@ pub(crate) fn user_key_for_biometric() -> Option<Zeroizing<Vec<u8>>> {
     Some(Zeroizing::new(
         guard.as_ref()?.vault()?.user_key().to_bytes().to_vec(),
     ))
+}
+
+/// The user key the phone app's biometric prompt opened, given back to
+/// confirm it's the person approving a sign-in (android.rs, or
+/// `pb_confirm_approval_with_key` for iOS): never to unlock. The error's
+/// words otherwise; a key that isn't the open vault's turns biometric unlock
+/// off, as unlocking does.
+#[cfg(phone)]
+pub(crate) fn confirm_approval_with_key_for_biometric(key: &[u8]) -> Result<(), String> {
+    let mut guard = match APP.try_lock() {
+        Ok(guard) => guard,
+        Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        Err(TryLockError::WouldBlock) => return Err("PassBundle is busy; try again.".into()),
+    };
+    let app = guard.as_mut().ok_or_else(|| Error::SignedOut.to_string())?;
+    let key = crate::crypto::SymmetricKey::from_bytes(key).map_err(|e| e.to_string())?;
+    match app.confirm_approval_with_key(key) {
+        Err(e @ Error::Refused(_)) => {
+            let _ = app.remove_biometric();
+            Err(e.to_string())
+        }
+        other => other.map_err(|e| e.to_string()),
+    }
 }
 
 /// Opens the kept vault with the user key the phone app's biometric unlock
@@ -1585,6 +1628,118 @@ pub(crate) fn check_master_password(password: &str) -> Value {
 fn base64url(bytes: &[u8]) -> String {
     use base64::Engine;
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+}
+
+/// Sign-in requests waiting for this account's answer (docs/core.md,
+/// "Approving a sign-in"), from the server, newest first: `{ok, requests:
+/// [{id, device, ip, fingerprint, ageSeconds, secondsLeft}]}`. Only while
+/// unlocked; the app asks every few seconds then.
+///
+/// The server is asked without holding the app, on a thread of the core's
+/// own, so the screens' reads and locking go on meanwhile.
+#[no_mangle]
+pub extern "C" fn pb_sign_in_requests() -> *mut c_char {
+    out(std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                let mut call = None;
+                let asked = app_value(|app| match app.sign_in_requests_call() {
+                    Ok(c) => {
+                        call = Some(c);
+                        json!({ "ok": true })
+                    }
+                    Err(e) => failed(e),
+                });
+                let Some(call) = call else { return asked };
+                let fetched = call.fetch();
+                app_value(
+                    |app| match fetched.and_then(|f| app.keep_sign_in_requests(&call, f)) {
+                        Ok(requests) => {
+                            json!({ "ok": true, "requests": sign_in_requests(&requests) })
+                        }
+                        Err(e) => failed(e),
+                    },
+                )
+            })
+            .join()
+            .unwrap_or_else(|_| json!({ "ok": false, "error": "The core stopped unexpectedly." }))
+    }))
+}
+
+fn sign_in_requests(requests: &[crate::device_approval::SignInRequest]) -> Vec<Value> {
+    requests
+        .iter()
+        .map(|r| {
+            json!({
+                "id": r.id,
+                "deviceId": r.device_id,
+                "deviceType": r.device_type,
+                "device": r.device,
+                "ip": r.ip,
+                "fingerprint": r.fingerprint,
+                "ageSeconds": r.age,
+                "secondsLeft": r.left,
+            })
+        })
+        .collect()
+}
+
+/// Approves (`approve`: "true") or denies a listed sign-in request. Approving
+/// takes the fingerprint phrase the person was shown, and may answer
+/// `confirmFirst`: ask for biometrics or the master password, then again.
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_answer_sign_in_request(
+    id: *const c_char,
+    fingerprint: *const c_char,
+    approve: *const c_char,
+) -> *mut c_char {
+    let (id, fingerprint, approve) = (text(id), text(fingerprint), text(approve) == "true");
+    with_app_waiting(|app| done(app.answer_sign_in_request(&id, &fingerprint, approve)))
+}
+
+/// The master password, as the person confirming it's them to approve a
+/// sign-in: `{ok}`, or the words to show.
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_confirm_with_master_password(password: *const c_char) -> *mut c_char {
+    let password = Zeroizing::new(text(password));
+    with_app_waiting(|app| done(app.confirm_with_master_password(&password)))
+}
+
+/// Windows Hello or Touch ID through the desktop agent, as the person
+/// confirming it's them to approve a sign-in (or turn off asking): `{ok,
+/// confirmed}`, `confirmed` false if they cancelled. Phones confirm through
+/// their own code instead (android.rs, `pb_confirm_approval_with_key`).
+#[cfg(not(phone))]
+#[no_mangle]
+pub extern "C" fn pb_confirm_approval_with_biometric() -> *mut c_char {
+    with_app_waiting(|app| match app.confirm_approval_with_biometric() {
+        Ok(confirmed) => json!({ "ok": true, "confirmed": confirmed }),
+        Err(e) => failed(e),
+    })
+}
+
+/// Whether approving a sign-in asks for biometrics or the master password
+/// first on this device: `{confirm}`.
+#[no_mangle]
+pub extern "C" fn pb_approvals() -> *mut c_char {
+    with_app(|app| json!({ "confirm": app.confirm_approvals() }))
+}
+
+/// Turning it off needs the person to have confirmed it's them just now
+/// (`confirmFirst` otherwise), and uses that up.
+///
+/// # Safety
+/// `confirm` is null or a NUL-terminated UTF-8 string ("true" or "false").
+#[no_mangle]
+pub unsafe extern "C" fn pb_set_approvals(confirm: *const c_char) -> *mut c_char {
+    let confirm = text(confirm) == "true";
+    with_app(|app| done(app.set_confirm_approvals(confirm)))
 }
 
 /// Checks the master password for an item that asks for it again (docs/core.md,

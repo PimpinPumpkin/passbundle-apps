@@ -105,7 +105,7 @@ jobs:
           persist-credentials: false
       - name: Each copy is the meta repo's
         run: |
-          for name in core-v1.json desktop-update-v1.json; do
+          for name in core-v1.json desktop-update-v1.json device-approval-v1.json; do
             cmp "core/tests/vectors/$name" "meta/docs/vectors/$name"
           done
 
@@ -397,7 +397,10 @@ jobs:
 
   core-server:
     # Real keys against a real PassBundle server (core/tests/server.rs):
-    # signing up, signing in, two-step login, sync, saving, and organizations.
+    # signing up, signing in, two-step login, sync, saving, organizations,
+    # and approving a sign-in from another device. On a pull request, the
+    # server's branch of the same name if it has one (a change that spans
+    # the two), else its keykeeper branch.
     name: Core against a real server
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -408,10 +411,21 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: The server's branch
+        id: server
+        env:
+          BRANCH: ${{ github.head_ref }}
+        run: |
+          ref=keykeeper
+          if [ -n "$BRANCH" ] && git ls-remote --exit-code --heads https://github.com/PimpinPumpkin/passbundle-server.git "refs/heads/$BRANCH" > /dev/null; then
+            ref=$BRANCH
+          fi
+          echo "Testing against the server's $ref."
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: PimpinPumpkin/passbundle-server
-          ref: keykeeper
+          ref: ${{ steps.server.outputs.ref }}
           path: server
           persist-credentials: false
       - name: Server build dependencies
