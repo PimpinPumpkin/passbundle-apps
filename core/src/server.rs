@@ -190,6 +190,25 @@ fn allowed(url: &str) -> bool {
 }
 
 /// The server's message from an error answer, in the shapes it uses.
+/// Whether a refused sign-in is the server's setup session for two-step
+/// login (`KeykeeperTwoStepSetup`), and who requires it. The core never uses
+/// the session's token: setting it up is the web vault's.
+fn setup_two_step_first(body: &Value) -> Option<Vec<String>> {
+    body["KeykeeperTwoStepSetup"].as_str()?;
+    Some(
+        body["KeykeeperTwoStepRequiredBy"]
+            .as_array()
+            .map(|names| {
+                names
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default(),
+    )
+}
+
 fn message_of(body: &Value) -> Option<String> {
     for key in ["message", "Message", "error_description", "ErrorModel"] {
         match &body[key] {
@@ -408,6 +427,16 @@ impl Server {
                 .send_form(form),
         )?;
         if status == 400 {
+            // The password (and any email code) checked out, but the role
+            // requires two-step login, which isn't set up: a setup session
+            // for the web vault, not a sign-in. Before the code check below,
+            // which would call it a wrong code.
+            if let Some(required_by) = setup_two_step_first(&body) {
+                return Err(Error::SetUpTwoStepFirst {
+                    required_by,
+                    web_vault: self.base.clone(),
+                });
+            }
             if let Some(providers) = body["TwoFactorProviders"].as_array() {
                 return Ok(Token::TwoFactor(
                     providers
@@ -853,6 +882,88 @@ mod tests {
         png.extend_from_slice(&side.to_be_bytes());
         png.extend_from_slice(&[8, 6, 0, 0, 0]);
         png
+    }
+
+    /// What the server says when a role requires two-step login that isn't
+    /// set up: a setup session, not a sign-in.
+    const SET_UP_FIRST: &[u8] = br#"{"error":"invalid_grant","error_description":"Acme Dental requires two-step login for your role.","KeykeeperTwoStepSetup":"AbCdEfGhIjKlMnOpQrStUvWxYz0123456789-_abcde","KeykeeperTwoStepRequiredBy":["Acme Dental"],"ErrorModel":{"Message":"Acme Dental requires two-step login for your role.","Object":"error"}}"#;
+
+    fn test_prelogin() -> crate::kdf::Prelogin {
+        crate::kdf::Prelogin {
+            kdf: 0,
+            kdf_iterations: 600_000,
+            kdf_memory: None,
+            kdf_parallelism: None,
+        }
+    }
+
+    #[test]
+    fn a_role_that_needs_two_step_login_is_sent_to_the_web_vault() {
+        let json = "Content-Type: application/json\r\n";
+        let (url, served) = answering(vec![answer("400 Bad Request", json, SET_UP_FIRST)]);
+        let server = Server::new(&url, Device::this_one("")).unwrap();
+        let refused = server
+            .sign_in_with(&test_prelogin(), "ana@acme.test", "correct horse battery")
+            .err();
+        assert_eq!(
+            refused,
+            Some(Error::SetUpTwoStepFirst {
+                required_by: vec!["Acme Dental".into()],
+                web_vault: url.clone(),
+            })
+        );
+        assert_eq!(served.join().unwrap(), ["/identity/connect/token"]);
+
+        // After an email code that checked out, the same: never a wrong code.
+        let asked = br#"{"error":"invalid_grant","TwoFactorProviders":["1"],"TwoFactorProviders2":{"1":null}}"#;
+        let (url, _) = answering(vec![
+            answer("400 Bad Request", json, asked),
+            answer("400 Bad Request", json, SET_UP_FIRST),
+        ]);
+        let server = Server::new(&url, Device::this_one("")).unwrap();
+        let SignIn::NeedsTwoFactor(pending) = server
+            .sign_in_with(&test_prelogin(), "ana@acme.test", "correct horse battery")
+            .unwrap()
+        else {
+            panic!("an email code should be asked for");
+        };
+        let code = TwoFactor {
+            provider: 1,
+            code: "123456".into(),
+            remember: false,
+        };
+        let refused = server.finish_sign_in(&pending, &code).err();
+        assert_eq!(
+            refused,
+            Some(Error::SetUpTwoStepFirst {
+                required_by: vec!["Acme Dental".into()],
+                web_vault: url,
+            })
+        );
+    }
+
+    #[test]
+    fn the_message_says_who_requires_it_and_where_to_set_it_up() {
+        let message = |names: &[&str]| {
+            Error::SetUpTwoStepFirst {
+                required_by: names.iter().map(|n| (*n).to_owned()).collect(),
+                web_vault: "https://vault.example.test".into(),
+            }
+            .to_string()
+        };
+        assert_eq!(
+            message(&["Acme Dental"]),
+            "Acme Dental requires two-step login for your role. Set it up in the web vault at https://vault.example.test (an authenticator app, a security key or passkey, or Duo), then sign in here again."
+        );
+        assert!(message(&["Acme Dental", "Contoso IT"])
+            .starts_with("Acme Dental and Contoso IT require two-step login for your role."));
+        assert!(message(&[])
+            .starts_with("Your role requires two-step login. Set it up in the web vault"));
+        // Other refusals keep the server's words.
+        assert_eq!(
+            setup_two_step_first(&json!({ "message": "Username or password is incorrect." })),
+            None
+        );
     }
 
     #[test]

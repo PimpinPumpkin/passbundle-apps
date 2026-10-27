@@ -31,6 +31,15 @@ pub enum Error {
     SignedOut,
     /// The desktop agent isn't running here (or isn't installed).
     NoAgent,
+    /// The password (and any email code) checked out, but the person's role
+    /// requires two-step login (an authenticator app, a security key or
+    /// passkey, or Duo) and they haven't set it up: the server gave a setup
+    /// session the web vault uses, not a sign-in. Who requires it, and the
+    /// web vault's address. See DESIGN.md, "Two-step login for admins".
+    SetUpTwoStepFirst {
+        required_by: Vec<String>,
+        web_vault: String,
+    },
     /// Making an account got as far as the server (`sure`: it said so;
     /// otherwise the connection dropped after the account was sent), then
     /// signing in to it didn't work, and why: sign in, rather than make it
@@ -61,6 +70,17 @@ impl fmt::Display for Error {
             Error::Server(message) => write!(f, "The server said: {message}"),
             Error::SignedOut => write!(f, "You've been signed out. Sign in again."),
             Error::NoAgent => write!(f, "PassBundle's desktop agent isn't running. Start it from the Start menu or Applications, then try again."),
+            Error::SetUpTwoStepFirst { required_by, web_vault } => {
+                match required_by.as_slice() {
+                    [] => write!(f, "Your role requires two-step login.")?,
+                    [one] => write!(f, "{one} requires two-step login for your role.")?,
+                    [rest @ .., last] => write!(f, "{} and {last} require two-step login for your role.", rest.join(", "))?,
+                }
+                write!(
+                    f,
+                    " Set it up in the web vault at {web_vault} (an authenticator app, a security key or passkey, or Duo), then sign in here again."
+                )
+            }
             Error::AccountMade { sure: true, why } => write!(f, "Your account was made, but signing in to it didn't work ({why}) Sign in with it."),
             Error::AccountMade { sure: false, why } => write!(f, "The server may have made your account before the connection dropped ({why}) Try signing in with it."),
         }
