@@ -78,7 +78,7 @@ class MainActivity : FlutterActivity() {
                             result.success(mapOf("ok" to (error == null), "on" to on, "error" to error))
                         }
                     "biometricUnlock" ->
-                        Biometric.unlock(this) { unlocked, error ->
+                        Biometric.unlock(this, call.argument<String>("reason") ?: "Unlock PassBundle") { unlocked, error ->
                             result.success(mapOf("ok" to (error == null), "unlocked" to unlocked, "error" to error))
                         }
                     // Tests only: debug builds' stand-in for Android's prompt (false in a release build).

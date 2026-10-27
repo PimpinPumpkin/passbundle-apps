@@ -160,6 +160,8 @@ fn failed(e: Error) -> Value {
         "signedOut": e == Error::SignedOut,
         // Making an account got to the server: signing in is what's left.
         "accountMade": matches!(e, Error::AccountMade { .. }),
+        // Approving a sign-in waits for biometrics or the master password.
+        "confirmFirst": e == Error::ConfirmFirst,
     })
 }
 
@@ -1585,6 +1587,100 @@ pub(crate) fn check_master_password(password: &str) -> Value {
 fn base64url(bytes: &[u8]) -> String {
     use base64::Engine;
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+}
+
+/// Sign-in requests waiting for this account's answer (docs/core.md,
+/// "Approving a sign-in"), from the server, newest first: `{ok, requests:
+/// [{id, device, ip, fingerprint, ageSeconds, secondsLeft}]}`. Only while
+/// unlocked; the app asks every few seconds then.
+///
+/// The server is asked without holding the app, on a thread of the core's
+/// own, so the screens' reads and locking go on meanwhile.
+#[no_mangle]
+pub extern "C" fn pb_sign_in_requests() -> *mut c_char {
+    out(std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                let mut call = None;
+                let asked = app_value(|app| match app.sign_in_requests_call() {
+                    Ok(c) => {
+                        call = Some(c);
+                        json!({ "ok": true })
+                    }
+                    Err(e) => failed(e),
+                });
+                let Some(call) = call else { return asked };
+                let fetched = call.fetch();
+                app_value(
+                    |app| match fetched.and_then(|f| app.keep_sign_in_requests(&call, f)) {
+                        Ok(requests) => {
+                            json!({ "ok": true, "requests": sign_in_requests(&requests) })
+                        }
+                        Err(e) => failed(e),
+                    },
+                )
+            })
+            .join()
+            .unwrap_or_else(|_| json!({ "ok": false, "error": "The core stopped unexpectedly." }))
+    }))
+}
+
+fn sign_in_requests(requests: &[crate::device_approval::SignInRequest]) -> Vec<Value> {
+    requests
+        .iter()
+        .map(|r| {
+            json!({
+                "id": r.id,
+                "device": r.device,
+                "ip": r.ip,
+                "fingerprint": r.fingerprint,
+                "ageSeconds": r.age,
+                "secondsLeft": r.left,
+            })
+        })
+        .collect()
+}
+
+/// Approves (`approve`: "true") or denies a listed sign-in request. Approving
+/// takes the fingerprint phrase the person was shown, and may answer
+/// `confirmFirst`: ask for biometrics or the master password, then again.
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_answer_sign_in_request(
+    id: *const c_char,
+    fingerprint: *const c_char,
+    approve: *const c_char,
+) -> *mut c_char {
+    let (id, fingerprint, approve) = (text(id), text(fingerprint), text(approve) == "true");
+    with_app_waiting(|app| done(app.answer_sign_in_request(&id, &fingerprint, approve)))
+}
+
+/// The master password, as the person confirming it's them to approve a
+/// sign-in: `{ok}`, or the words to show.
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_confirm_with_master_password(password: *const c_char) -> *mut c_char {
+    let password = Zeroizing::new(text(password));
+    with_app_waiting(|app| done(app.confirm_with_master_password(&password)))
+}
+
+/// Whether approving a sign-in asks for biometrics or the master password
+/// first on this device: `{confirm}`.
+#[no_mangle]
+pub extern "C" fn pb_approvals() -> *mut c_char {
+    with_app(|app| json!({ "confirm": app.confirm_approvals() }))
+}
+
+/// # Safety
+/// `confirm` is null or a NUL-terminated UTF-8 string ("true" or "false").
+#[no_mangle]
+pub unsafe extern "C" fn pb_set_approvals(confirm: *const c_char) -> *mut c_char {
+    let confirm = text(confirm) == "true";
+    with_app(|app| done(app.set_confirm_approvals(confirm)))
 }
 
 /// Checks the master password for an item that asks for it again (docs/core.md,

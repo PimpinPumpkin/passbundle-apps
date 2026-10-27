@@ -57,7 +57,8 @@ import UniformTypeIdentifiers
           result(["ok": error == nil, "on": on, "error": error as Any])
         }
       case "biometricUnlock":
-        Biometric.unlock { unlocked, error in
+        let reason = (call.arguments as? [String: Any])?["reason"] as? String ?? "Unlock PassBundle"
+        Biometric.unlock(reason: reason) { unlocked, error in
           result(["ok": error == nil, "unlocked": unlocked, "error": error as Any])
         }
       // Tests only: debug builds' stand-in for the Face ID prompt (false in a release build).
@@ -258,11 +259,13 @@ enum Biometric {
 
   /// Unlocks: reading the key asks for Face ID or Touch ID, then the core
   /// opens the kept vault with it. `done(unlocked, error)`: unlocked is false
-  /// if the person cancelled.
-  static func unlock(_ done: @escaping (Bool, String?) -> Void) {
+  /// if the person cancelled. While unlocked, the core takes the key as the
+  /// person confirming it's them (approving a sign-in from another device),
+  /// and the prompt says `reason`.
+  static func unlock(reason: String = "Unlock PassBundle", _ done: @escaping (Bool, String?) -> Void) {
     DispatchQueue.global(qos: .userInitiated).async {
       let context = LAContext()
-      context.localizedReason = "Unlock PassBundle"
+      context.localizedReason = reason
       var query = item
       query[kSecUseAuthenticationContext as String] = context
       query[kSecReturnData as String] = true

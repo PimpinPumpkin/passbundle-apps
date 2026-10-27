@@ -58,6 +58,21 @@ impl Default for Appearance {
     }
 }
 
+/// Approving a sign-in from another device, kept on this device
+/// (docs/core.md, "Approving a sign-in"): whether approving asks for
+/// biometrics or the master password first (on until turned off).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Approvals {
+    pub confirm: bool,
+}
+
+impl Default for Approvals {
+    fn default() -> Self {
+        Approvals { confirm: true }
+    }
+}
+
 impl Store {
     /// The app's own folder: the OS's local app data folder (AppData\Local on
     /// Windows, Application Support on macOS, ~/.local/share on Linux), in
@@ -176,6 +191,21 @@ impl Store {
         self.write(
             "appearance.json",
             &serde_json::to_string_pretty(appearance).expect("appearance always serializes"),
+        )
+    }
+
+    /// Approving sign-ins on this device (`Approvals`); the defaults until
+    /// the person chooses.
+    pub fn approvals(&self) -> Approvals {
+        self.read("approvals.json")
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn save_approvals(&self, approvals: &Approvals) -> Result<()> {
+        self.write(
+            "approvals.json",
+            &serde_json::to_string_pretty(approvals).expect("approvals always serialize"),
         )
     }
 

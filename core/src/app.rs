@@ -12,6 +12,7 @@ use crate::agent::{self, Agent};
 use crate::autolock::{AutoLock, Preferences, Readings, Reason};
 use crate::clipboard;
 use crate::crypto::{EncString, SymmetricKey};
+use crate::device_approval::{self, SignInRequest};
 use crate::error::{Error, Result};
 use crate::generator;
 use crate::generator_policy::GeneratorPolicy;
@@ -84,7 +85,18 @@ pub struct App {
     /// Counts each time the icons are emptied (locking, signing out,
     /// turning them off), so one fetched before isn't kept after.
     icon_session: u64,
+    /// Sign-in requests from the last listing, and when they were listed
+    /// (docs/core.md, "Approving a sign-in"): an approval goes only to the
+    /// key of one listed here, whose phrase the person saw. Forgotten when
+    /// the vault locks.
+    sign_in_requests: Option<(Instant, Vec<SignInRequest>)>,
+    /// When the person last confirmed it's them (biometrics or the master
+    /// password) to approve a sign-in; one confirmation, one approval.
+    confirmed: Option<Instant>,
 }
+
+/// How long confirming it's you lasts, to approve a sign-in.
+const CONFIRMATION_LASTS: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// An item's past versions, opened (`App::history`).
 pub struct History {
@@ -129,6 +141,8 @@ impl App {
             generated: None,
             icons: crate::icons::Cache::default(),
             icon_session: 0,
+            sign_in_requests: None,
+            confirmed: None,
         }
     }
 
@@ -376,6 +390,17 @@ impl App {
     /// KDF. A key that no longer opens it (the account's keys changed) is
     /// refused, and the caller turns that unlock off.
     pub fn unlock_with_key(&mut self, key: SymmetricKey) -> Result<()> {
+        // Unlocked already: the key is the person confirming it's them
+        // (biometrics, to approve a sign-in), if it's this vault's.
+        if let Some(vault) = &self.vault {
+            if !same_key(vault.user_key(), &key) {
+                return Err(Error::Refused(
+                    "that unlock is out of date; use your master password, then turn it on again",
+                ));
+            }
+            self.confirmed = Some(Instant::now());
+            return Ok(());
+        }
         let text = self.store.sync().ok_or(Error::SignedOut)?;
         match Vault::open(&Sync::from_json(&text)?, key) {
             Ok(vault) => {
@@ -614,6 +639,8 @@ impl App {
 
     /// Drops every key and everything decrypted.
     pub fn lock(&mut self) {
+        self.sign_in_requests = None;
+        self.confirmed = None;
         self.reprompted = None;
         self.grant += 1;
         self.history = None;
@@ -660,6 +687,157 @@ impl App {
         let vault = self.vault.as_ref().ok_or(Error::SignedOut)?;
         if !vault.is_master_password(&Sync::from_json(&text)?, &settings.prelogin(), password)? {
             return Err(Error::WrongPassword);
+        }
+        Ok(())
+    }
+
+    /// Whether approving a sign-in asks for biometrics or the master
+    /// password first, on this device (on until turned off).
+    pub fn confirm_approvals(&self) -> bool {
+        self.store.approvals().confirm
+    }
+
+    pub fn set_confirm_approvals(&mut self, confirm: bool) -> Result<()> {
+        self.store
+            .save_approvals(&crate::store::Approvals { confirm })
+    }
+
+    /// The master password, as the person confirming it's them to approve a
+    /// sign-in. Biometrics confirm through `unlock_with_key` while unlocked.
+    pub fn confirm_with_master_password(&mut self, password: &str) -> Result<()> {
+        self.check_master_password(password)?;
+        self.confirmed = Some(Instant::now());
+        Ok(())
+    }
+
+    /// Sign-in requests waiting for this account's answer, newest first,
+    /// from the server, while unlocked (docs/core.md, "Approving a
+    /// sign-in"). They're kept, so an approval goes only to one of them.
+    pub fn sign_in_requests(&mut self) -> Result<Vec<SignInRequest>> {
+        let call = self.sign_in_requests_call()?;
+        let fetched = call.fetch()?;
+        self.keep_sign_in_requests(&call, fetched)
+    }
+
+    /// What asking the server for sign-in requests needs, so the bridge can
+    /// ask without holding the app (the app asks every few seconds, and the
+    /// screens read the core meanwhile): the server, and a session token
+    /// that's good for a minute more (refreshed here first if not).
+    pub fn sign_in_requests_call(&mut self) -> Result<SignInRequestsCall> {
+        let email = self.vault.as_ref().ok_or(Error::SignedOut)?.email.clone();
+        let (Some(server), Some(session)) = (&self.server, self.session.as_mut()) else {
+            return Err(Error::SignedOut);
+        };
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        if session.expires_at <= now + 60 {
+            server.refresh(session)?;
+        }
+        Ok(SignInRequestsCall {
+            server: server.clone(),
+            access_token: session.access_token.clone(),
+            email,
+        })
+    }
+
+    /// Keeps what the server listed (`SignInRequestsCall::fetch`), for the
+    /// account it was asked for, if its vault is still the one open.
+    pub fn keep_sign_in_requests(
+        &mut self,
+        call: &SignInRequestsCall,
+        (body, server_now): (serde_json::Value, Option<u64>),
+    ) -> Result<Vec<SignInRequest>> {
+        let vault = self.vault.as_ref().ok_or(Error::SignedOut)?;
+        if vault.email != call.email {
+            return Err(Error::SignedOut);
+        }
+        // The server's clock, or this device's if it didn't say.
+        let server_now = server_now.unwrap_or_else(|| {
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0)
+        });
+        let requests = device_approval::parse_pending(&body, &call.email, server_now);
+        self.sign_in_requests = Some((Instant::now(), requests));
+        Ok(self.kept_sign_in_requests())
+    }
+
+    /// The requests from the last listing as they stand now, without the
+    /// server: one whose time is up is gone.
+    pub fn kept_sign_in_requests(&self) -> Vec<SignInRequest> {
+        let Some((listed, requests)) = &self.sign_in_requests else {
+            return Vec::new();
+        };
+        let elapsed = listed.elapsed().as_secs();
+        requests.iter().filter_map(|r| r.after(elapsed)).collect()
+    }
+
+    /// Approves or denies a listed sign-in request. Approving sends the user
+    /// key wrapped to the request's public key, and only when:
+    /// - `fingerprint` is the phrase of the request the core listed (what
+    ///   the person saw), and the server still has it waiting with that key;
+    /// - the person confirmed it's them in the last minute, where this
+    ///   device asks for that (`confirm_approvals`).
+    pub fn answer_sign_in_request(
+        &mut self,
+        id: &str,
+        fingerprint: &str,
+        approve: bool,
+    ) -> Result<()> {
+        let request = self
+            .kept_sign_in_requests()
+            .into_iter()
+            .find(|r| r.id == id)
+            .ok_or(Error::Refused(
+                "that sign-in request has expired or was answered",
+            ))?;
+        if approve {
+            if request.fingerprint != fingerprint {
+                return Err(Error::Refused(
+                    "the fingerprint phrase isn't that sign-in request's",
+                ));
+            }
+            let confirmed = self
+                .confirmed
+                .is_some_and(|at| at.elapsed() < CONFIRMATION_LASTS);
+            if self.confirm_approvals() && !confirmed {
+                return Err(Error::ConfirmFirst);
+            }
+        }
+        let vault = self.vault.as_ref().ok_or(Error::SignedOut)?;
+        let (Some(server), Some(session)) = (&self.server, self.session.as_mut()) else {
+            return Err(Error::SignedOut);
+        };
+        // Still waiting, with the key the person saw the phrase of.
+        let now = server.sign_in_request(session, id)?;
+        if now["requestApproved"].as_bool().is_some() || !now["responseDate"].is_null() {
+            return Err(Error::Refused("that sign-in request was already answered"));
+        }
+        let wrapped = if approve {
+            let key = now["publicKey"].as_str().and_then(|k| {
+                base64::Engine::decode(&base64::engine::general_purpose::STANDARD, k).ok()
+            });
+            if key.as_deref() != Some(request.public_key()) {
+                return Err(Error::Refused(
+                    "that sign-in request changed since it was shown; deny it",
+                ));
+            }
+            Some(device_approval::wrap_user_key(
+                request.public_key(),
+                vault.user_key(),
+            )?)
+        } else {
+            None
+        };
+        server.answer_sign_in_request(session, id, wrapped.as_ref())?;
+        if approve {
+            self.confirmed = None;
+        }
+        if let Some((_, requests)) = &mut self.sign_in_requests {
+            requests.retain(|r| r.id != id);
         }
         Ok(())
     }
@@ -1329,6 +1507,27 @@ impl App {
 /// credentials in the vault (WebAuthn's InvalidStateError).
 pub const ALREADY_HAS_PASSKEY: &str =
     "PassBundle already has a passkey for this account on this site";
+
+/// Asking the server for sign-in requests without holding the app
+/// (`App::sign_in_requests_call`).
+pub struct SignInRequestsCall {
+    server: Server,
+    access_token: Zeroizing<String>,
+    email: String,
+}
+
+impl SignInRequestsCall {
+    /// The server's list, and its clock.
+    pub fn fetch(&self) -> Result<(serde_json::Value, Option<u64>)> {
+        self.server.pending_sign_in_requests(&self.access_token)
+    }
+}
+
+/// Whether two keys are the same, in constant time.
+fn same_key(a: &SymmetricKey, b: &SymmetricKey) -> bool {
+    let (a, b) = (a.to_bytes(), b.to_bytes());
+    a.len() == b.len() && a.iter().zip(b.iter()).fold(0u8, |d, (x, y)| d | (x ^ y)) == 0
+}
 
 /// A passkey to make (`App::passkey_create`): what the site asked for.
 pub struct NewPasskey<'a> {

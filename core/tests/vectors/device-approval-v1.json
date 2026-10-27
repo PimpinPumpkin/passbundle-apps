@@ -1,0 +1,132 @@
+{
+  "description": "Approving a sign-in from another device, version 1: DESIGN.md, \"Approving a sign-in from another device\". Made by docs/vectors/make-device-approval-v1.mjs with Node's crypto and EFF's long word list.",
+  "request": {
+    "privateKey": "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDhkpgz/cdioz6f6pJoRRFrXvp1nxuH5OUTCNR/eNQMKusWE95IXt8V4YmhfhgO+wCvx8Jd+56pVHzo5qcw/+1gY6kuRoD0okbZNV6OXKvmt+Ed15iaabRLG26ERZcVaaU7bBDWS2ZA0Ewo369v4s/0R6YGIiD1EdRYDSn85fKmGt+2CBFsX737Wi38oAIuB3OJcf6xg/0iUk/jtaA+mTRBlSfhTJydSDKnQeXMApLBi5GYp5CIJfVs83m8515vPMC88OfM4sYBe9sXzRIhaGkEIbsKPaZwVPN0Esr3WEofOK8WYLW8KOfJDz5L45O8Uln3Hk4zfKg3yCz1S7rDOMtXAgMBAAECggEAcDhZ+COc+fl0wmIUjEMwM1aBC9sn+ydov1t5PCGEfLktU0J3J1HrchtOOUVd+rXs1YZvsAnqGRurOMLnEn2APp/WHut8ZDgHPzBJ5lE8Q//ewtXrWYaU53iyNqPYUhLI3RMaHUJNkJkQCpWd1e/kvQaYFh0MgF9qYJPL+8D6Qp/UpwkciHAULVRP9AjSQQ+LRJecgI+AhJX0UtVsDodADFcy/pR34I0Ym9JDGEoUMAdv3EjQPFY2FCZkZFs2+yJpw3tyRzhFz8Egk+5LjH2FQzSY9NCxH0mfHlQ7yEydyGySzyAR4Rju8jPJCWs17aMN8bSpwYNe4792VAV74yR+IQKBgQD7x2dcsNY//WxRtTKAgJ1cga/P6T1HSg1dYA6EHp9E4/qiqhfhnXTNRyTGVfjIgUtlL/SezbAXgXAkMB9oDCOxW00aPF/hNuj9gFYWCXbuqjqHoclxpelA6RQDnI7x6IIkel1R6kVgRWlTo+/Ef9EcGOz/OF8yOqJmIZP1K1TYXQKBgQDlWrerA/0Y4ZCKJYB9bDLvtRqFx2WTO791qhzlQcageVeQwnAyRpwkQtnjfBcyeZJd8LffACpIPwVjGKPxkDgVVXnMOXZCiqMRsBjMdVcA7N/JlgtSiJHWmUpkAm9YvU5GjWrueTRG4pISwOtNpMTdWQFyvJMT4TVGiF+c0mYnQwKBgCwF4qHHXb7UjdL/jrP/SQR6vIXq70b+wLV57S/WttxxzEoS2ZgeUuTtspVnRNeyG7+2kdwOdOK3RCdfrq4fqUICh8m1ksIrOrPQc7zorL3wT8mVVUakztMFrfUvs6LCl7bPGnAPOVAq8s6oFG1UN/jkttOtRJ/gtrKK3nb4u54VAoGALDQiyAQZyKzYpbd6nzG2U3rNJNF8YzcVvIDP1uOpe45HcS/4Xcg8GcUEp5JoCiNiMVbOqV0nyQrUZ/f8yPbpyDrUIadFgqejrCoLbYSEAzqkGv8fKYYGzZx3uPS7Lxg1OOXSoSmdCLhsPM8PysQh6SNZYxqzIha6pOBtxRTL+W8CgYEAj99EqehVRcg8JoYcphcDEgvSp9L6Zdj7IJZmvWbsvQzn0za6vRUEDZrQWNtA7aLVg0FDa6QR0WjVVFc84ljvw+7guS7wD5DP5lZAGi+E7QyOXzj2cTS9d3nn4cOOXAJ4XKFZk3xmCP2Jh9zheKPUHImj8gucQhypDfV+OBorObE=",
+    "publicKey": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA4ZKYM/3HYqM+n+qSaEURa176dZ8bh+TlEwjUf3jUDCrrFhPeSF7fFeGJoX4YDvsAr8fCXfueqVR86OanMP/tYGOpLkaA9KJG2TVejlyr5rfhHdeYmmm0SxtuhEWXFWmlO2wQ1ktmQNBMKN+vb+LP9EemBiIg9RHUWA0p/OXyphrftggRbF+9+1ot/KACLgdziXH+sYP9IlJP47WgPpk0QZUn4UycnUgyp0HlzAKSwYuRmKeQiCX1bPN5vOdebzzAvPDnzOLGAXvbF80SIWhpBCG7Cj2mcFTzdBLK91hKHzivFmC1vCjnyQ8+S+OTvFJZ9x5OM3yoN8gs9Uu6wzjLVwIDAQAB"
+  },
+  "fingerprints": [
+    {
+      "why": "the account and the requesting device",
+      "email": "dana@example.test",
+      "publicKey": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA4ZKYM/3HYqM+n+qSaEURa176dZ8bh+TlEwjUf3jUDCrrFhPeSF7fFeGJoX4YDvsAr8fCXfueqVR86OanMP/tYGOpLkaA9KJG2TVejlyr5rfhHdeYmmm0SxtuhEWXFWmlO2wQ1ktmQNBMKN+vb+LP9EemBiIg9RHUWA0p/OXyphrftggRbF+9+1ot/KACLgdziXH+sYP9IlJP47WgPpk0QZUn4UycnUgyp0HlzAKSwYuRmKeQiCX1bPN5vOdebzzAvPDnzOLGAXvbF80SIWhpBCG7Cj2mcFTzdBLK91hKHzivFmC1vCjnyQ8+S+OTvFJZ9x5OM3yoN8gs9Uu6wzjLVwIDAQAB",
+      "publicKeySha256": "4kC2dgRBE7GxEZeIm0FgqA1PGcpQZqXykP5UmNKV638=",
+      "expanded": "Zw+2PiEuOpm7s2tJzxf/0tIdYEeO3AbHZXJbUlbsAdk=",
+      "indices": [
+        857,
+        7004,
+        1269,
+        5460,
+        1953
+      ],
+      "words": [
+        "caretaker",
+        "uncaring",
+        "constrain",
+        "rind",
+        "dove"
+      ],
+      "phrase": "caretaker-uncaring-constrain-rind-dove"
+    },
+    {
+      "why": "the same email typed with capitals: the same phrase",
+      "email": "Dana@Example.TEST",
+      "publicKey": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA4ZKYM/3HYqM+n+qSaEURa176dZ8bh+TlEwjUf3jUDCrrFhPeSF7fFeGJoX4YDvsAr8fCXfueqVR86OanMP/tYGOpLkaA9KJG2TVejlyr5rfhHdeYmmm0SxtuhEWXFWmlO2wQ1ktmQNBMKN+vb+LP9EemBiIg9RHUWA0p/OXyphrftggRbF+9+1ot/KACLgdziXH+sYP9IlJP47WgPpk0QZUn4UycnUgyp0HlzAKSwYuRmKeQiCX1bPN5vOdebzzAvPDnzOLGAXvbF80SIWhpBCG7Cj2mcFTzdBLK91hKHzivFmC1vCjnyQ8+S+OTvFJZ9x5OM3yoN8gs9Uu6wzjLVwIDAQAB",
+      "publicKeySha256": "4kC2dgRBE7GxEZeIm0FgqA1PGcpQZqXykP5UmNKV638=",
+      "expanded": "Zw+2PiEuOpm7s2tJzxf/0tIdYEeO3AbHZXJbUlbsAdk=",
+      "indices": [
+        857,
+        7004,
+        1269,
+        5460,
+        1953
+      ],
+      "words": [
+        "caretaker",
+        "uncaring",
+        "constrain",
+        "rind",
+        "dove"
+      ],
+      "phrase": "caretaker-uncaring-constrain-rind-dove"
+    },
+    {
+      "why": "another account, the same key: another phrase",
+      "email": "lee@example.test",
+      "publicKey": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA4ZKYM/3HYqM+n+qSaEURa176dZ8bh+TlEwjUf3jUDCrrFhPeSF7fFeGJoX4YDvsAr8fCXfueqVR86OanMP/tYGOpLkaA9KJG2TVejlyr5rfhHdeYmmm0SxtuhEWXFWmlO2wQ1ktmQNBMKN+vb+LP9EemBiIg9RHUWA0p/OXyphrftggRbF+9+1ot/KACLgdziXH+sYP9IlJP47WgPpk0QZUn4UycnUgyp0HlzAKSwYuRmKeQiCX1bPN5vOdebzzAvPDnzOLGAXvbF80SIWhpBCG7Cj2mcFTzdBLK91hKHzivFmC1vCjnyQ8+S+OTvFJZ9x5OM3yoN8gs9Uu6wzjLVwIDAQAB",
+      "publicKeySha256": "4kC2dgRBE7GxEZeIm0FgqA1PGcpQZqXykP5UmNKV638=",
+      "expanded": "XwDqXl5DQN5Nf6MkwOO3YXRHjdOgslM05U75nzEy0zA=",
+      "indices": [
+        880,
+        170,
+        129,
+        5772,
+        5839
+      ],
+      "words": [
+        "cartridge",
+        "amplify",
+        "alone",
+        "sensually",
+        "shelve"
+      ],
+      "phrase": "cartridge-amplify-alone-sensually-shelve"
+    },
+    {
+      "why": "another device's key: another phrase",
+      "email": "dana@example.test",
+      "publicKey": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA1j6k6w56PagXwKZ6SYabRKfFePAVFtNd9cc/6ghFxadUxU2xFtGQToIer7O7Fm4CqC3mEQrQ6CxcnUae3mB8DK5uwscgiP2yO2HtM+7/WQz4Ubg3kLm6az4Tp9WdNMBMeNdk2Jh2tAHIAIaofE60sqsZ9DicxBBSJaVBveuiCca9jynu+Bvu8e+SZ6Mo9bw1xNGL8OmgrcAiDgM5xeCe2guqKk76JmDaQEO8FgPRrTxmJfmy077Al0eSZmaSIJ4zOEPzxlbfTE68JhM+H3LqRfqXLzNTRQF+nRSNM8ncvda7iNAR2ef4sp0AhAuirCWkYS5rXRojVK6frrI9hrk8AwIDAQAB",
+      "publicKeySha256": "QCvVt8ESuUPpuBfUR+KOUQGOMHSuUC2IJbXFPqy0BmQ=",
+      "expanded": "qVmXQx4jws1zN3lBCnQoTbkppQ5l1Wgw4K3T297n5rM=",
+      "indices": [
+        211,
+        3989,
+        5046,
+        1708,
+        992
+      ],
+      "words": [
+        "annex",
+        "mortally",
+        "radial",
+        "deplored",
+        "cheer"
+      ],
+      "phrase": "annex-mortally-radial-deplored-cheer"
+    }
+  ],
+  "approval": {
+    "userKey": "QEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaW1xdXl9gYWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXp7fH1+fw==",
+    "seed": "oKGio6SlpqeoqaqrrK2ur7CxsrM=",
+    "key": "4.Xm4XouIUnJj3n0Sojgn2s1BqmYk+CEdmamGvV5h7rBqkIKnB4x8hfmgOX40AFSGV8m2jvw2mmR7uh8ACoNW7yAFSYdPCBFIl1/33aFqgwQ3vlqsM5F704Zp1lV7/PeHT5QjoJDdBW42scG8ve1WqzzjQSEJgGAmuojaG5jjoHdjnyp9MlDpPBxqUDPdvOfusc8JhPoJ51pmu1LvWPkoiZkihq5kHRHfNnwr5nK6F9eyutde2RjinL/r/rnU5v8qBOkQgjyipI0aKi+QoJn/UU/N14vqUUVPuVFoz8q+oEuojYXQJeQF0KsyBuRcppncq36FBYLS9T5CzLmlrKpRGGg=="
+  },
+  "refusedPublicKeys": [
+    {
+      "why": "an RSA key shorter than 2048 bits",
+      "publicKey": "MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQCdt3PGPXBaOC0ZdQaX0jLN55705gp4drjkmeeXV64AqRXLACwFtDsahyCILvwzb7xtSdaHWKJFYmlQNJYwVbhKxOfqC/v3eoPdN1UA4CiUQh6AZd/UqAD2ZLYUPGbyyLzY+yjn5uq5D0k0QteqykKyq46scNAPB31pcgRJTvDkhwIDAQAB"
+    },
+    {
+      "why": "an RSA key longer than 2048 bits",
+      "publicKey": "MIICIjANBgkqhkiG9w0BAQEFAAOCAg8AMIICCgKCAgEAjK2coUVAoFSosbDCJu9mcRGLZWoN/cH+aUM2ZeMvJIaFCbflG3/Jf0KTNRN7vb0hi4gpRIC8bscflwOf1zwfbEEFagT3rDvOtNHXalk7oa+nYwg42U7RSaO6JI7yWJQcpr+DylmVW6Tb32ECjdHL/HhTGtNq4+9SY+jkZYEp9e0xtKD2ogvJTQWK+xHOKp3f1r5Ix4YckXC58XJctHGO5LKIgXxabfPfK9XNr8enNp1caeyneH14Y5wV3RclusFpOj7YdhLvvpirDki6r8eX3faUpzj2xK9ZHzr6Hd4bOjWpFBY08OCybawq86VSHI+aOb/u0qAta5gjRwdXfoYY6AyqswRcKPg8+up9CDckDYOYqhQ5N9ZI1lJGXy4RTast1+gbYLlGy2rY7jVUw9NY5Us64G0XzgBSJBa+3djFpF4LdA8w+MKdoNwG/rtRXgjPwsRjA3itciP3ZgMzbMT4PTJ9tyEvM3FfgaTbsLB0pHwr0WX6+zUUxFkyaSZ2kWcirfG/xMGhub8UIoEakMdqtSjmaHxqwlMDw7UwMK6xss1xhaKAMi98JPCzCnXYK/rLmwChZAFaWXHuWCb3QJwIW4FRctHPszTaJFsyDwy3wOGnyfPFW4vCtlfA1Mt+rr1va4z1kC4aoBBwWht0RzKlfAbJrpms4Tfw9x/5Hw+x13MCAwEAAQ=="
+    },
+    {
+      "why": "an RSA key whose exponent isn't 65537",
+      "publicKey": "MIIBIDANBgkqhkiG9w0BAQEFAAOCAQ0AMIIBCAKCAQEAyReGwbpdZbGshlNFjlbz44aMj7r44hnFrYhEaqcfQF3fI7N7BKk9a9EbEAXvtCIYAxaZ/tgpDnCKu0zsym/+LsjpRvoJarQH7GqsSNFQUyuNrpDnuXc4itsi6Lix77gYYGEYhidGiulNIDqE1x7Qqkje8rly/BWamkFI+MIe0dKOe/3vFapP62PMoRXC+NeofORGyzTfuhbWc6HX4jf6NE7qv5UwOD3ZquTUsk9ptrLgo3023w3xzxY7P5C0Xt6yicooW5vWIamEzyR8X5FLugMWDHvdEnT0t3Yq1Oj27UaXoErozS4AY3tiAZyS9RPQ4ZSUOw8uqiaHzFMqw5AadQIBAw=="
+    },
+    {
+      "why": "not an RSA key (P-256)",
+      "publicKey": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEvodc/Bs1oJYYfc9d3uCa9KJaD5YKC7ikzd2UUmSl3DQYP4TCtUPTbIM+7UVxSxkoD9QOo5Jr/wt40A+OFqIh/Q=="
+    },
+    {
+      "why": "not a public key",
+      "publicKey": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0+Pw=="
+    },
+    {
+      "why": "not base64",
+      "publicKey": "not base64!"
+    },
+    {
+      "why": "empty",
+      "publicKey": ""
+    }
+  ]
+}

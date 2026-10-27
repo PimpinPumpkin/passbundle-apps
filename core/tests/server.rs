@@ -1389,3 +1389,146 @@ fn an_items_versions_compare_restore_and_clear() {
     app.delete_history(&id, None).unwrap();
     assert!(app.history(&id).unwrap().versions.is_empty());
 }
+
+/// A device the account knows asking to sign in with a device (docs/core.md,
+/// "Approving a sign-in"), as the web vault and the extension ask: a new
+/// RSA-2048 key pair and an access code. Its id, private key, and code.
+fn ask_to_sign_in(url: &str, email: &str, device: &str) -> (String, PrivateKey, String) {
+    let private = PrivateKey::generate().unwrap();
+    let code = uuid::Uuid::new_v4().simple().to_string()[..25].to_owned();
+    let kind = Device::this_one(device).kind.to_string();
+    let mut response = ureq::post(format!("{url}/api/auth-requests"))
+        .header("Device-Type", &kind)
+        .send_json(json!({
+            "email": email,
+            "deviceIdentifier": device,
+            "publicKey": STANDARD.encode(private.public_key_der()),
+            "accessCode": code,
+            "type": 0,
+        }))
+        .unwrap();
+    let body: serde_json::Value = response.body_mut().read_json().unwrap();
+    (body["id"].as_str().unwrap().to_owned(), private, code)
+}
+
+/// The asking device reading its answer with its access code: the status,
+/// and the wrapped key if there's one.
+fn read_answer(url: &str, device: &str, id: &str, code: &str) -> (u16, Option<String>) {
+    let kind = Device::this_one(device).kind.to_string();
+    let response = ureq::get(format!("{url}/api/auth-requests/{id}/response?code={code}"))
+        .header("Device-Type", &kind)
+        .config()
+        .http_status_as_error(false)
+        .build()
+        .call()
+        .unwrap();
+    let status = response.status().as_u16();
+    let body: serde_json::Value = response.into_body().read_json().unwrap_or_default();
+    (status, body["key"].as_str().map(str::to_owned))
+}
+
+#[test]
+fn a_sign_in_from_another_device_is_approved_in_the_app_and_the_key_reaches_only_it() {
+    let Some(server) = server() else { return };
+    let url = std::env::var("PB_TEST_SERVER").unwrap();
+    let email = new_email("approval");
+    sign_up(&server, &email);
+    // The device that asks signed in before, so the account knows it.
+    let asking = Device::new_identifier();
+    let first = Server::new(&url, Device::this_one(&asking)).unwrap();
+    sign_in(&first, &email);
+    let user_key = sign_in(&server, &email).user_key().to_bytes();
+    let mut app = signed_in_app(&url, &email);
+
+    let (id, private, code) = ask_to_sign_in(&url, &email, &asking);
+    let listed = app.sign_in_requests().unwrap();
+    assert_eq!(listed.len(), 1);
+    let request = &listed[0];
+    assert_eq!(request.id, id);
+    assert_eq!(
+        request.fingerprint,
+        passbundle_core::device_approval::fingerprint_phrase(&email, &private.public_key_der())
+    );
+    assert_eq!(request.ip, "127.0.0.1");
+    assert!(request.device.starts_with("App on "), "{}", request.device);
+    assert!(request.left > 14 * 60 && request.left <= 15 * 60);
+
+    // Approving waits for the person to confirm it's them, and for the
+    // phrase they were shown; nothing is sent until then.
+    assert_eq!(
+        app.answer_sign_in_request(&id, &request.fingerprint, true),
+        Err(Error::ConfirmFirst)
+    );
+    app.confirm_with_master_password(PASSWORD).unwrap();
+    assert!(matches!(
+        app.answer_sign_in_request(&id, "not-the-phrase-shown-here", true),
+        Err(Error::Refused(_))
+    ));
+    assert_eq!(read_answer(&url, &asking, &id, &code), (200, None));
+
+    app.answer_sign_in_request(&id, &request.fingerprint, true)
+        .unwrap();
+    assert!(app.sign_in_requests().unwrap().is_empty());
+    // Only the asking device's private key opens what the app sent: the
+    // user key.
+    let (status, key) = read_answer(&url, &asking, &id, &code);
+    assert_eq!(status, 200);
+    let key = passbundle_core::crypto::EncString::parse(&key.unwrap()).unwrap();
+    assert!(key.to_string().starts_with("4."));
+    assert_eq!(&*private.decrypt(&key).unwrap(), &*user_key);
+    assert!(PrivateKey::generate().unwrap().decrypt(&key).is_err());
+    // And it signs in with its access code.
+    let mut signed_in = ureq::post(format!("{url}/identity/connect/token"))
+        .send_form([
+            ("grant_type", "password"),
+            ("username", email.as_str()),
+            ("password", code.as_str()),
+            ("authRequest", id.as_str()),
+            ("scope", "api offline_access"),
+            ("client_id", "desktop"),
+            ("deviceType", &Device::this_one(&asking).kind.to_string()),
+            ("deviceIdentifier", asking.as_str()),
+            ("deviceName", "asking"),
+        ])
+        .unwrap();
+    let token: serde_json::Value = signed_in.body_mut().read_json().unwrap();
+    assert!(token["access_token"].is_string());
+
+    // One confirmation, one approval; biometrics confirm too (the OS's
+    // stored user key, given back while unlocked), but only this vault's key.
+    let (second, _, second_code) = ask_to_sign_in(&url, &email, &asking);
+    let phrase = app.sign_in_requests().unwrap()[0].fingerprint.clone();
+    assert_eq!(
+        app.answer_sign_in_request(&second, &phrase, true),
+        Err(Error::ConfirmFirst)
+    );
+    assert!(matches!(
+        app.unlock_with_key(SymmetricKey::generate()),
+        Err(Error::Refused(_))
+    ));
+    app.unlock_with_key(SymmetricKey::from_bytes(&user_key).unwrap())
+        .unwrap();
+    // Denying needs no confirmation, and sends no key: the request is gone.
+    app.answer_sign_in_request(&second, "", false).unwrap();
+    assert!(app.sign_in_requests().unwrap().is_empty());
+    assert_eq!(read_answer(&url, &asking, &second, &second_code).0, 400);
+
+    // Turned off on this device, approving doesn't ask.
+    app.set_confirm_approvals(false).unwrap();
+    assert!(!app.confirm_approvals());
+    let (third, _, _) = ask_to_sign_in(&url, &email, &asking);
+    let phrase = app.sign_in_requests().unwrap()[0].fingerprint.clone();
+    app.answer_sign_in_request(&third, &phrase, true).unwrap();
+
+    // Another account never sees them.
+    let other = new_email("approval-other");
+    sign_up(&server, &other);
+    let mut other_app = signed_in_app(&url, &other);
+    ask_to_sign_in(&url, &email, &asking);
+    assert!(other_app.sign_in_requests().unwrap().is_empty());
+    // Locking forgets the listed requests.
+    assert_eq!(app.sign_in_requests().unwrap().len(), 1);
+    app.lock();
+    assert!(app.kept_sign_in_requests().is_empty());
+    assert_eq!(app.sign_in_requests().err(), Some(Error::SignedOut));
+}

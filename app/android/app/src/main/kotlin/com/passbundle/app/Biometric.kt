@@ -202,8 +202,11 @@ object Biometric {
     /**
      * Unlocks: asks for the biometric, opens the user key, and hands it to the
      * core. `done(unlocked, error)`: unlocked is false if the person cancelled.
+     * While unlocked, the core takes the key as the person confirming it's
+     * them (approving a sign-in from another device), and the prompt says
+     * [title].
      */
-    fun unlock(activity: Activity, done: (Boolean, String?) -> Unit) {
+    fun unlock(activity: Activity, title: String = "Unlock PassBundle", done: (Boolean, String?) -> Unit) {
         val bytes = runCatching { sealed.readBytes() }.getOrNull()
         val key = runCatching { keystore().getKey(ALIAS, null) as? SecretKey }.getOrNull()
         if (bytes == null || bytes.size <= IV_BYTES || key == null) {
@@ -226,7 +229,7 @@ object Biometric {
             } catch (e: GeneralSecurityException) {
                 return done(false, "Couldn't unlock with ${method(activity)}.")
             }
-        prompt(activity, "Unlock PassBundle", cipher) { authed, error ->
+        prompt(activity, title, cipher) { authed, error ->
             if (authed == null) return@prompt done(false, error)
             val userKey =
                 try {
