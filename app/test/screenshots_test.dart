@@ -3,12 +3,15 @@
 // dark; the phone's at 390 wide, and Settings also at 360 with the text 1.3
 // times its size, as a phone set to large text draws it. With PB_SHOWCASE
 // (core/examples/showcase.rs), on a fuller vault: folders in folders,
-// shared folders, and items made from templates.
+// shared folders, and items made from templates. The computer's are drawn
+// with the window's top as Windows has it (window_chrome.dart), and an item
+// also as a Mac (with stand-ins for its traffic lights) and Linux have it.
 @Tags(['screenshots'])
 library;
 
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -16,6 +19,7 @@ import 'package:passbundle/core.dart';
 import 'package:passbundle/icons.dart';
 import 'package:passbundle/main.dart';
 import 'package:passbundle/updates.dart';
+import 'package:passbundle/window_chrome.dart';
 
 import 'support.dart';
 
@@ -29,11 +33,85 @@ Future<void> size(WidgetTester tester, Size size, {double text = 1}) async {
 
 /// Draws what's on screen: the websites' icons first, which load outside
 /// the test's clock.
-Future<void> shoot(String name, [WidgetTester? tester]) async {
+Future<void> shoot(String name, [WidgetTester? tester, Finder? what]) async {
   if (tester != null) await tester.pump();
   await expectLater(
-    find.byType(MaterialApp),
+    what ?? find.byType(MaterialApp),
     matchesGoldenFile('screenshots/$name.png'),
+  );
+}
+
+const windows = WindowFrame(
+  style: FrameStyle.windows,
+  end: WindowButton.values,
+);
+
+/// A computer's window, as its runner would describe it (window_chrome.dart):
+/// [lights] hears where a Mac's traffic lights would go.
+void onComputer(
+  WidgetTester tester,
+  WindowFrame frame, {
+  ValueNotifier<List<double>?>? lights,
+}) {
+  final messenger = tester.binding.defaultBinaryMessenger;
+  messenger.setMockMethodCallHandler(WindowFrameKeeper.channel, (call) async {
+    if (call.method == 'chrome' && lights != null) {
+      lights.value = ((call.arguments as Map)['lights'] as List?)
+          ?.cast<double>();
+    }
+    return null;
+  });
+  WindowFrameKeeper.instance.debugFrame = frame;
+  addTearDown(() {
+    messenger.setMockMethodCallHandler(WindowFrameKeeper.channel, null);
+    WindowFrameKeeper.instance.debugFrame = const WindowFrame();
+  });
+}
+
+/// The app, with a Mac's traffic lights where it has the runner put them:
+/// the real ones are AppKit's, which a test hasn't.
+class _WithLights extends StatelessWidget {
+  const _WithLights({required this.lights, required this.child});
+
+  final ValueListenable<List<double>?> lights;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) => Directionality(
+    textDirection: TextDirection.ltr,
+    child: Stack(
+      children: [
+        child,
+        ValueListenableBuilder(
+          valueListenable: lights,
+          builder: (context, at, _) => at == null
+              ? const SizedBox.shrink()
+              : Positioned(
+                  // 12 across, 20 apart, as macOS draws them.
+                  left: at[0] + 1,
+                  top: at[1] - 6,
+                  child: Row(
+                    children: [
+                      for (final color in const [
+                        Color(0xFFFF5F57),
+                        Color(0xFFFEBC2E),
+                        Color(0xFF28C840),
+                      ])
+                        Container(
+                          width: 12,
+                          height: 12,
+                          margin: const EdgeInsets.only(right: 8),
+                          decoration: BoxDecoration(
+                            color: color,
+                            shape: BoxShape.circle,
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+        ),
+      ],
+    ),
   );
 }
 
@@ -109,6 +187,7 @@ void main() {
 
     shots('sign in, $b', (tester) async {
       await size(tester, const Size(1280, 800));
+      onComputer(tester, windows);
       openEmpty();
       await tester.pumpWidget(PassBundleApp(themeMode: theme));
       await shoot('sign-in-$b', tester);
@@ -116,6 +195,7 @@ void main() {
 
     shots('unlock, vault, item, editor, desktop, $b', (tester) async {
       await size(tester, const Size(1280, 800));
+      onComputer(tester, windows);
       openShowcase();
       await tester.pumpWidget(PassBundleApp(themeMode: theme));
       await precacheIcons(tester);
@@ -169,6 +249,7 @@ void main() {
     shots('version history, desktop, $b', (tester) async {
       final server = Platform.environment['PB_TEST_SERVER']!;
       await size(tester, const Size(1280, 800));
+      onComputer(tester, windows);
       openEmpty();
       final email =
           'history-${DateTime.now().microsecondsSinceEpoch}@example.test';
@@ -226,6 +307,7 @@ void main() {
 
     shots('unlocking with Windows Hello or Touch ID, $b', (tester) async {
       await size(tester, const Size(1280, 800));
+      onComputer(tester, windows);
       final program = Platform.environment['PB_TEST_AGENT']!;
       final home = Directory('/tmp').createTempSync('pb-ag-').path;
       final agent = (await tester.runAsync(
@@ -274,6 +356,39 @@ void main() {
       await pumpUntil(tester, find.textContaining('Unlock with '));
       await shoot('unlock-with-biometrics-$b', tester);
     }, skip: Platform.environment['PB_TEST_AGENT'] == null);
+
+    shots('an item, with the window\'s top as a Mac and Linux have it, $b', (
+      tester,
+    ) async {
+      await size(tester, const Size(1280, 800));
+      final lights = ValueNotifier<List<double>?>(null);
+      onComputer(
+        tester,
+        const WindowFrame(style: FrameStyle.mac),
+        lights: lights,
+      );
+      openShowcase();
+      await tester.pumpWidget(
+        _WithLights(
+          lights: lights,
+          child: PassBundleApp(themeMode: theme),
+        ),
+      );
+      await precacheIcons(tester);
+      await unlock(tester);
+      await tester.tap(find.text('Example Mail').first);
+      await tester.pump();
+      await tester.pump();
+      await shoot('item-desktop-mac-$b', tester, find.byType(_WithLights));
+      // Ubuntu's: minimize, maximize, and close, at the end.
+      WindowFrameKeeper.instance.debugFrame = const WindowFrame(
+        style: FrameStyle.linux,
+        end: [WindowButton.minimize, WindowButton.maximize, WindowButton.close],
+      );
+      await tester.pump();
+      await tester.pump();
+      await shoot('item-desktop-linux-$b', tester, find.byType(_WithLights));
+    });
 
     shots('vault, item, editor, and the offer, phone, $b', (tester) async {
       await size(tester, const Size(390, 844));

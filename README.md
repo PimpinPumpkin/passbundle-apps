@@ -20,6 +20,7 @@ Early, and not released.
 - **Folders and templates as in the web vault:** Personal and its folders, then each organization and its shared folders, nested by name, with counts; the editor's one Folder picker, grouped by owner; what each shared folder lets the person do (no secrets shown where it hides passwords, no edit or trash where it doesn't allow them). New item offers the web vault's kinds and templates (Wi-Fi, servers, databases, licenses, API keys, domains, and the person's and their organizations' own), each with its category's jewel, and an edit keeps an item's template and every field (`core/src/templates.rs`, `core/src/places.rs`).
 - **Items as the web vault's panel shows them:** logins' websites' icons from the server's icon service, kept in memory only while the vault is open and refused when they're larger than an icon, with the letter where there's none (Settings turns them off; `core/src/icons.rs`); the favorite star; Open website; how strong the password is and when it changed, and Health's weak, reused, and unsecured logins (zxcvbn, on the device; `core/src/health.rs`); and the item's version history, side by side with the item now, restored as a normal edit, or cleared where the person may (`core/src/history.rs`). Phones have a Generator tab, whose Copy copies what it shows and clears after 30 seconds like any secret. Revealed secrets aren't selectable, so the system's own Copy can't keep one on the clipboard.
 - **Windows Hello** (Touch ID once the agent has it) unlocks the app through the desktop agent, sharing the browser extension's enrollment. The agent's tray opens the app, and the app starts the agent.
+- **The window's top is the app's**, as 1Password draws its own, with no system title bar (`app/lib/window_chrome.dart`): on a Mac the traffic lights sit in the menu's top, lined up with the list's search; on Windows the app draws minimize, maximize, and close at the top right, which Windows treats as a caption's (snap layouts, the window menu, Aero Snap); on Linux it draws the buttons the desktop asks for, on its side, and keeps the system's title bar where the desktop can't take a window that draws its own (no compositor, a tiling window manager, or `GTK_CSD=0`). The rest of the band moves the window, as a title bar does.
 - **Not yet:** passkeys, attachments, the macOS and Linux installs, phones, and code signing.
 
 ## Tests
@@ -38,6 +39,8 @@ PB_TEST_SERVER=$(tools/test-server.sh <passbundle-server binary> 8591 /tmp/pb-se
 ```
 
 `flutter test --tags screenshots --update-goldens` redraws `app/test/screenshots/`. With `PB_SHOWCASE` set to a folder `cargo run --example showcase -- <folder>` filled, they're drawn on a fuller sample vault (folders in folders, shared folders, items from templates), which isn't committed.
+
+The window on each computer, with a build with test hooks: `tools/mac-window-test.sh <passbundle.app>`, `tools/window-test.ps1 -Exe <passbundle.exe>`, and on Linux `DISPLAY=:98 dbus-run-session -- tools/window-test.sh <passbundle>` (under Xvfb, with xfwm4). `tools/window-shots.sh` and `tools/window-shots.ps1` take screenshots of the real window, light and dark, which CI keeps with each run (`window-shots-*`).
 
 The Mac updater on its own, against bundles signed as the Mac test releases are (with a built app, that app too; `--launch` opens it):
 

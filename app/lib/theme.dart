@@ -13,6 +13,7 @@ import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import 'core.dart' show isPhone;
 import 'glyphs.dart';
 
 const brandGreen = Color(0xFF1F6F5C);
@@ -645,9 +646,12 @@ class _GroundPainter extends CustomPainter {
 /// The system's bars over the app, matching it: on a phone, the status and
 /// navigation bars see-through over the ground (Android draws the app under
 /// them on every version, main.dart), with icons that show on it; on a
-/// computer, the window's frame light or dark as the app is, and in the dark
-/// its title bar in the ground's color, where the runner can set it
-/// (MainFlutterWindow.swift, flutter_window.cpp).
+/// computer, where the app draws the window's top itself (window_chrome.dart),
+/// what's left of the window's frame light or dark as the app is (a Mac's
+/// traffic lights, Windows' border and window menu, and on Linux the
+/// system's title bar where the app can't draw its own), and the window's
+/// own background the ground's color (MainFlutterWindow.swift,
+/// flutter_window.cpp, my_application.cc).
 class SystemBars extends StatefulWidget {
   const SystemBars({super.key, required this.child});
 
@@ -666,7 +670,10 @@ class _SystemBarsState extends State<SystemBars> {
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    if (!Platform.isMacOS && !Platform.isWindows) return;
+    if (isPhone ||
+        !(Platform.isMacOS || Platform.isWindows || Platform.isLinux)) {
+      return;
+    }
     final c = context.colors;
     final look = (
       c.brightness == Brightness.dark,

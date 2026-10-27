@@ -485,7 +485,10 @@ jobs:
         if: matrix.platform == 'linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends clang cmake ninja-build pkg-config libgtk-3-dev libdbus-1-dev libssl-dev xvfb imagemagick xdotool x11-utils
+          # xfwm4 (Xfce's window manager, with its compositor) and a D-Bus
+          # session for it: the window tests' desktop, where the app draws
+          # its own window top.
+          sudo apt-get install -y --no-install-recommends clang cmake ninja-build pkg-config libgtk-3-dev libdbus-1-dev libssl-dev xvfb imagemagick xdotool x11-utils xfwm4 dbus
       - name: The agent's test build, for the app's unlock test
         working-directory: agent
         run: |
@@ -608,16 +611,32 @@ jobs:
         shell: pwsh
         run: tools/measure.ps1 -Exe "${{ matrix.exe }}" -Bundle "${{ matrix.bundle }}" -Shot screenshot-windows.png | Tee-Object -Append -FilePath $env:GITHUB_STEP_SUMMARY
       # After measuring, which opens the app on a window of its own.
-      - name: The window opens no smaller than 400 by 560, and again where and how big it was left (Linux)
+      - name: The app draws the window's top, its buttons and band work as a title bar's, and the window opens no smaller than 400 by 560, and again where and how big it was left (Linux; and without a compositor, the system's title bar)
         if: matrix.platform == 'linux'
         run: |
           Xvfb :98 -screen 0 1440x900x24 &
           sleep 2
-          DISPLAY=:98 tools/window-test.sh "${{ matrix.exe }}"
-      - name: The window opens no smaller than 400 by 560, and again where and how big it was left (Windows)
+          DISPLAY=:98 dbus-run-session -- tools/window-test.sh "${{ matrix.exe }}"
+      - name: The app draws the window's top, the traffic lights sit in it and work, the band moves the window, and the window opens no smaller than 400 by 560, and again where and how big it was left (macOS)
+        if: matrix.platform == 'macos'
+        run: tools/mac-window-test.sh "${{ matrix.bundle }}"
+      - name: The app draws the window's top, Windows hears its buttons as a caption's (snap layouts on maximize), and the window opens no smaller than 400 by 560, and again where and how big it was left (Windows)
         if: matrix.platform == 'windows'
         shell: pwsh
         run: tools/window-test.ps1 -Exe "${{ matrix.exe }}"
+      - name: Screenshots of the real window, light and dark (Linux)
+        if: matrix.platform == 'linux'
+        run: |
+          Xvfb :96 -screen 0 1440x900x24 &
+          sleep 2
+          DISPLAY=:96 dbus-run-session -- tools/window-shots.sh "${{ matrix.exe }}" window-shots linux
+      - name: Screenshots of the real window, light and dark (macOS)
+        if: matrix.platform == 'macos'
+        run: tools/window-shots.sh "${{ matrix.exe }}" window-shots macos
+      - name: Screenshots of the real window, light and dark (Windows)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: tools/window-shots.ps1 -Exe "${{ matrix.exe }}" -Out window-shots -Name windows
       # The Windows and Linux updater with the real app (core/src/updates):
       # an older build updates itself to a newer one, signed with a
       # throwaway key and served from a stand-in for GitHub on the runner,
@@ -642,5 +661,11 @@ jobs:
           path: |
             passbundle-${{ matrix.platform }}.tar.gz
             screenshot-${{ matrix.platform }}.png
+          if-no-files-found: warn
+          retention-days: 7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: window-shots-${{ matrix.platform }}
+          path: window-shots/*.png
           if-no-files-found: warn
           retention-days: 7

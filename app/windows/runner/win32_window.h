@@ -6,6 +6,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <vector>
 
 // A class abstraction for a high DPI-aware Win32 Window. Intended to be
 // inherited from by classes that wish to specialize with custom
@@ -64,11 +65,33 @@ class Win32Window {
   // Returns whether there was a place to go back to.
   bool RestorePlacement();
 
-  // The window's frame as the app is (SystemBars in app/lib/theme.dart),
-  // whatever Windows' own setting: dark or light, and in the dark a title
-  // bar in the app's ground, |ground| as 0xRRGGBB (Windows 11; Windows 10
-  // keeps its own dark gray).
+  // What's left of the window's frame as the app is (SystemBars in
+  // app/lib/theme.dart), whatever Windows' own setting: its border and
+  // window menu dark or light. |ground| is the app's ground, 0xRRGGBB.
   void SetLook(bool dark, unsigned int ground);
+
+  // A box in the app's logical pixels, from the window's top left.
+  struct Box {
+    double left = 0, top = 0, right = 0, bottom = 0;
+    bool Contains(double x, double y) const {
+      return x >= left && x < right && y >= top && y < bottom;
+    }
+  };
+
+  // The window's caption buttons, as the app draws them.
+  enum Button { kNoButton = -1, kMinimize = 0, kMaximize = 1, kClose = 2 };
+
+  // Where the app's top band is, what in it takes clicks (|holes|), and
+  // where it draws minimize, maximize, and close (app/lib/window_chrome.dart):
+  // the rest of the band is the window's caption.
+  void SetChrome(const Box& band, std::vector<Box> holes,
+                 const Box buttons[3], const bool has_buttons[3]);
+
+  // As the caption button would: minimizes, maximizes or restores, closes.
+  void Press(Button button);
+
+  bool Maximized() const;
+  bool Active() const { return active_; }
 
  protected:
   // Processes and route salient window messages for mouse handling,
@@ -86,6 +109,13 @@ class Win32Window {
   // Called when Destroy is called.
   virtual void OnDestroy();
 
+  // The window was maximized or restored, or gained or lost the focus.
+  virtual void OnFrameChanged() {}
+
+  // The mouse moved over or off a caption button, or pressed or let go of
+  // one: Windows answers for the mouse there, so the app only draws them.
+  virtual void OnButtonsChanged(Button hovered, Button pressed) {}
+
  private:
   friend class WindowClassRegistrar;
 
@@ -101,6 +131,27 @@ class Win32Window {
 
   // Retrieves a class instance pointer for |window|
   static Win32Window* GetThisFromHandle(HWND const window) noexcept;
+
+  // The hosted content's (Flutter's) own window, asked what's under the
+  // mouse: what's the caption's it leaves to this window (HTTRANSPARENT).
+  static LRESULT CALLBACK ContentProc(HWND window, UINT message, WPARAM wparam,
+                                      LPARAM lparam, UINT_PTR id,
+                                      DWORD_PTR self) noexcept;
+
+  // What's under |screen| (a point on the screen), as WM_NCHITTEST answers:
+  // the top edge (to resize), a caption button, the caption, or the client.
+  LRESULT HitTest(POINT screen) const;
+
+  // The top resize edge's height, inside the window as Windows 10 and 11
+  // have it; and how far a maximized window hangs off the screen's top.
+  int ResizeEdge() const;
+
+  // The client area for a window rect |rect|: Windows' own sides and
+  // bottom, and no caption, but on screen when maximized.
+  void FitClientArea(RECT* rect);
+
+  // The caption buttons' state changed: tells the app, if it did.
+  void SetButtons(Button hovered, Button pressed);
 
   // Update the window frame's theme to match the system theme.
   static void UpdateTheme(HWND const window);
@@ -124,6 +175,21 @@ class Win32Window {
   bool has_look_ = false;
   bool look_dark_ = false;
   unsigned int look_ground_ = 0;
+
+  // The app's top band (|SetChrome|), in its logical pixels.
+  Box band_;
+  std::vector<Box> holes_;
+  Box buttons_[3];
+  bool has_buttons_[3] = {false, false, false};
+
+  // The caption button the mouse is over, and the one it pressed.
+  Button hovered_ = kNoButton;
+  Button pressed_ = kNoButton;
+  bool tracking_mouse_ = false;
+
+  // What the app was last told about the window.
+  bool maximized_ = false;
+  bool active_ = false;
 
   // window handle for top level window.
   HWND window_handle_ = nullptr;

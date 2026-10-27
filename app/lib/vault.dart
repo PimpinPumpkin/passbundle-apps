@@ -26,6 +26,14 @@ import 'theme.dart';
 import 'unlock_offer.dart';
 import 'updates.dart';
 import 'widgets.dart';
+import 'window_chrome.dart';
+
+/// The menu, the list, and an item side by side, from this wide; a phone's
+/// screens below it.
+const wideWidth = 900.0;
+
+bool isWide(BuildContext context) =>
+    MediaQuery.sizeOf(context).width >= wideWidth;
 
 class VaultScreen extends StatefulWidget {
   const VaultScreen({
@@ -238,7 +246,7 @@ class VaultScreenState extends State<VaultScreen> {
 
   /// New item: the picker (the main kinds, then templates), then its editor.
   Future<void> newItem() async {
-    final wide = MediaQuery.sizeOf(context).width >= 900;
+    final wide = isWide(context);
     final choice = await chooseNewItem(
       context,
       templates: widget.core.templates(),
@@ -253,7 +261,7 @@ class VaultScreenState extends State<VaultScreen> {
     Map<String, dynamic>? prefill,
     NewItemChoice? choice,
   ]) async {
-    final wide = MediaQuery.sizeOf(context).width >= 900;
+    final wide = isWide(context);
     // An item that asks for the master password gets it before its editor
     // opens, so the editor shows its secrets, not blanks (Android's "Save
     // to PassBundle" opens the editor straight away).
@@ -438,7 +446,7 @@ class VaultScreenState extends State<VaultScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final wide = MediaQuery.sizeOf(context).width >= 900;
+    final wide = isWide(context);
     if (!wide) return phone(context);
     final pane = selected == null
         ? null
@@ -451,10 +459,12 @@ class VaultScreenState extends State<VaultScreen> {
             onChanged: reload,
             onTrash: (name) => trash(selected!, name),
           );
+    // The top band is the window's (window_chrome.dart): the menu's top, the
+    // list's search, and the item's actions sit where a title bar would, so
+    // the signed-out banner goes in the list, under its search.
     return Scaffold(
       body: Column(
         children: [
-          ?signedOutBanner,
           Expanded(
             child: Row(
               children: [
@@ -478,6 +488,7 @@ class VaultScreenState extends State<VaultScreen> {
                 Expanded(
                   child: ItemList(
                     title: placeName ?? 'All items',
+                    banner: signedOutBanner,
                     items: shown,
                     badges: !const {
                       Filter.folder,
@@ -1295,6 +1306,11 @@ class Sidebar extends StatelessWidget {
               (filter == Filter.kind && filterId == k.kind),
         )
         .toList();
+    // The window's buttons at the top left (a Mac's traffic lights, or
+    // Linux's on the left) sit in the menu's top, in the window's band, and
+    // the menu starts under them, as 1Password's does.
+    final chrome = WindowChrome.of(context);
+    final underButtons = chrome.integrated && chrome.startButtons;
     return Container(
       width: width,
       margin: const EdgeInsets.fromLTRB(12, 12, 0, 12),
@@ -1302,10 +1318,11 @@ class Sidebar extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
+          if (underButtons) const SizedBox(height: windowBand - 12),
           // The logo, as the web vault's menu has it.
-          const Padding(
-            padding: EdgeInsets.fromLTRB(18, 18, 16, 12),
-            child: Align(
+          Padding(
+            padding: EdgeInsets.fromLTRB(18, underButtons ? 4 : 18, 16, 12),
+            child: const Align(
               alignment: Alignment.centerLeft,
               child: Wordmark(size: 30),
             ),
@@ -1451,10 +1468,14 @@ class ItemList extends StatelessWidget {
     required this.onSync,
     required this.onSelect,
     this.badges = true,
+    this.banner,
   });
 
   /// What the list shows: All items, a kind, a folder.
   final String title;
+
+  /// Said under the search: the server signed this device out.
+  final Widget? banner;
 
   /// Where each item is, beside it (not while one folder is shown).
   final bool badges;
@@ -1472,8 +1493,11 @@ class ItemList extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(16, 12, 12, 4),
+        // In the window's top band (window_chrome.dart): its row, whatever
+        // the platform's density, with the window's buttons in line.
+        Container(
+          height: windowBand - 12,
+          margin: const EdgeInsets.fromLTRB(16, 12, 12, 4),
           child: Row(
             children: [
               Expanded(
@@ -1529,6 +1553,14 @@ class ItemList extends StatelessWidget {
             ],
           ),
         ),
+        if (banner != null)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 8, 12, 0),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(12),
+              child: banner,
+            ),
+          ),
         Padding(
           padding: const EdgeInsets.fromLTRB(22, 10, 18, 6),
           child: Row(
@@ -1894,7 +1926,7 @@ class _ItemPaneState extends State<ItemPane> {
     return ListView(
       padding: widget.phone
           ? const EdgeInsets.fromLTRB(20, 8, 20, 28)
-          : const EdgeInsets.fromLTRB(28, 26, 28, 28),
+          : const EdgeInsets.fromLTRB(28, 14, 28, 28),
       children: [
         Row(
           children: [
@@ -1950,39 +1982,57 @@ class _ItemPaneState extends State<ItemPane> {
     final body = asking
         ? askForMasterPassword(context, item)
         : details(context, item);
-    if (!widget.phone) return body;
+    if (!widget.phone) {
+      // On a computer, its actions along the window's top band, where a
+      // title bar would be, as 1Password has them, short of the window's
+      // own buttons (window_chrome.dart); the item under them.
+      final end = WindowChrome.of(context).endInset;
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Padding(
+            padding: EdgeInsets.fromLTRB(12, 12, math.max(20, end + 8), 0),
+            child: SizedBox(
+              height: windowBand - 12,
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: asking ? const [] : actions(item),
+              ),
+            ),
+          ),
+          Expanded(child: body),
+        ],
+      );
+    }
     return Scaffold(
       appBar: AppBar(
-        actions: [
-          if (!asking) ...[
-            FavoriteButton(
-              on: item['favorite'] == true,
-              size: 22,
-              onChanged: favorite,
-            ),
-            // Some kinds are the web vault's to edit, for now, and some
-            // items the person's shared folder lets them see only.
-            if (item['editable'] != false)
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 4),
-                child: OutlinedButton(
-                  onPressed: edit,
-                  child: const Text('Edit'),
-                ),
-              ),
-            if (may(item, 'delete'))
-              IconButton(
-                tooltip: 'Move to trash',
-                icon: const Icon(Icons.delete_outline_rounded),
-                onPressed: () => widget.onTrash(item['name'] as String),
-              ),
-          ],
-          const SizedBox(width: 8),
-        ],
+        actions: [if (!asking) ...actions(item), const SizedBox(width: 8)],
       ),
       body: body,
     );
   }
+
+  /// What can be done with it: favorite it, edit it, and move it to the trash.
+  List<Widget> actions(Map<String, dynamic> item) => [
+    FavoriteButton(
+      on: item['favorite'] == true,
+      size: widget.phone ? 22 : 20,
+      onChanged: favorite,
+    ),
+    // Some kinds are the web vault's to edit, for now, and some items the
+    // person's shared folder lets them see only.
+    if (item['editable'] != false)
+      Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 4),
+        child: OutlinedButton(onPressed: edit, child: const Text('Edit')),
+      ),
+    if (may(item, 'delete'))
+      IconButton(
+        tooltip: 'Move to trash',
+        icon: const Icon(Icons.delete_outline_rounded),
+        onPressed: () => widget.onTrash(item['name'] as String),
+      ),
+  ];
 
   /// Its details, each a row on a card with what can be done with it.
   Widget details(BuildContext context, Map<String, dynamic> item) {
@@ -2472,9 +2522,9 @@ class _ItemPaneState extends State<ItemPane> {
       );
     }
     // On a computer: a raised card, as the web vault has it, with the
-    // details in a well inside.
+    // details in a well inside, under the item's actions (build).
     return ListView(
-      padding: const EdgeInsets.fromLTRB(12, 12, 20, 20),
+      padding: const EdgeInsets.fromLTRB(12, 4, 20, 20),
       children: [
         Align(
           alignment: Alignment.topLeft,
@@ -2515,29 +2565,6 @@ class _ItemPaneState extends State<ItemPane> {
                           ],
                         ),
                       ),
-                      FavoriteButton(
-                        on: item['favorite'] == true,
-                        size: 20,
-                        onChanged: favorite,
-                      ),
-                      // Some kinds are the web vault's to edit, for now,
-                      // and some items the person's shared folder lets
-                      // them see only.
-                      if (item['editable'] != false)
-                        Padding(
-                          padding: const EdgeInsets.only(left: 4),
-                          child: OutlinedButton(
-                            onPressed: edit,
-                            child: const Text('Edit'),
-                          ),
-                        ),
-                      if (may(item, 'delete'))
-                        IconButton(
-                          tooltip: 'Move to trash',
-                          icon: const Icon(Icons.delete_outline_rounded),
-                          onPressed: () =>
-                              widget.onTrash(item['name'] as String),
-                        ),
                     ],
                   ),
                   if (rows.isNotEmpty) ...[
