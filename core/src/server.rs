@@ -859,6 +859,18 @@ mod tests {
                 }
                 let line = String::from_utf8_lossy(&request);
                 asked.push(line.split(' ').nth(1).unwrap_or_default().to_owned());
+                // A request's body (a sign-in's form) is read before the
+                // answer, so the connection never closes while it's sent.
+                let length = line
+                    .lines()
+                    .find_map(|h| {
+                        let (name, value) = h.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().ok())?
+                    })
+                    .unwrap_or(0);
+                let mut body = vec![0u8; length];
+                let _ = stream.read_exact(&mut body);
                 let _ = stream.write_all(&answer);
             }
             asked
