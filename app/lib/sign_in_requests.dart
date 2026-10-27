@@ -25,6 +25,7 @@ class SignInRequest {
   SignInRequest(Map<String, dynamic> json, {DateTime? listedAt})
     : id = json['id'] as String,
       deviceId = json['deviceId'] as String? ?? '',
+      deviceType = json['deviceType'] as String? ?? '',
       device = json['device'] as String? ?? 'A device',
       ip = json['ip'] as String? ?? '',
       fingerprint = json['fingerprint'] as String,
@@ -38,9 +39,15 @@ class SignInRequest {
   /// say).
   final String deviceId;
 
-  /// Which device asked, for prompting once per device: its identifier, or
-  /// the request where there's none.
-  String get asker => deviceId.isEmpty ? id : deviceId;
+  /// Its type, as the server names it ("Chrome").
+  final String deviceType;
+
+  /// Which device asked, for prompting once per device and for showing a
+  /// request it sent again in its place: its identifier, type, and address
+  /// together (a request from the same identifier as another type, or from
+  /// another address, is another asker), or the request where there's no
+  /// identifier.
+  String get asker => deviceId.isEmpty ? id : '$deviceId $deviceType $ip';
 
   /// The requesting device, in words ("Web vault in Chrome").
   final String device;
@@ -235,8 +242,10 @@ class SignInRequests extends ChangeNotifier {
     return null;
   }
 
-  /// The request that took this one's place: still waiting, or the same
-  /// device's newer one (it sent it again), or none.
+  /// The request that took this one's place: still waiting, or a newer one
+  /// from the same device (identifier, type, and address all the same: it
+  /// sent it again), or none. A new request that differs in any of them
+  /// isn't this one's: the open prompt closes, and it prompts on its own.
   SignInRequest? replacing(SignInRequest request) {
     for (final r in requests) {
       if (r.id == request.id) return r;

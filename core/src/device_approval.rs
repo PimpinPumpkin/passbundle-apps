@@ -42,6 +42,9 @@ pub struct SignInRequest {
     /// device, and shows a request it sent again ("Resend") in its place.
     /// Empty from a server that doesn't say.
     pub device_id: String,
+    /// Its type, as the server names it ("Chrome"); with the identifier and
+    /// the address, what says a request sent again is the same device's.
+    pub device_type: String,
     /// The requesting device, in words ("Web vault in Chrome").
     pub device: String,
     /// Its address, as the server saw it.
@@ -244,6 +247,10 @@ pub fn parse_request(value: &Value, email: &str, server_now: u64) -> Option<Sign
             .as_str()
             .unwrap_or_default()
             .to_owned(),
+        device_type: value["requestDeviceType"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned(),
         device: device_words(value["requestDeviceType"].as_str().unwrap_or_default()),
         ip: value["requestIpAddress"]
             .as_str()
@@ -395,6 +402,7 @@ mod tests {
         );
         assert_eq!(request.device, "Web vault in Chrome");
         assert_eq!(request.device_id, "2f9e3c1a-0000-4000-8000-0000000000aa");
+        assert_eq!(request.device_type, "Chrome");
         assert_eq!(request.ip, "203.0.113.7");
         assert_eq!((request.age, request.left), (60, 14 * 60));
         assert_eq!(

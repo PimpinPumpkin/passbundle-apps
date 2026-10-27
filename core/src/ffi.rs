@@ -1673,6 +1673,7 @@ fn sign_in_requests(requests: &[crate::device_approval::SignInRequest]) -> Vec<V
             json!({
                 "id": r.id,
                 "deviceId": r.device_id,
+                "deviceType": r.device_type,
                 "device": r.device,
                 "ip": r.ip,
                 "fingerprint": r.fingerprint,

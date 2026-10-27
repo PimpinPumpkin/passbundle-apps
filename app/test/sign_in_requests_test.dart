@@ -5,8 +5,10 @@
 // so, and sends nothing if they don't; denying asks nothing; an expired
 // request closes itself, and one answered elsewhere too; each device is
 // prompted for once every 15 minutes, and a request it sends again takes the
-// open prompt's place, with Approve held a moment; and Settings lists the
-// waiting ones, and asks to confirm before turning confirming off. The core's side (the phrase, the key, refusing an
+// open prompt's place, with Approve held a moment, only when its identifier,
+// type, and address are all the same (otherwise the prompt closes and the new
+// one prompts on its own); and Settings lists the waiting ones, and asks to
+// confirm before turning confirming off. The core's side (the phrase, the key, refusing an
 // approval nobody confirmed) has its own tests, against a real server, and
 // the meta repo's end-to-end test approves a real web vault's sign-in.
 import 'package:flutter/material.dart';
@@ -25,12 +27,15 @@ Map<String, dynamic> waiting(
   int age = 30,
   int left = 870,
   String? deviceId,
+  String deviceType = 'Chrome',
+  String ip = '203.0.113.7',
   String fingerprint = phrase,
 }) => {
   'id': id,
   'deviceId': deviceId ?? 'device-$id',
+  'deviceType': deviceType,
   'device': 'Web vault in Chrome',
-  'ip': '203.0.113.7',
+  'ip': ip,
   'fingerprint': fingerprint,
   'ageSeconds': age,
   'secondsLeft': left,
@@ -360,4 +365,46 @@ void main() {
     expect(source.answered, isEmpty);
     list.stop();
   });
+
+  for (final (what, changed) in [
+    ('another address', {'ip': '198.51.100.9'}),
+    ('another type', {'deviceType': 'Firefox'}),
+  ]) {
+    testWidgets(
+      'a new request from the same device identifier but $what closes the prompt and prompts on its own',
+      (tester) async {
+        const other = 'amply-blizzard-dove-ladle-sprout';
+        final source = StandIn()
+          ..requests = [waiting('a1', deviceId: 'laptop')];
+        final list = SignInRequests(source)..start();
+        await tester.runAsync(list.check);
+        expect(list.unprompted()?.id, 'a1');
+        await review(
+          tester,
+          source,
+          waiting('a1', deviceId: 'laptop'),
+          requests: list,
+        );
+        source.requests = [
+          {
+            ...waiting('a2', deviceId: 'laptop', fingerprint: other),
+            ...changed,
+          },
+        ];
+        await tester.runAsync(list.check);
+        await tester.pumpAndSettle();
+        // Not swapped in: the open prompt is gone, never showing its phrase...
+        expect(find.text(other), findsNothing);
+        expect(find.text('Approve sign-in?'), findsNothing);
+        expect(
+          find.text('That sign-in request was answered elsewhere, or expired.'),
+          findsOneWidget,
+        );
+        // ...and it's prompted for on its own.
+        expect(list.unprompted()?.id, 'a2');
+        expect(source.answered, isEmpty);
+        list.stop();
+      },
+    );
+  }
 }
