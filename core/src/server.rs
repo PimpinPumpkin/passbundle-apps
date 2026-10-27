@@ -159,6 +159,7 @@ impl Download {
     }
 }
 
+#[derive(Clone)]
 pub struct Server {
     base: String,
     agent: Agent,
@@ -170,6 +171,19 @@ fn now() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// An id the server gave, for a path: letters, digits, and hyphens only (a
+/// UUID), so nothing in it can change which path is called.
+fn path_id(id: &str) -> Result<&str> {
+    if !id.is_empty()
+        && id.len() <= 64
+        && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    {
+        Ok(id)
+    } else {
+        Err(Error::Malformed("an id that isn't one".into()))
+    }
 }
 
 /// Whether a URL may be used: HTTPS anywhere, or plain HTTP to this computer only.
@@ -765,6 +779,63 @@ impl Server {
     pub fn trash_item(&self, session: &mut Session, id: &str) -> Result<()> {
         self.call(session, "PUT", &format!("/api/ciphers/{id}/delete"), None)
             .map(|_| ())
+    }
+
+    /// Sign-in requests waiting for this account's answer (device_approval.rs),
+    /// as the server lists them, and the server's clock (its `Date`), so how
+    /// long each has left is by the server's time, not this device's. With
+    /// a session's access token, so the app needn't be held while it's asked
+    /// (`App::sign_in_requests_call`); at most 10 seconds, as the app asks
+    /// again soon.
+    pub fn pending_sign_in_requests(&self, access_token: &str) -> Result<(Value, Option<u64>)> {
+        let response = self
+            .agent
+            .get(self.url("/api/auth-requests/pending"))
+            .header("Authorization", &format!("Bearer {access_token}"))
+            .config()
+            .timeout_global(Some(Duration::from_secs(10)))
+            .build()
+            .call();
+        let server_now = response
+            .as_ref()
+            .ok()
+            .and_then(|r| r.headers().get("Date"))
+            .and_then(|d| d.to_str().ok())
+            .and_then(crate::device_approval::parse_http_date);
+        let (status, body) = Self::answer(response)?;
+        Ok((Self::checked(status, body)?, server_now))
+    }
+
+    /// One sign-in request, as the server has it now: whether it's still
+    /// waiting, and its public key.
+    pub fn sign_in_request(&self, session: &mut Session, id: &str) -> Result<Value> {
+        self.call(
+            session,
+            "GET",
+            &format!("/api/auth-requests/{}", path_id(id)?),
+            None,
+        )
+    }
+
+    /// Answers a sign-in request from this device: approved with the user
+    /// key wrapped to the request's public key, or denied with nothing.
+    pub fn answer_sign_in_request(
+        &self,
+        session: &mut Session,
+        id: &str,
+        wrapped_user_key: Option<&EncString>,
+    ) -> Result<Value> {
+        self.call(
+            session,
+            "PUT",
+            &format!("/api/auth-requests/{}", path_id(id)?),
+            Some(json!({
+                "deviceIdentifier": self.device.identifier,
+                "key": wrapped_user_key.map(ToString::to_string),
+                "masterPasswordHash": null,
+                "requestApproved": wrapped_user_key.is_some(),
+            })),
+        )
     }
 
     /// For tests and setup: any call, signed in.

@@ -40,6 +40,10 @@ pub enum Error {
         required_by: Vec<String>,
         web_vault: String,
     },
+    /// Approving a sign-in asks for biometrics or the master password
+    /// first, and they weren't given just now (docs/core.md, "Approving a
+    /// sign-in").
+    ConfirmFirst,
     /// Making an account got as far as the server (`sure`: it said so;
     /// otherwise the connection dropped after the account was sent), then
     /// signing in to it didn't work, and why: sign in, rather than make it
@@ -74,13 +78,15 @@ impl fmt::Display for Error {
                 match required_by.as_slice() {
                     [] => write!(f, "Your role requires two-step login.")?,
                     [one] => write!(f, "{one} requires two-step login for your role.")?,
-                    [rest @ .., last] => write!(f, "{} and {last} require two-step login for your role.", rest.join(", "))?,
+                    [a, b] => write!(f, "{a} and {b} require two-step login for your role.")?,
+                    [rest @ .., last] => write!(f, "{}, and {last} require two-step login for your role.", rest.join(", "))?,
                 }
                 write!(
                     f,
                     " Set it up in the web vault at {web_vault} (an authenticator app, a security key or passkey, or Duo), then sign in here again."
                 )
             }
+            Error::ConfirmFirst => write!(f, "Confirm it's you first."),
             Error::AccountMade { sure: true, why } => write!(f, "Your account was made, but signing in to it didn't work ({why}) Sign in with it."),
             Error::AccountMade { sure: false, why } => write!(f, "The server may have made your account before the connection dropped ({why}) Try signing in with it."),
         }

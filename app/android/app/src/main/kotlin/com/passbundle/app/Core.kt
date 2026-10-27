@@ -29,6 +29,9 @@ object Core {
     /** Opens the kept vault with the user key biometric unlock opened: "" if it opened, else the words to show. */
     @JvmStatic external fun unlockWithKey(key: ByteArray): String?
 
+    /** The same key, given back to confirm it's the person approving a sign-in, never to unlock: "" if it's the open vault's. */
+    @JvmStatic external fun confirmApprovalWithKey(key: ByteArray): String?
+
     /** Opens the core on the app's own folder unless it's open (autofill can start the app without its screens). */
     @JvmStatic external fun openIfClosed(dir: String)
 

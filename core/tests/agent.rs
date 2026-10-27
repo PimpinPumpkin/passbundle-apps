@@ -225,6 +225,25 @@ fn the_app_turns_it_on_unlocks_with_it_and_signing_out_turns_it_off() {
         v["opened"]["items"].as_object().unwrap().len()
     );
 
+    // Confirming it's the person, to approve a sign-in from another device
+    // (or turn off asking): the agent's own prompt for it, and the key must
+    // be this vault's. Unlocking isn't confirming; cancelling confirms
+    // nothing.
+    assert_eq!(
+        app.set_confirm_approvals(false),
+        Err(passbundle_core::Error::ConfirmFirst)
+    );
+    agent.answers(&[true]);
+    assert!(app.confirm_approval_with_biometric().unwrap());
+    app.set_confirm_approvals(false).unwrap();
+    app.set_confirm_approvals(true).unwrap();
+    agent.answers(&[false]);
+    assert!(!app.confirm_approval_with_biometric().unwrap());
+    assert_eq!(
+        app.set_confirm_approvals(false),
+        Err(passbundle_core::Error::ConfirmFirst)
+    );
+
     app.sign_out();
     assert_eq!(
         Agent::connect(

@@ -22,6 +22,7 @@ import 'icons.dart';
 import 'new_item.dart';
 import 'places.dart';
 import 'settings.dart';
+import 'sign_in_requests.dart';
 import 'theme.dart';
 import 'unlock_offer.dart';
 import 'updates.dart';
@@ -100,8 +101,25 @@ class VaultScreenState extends State<VaultScreen> {
     onShow: () {
       WidgetsBinding.instance.addPostFrameCallback((_) => saveOffered());
       WidgetsBinding.instance.scheduleFrame();
+      // Sign-ins waiting for an answer: asked for again at once.
+      signInRequests.resume();
     },
+    onHide: signInRequests.pause,
   );
+
+  /// A sign-in request open over the vault (sign_in_requests.dart): one at
+  /// a time; the next waits for it.
+  bool prompting = false;
+
+  Future<void> promptForSignIns() async {
+    if (prompting || !mounted) return;
+    final request = signInRequests.unprompted();
+    if (request == null) return;
+    prompting = true;
+    await reviewSignInRequest(context, request, email: widget.email);
+    prompting = false;
+    if (mounted) unawaited(promptForSignIns());
+  }
 
   @override
   void initState() {
@@ -117,15 +135,26 @@ class VaultScreenState extends State<VaultScreen> {
       // A sign-in to save opens the editor; the offer waits for another time.
       final saving = await saveOffered();
       if (!mounted) return;
-      if (saving || !offer) return;
-      final method = await offerBiometricUnlock(context);
-      if (!mounted) return;
-      if (method != null) showMessage(context, 'Unlocking with $method is on.');
+      if (!saving && offer) {
+        final method = await offerBiometricUnlock(context);
+        if (!mounted) return;
+        if (method != null) {
+          showMessage(context, 'Unlocking with $method is on.');
+        }
+      }
+      // Then sign-ins waiting for this account's answer, while the vault is
+      // open (not while measuring, which has no server).
+      if (widget.syncOnOpen) {
+        signInRequests.addListener(promptForSignIns);
+        signInRequests.start();
+      }
     });
   }
 
   @override
   void dispose() {
+    signInRequests.removeListener(promptForSignIns);
+    signInRequests.stop();
     updates?.removeListener(updateFound);
     lifecycle.dispose();
     search.dispose();

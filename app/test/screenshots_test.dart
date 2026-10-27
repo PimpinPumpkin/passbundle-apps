@@ -18,6 +18,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:passbundle/core.dart';
 import 'package:passbundle/icons.dart';
 import 'package:passbundle/main.dart';
+import 'package:passbundle/sign_in_requests.dart';
 import 'package:passbundle/updates.dart';
 import 'package:passbundle/window_chrome.dart';
 
@@ -122,6 +123,38 @@ Future<void> unlock(WidgetTester tester, {bool phone = false}) async {
   await pumpUntil(tester, find.text(phone ? 'Logins' : 'Backup service'));
   // The offline banner (no server behind the sample) settles first.
   await pumpUntil(tester, find.textContaining('Sign in again to get changes'));
+}
+
+/// A sign-in waiting for an answer (sign_in_requests.dart), as the core
+/// would list it, so the prompt shows over the vault.
+class _SignInRequests implements SignInRequestSource {
+  @override
+  Future<Answer> list() async => Answer({
+    'ok': true,
+    'requests': [
+      {
+        'id': 'shot',
+        'device': 'Web vault in Chrome',
+        'ip': '203.0.113.7',
+        'fingerprint': 'caretaker-uncaring-constrain-rind-dove',
+        'ageSeconds': 20,
+        'secondsLeft': 880,
+      },
+    ],
+  });
+
+  @override
+  Future<Answer> answer(String id, String fingerprint, bool approve) async =>
+      Answer({'ok': true});
+
+  @override
+  Future<bool> confirm(BuildContext context) async => true;
+
+  @override
+  bool confirmApprovals = true;
+
+  @override
+  Answer setConfirmApprovals(bool on) => Answer({'ok': true});
 }
 
 /// Android's updates, as Settings shows them there: this version, checked.
@@ -388,6 +421,43 @@ void main() {
       await tester.pump();
       await tester.pump();
       await shoot('item-desktop-linux-$b', tester, find.byType(_WithLights));
+    });
+
+    shots('a sign-in to approve, desktop and phone, $b', (tester) async {
+      signInRequests.source = _SignInRequests();
+      addTearDown(() => signInRequests.source = CoreSignInRequests());
+      await size(tester, const Size(1280, 800));
+      onComputer(tester, windows);
+      openShowcase();
+      await tester.pumpWidget(PassBundleApp(themeMode: theme));
+      await precacheIcons(tester);
+      await unlock(tester);
+      await pumpUntil(tester, find.text('Approve sign-in?'));
+      await tester.pump(const Duration(milliseconds: 400));
+      await shoot('sign-in-request-desktop-$b', tester);
+      await tester.tap(find.text('Later'));
+      await tester.pumpAndSettle();
+    });
+
+    shots('a sign-in to approve, phone, $b', (tester) async {
+      signInRequests.source = _SignInRequests();
+      addTearDown(() => signInRequests.source = CoreSignInRequests());
+      await size(tester, const Size(390, 844));
+      PhoneStandIn(tester);
+      openShowcase();
+      await tester.pumpWidget(PassBundleApp(themeMode: theme));
+      await precacheIcons(tester);
+      await unlock(tester, phone: true);
+      // After the offer to unlock with a fingerprint.
+      await pumpUntil(tester, find.text('Unlock with fingerprint next time?'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Not now'));
+      await tester.pumpAndSettle();
+      await pumpUntil(tester, find.text('Approve sign-in?'));
+      await tester.pump(const Duration(milliseconds: 400));
+      await shoot('sign-in-request-phone-$b', tester);
+      await tester.tap(find.text('Later'));
+      await tester.pumpAndSettle();
     });
 
     shots('vault, item, editor, and the offer, phone, $b', (tester) async {

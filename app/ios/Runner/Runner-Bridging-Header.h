@@ -17,6 +17,7 @@ void pb_free_secret(uint8_t *bytes, size_t len);
 // turns it off, which the core calls when signing out.
 uint8_t *pb_user_key(size_t *len);
 char *pb_unlock_with_key(const uint8_t *key, size_t len);
+char *pb_confirm_approval_with_key(const uint8_t *key, size_t len);
 void pb_set_remove_biometric(void (*remove)(void));
 // Saves an attachment in `dir` (the app's Documents folder): {"ok", "path"} or the words to show.
 char *pb_save_attachment_in(const char *id, const char *attachment_id, const char *dir);

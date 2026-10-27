@@ -10,6 +10,13 @@
 //! in a new login, and `{"action": "signWithPasskey", rpId, clientDataHash}`
 //! signs in with the site's passkey (IDs and hashes in base64url).
 //!
+//! Approving a sign-in from another device too, through the app's own calls
+//! (e2e/tests/device-approval.spec.ts): `{"action": "signInRequests"}` lists
+//! the requests waiting for the account, and `{"action": "approveSignIn",
+//! fingerprint}` or `{"action": "denySignIn", fingerprint}` answers the one
+//! with that phrase, after confirming with the master password as the app
+//! asks (`{"confirm": false}` skips confirming, to see it refused).
+//!
 //!   cargo run --release --features test-trust --example interop -- \
 //!     <server> <certificate.pem> <email> <password> [<draft.json>]
 //!
@@ -68,6 +75,11 @@ fn main() {
         let d: Value = serde_json::from_str(&std::fs::read_to_string(path).expect("the draft"))
             .expect("draft JSON");
         if let Some(action) = d["action"].as_str() {
+            if matches!(action, "signInRequests" | "approveSignIn" | "denySignIn") {
+                let answer = sign_in_request(action, &d, server_url, &pem, email, password);
+                println!("{}", json!({ "items": items, "signIn": answer }));
+                return;
+            }
             let answer = passkey(action, &d, server_url, &pem, email, password);
             println!("{}", json!({ "items": items, "passkey": answer }));
             return;
@@ -181,6 +193,57 @@ fn passkey(
         }
         other => panic!("no such action: {other}"),
     };
+    let _ = std::fs::remove_dir_all(dir);
+    answer
+}
+
+/// A sign-in request action, through the app's own calls, signed in afresh
+/// on a new device: the requests waiting, and the one with the given phrase
+/// approved or denied (`answered`), or why it wasn't (`refused`).
+fn sign_in_request(
+    action: &str,
+    d: &Value,
+    server: &str,
+    pem: &[u8],
+    email: &str,
+    password: &str,
+) -> Value {
+    passbundle_core::server::trust_only_for_tests(pem);
+    let dir = std::env::temp_dir().join(format!("pb-interop-{}", uuid::Uuid::new_v4().simple()));
+    let mut app = App::open(Store::new(&dir), Box::new(MemorySecretStore::default()));
+    app.sign_in(server, email, password).expect("signing in");
+    let listed = app.sign_in_requests().expect("listing sign-in requests");
+    let requests: Vec<Value> = listed
+        .iter()
+        .map(|r| {
+            json!({
+                "id": r.id,
+                "device": r.device,
+                "ip": r.ip,
+                "fingerprint": r.fingerprint,
+                "ageSeconds": r.age,
+                "secondsLeft": r.left,
+            })
+        })
+        .collect();
+    let mut answer = json!({ "requests": requests });
+    if action != "signInRequests" {
+        let fingerprint = d["fingerprint"].as_str().expect("fingerprint");
+        let id = listed
+            .iter()
+            .find(|r| r.fingerprint == fingerprint)
+            .map(|r| r.id.clone())
+            .unwrap_or_default();
+        let approve = action == "approveSignIn";
+        if approve && d["confirm"].as_bool() != Some(false) {
+            app.confirm_with_master_password(password)
+                .expect("confirming with the master password");
+        }
+        match app.answer_sign_in_request(&id, fingerprint, approve) {
+            Ok(()) => answer["answered"] = json!(id),
+            Err(e) => answer["refused"] = json!(e.to_string()),
+        }
+    }
     let _ = std::fs::remove_dir_all(dir);
     answer
 }
