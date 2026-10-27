@@ -241,7 +241,9 @@ class _SignInScreenState extends State<SignInScreen> {
           decoration: InputDecoration(
             labelText: 'Master password',
             errorText: error,
-            errorMaxLines: 3,
+            // Room for the longest: a role that needs two-step login set
+            // up in the web vault first, with its address.
+            errorMaxLines: 6,
             suffixIcon: IconButton(
               tooltip: hidden ? 'Show' : 'Hide',
               icon: Icon(
@@ -447,7 +449,9 @@ class _SignInScreenState extends State<SignInScreen> {
             decoration: InputDecoration(
               labelText: 'Code',
               errorText: error,
-              errorMaxLines: 3,
+              // An email code that checked out can still lead to setting up
+              // two-step login in the web vault, with its address.
+              errorMaxLines: 6,
             ),
           ),
           const SizedBox(height: 8),
