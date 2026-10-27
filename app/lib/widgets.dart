@@ -433,8 +433,8 @@ class Centered extends StatelessWidget {
   final List<Widget> children;
 
   @override
-  Widget build(BuildContext context) => Scaffold(
-    body: Center(
+  Widget build(BuildContext context) {
+    final page = Center(
       child: SingleChildScrollView(
         padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 24),
         child: ConstrainedBox(
@@ -446,8 +446,11 @@ class Centered extends StatelessWidget {
           ),
         ),
       ),
-    ),
-  );
+    );
+    // On a computer, under the strip along the window's top
+    // (window_chrome.dart); a phone's stays as it is.
+    return Scaffold(body: isPhone ? page : SafeArea(child: page));
+  }
 }
 
 Widget heading(BuildContext context, String title, String? subtitle) => Column(

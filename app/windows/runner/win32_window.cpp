@@ -1,7 +1,10 @@
 #include "win32_window.h"
 
+#include <commctrl.h>
 #include <dwmapi.h>
 #include <flutter_windows.h>
+#include <shellapi.h>
+#include <windowsx.h>
 
 #include "resource.h"
 
@@ -14,15 +17,6 @@ namespace {
 /// See: https://docs.microsoft.com/windows/win32/api/dwmapi/ne-dwmapi-dwmwindowattribute
 #ifndef DWMWA_USE_IMMERSIVE_DARK_MODE
 #define DWMWA_USE_IMMERSIVE_DARK_MODE 20
-#endif
-
-/// Window attribute for the title bar's color, and the value that gives it
-/// back to Windows (Windows 11, SDK 10.0.22000.0).
-#ifndef DWMWA_CAPTION_COLOR
-#define DWMWA_CAPTION_COLOR 35
-#endif
-#ifndef DWMWA_COLOR_DEFAULT
-#define DWMWA_COLOR_DEFAULT 0xFFFFFFFF
 #endif
 
 constexpr const wchar_t kWindowClassName[] = L"FLUTTER_RUNNER_WIN32_WINDOW";
@@ -49,6 +43,22 @@ using EnableNonClientDpiScaling = BOOL __stdcall(HWND hwnd);
 // scale factor
 int Scale(int source, double scale_factor) {
   return static_cast<int>(source * scale_factor);
+}
+
+// What WM_NCHITTEST answers for each caption button.
+constexpr LRESULT kButtonHits[3] = {HTMINBUTTON, HTMAXBUTTON, HTCLOSE};
+
+Win32Window::Button ButtonAt(WPARAM hit) {
+  switch (hit) {
+    case HTMINBUTTON:
+      return Win32Window::kMinimize;
+    case HTMAXBUTTON:
+      return Win32Window::kMaximize;
+    case HTCLOSE:
+      return Win32Window::kClose;
+    default:
+      return Win32Window::kNoButton;
+  }
 }
 
 // Dynamically loads the |EnableNonClientDpiScaling| from the User32 module.
@@ -159,6 +169,13 @@ bool Win32Window::Create(const std::wstring& title,
   }
 
   UpdateTheme(window);
+  // The app draws the window's top (app/lib/window_chrome.dart): the frame
+  // is worked out again without a caption (WM_NCCALCSIZE). The window keeps
+  // its caption's styles, for Aero Snap, the window menu, and Windows'
+  // animations.
+  SetWindowPos(window, nullptr, 0, 0, 0, 0,
+               SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER |
+                   SWP_NOACTIVATE);
 
   return OnCreate();
 }
@@ -275,17 +292,93 @@ Win32Window::MessageHandler(HWND hwnd,
       if (minimum_size_.width == 0 || minimum_size_.height == 0) {
         break;
       }
-      // The content's smallest size on this screen, with the window's frame.
-      HMONITOR monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
-      double scale_factor = FlutterDesktopGetDpiForMonitor(monitor) / 96.0;
+      // The content's smallest size on this screen, with the window's
+      // frame: its sides and bottom, and no caption.
+      const UINT dpi = FlutterDesktopGetDpiForHWND(hwnd);
+      const double scale_factor = dpi / 96.0;
       RECT frame = {0, 0, Scale(minimum_size_.width, scale_factor),
                     Scale(minimum_size_.height, scale_factor)};
-      AdjustWindowRectEx(&frame, WS_OVERLAPPEDWINDOW, FALSE, 0);
+      AdjustWindowRectExForDpi(&frame, WS_OVERLAPPEDWINDOW, FALSE, 0, dpi);
       auto info = reinterpret_cast<MINMAXINFO*>(lparam);
       info->ptMinTrackSize.x = frame.right - frame.left;
-      info->ptMinTrackSize.y = frame.bottom - frame.top;
+      info->ptMinTrackSize.y = frame.bottom;
       return 0;
     }
+
+    // No caption: the client area goes up to the window's top, and the app
+    // draws what was there (app/lib/window_chrome.dart). Windows keeps the
+    // sides and bottom, where it resizes from and draws the border.
+    case WM_NCCALCSIZE:
+      FitClientArea(wparam ? &reinterpret_cast<NCCALCSIZE_PARAMS*>(lparam)
+                                  ->rgrc[0]
+                           : reinterpret_cast<RECT*>(lparam));
+      return 0;
+
+    case WM_NCHITTEST: {
+      // The sides and bottom are Windows' own; the top is ours to answer.
+      const LRESULT edge = DefWindowProc(hwnd, message, wparam, lparam);
+      if (edge != HTCLIENT) {
+        return edge;
+      }
+      return HitTest({GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)});
+    }
+
+    // The caption buttons are the app's to draw, and this window's to
+    // answer for: Windows would draw its own old ones over them, so their
+    // mouse messages stop here. Answering HTMAXBUTTON for maximize is what
+    // shows Windows 11's snap layouts over it.
+    case WM_NCMOUSEMOVE: {
+      const Button over = ButtonAt(wparam);
+      SetButtons(over, over == pressed_ ? pressed_ : kNoButton);
+      if (over == kNoButton) {
+        break;
+      }
+      if (!tracking_mouse_) {
+        TRACKMOUSEEVENT track{sizeof(track), TME_LEAVE | TME_NONCLIENT, hwnd,
+                              HOVER_DEFAULT};
+        tracking_mouse_ = TrackMouseEvent(&track) != 0;
+      }
+      return 0;
+    }
+
+    case WM_NCMOUSELEAVE:
+      tracking_mouse_ = false;
+      SetButtons(kNoButton, kNoButton);
+      break;
+
+    case WM_NCLBUTTONDOWN:
+    case WM_NCLBUTTONDBLCLK: {
+      const Button down = ButtonAt(wparam);
+      if (down == kNoButton) {
+        // The caption moves the window, a double click maximizes it, and
+        // the top edge resizes it, all as Windows does.
+        break;
+      }
+      SetButtons(down, down);
+      return 0;
+    }
+
+    case WM_NCLBUTTONUP: {
+      const Button up = ButtonAt(wparam);
+      if (up == kNoButton) {
+        break;
+      }
+      const bool pressed = up == pressed_;
+      SetButtons(up, kNoButton);
+      if (pressed) {
+        Press(up);
+      }
+      return 0;
+    }
+
+    case WM_NCRBUTTONDOWN:
+    case WM_NCRBUTTONDBLCLK:
+    case WM_NCRBUTTONUP:
+      if (ButtonAt(wparam) != kNoButton) {
+        return 0;
+      }
+      // On the caption, the window menu, as Windows shows it.
+      break;
 
     case WM_DPICHANGED: {
       auto newRectSize = reinterpret_cast<RECT*>(lparam);
@@ -304,14 +397,27 @@ Win32Window::MessageHandler(HWND hwnd,
         MoveWindow(child_content_, rect.left, rect.top, rect.right - rect.left,
                    rect.bottom - rect.top, TRUE);
       }
+      if (wparam == SIZE_MAXIMIZED || wparam == SIZE_RESTORED) {
+        const bool maximized = wparam == SIZE_MAXIMIZED;
+        if (maximized != maximized_) {
+          maximized_ = maximized;
+          OnFrameChanged();
+        }
+      }
       return 0;
     }
 
-    case WM_ACTIVATE:
+    case WM_ACTIVATE: {
       if (child_content_ != nullptr) {
         SetFocus(child_content_);
       }
+      const bool active = LOWORD(wparam) != WA_INACTIVE;
+      if (active != active_) {
+        active_ = active;
+        OnFrameChanged();
+      }
       return 0;
+    }
 
     case WM_DWMCOLORIZATIONCOLORCHANGED:
       if (has_look_) {
@@ -345,6 +451,8 @@ Win32Window* Win32Window::GetThisFromHandle(HWND const window) noexcept {
 void Win32Window::SetChildContent(HWND content) {
   child_content_ = content;
   SetParent(content, window_handle_);
+  SetWindowSubclass(content, ContentProc, 1,
+                    reinterpret_cast<DWORD_PTR>(this));
   RECT frame = GetClientArea();
 
   MoveWindow(content, frame.left, frame.top, frame.right - frame.left,
@@ -390,13 +498,155 @@ void Win32Window::ShowLook() {
   BOOL dark = look_dark_ ? TRUE : FALSE;
   DwmSetWindowAttribute(window_handle_, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark,
                         sizeof(dark));
-  COLORREF caption =
-      look_dark_ ? RGB((look_ground_ >> 16) & 0xff, (look_ground_ >> 8) & 0xff,
-                       look_ground_ & 0xff)
-                 : DWMWA_COLOR_DEFAULT;
-  // Windows 10 has no such attribute, and refuses it: its own dark gray stays.
-  DwmSetWindowAttribute(window_handle_, DWMWA_CAPTION_COLOR, &caption,
-                        sizeof(caption));
+}
+
+void Win32Window::SetChrome(const Box& band, std::vector<Box> holes,
+                            const Box buttons[3], const bool has_buttons[3]) {
+  band_ = band;
+  holes_ = std::move(holes);
+  for (int i = 0; i < 3; i++) {
+    buttons_[i] = buttons[i];
+    has_buttons_[i] = has_buttons[i];
+  }
+}
+
+void Win32Window::Press(Button button) {
+  if (!window_handle_) {
+    return;
+  }
+  switch (button) {
+    case kMinimize:
+      PostMessage(window_handle_, WM_SYSCOMMAND, SC_MINIMIZE, 0);
+      break;
+    case kMaximize:
+      PostMessage(window_handle_, WM_SYSCOMMAND,
+                  Maximized() ? SC_RESTORE : SC_MAXIMIZE, 0);
+      break;
+    case kClose:
+      PostMessage(window_handle_, WM_SYSCOMMAND, SC_CLOSE, 0);
+      break;
+    default:
+      break;
+  }
+}
+
+bool Win32Window::Maximized() const {
+  return window_handle_ != nullptr && IsZoomed(window_handle_);
+}
+
+int Win32Window::ResizeEdge() const {
+  const UINT dpi = FlutterDesktopGetDpiForHWND(window_handle_);
+  return GetSystemMetricsForDpi(SM_CYSIZEFRAME, dpi) +
+         GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
+}
+
+void Win32Window::FitClientArea(RECT* rect) {
+  const LONG top = rect->top;
+  // Windows' own sides and bottom, as with a caption.
+  DefWindowProc(window_handle_, WM_NCCALCSIZE, FALSE,
+                reinterpret_cast<LPARAM>(rect));
+  rect->top = top;
+  if (!Maximized()) {
+    return;
+  }
+  // Maximized, a window hangs its frame off the screen's edges: the top
+  // comes in by as much, so nothing of the app's is off the screen.
+  rect->top += ResizeEdge();
+  // A taskbar that hides itself comes back when the mouse reaches its edge
+  // of the screen: a maximized window leaves that edge a pixel.
+  APPBARDATA state{sizeof(state)};
+  if ((SHAppBarMessage(ABM_GETSTATE, &state) & ABS_AUTOHIDE) == 0) {
+    return;
+  }
+  MONITORINFO info{sizeof(info)};
+  if (!GetMonitorInfo(MonitorFromWindow(window_handle_,
+                                        MONITOR_DEFAULTTONEAREST),
+                      &info)) {
+    return;
+  }
+  const auto hides_at = [&info](UINT edge) {
+    APPBARDATA bar{sizeof(bar)};
+    bar.uEdge = edge;
+    bar.rc = info.rcMonitor;
+    return SHAppBarMessage(ABM_GETAUTOHIDEBAREX, &bar) != 0;
+  };
+  if (hides_at(ABE_TOP)) {
+    rect->top += 1;
+  } else if (hides_at(ABE_BOTTOM)) {
+    rect->bottom -= 1;
+  } else if (hides_at(ABE_LEFT)) {
+    rect->left += 1;
+  } else if (hides_at(ABE_RIGHT)) {
+    rect->right -= 1;
+  }
+}
+
+LRESULT Win32Window::HitTest(POINT screen) const {
+  POINT point = screen;
+  ScreenToClient(window_handle_, &point);
+  RECT client;
+  GetClientRect(window_handle_, &client);
+  if (point.x < client.left || point.x >= client.right ||
+      point.y < client.top || point.y >= client.bottom) {
+    return HTNOWHERE;
+  }
+  // The top edge resizes the window, as a caption's top does, but not
+  // while it's maximized; its ends resize from the corners.
+  const int edge = ResizeEdge();
+  if (!Maximized() && point.y < edge) {
+    if (point.x < edge * 2) {
+      return HTTOPLEFT;
+    }
+    if (point.x >= client.right - edge * 2) {
+      return HTTOPRIGHT;
+    }
+    return HTTOP;
+  }
+  const double scale = FlutterDesktopGetDpiForHWND(window_handle_) / 96.0;
+  const double x = point.x / scale;
+  const double y = point.y / scale;
+  for (int i = 0; i < 3; i++) {
+    if (has_buttons_[i] && buttons_[i].Contains(x, y)) {
+      return kButtonHits[i];
+    }
+  }
+  if (!band_.Contains(x, y)) {
+    return HTCLIENT;
+  }
+  for (const Box& hole : holes_) {
+    if (hole.Contains(x, y)) {
+      return HTCLIENT;
+    }
+  }
+  return HTCAPTION;
+}
+
+void Win32Window::SetButtons(Button hovered, Button pressed) {
+  if (hovered == hovered_ && pressed == pressed_) {
+    return;
+  }
+  hovered_ = hovered;
+  pressed_ = pressed;
+  OnButtonsChanged(hovered, pressed);
+}
+
+// static
+LRESULT CALLBACK Win32Window::ContentProc(HWND window, UINT message,
+                                          WPARAM wparam, LPARAM lparam,
+                                          UINT_PTR id,
+                                          DWORD_PTR self) noexcept {
+  if (message == WM_NCHITTEST) {
+    auto that = reinterpret_cast<Win32Window*>(self);
+    if (that->HitTest({GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)}) !=
+        HTCLIENT) {
+      // The caption's, a button's, or the top edge's: the window under
+      // this one, which is the app's own, answers.
+      return HTTRANSPARENT;
+    }
+  } else if (message == WM_NCDESTROY) {
+    RemoveWindowSubclass(window, ContentProc, id);
+  }
+  return DefSubclassProc(window, message, wparam, lparam);
 }
 
 void Win32Window::UpdateTheme(HWND const window) {

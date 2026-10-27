@@ -15,6 +15,7 @@ import 'sign_in.dart';
 import 'theme.dart';
 import 'updates.dart';
 import 'vault.dart';
+import 'window_chrome.dart';
 
 final measuring = testSetting('PB_MEASURE') == '1';
 var _readyReported = false;
@@ -43,6 +44,9 @@ Future<void> main() async {
     unawaited(SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge));
   }
   await Core.openOnThisDevice();
+  // How the window's top is drawn on a computer (window_chrome.dart), known
+  // before the first frame, so the app opens as it stays.
+  await WindowFrameKeeper.instance.load();
   if (measuring) {
     SchedulerBinding.instance.addPostFrameCallback((_) {
       report('first-frame ${DateTime.now().microsecondsSinceEpoch}');
@@ -99,6 +103,10 @@ class _PassBundleAppState extends State<PassBundleApp> {
 
   /// Leaving the screen and coming back (on phones, the app switcher and home).
   late final AppLifecycleListener lifecycle;
+
+  /// Each state's pages, for the window's buttons (window_chrome.dart): each
+  /// state has a MaterialApp, and so a Navigator, of its own.
+  final pages = <Object?, WindowPages>{};
 
   @override
   void initState() {
@@ -186,6 +194,7 @@ class _PassBundleAppState extends State<PassBundleApp> {
     final server = state['server'] as String?;
     final email = state['email'] as String?;
     final Widget home;
+    var vault = false;
     if (state['state'] == 'signedOut' || signingInAgain) {
       home = SignInScreen(
         server: server,
@@ -211,6 +220,7 @@ class _PassBundleAppState extends State<PassBundleApp> {
         },
       );
     } else {
+      vault = true;
       home = VaultScreen(
         key: const ValueKey('vault'),
         core: core,
@@ -230,10 +240,19 @@ class _PassBundleAppState extends State<PassBundleApp> {
       if (measuring && !_readyReported) {
         _readyReported = true;
         WidgetsBinding.instance.addPostFrameCallback(
-          (_) => Timer(const Duration(seconds: 1), () => report('ready')),
+          (_) => Timer(const Duration(seconds: 1), () {
+            // How big the app's view is, in points: the window tests
+            // (tools/mac-window-test.sh) check it's the whole window, with
+            // no title bar over it.
+            final view = WidgetsBinding.instance.platformDispatcher.views.first;
+            final size = view.physicalSize / view.devicePixelRatio;
+            report('view ${size.width.round()}x${size.height.round()}');
+            report('ready');
+          }),
         );
       }
     }
+    final shown = pages.putIfAbsent(state['state'], WindowPages.new);
     return Listener(
       onPointerDown: (_) => used(),
       onPointerMove: (_) => used(),
@@ -244,13 +263,23 @@ class _PassBundleAppState extends State<PassBundleApp> {
         // the vault (an item's editor, a menu) at once, with no fade.
         key: ValueKey(state['state']),
         title: 'PassBundle',
+        navigatorObservers: [shown],
         debugShowCheckedModeBanner: false,
         theme: passBundleTheme(Brightness.light),
         darkTheme: passBundleTheme(Brightness.dark),
         themeMode: mode,
         // The ground behind everything too, so switching between light and
-        // dark never shows what's behind the app.
-        builder: (context, child) => SystemBars(child: Ground(child: child!)),
+        // dark never shows what's behind the app. On a computer, the app
+        // draws the window's top: the wide vault's band, or a strip.
+        builder: (context, child) => SystemBars(
+          child: Ground(
+            child: WindowChrome(
+              integrated: vault && isWide(context),
+              pages: shown,
+              child: child!,
+            ),
+          ),
+        ),
         home: home,
       ),
     );
