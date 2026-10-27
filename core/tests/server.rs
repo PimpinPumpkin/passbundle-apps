@@ -1466,6 +1466,8 @@ fn a_sign_in_from_another_device_is_approved_in_the_app_and_the_key_reaches_only
     ));
     assert_eq!(read_answer(&url, &asking, &id, &code), (200, None));
 
+    // The wrong phrase used the confirmation up: once more.
+    app.confirm_with_master_password(PASSWORD).unwrap();
     app.answer_sign_in_request(&id, &request.fingerprint, true)
         .unwrap();
     assert!(app.sign_in_requests().unwrap().is_empty());
@@ -1495,7 +1497,8 @@ fn a_sign_in_from_another_device_is_approved_in_the_app_and_the_key_reaches_only
     assert!(token["access_token"].is_string());
 
     // One confirmation, one approval; biometrics confirm too (the OS's
-    // stored user key, given back while unlocked), but only this vault's key.
+    // stored user key, given back for the approval), but only this vault's
+    // key, and unlocking with it again isn't confirming.
     let (second, _, second_code) = ask_to_sign_in(&url, &email, &asking);
     let phrase = app.sign_in_requests().unwrap()[0].fingerprint.clone();
     assert_eq!(
@@ -1503,22 +1506,45 @@ fn a_sign_in_from_another_device_is_approved_in_the_app_and_the_key_reaches_only
         Err(Error::ConfirmFirst)
     );
     assert!(matches!(
-        app.unlock_with_key(SymmetricKey::generate()),
+        app.confirm_approval_with_key(SymmetricKey::generate()),
         Err(Error::Refused(_))
     ));
     app.unlock_with_key(SymmetricKey::from_bytes(&user_key).unwrap())
         .unwrap();
-    // Denying needs no confirmation, and sends no key: the request is gone.
+    assert_eq!(
+        app.answer_sign_in_request(&second, &phrase, true),
+        Err(Error::ConfirmFirst)
+    );
+    // A confirmation is used up by a denial too. Denying needs none, and
+    // sends no key: the request is gone.
+    app.confirm_approval_with_key(SymmetricKey::from_bytes(&user_key).unwrap())
+        .unwrap();
     app.answer_sign_in_request(&second, "", false).unwrap();
     assert!(app.sign_in_requests().unwrap().is_empty());
     assert_eq!(read_answer(&url, &asking, &second, &second_code).0, 400);
+    let (fourth, _, _) = ask_to_sign_in(&url, &email, &asking);
+    let phrase = app.sign_in_requests().unwrap()[0].fingerprint.clone();
+    assert_eq!(
+        app.answer_sign_in_request(&fourth, &phrase, true),
+        Err(Error::ConfirmFirst)
+    );
+    // And by an approval that went wrong (the wrong phrase).
+    app.confirm_with_master_password(PASSWORD).unwrap();
+    assert!(app
+        .answer_sign_in_request(&fourth, "not-the-phrase-shown-here", true)
+        .is_err());
+    assert_eq!(
+        app.answer_sign_in_request(&fourth, &phrase, true),
+        Err(Error::ConfirmFirst)
+    );
 
-    // Turned off on this device, approving doesn't ask.
+    // Turned off on this device (which needs confirming first), approving
+    // doesn't ask.
+    assert_eq!(app.set_confirm_approvals(false), Err(Error::ConfirmFirst));
+    app.confirm_with_master_password(PASSWORD).unwrap();
     app.set_confirm_approvals(false).unwrap();
     assert!(!app.confirm_approvals());
-    let (third, _, _) = ask_to_sign_in(&url, &email, &asking);
-    let phrase = app.sign_in_requests().unwrap()[0].fingerprint.clone();
-    app.answer_sign_in_request(&third, &phrase, true).unwrap();
+    app.answer_sign_in_request(&fourth, &phrase, true).unwrap();
 
     // Another account never sees them.
     let other = new_email("approval-other");

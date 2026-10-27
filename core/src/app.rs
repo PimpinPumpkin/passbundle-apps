@@ -390,17 +390,6 @@ impl App {
     /// KDF. A key that no longer opens it (the account's keys changed) is
     /// refused, and the caller turns that unlock off.
     pub fn unlock_with_key(&mut self, key: SymmetricKey) -> Result<()> {
-        // Unlocked already: the key is the person confirming it's them
-        // (biometrics, to approve a sign-in), if it's this vault's.
-        if let Some(vault) = &self.vault {
-            if !same_key(vault.user_key(), &key) {
-                return Err(Error::Refused(
-                    "that unlock is out of date; use your master password, then turn it on again",
-                ));
-            }
-            self.confirmed = Some(Instant::now());
-            return Ok(());
-        }
         let text = self.store.sync().ok_or(Error::SignedOut)?;
         match Vault::open(&Sync::from_json(&text)?, key) {
             Ok(vault) => {
@@ -697,17 +686,73 @@ impl App {
         self.store.approvals().confirm
     }
 
+    /// Turning it on needs nothing; turning it off needs the person to have
+    /// confirmed it's them in the last minute (as approving does), and uses
+    /// that confirmation up, so nobody at an unlocked device turns it off and
+    /// approves without them.
     pub fn set_confirm_approvals(&mut self, confirm: bool) -> Result<()> {
+        if !confirm && self.confirm_approvals() {
+            let confirmed = self.take_confirmation();
+            if !confirmed {
+                return Err(Error::ConfirmFirst);
+            }
+        }
         self.store
             .save_approvals(&crate::store::Approvals { confirm })
     }
 
-    /// The master password, as the person confirming it's them to approve a
-    /// sign-in. Biometrics confirm through `unlock_with_key` while unlocked.
+    /// Whether the person confirmed it's them in the last minute; either way
+    /// the confirmation is used up.
+    fn take_confirmation(&mut self) -> bool {
+        self.confirmed
+            .take()
+            .is_some_and(|at| at.elapsed() < CONFIRMATION_LASTS)
+    }
+
+    /// The master password, as the person confirming it's them, to approve a
+    /// sign-in or turn off asking for that.
     pub fn confirm_with_master_password(&mut self, password: &str) -> Result<()> {
+        self.confirmed = None;
         self.check_master_password(password)?;
         self.confirmed = Some(Instant::now());
         Ok(())
+    }
+
+    /// Biometrics, as the person confirming it's them for the same: the user
+    /// key the OS kept for biometric unlock (the phone's Keystore or
+    /// Keychain), given back after its prompt, must be the open vault's
+    /// (compared in constant time). Only the approval prompt's own call comes
+    /// here, never unlocking or a passkey's check that it's the person. A
+    /// key that isn't this vault's means that unlock is out of date.
+    pub fn confirm_approval_with_key(&mut self, key: SymmetricKey) -> Result<()> {
+        self.confirmed = None;
+        let vault = self.vault.as_ref().ok_or(Error::SignedOut)?;
+        if !same_key(vault.user_key(), &key) {
+            return Err(Error::Refused(
+                "that unlock is out of date; use your master password, then turn it on again",
+            ));
+        }
+        self.confirmed = Some(Instant::now());
+        Ok(())
+    }
+
+    /// On a computer: Windows Hello or Touch ID through the desktop agent,
+    /// its prompt saying it's to approve a sign-in, then
+    /// `confirm_approval_with_key`. False if the person cancelled. A key that
+    /// no longer opens the vault turns that unlock off, as unlocking does.
+    pub fn confirm_approval_with_biometric(&mut self) -> Result<bool> {
+        self.confirmed = None;
+        let mut agent = self.agent()?;
+        let Some(key) = agent.unlock_to_approve()? else {
+            return Ok(false);
+        };
+        match self.confirm_approval_with_key(key) {
+            Err(Error::Refused(why)) => {
+                let _ = agent.remove();
+                Err(Error::Refused(why))
+            }
+            other => other.map(|()| true),
+        }
     }
 
     /// Sign-in requests waiting for this account's answer, newest first,
@@ -787,6 +832,19 @@ impl App {
         fingerprint: &str,
         approve: bool,
     ) -> Result<()> {
+        let answered = self.answer_sign_in_request_once(id, fingerprint, approve);
+        // One confirmation, one answer: used up by an approval, a denial, or
+        // anything that went wrong.
+        self.confirmed = None;
+        answered
+    }
+
+    fn answer_sign_in_request_once(
+        &mut self,
+        id: &str,
+        fingerprint: &str,
+        approve: bool,
+    ) -> Result<()> {
         let request = self
             .kept_sign_in_requests()
             .into_iter()
@@ -833,9 +891,6 @@ impl App {
             None
         };
         server.answer_sign_in_request(session, id, wrapped.as_ref())?;
-        if approve {
-            self.confirmed = None;
-        }
         if let Some((_, requests)) = &mut self.sign_in_requests {
             requests.retain(|r| r.id != id);
         }

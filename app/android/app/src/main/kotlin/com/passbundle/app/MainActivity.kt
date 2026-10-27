@@ -78,8 +78,13 @@ class MainActivity : FlutterActivity() {
                             result.success(mapOf("ok" to (error == null), "on" to on, "error" to error))
                         }
                     "biometricUnlock" ->
-                        Biometric.unlock(this, call.argument<String>("reason") ?: "Unlock PassBundle") { unlocked, error ->
+                        Biometric.unlock(this) { unlocked, error ->
                             result.success(mapOf("ok" to (error == null), "unlocked" to unlocked, "error" to error))
+                        }
+                    // Confirming it's the person, to approve a sign-in from another device.
+                    "biometricConfirmApproval" ->
+                        Biometric.unlock(this, "Approve sign-in", forApproval = true) { confirmed, error ->
+                            result.success(mapOf("ok" to (error == null), "confirmed" to confirmed, "error" to error))
                         }
                     // Tests only: debug builds' stand-in for Android's prompt (false in a release build).
                     "biometricStandIn" -> result.success(Biometric.useStandIn(this, call.argument<Boolean>("on") == true))

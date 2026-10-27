@@ -117,6 +117,9 @@ class Core {
   late final _bioRemove = _lib.lookupFunction<_Str0, _Str0>(
     'pb_biometric_remove',
   );
+  late final _bioConfirmApproval = _lib.lookupFunction<_Str0, _Str0>(
+    'pb_confirm_approval_with_biometric',
+  );
   late final _state = _lib.lookupFunction<_Str0, _Str0>('pb_state');
   late final _servers = _lib.lookupFunction<_Str0, _Str0>('pb_servers');
   late final _signIn = _lib.lookupFunction<_Str3, _Str3>('pb_sign_in');
@@ -505,12 +508,19 @@ class Core {
       ? Answer(await _onPhone('biometricEnroll'))
       : _background((c) => c._answer(c._bioEnroll()));
 
-  /// Unlocks with it; `unlocked` is false if the person cancelled. While
-  /// unlocked, it's the person confirming it's them (approving a sign-in),
-  /// and a phone's prompt says [reason].
-  static Future<Answer> unlockWithBiometric({String? reason}) async => isPhone
-      ? Answer(await _onPhone('biometricUnlock', {'reason': ?reason}))
+  /// Unlocks with it; `unlocked` is false if the person cancelled.
+  static Future<Answer> unlockWithBiometric() async => isPhone
+      ? Answer(await _onPhone('biometricUnlock'))
       : _background((c) => c._answer(c._bioUnlock()));
+
+  /// The same biometrics, as the person confirming it's them to approve a
+  /// sign-in (or to turn off asking for that), and nothing else: its prompt
+  /// says "Approve sign-in" where the OS shows the app's words, and the core
+  /// only compares the key with the open vault's. `confirmed` is false if
+  /// the person cancelled.
+  static Future<Answer> confirmApprovalWithBiometric() async => isPhone
+      ? Answer(await _onPhone('biometricConfirmApproval'))
+      : _background((c) => c._answer(c._bioConfirmApproval()));
 
   /// Turns it off, for the browser extension too (on a computer).
   static Future<Answer> removeBiometric() async => isPhone

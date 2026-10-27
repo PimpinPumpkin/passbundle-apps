@@ -57,9 +57,13 @@ import UniformTypeIdentifiers
           result(["ok": error == nil, "on": on, "error": error as Any])
         }
       case "biometricUnlock":
-        let reason = (call.arguments as? [String: Any])?["reason"] as? String ?? "Unlock PassBundle"
-        Biometric.unlock(reason: reason) { unlocked, error in
+        Biometric.unlock { unlocked, error in
           result(["ok": error == nil, "unlocked": unlocked, "error": error as Any])
+        }
+      // Confirming it's the person, to approve a sign-in from another device.
+      case "biometricConfirmApproval":
+        Biometric.unlock(reason: "Approve sign-in", forApproval: true) { confirmed, error in
+          result(["ok": error == nil, "confirmed": confirmed, "error": error as Any])
         }
       // Tests only: debug builds' stand-in for the Face ID prompt (false in a release build).
       case "biometricStandIn":
@@ -259,10 +263,13 @@ enum Biometric {
 
   /// Unlocks: reading the key asks for Face ID or Touch ID, then the core
   /// opens the kept vault with it. `done(unlocked, error)`: unlocked is false
-  /// if the person cancelled. While unlocked, the core takes the key as the
-  /// person confirming it's them (approving a sign-in from another device),
-  /// and the prompt says `reason`.
-  static func unlock(reason: String = "Unlock PassBundle", _ done: @escaping (Bool, String?) -> Void) {
+  /// if the person cancelled. With `forApproval`, it's the person confirming
+  /// it's them to approve a sign-in from another device, and nothing else:
+  /// the core only compares the key with the open vault's
+  /// (`pb_confirm_approval_with_key`), and the prompt says `reason`.
+  static func unlock(
+    reason: String = "Unlock PassBundle", forApproval: Bool = false, _ done: @escaping (Bool, String?) -> Void
+  ) {
     DispatchQueue.global(qos: .userInitiated).async {
       let context = LAContext()
       context.localizedReason = reason
@@ -276,7 +283,9 @@ enum Biometric {
         case errSecSuccess:
           guard var key = found as? Data else { return done(false, "Couldn't unlock with \(method()).") }
           let why = key.withUnsafeBytes { raw -> String in
-            guard let answer = pb_unlock_with_key(raw.bindMemory(to: UInt8.self).baseAddress, raw.count) else {
+            let bytes = raw.bindMemory(to: UInt8.self).baseAddress
+            let given = forApproval ? pb_confirm_approval_with_key(bytes, raw.count) : pb_unlock_with_key(bytes, raw.count)
+            guard let answer = given else {
               return "Couldn't unlock with \(method())."
             }
             defer { pb_free(answer) }

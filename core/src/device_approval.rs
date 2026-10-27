@@ -38,6 +38,10 @@ const PHRASE_WORDS: usize = 5;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SignInRequest {
     pub id: String,
+    /// The requesting device's identifier, so the app prompts once per
+    /// device, and shows a request it sent again ("Resend") in its place.
+    /// Empty from a server that doesn't say.
+    pub device_id: String,
     /// The requesting device, in words ("Web vault in Chrome").
     pub device: String,
     /// Its address, as the server saw it.
@@ -236,6 +240,10 @@ pub fn parse_request(value: &Value, email: &str, server_now: u64) -> Option<Sign
     Some(SignInRequest {
         fingerprint: fingerprint_phrase(email, &public_key),
         id,
+        device_id: value["requestDeviceIdentifier"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned(),
         device: device_words(value["requestDeviceType"].as_str().unwrap_or_default()),
         ip: value["requestIpAddress"]
             .as_str()
@@ -363,6 +371,7 @@ mod tests {
     fn request_at(v: &Value, created: &str) -> Value {
         json!({
             "id": "6f1c2b0e-0000-4000-8000-000000000001",
+            "requestDeviceIdentifier": "2f9e3c1a-0000-4000-8000-0000000000aa",
             "publicKey": v["request"]["publicKey"],
             "requestDeviceType": "Chrome",
             "requestIpAddress": "203.0.113.7",
@@ -385,6 +394,7 @@ mod tests {
             v["fingerprints"][0]["phrase"].as_str().unwrap()
         );
         assert_eq!(request.device, "Web vault in Chrome");
+        assert_eq!(request.device_id, "2f9e3c1a-0000-4000-8000-0000000000aa");
         assert_eq!(request.ip, "203.0.113.7");
         assert_eq!((request.age, request.left), (60, 14 * 60));
         assert_eq!(

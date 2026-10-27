@@ -2,10 +2,12 @@
 // sign-in"; DESIGN.md in the meta repo): someone signing in on the web vault
 // or the browser extension picks "Log in with device", and approves it here.
 // While the vault is open and the app is on screen, it asks the server every
-// 10 seconds for sign-ins waiting for this account's answer, and shows each
-// new one once, as a prompt over the vault; Settings lists them all. The core
-// makes the fingerprint phrase, wraps the key, and refuses an approval the
-// person didn't confirm; this only draws, and asks.
+// 10 seconds for sign-ins waiting for this account's answer, and prompts over
+// the vault once per requesting device every 15 minutes (a request sent again
+// shows in the open prompt's place, with its new phrase); Settings lists them
+// all. The core makes the fingerprint phrase, wraps the key, and refuses an
+// approval, or turning off confirming, that the person didn't confirm; this
+// only draws, and asks.
 //
 // Phones show a request while PassBundle is open, or the next time it opens:
 // a prompt while it's closed needs push notifications, which wait on
@@ -22,6 +24,7 @@ import 'widgets.dart';
 class SignInRequest {
   SignInRequest(Map<String, dynamic> json, {DateTime? listedAt})
     : id = json['id'] as String,
+      deviceId = json['deviceId'] as String? ?? '',
       device = json['device'] as String? ?? 'A device',
       ip = json['ip'] as String? ?? '',
       fingerprint = json['fingerprint'] as String,
@@ -30,6 +33,14 @@ class SignInRequest {
       _listedAt = listedAt ?? signInClock();
 
   final String id;
+
+  /// The requesting device's identifier (empty from a server that doesn't
+  /// say).
+  final String deviceId;
+
+  /// Which device asked, for prompting once per device: its identifier, or
+  /// the request where there's none.
+  String get asker => deviceId.isEmpty ? id : deviceId;
 
   /// The requesting device, in words ("Web vault in Chrome").
   final String device;
@@ -84,7 +95,9 @@ abstract class SignInRequestSource {
 
   /// Whether this device asks them to before approving.
   bool get confirmApprovals;
-  set confirmApprovals(bool on);
+
+  /// Turning it off needs a confirmation just now (`confirmFirst`).
+  Answer setConfirmApprovals(bool on);
 }
 
 /// The core's.
@@ -100,10 +113,8 @@ class CoreSignInRequests implements SignInRequestSource {
   Future<bool> confirm(BuildContext context) async {
     final status = await Core.biometricStatus();
     if (status['status'] == 'setUp') {
-      final answer = await whileBusy(
-        () => Core.unlockWithBiometric(reason: 'Approve sign-in'),
-      );
-      if (answer.ok && answer.body['unlocked'] == true) return true;
+      final answer = await whileBusy(Core.confirmApprovalWithBiometric);
+      if (answer.ok && answer.body['confirmed'] == true) return true;
     }
     if (!context.mounted) return false;
     return await showDialog<bool>(
@@ -117,12 +128,13 @@ class CoreSignInRequests implements SignInRequestSource {
   bool get confirmApprovals => Core().confirmApprovals();
 
   @override
-  set confirmApprovals(bool on) => Core().setConfirmApprovals(on);
+  Answer setConfirmApprovals(bool on) => Core().setConfirmApprovals(on);
 }
 
 /// The requests waiting, asked for every 10 seconds while the vault is open
-/// and the app is on screen ([start], [pause], [resume], [stop]). Each new
-/// one is prompted for once ([unprompted]).
+/// and the app is on screen ([start], [pause], [resume], [stop]). Each
+/// requesting device is prompted for once every 15 minutes ([unprompted]),
+/// so sending again ("Resend") can't keep the prompts coming.
 class SignInRequests extends ChangeNotifier {
   SignInRequests([SignInRequestSource? source])
     : source = source ?? CoreSignInRequests();
@@ -130,6 +142,12 @@ class SignInRequests extends ChangeNotifier {
   SignInRequestSource source;
   List<SignInRequest> requests = const [];
   final _prompted = <String>{};
+
+  /// When each requesting device was last prompted for.
+  final _promptedDevices = <String, DateTime>{};
+
+  /// How long a device isn't prompted for again: a request's lifetime.
+  static const promptEvery = Duration(minutes: 15);
   Timer? _timer;
   bool _asking = false;
   bool _running = false;
@@ -174,6 +192,7 @@ class SignInRequests extends ChangeNotifier {
     pause();
     requests = const [];
     _prompted.clear();
+    _promptedDevices.clear();
     notifyListeners();
   }
 
@@ -200,10 +219,30 @@ class SignInRequests extends ChangeNotifier {
     }
   }
 
-  /// The next request not prompted for yet, now marked as prompted.
+  /// The next request to prompt for, now marked as prompted: one not
+  /// prompted for yet, from a device not prompted for in 15 minutes. Another
+  /// from such a device waits in Settings (or shows in its device's open
+  /// prompt, [replacing]).
   SignInRequest? unprompted() {
+    final now = signInClock();
     for (final r in requests) {
-      if (!r.expired && _prompted.add(r.id)) return r;
+      if (r.expired || !_prompted.add(r.id)) continue;
+      final last = _promptedDevices[r.asker];
+      if (last != null && now.difference(last) < promptEvery) continue;
+      _promptedDevices[r.asker] = now;
+      return r;
+    }
+    return null;
+  }
+
+  /// The request that took this one's place: still waiting, or the same
+  /// device's newer one (it sent it again), or none.
+  SignInRequest? replacing(SignInRequest request) {
+    for (final r in requests) {
+      if (r.id == request.id) return r;
+    }
+    for (final r in requests) {
+      if (r.asker == request.asker && !r.expired) return r;
     }
     return null;
   }
@@ -229,22 +268,21 @@ Future<void> reviewSignInRequest(
   SignInRequests? requests,
 }) async {
   final list = requests ?? signInRequests;
-  final done = await showDialog<String>(
+  final done = await showDialog<(String, SignInRequest)>(
     context: context,
     barrierDismissible: false,
-    builder: (_) => SignInRequestDialog(
-      request: request,
-      email: email,
-      source: list.source,
-    ),
+    builder: (_) =>
+        SignInRequestDialog(request: request, email: email, requests: list),
   );
   if (done == null || !context.mounted) return;
-  if (done != 'expired') list.answered(request.id);
+  final (what, shown) = done;
+  if (what == 'approved' || what == 'denied') list.answered(shown.id);
   ScaffoldMessenger.maybeOf(context)?.showSnackBar(
     SnackBar(
-      content: Text(switch (done) {
-        'approved' => 'Approved. ${request.device} is signing in.',
+      content: Text(switch (what) {
+        'approved' => 'Approved. ${shown.device} is signing in.',
         'denied' => 'Denied. That sign-in won\'t go ahead.',
+        'gone' => 'That sign-in request was answered elsewhere, or expired.',
         _ => 'That sign-in request expired.',
       }),
       duration: const Duration(seconds: 4),
@@ -253,18 +291,21 @@ Future<void> reviewSignInRequest(
 }
 
 /// The prompt: the fingerprint phrase first and largest, then the request's
-/// details; Approve, Deny, or Later. Pops "approved", "denied", "expired",
-/// or null for later.
+/// details; Approve, Deny, or Later. If the device sends its request again,
+/// the new one takes its place here, with its new phrase, and Approve waits
+/// a moment so it isn't tapped for the old one. Pops what happened
+/// ("approved", "denied", "expired", "gone") and the request shown, or null
+/// for later.
 class SignInRequestDialog extends StatefulWidget {
   const SignInRequestDialog({
     super.key,
     required this.request,
-    required this.source,
+    required this.requests,
     this.email,
   });
 
   final SignInRequest request;
-  final SignInRequestSource source;
+  final SignInRequests requests;
   final String? email;
 
   @override
@@ -273,17 +314,28 @@ class SignInRequestDialog extends StatefulWidget {
 
 class _SignInRequestDialogState extends State<SignInRequestDialog> {
   late final Timer ticker;
+  late SignInRequest request = widget.request;
   bool working = false;
   String? error;
+
+  /// The device sent it again: the phrase shown is the new request's.
+  bool replaced = false;
+  DateTime? holdApproveUntil;
+
+  /// How long Approve waits after the request changed under it.
+  static const hold = Duration(seconds: 3);
+
+  SignInRequestSource get source => widget.requests.source;
 
   @override
   void initState() {
     super.initState();
+    widget.requests.addListener(listed);
     // The time left, and closing when it's up.
     ticker = Timer.periodic(const Duration(seconds: 1), (_) {
       if (!mounted) return;
-      if (widget.request.expired && !working) {
-        Navigator.of(context).pop('expired');
+      if (request.expired && !working) {
+        Navigator.of(context).pop(('expired', request));
         return;
       }
       setState(() {});
@@ -292,35 +344,58 @@ class _SignInRequestDialogState extends State<SignInRequestDialog> {
 
   @override
   void dispose() {
+    widget.requests.removeListener(listed);
     ticker.cancel();
     super.dispose();
   }
 
+  /// The list changed: the same request, the device's new one, or none.
+  void listed() {
+    if (!mounted || working) return;
+    final next = widget.requests.replacing(request);
+    if (next == null) {
+      Navigator.of(context).pop(('gone', request));
+      return;
+    }
+    if (next.id == request.id) return;
+    setState(() {
+      request = next;
+      replaced = true;
+      error = null;
+      holdApproveUntil = signInClock().add(hold);
+    });
+  }
+
+  bool get holding {
+    final until = holdApproveUntil;
+    return until != null && signInClock().isBefore(until);
+  }
+
   Future<void> answer(bool approve) async {
-    if (working) return;
+    if (working || (approve && holding)) return;
     setState(() {
       working = true;
       error = null;
     });
-    final r = widget.request;
-    if (approve && widget.source.confirmApprovals) {
-      final confirmed = await widget.source.confirm(context);
+    final r = request;
+    if (approve && source.confirmApprovals) {
+      final confirmed = await source.confirm(context);
       if (!mounted) return;
       if (!confirmed) {
         setState(() => working = false);
         return;
       }
     }
-    var answer = await widget.source.answer(r.id, r.fingerprint, approve);
+    var answer = await source.answer(r.id, r.fingerprint, approve);
     // Confirmed too long ago (the prompt sat open): once more.
     if (approve && answer.body['confirmFirst'] == true && mounted) {
-      if (await widget.source.confirm(context) && mounted) {
-        answer = await widget.source.answer(r.id, r.fingerprint, approve);
+      if (await source.confirm(context) && mounted) {
+        answer = await source.answer(r.id, r.fingerprint, approve);
       }
     }
     if (!mounted) return;
     if (answer.ok) {
-      Navigator.of(context).pop(approve ? 'approved' : 'denied');
+      Navigator.of(context).pop((approve ? 'approved' : 'denied', r));
       return;
     }
     setState(() {
@@ -331,7 +406,7 @@ class _SignInRequestDialogState extends State<SignInRequestDialog> {
 
   @override
   Widget build(BuildContext context) {
-    final r = widget.request;
+    final r = request;
     final colors = context.colors;
     final scheme = Theme.of(context).colorScheme;
     final email = widget.email;
@@ -386,6 +461,18 @@ class _SignInRequestDialogState extends State<SignInRequestDialog> {
                   ),
                 ),
               ),
+              if (replaced) ...[
+                const SizedBox(height: 8),
+                Text(
+                  'Sent again from the same device. The phrase is new: '
+                  'compare it again.',
+                  key: const ValueKey('sign-in-replaced'),
+                  style: TextStyle(
+                    color: scheme.primary,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
               const SizedBox(height: 8),
               const Text(
                 'Approve only if this matches the phrase on the device '
@@ -414,10 +501,15 @@ class _SignInRequestDialogState extends State<SignInRequestDialog> {
           onPressed: working ? null : () => answer(false),
           child: const Text('Deny'),
         ),
-        WorkingButton(
-          label: 'Approve',
-          working: working,
-          onPressed: () => answer(true),
+        FilledButton(
+          onPressed: working || holding ? null : () => answer(true),
+          child: working
+              ? const SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : const Text('Approve'),
         ),
       ],
     );
@@ -518,6 +610,9 @@ class _SignInRequestsSettingsState extends State<SignInRequestsSettings> {
   SignInRequests get requests => widget.requests ?? signInRequests;
   late bool confirm = requests.source.confirmApprovals;
 
+  /// Why turning confirming off didn't work.
+  String? note;
+
   @override
   void initState() {
     super.initState();
@@ -544,8 +639,10 @@ class _SignInRequestsSettingsState extends State<SignInRequestsSettings> {
     return SettingsGroup(
       title: 'Sign-in requests',
       footer:
+          note ??
           'When you choose "Log in with device" on the web vault or in the '
-          'browser extension, approve it here.${isPhone ? ' Requests show while PassBundle is open.' : ''}',
+              'browser extension, approve it here.${isPhone ? ' Requests show while PassBundle is open.' : ''}',
+      footerColor: note == null ? null : Theme.of(context).colorScheme.error,
       children: [
         if (waiting.isEmpty)
           const ListTile(title: Text('None waiting'))
@@ -574,9 +671,16 @@ class _SignInRequestsSettingsState extends State<SignInRequestsSettings> {
         SwitchListTile(
           key: const ValueKey('confirm-approvals'),
           value: confirm,
-          onChanged: (on) {
-            requests.source.confirmApprovals = on;
-            setState(() => confirm = requests.source.confirmApprovals);
+          onChanged: (on) async {
+            // Turning it off asks the person to confirm it's them first,
+            // and the core holds to that.
+            if (!on && !await requests.source.confirm(context)) return;
+            final answer = requests.source.setConfirmApprovals(on);
+            if (!mounted) return;
+            setState(() {
+              confirm = requests.source.confirmApprovals;
+              note = answer.ok ? null : answer.error;
+            });
           },
           title: const Text('Confirm before approving'),
           subtitle: Text(

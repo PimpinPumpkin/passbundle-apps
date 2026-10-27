@@ -137,6 +137,27 @@ pub fn unlock_with_key<'caller>(
         .resolve::<ThrowRuntimeExAndDefault>()
 }
 
+/// The user key Kotlin opened after the person's biometrics, given back to
+/// confirm it's them approving a sign-in, never to unlock: "" if it's the
+/// open vault's, else the words to show (null only if JNI itself failed).
+#[cfg(feature = "ffi")]
+#[jni_mangle("com.passbundle.app.Core")]
+pub fn confirm_approval_with_key<'caller>(
+    mut unowned_env: EnvUnowned<'caller>,
+    _class: JClass<'caller>,
+    key: JByteArray<'caller>,
+) -> jstring {
+    unowned_env
+        .with_env(|env| -> JniResult<jstring> {
+            let key = Zeroizing::new(env.convert_byte_array(&key)?);
+            match crate::ffi::confirm_approval_with_key_for_biometric(&key) {
+                Ok(()) => Ok(env.new_string("")?.into_raw()),
+                Err(why) => Ok(env.new_string(why)?.into_raw()),
+            }
+        })
+        .resolve::<ThrowRuntimeExAndDefault>()
+}
+
 /// Opens the core on the app's own folder unless it's open: the autofill
 /// service can start the app's process without its screens (or Dart).
 #[cfg(feature = "ffi")]

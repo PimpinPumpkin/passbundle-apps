@@ -3,8 +3,10 @@
 // fingerprint phrase first, with the device, its address, and the time left;
 // approving asks the person to confirm it's them first where the device says
 // so, and sends nothing if they don't; denying asks nothing; an expired
-// request closes itself; each new request is prompted for once; and Settings
-// lists the waiting ones. The core's side (the phrase, the key, refusing an
+// request closes itself, and one answered elsewhere too; each device is
+// prompted for once every 15 minutes, and a request it sends again takes the
+// open prompt's place, with Approve held a moment; and Settings lists the
+// waiting ones, and asks to confirm before turning confirming off. The core's side (the phrase, the key, refusing an
 // approval nobody confirmed) has its own tests, against a real server, and
 // the meta repo's end-to-end test approves a real web vault's sign-in.
 import 'package:flutter/material.dart';
@@ -18,11 +20,18 @@ import 'support.dart';
 
 const phrase = 'caretaker-uncaring-constrain-rind-dove';
 
-Map<String, dynamic> waiting(String id, {int age = 30, int left = 870}) => {
+Map<String, dynamic> waiting(
+  String id, {
+  int age = 30,
+  int left = 870,
+  String? deviceId,
+  String fingerprint = phrase,
+}) => {
   'id': id,
+  'deviceId': deviceId ?? 'device-$id',
   'device': 'Web vault in Chrome',
   'ip': '203.0.113.7',
-  'fingerprint': phrase,
+  'fingerprint': fingerprint,
   'ageSeconds': age,
   'secondsLeft': left,
 };
@@ -38,6 +47,14 @@ class StandIn implements SignInRequestSource {
 
   @override
   bool confirmApprovals = true;
+  final confirmChanges = <bool>[];
+
+  @override
+  Answer setConfirmApprovals(bool on) {
+    confirmChanges.add(on);
+    confirmApprovals = on;
+    return Answer({'ok': true});
+  }
 
   @override
   Future<Answer> list() async => Answer({'ok': true, 'requests': requests});
@@ -67,9 +84,10 @@ class StandIn implements SignInRequestSource {
 Future<SignInRequests> review(
   WidgetTester tester,
   StandIn source,
-  Map<String, dynamic> request,
-) async {
-  final list = SignInRequests(source);
+  Map<String, dynamic> request, {
+  SignInRequests? requests,
+}) async {
+  final list = requests ?? SignInRequests(source);
   await tester.pumpWidget(
     MaterialApp(
       theme: passBundleTheme(Brightness.light),
@@ -230,10 +248,25 @@ void main() {
       // Answered here, it's gone from the list at once.
       expect(find.byKey(const ValueKey('sign-in-request-r2')), findsNothing);
 
-      // Turning confirming off is this device's choice.
+      // Turning confirming off asks the person to confirm it's them first:
+      // not confirmed, it stays on.
+      source.confirmed = false;
       await tester.tap(find.byKey(const ValueKey('confirm-approvals')));
       await tester.pumpAndSettle();
+      expect(source.confirms, 1);
+      expect(source.confirmChanges, isEmpty);
+      expect(source.confirmApprovals, isTrue);
+      source.confirmed = true;
+      await tester.tap(find.byKey(const ValueKey('confirm-approvals')));
+      await tester.pumpAndSettle();
+      expect(source.confirms, 2);
+      expect(source.confirmChanges, [false]);
       expect(source.confirmApprovals, isFalse);
+      // Turning it back on asks nothing.
+      await tester.tap(find.byKey(const ValueKey('confirm-approvals')));
+      await tester.pumpAndSettle();
+      expect(source.confirms, 2);
+      expect(source.confirmChanges, [false, true]);
 
       // Nothing waiting: it says so.
       source.requests = [];
@@ -243,4 +276,88 @@ void main() {
       list.stop();
     },
   );
+
+  test('each device is prompted for once every 15 minutes', () async {
+    var now = DateTime(2026, 10, 26, 12);
+    signInClock = () => now;
+    final source = StandIn()
+      ..requests = [
+        waiting('a1', deviceId: 'laptop'),
+        waiting('b1', deviceId: 'phone'),
+      ];
+    final list = SignInRequests(source)..start();
+    await list.check();
+    expect(list.unprompted()?.id, 'a1');
+    expect(list.unprompted()?.id, 'b1');
+    expect(list.unprompted(), isNull);
+    // The laptop sends it again ("Resend"): no new prompt...
+    source.requests = [waiting('a2', deviceId: 'laptop')];
+    await list.check();
+    expect(list.unprompted(), isNull);
+    // ...nor for one more a minute later; after 15 minutes, a new one.
+    now = now.add(const Duration(minutes: 1));
+    source.requests = [waiting('a3', deviceId: 'laptop')];
+    await list.check();
+    expect(list.unprompted(), isNull);
+    now = now.add(const Duration(minutes: 15));
+    source.requests = [waiting('a4', deviceId: 'laptop')];
+    await list.check();
+    expect(list.unprompted()?.id, 'a4');
+    list.stop();
+  });
+
+  testWidgets(
+    'a request sent again takes the open prompt\'s place, with Approve held a moment',
+    (tester) async {
+      var now = DateTime(2026, 10, 26, 12);
+      signInClock = () => now;
+      const resent = 'amply-blizzard-dove-ladle-sprout';
+      final source = StandIn()..requests = [waiting('a1', deviceId: 'laptop')];
+      final list = SignInRequests(source)..start();
+      await tester.runAsync(list.check);
+      await review(
+        tester,
+        source,
+        waiting('a1', deviceId: 'laptop'),
+        requests: list,
+      );
+      expect(find.text(phrase), findsOneWidget);
+
+      source.requests = [
+        waiting('a2', deviceId: 'laptop', fingerprint: resent),
+      ];
+      await tester.runAsync(list.check);
+      await tester.pump();
+      expect(find.text(resent), findsOneWidget);
+      expect(find.byKey(const ValueKey('sign-in-replaced')), findsOneWidget);
+      // Held: tapping Approve does nothing yet.
+      await tester.tap(find.text('Approve'));
+      await tester.pump();
+      expect(source.confirms, 0);
+      now = now.add(const Duration(seconds: 4));
+      await tester.pump(const Duration(seconds: 1));
+      await tester.tap(find.text('Approve'));
+      await tester.pumpAndSettle();
+      expect(source.answered, [('a2', resent, true)]);
+      list.stop();
+    },
+  );
+
+  testWidgets('a request answered elsewhere closes its prompt', (tester) async {
+    final source = StandIn()..requests = [waiting('a1')];
+    final list = SignInRequests(source)..start();
+    await tester.runAsync(list.check);
+    await review(tester, source, waiting('a1'), requests: list);
+    expect(find.text('Approve sign-in?'), findsOneWidget);
+    source.requests = [];
+    await tester.runAsync(list.check);
+    await tester.pumpAndSettle();
+    expect(find.text('Approve sign-in?'), findsNothing);
+    expect(
+      find.text('That sign-in request was answered elsewhere, or expired.'),
+      findsOneWidget,
+    );
+    expect(source.answered, isEmpty);
+    list.stop();
+  });
 }

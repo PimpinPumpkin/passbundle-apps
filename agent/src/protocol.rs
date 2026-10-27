@@ -261,10 +261,18 @@ impl<'a> Connection<'a> {
                     json!(matches!(answer, Answer::Approved(()))),
                 );
             }
-            "unlockWithBiometricsForUser" => {
+            // Keykeeper: our app confirming it's the person, to approve a
+            // sign-in from another device: the same key, behind the same
+            // prompt, which says so where the OS shows our words (not
+            // Windows Hello's key prompt, which has its own).
+            "unlockWithBiometricsForUser" | "keykeeper.biometric.approve" => {
                 let mut unlocked = false;
                 if self.biometrics.is_enrolled(user_id) {
-                    let reason = format!("Unlock {} in {browser}", crate::brand::NAME);
+                    let reason = if command == "keykeeper.biometric.approve" {
+                        format!("Approve a sign-in to {}", crate::brand::NAME)
+                    } else {
+                        format!("Unlock {} in {browser}", crate::brand::NAME)
+                    };
                     match self
                         .gate
                         .prompt(now, || self.biometrics.unlock(user_id, &reason))
@@ -552,6 +560,29 @@ mod tests {
                 format!("Unlock {} in Chrome", crate::brand::NAME),
             ]
         );
+    }
+
+    #[test]
+    fn approving_a_sign_in_asks_with_its_own_words_and_returns_the_key() {
+        let fake = Fake::new(&["yes", "yes", "no"]);
+        let gate = PromptGate::default();
+        let mut connection = Connection::new(&fake, &gate, context()).with_clock(|| NOW);
+        let mut extension = Extension::new();
+        extension.setup(&mut connection, NOW).unwrap();
+        extension.call(&mut connection, enroll_message()).unwrap();
+
+        let approve = json!({ "command": "keykeeper.biometric.approve" });
+        let confirmed = extension.call(&mut connection, approve.clone()).unwrap();
+        assert_eq!(confirmed["response"], true);
+        assert_eq!(confirmed["userKeyB64"], STANDARD.encode(user_key()));
+        assert_eq!(
+            fake.reasons.lock().unwrap().last().unwrap(),
+            &format!("Approve a sign-in to {}", crate::brand::NAME)
+        );
+        // Declined, nothing comes back.
+        let declined = extension.call(&mut connection, approve).unwrap();
+        assert_eq!(declined["response"], false);
+        assert!(declined.get("userKeyB64").is_none());
     }
 
     #[test]

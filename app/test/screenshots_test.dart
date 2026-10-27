@@ -152,6 +152,9 @@ class _SignInRequests implements SignInRequestSource {
 
   @override
   bool confirmApprovals = true;
+
+  @override
+  Answer setConfirmApprovals(bool on) => Answer({'ok': true});
 }
 
 /// Android's updates, as Settings shows them there: this version, checked.

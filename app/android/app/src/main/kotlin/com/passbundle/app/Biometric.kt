@@ -202,11 +202,17 @@ object Biometric {
     /**
      * Unlocks: asks for the biometric, opens the user key, and hands it to the
      * core. `done(unlocked, error)`: unlocked is false if the person cancelled.
-     * While unlocked, the core takes the key as the person confirming it's
-     * them (approving a sign-in from another device), and the prompt says
-     * [title].
+     * With [forApproval], it's the person confirming it's them to approve a
+     * sign-in from another device, and nothing else: the core only compares
+     * the key with the open vault's (`Core.confirmApprovalWithKey`), and the
+     * prompt says [title].
      */
-    fun unlock(activity: Activity, title: String = "Unlock PassBundle", done: (Boolean, String?) -> Unit) {
+    fun unlock(
+        activity: Activity,
+        title: String = "Unlock PassBundle",
+        forApproval: Boolean = false,
+        done: (Boolean, String?) -> Unit,
+    ) {
         val bytes = runCatching { sealed.readBytes() }.getOrNull()
         val key = runCatching { keystore().getKey(ALIAS, null) as? SecretKey }.getOrNull()
         if (bytes == null || bytes.size <= IV_BYTES || key == null) {
@@ -239,7 +245,7 @@ object Biometric {
                 }
             val why =
                 try {
-                    Core.unlockWithKey(userKey)
+                    if (forApproval) Core.confirmApprovalWithKey(userKey) else Core.unlockWithKey(userKey)
                 } finally {
                     userKey.fill(0)
                 }
