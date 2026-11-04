@@ -61,8 +61,9 @@ pub struct Template {
     /// For a custom template: the item that defines it, and its organization.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<Source>,
-    /// For a copy an MSP sent: the MSP's name.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// For a copy an MSP keeps up to date: what its definition says. Never
+    /// shown as who sent it, since anyone who can edit the item could write it.
+    #[serde(skip)]
     pub from: Option<String>,
 }
 
@@ -366,12 +367,16 @@ pub fn custom(item: &Item) -> Option<Template> {
 }
 
 /// Templates to choose from, grouped as the web vault's New item picker
-/// groups them (templates.ts, `templateGroups`): each MSP's (once each,
-/// however many of its clients the person sees), then each organization's
-/// own (by the organization's name), then the person's own, then the
-/// built-in ones. Empty groups are left out. `may_use` says whether a
-/// template note's secrets may leave the core now (`App::may_use`: it
-/// doesn't ask for the master password again, or it was given).
+/// groups them (templates.ts, `templateGroups`): by where they are, each
+/// organization's (by the organization's name), then the person's own, then
+/// the built-in ones. Who a template came from isn't shown: anyone who can
+/// edit an item could write any name into it. A template an MSP copies into
+/// many clients is offered once, however many of them the person sees: a copy
+/// identical to one already offered in another organization (the MSP's own
+/// template, if the person sees it, or the first copy) is left out. Empty
+/// groups are left out. `may_use` says whether a template note's secrets may
+/// leave the core now (`App::may_use`: it doesn't ask for the master password
+/// again, or it was given).
 pub fn groups(vault: &Vault, may_use: impl Fn(&Item) -> bool) -> Vec<Group> {
     let by_name = |a: &Template, b: &Template| a.name.to_lowercase().cmp(&b.name.to_lowercase());
     // A hidden field's default is a secret like any other: someone the
@@ -392,30 +397,32 @@ pub fn groups(vault: &Vault, may_use: impl Fn(&Item) -> bool) -> Vec<Group> {
             Some(template)
         })
         .collect();
-    all.sort_by(by_name);
-    let (from_msp, custom): (Vec<Template>, Vec<Template>) = all.into_iter().partition(|t| {
-        t.from.is_some()
-            && t.source
-                .as_ref()
-                .is_some_and(|s| s.organization_id.is_some())
-    });
-    let mut groups = Vec::new();
-    let mut msps: Vec<String> = from_msp.iter().filter_map(|t| t.from.clone()).collect();
-    msps.sort_by_key(|m| m.to_lowercase());
-    msps.dedup();
-    for msp in msps {
-        let mut seen = std::collections::HashSet::new();
-        groups.push(Group {
-            name: format!("From {msp}"),
-            templates: from_msp
-                .iter()
-                .filter(|t| t.from.as_deref() == Some(msp.as_str()) && seen.insert(t.id.clone()))
-                .cloned()
-                .collect(),
-        });
-    }
+    let org_of = |t: &Template| t.source.as_ref().and_then(|s| s.organization_id.clone());
     let mut organizations: Vec<(&String, &String)> = vault.organizations.iter().collect();
     organizations.sort_by_key(|(_, name)| name.to_lowercase());
+    let place = |t: &Template| {
+        org_of(t)
+            .and_then(|org| organizations.iter().position(|(id, _)| **id == org))
+            .unwrap_or(organizations.len())
+    };
+    // Originals before copies, then by where they are, so the one offered is
+    // the original when the person sees it.
+    all.sort_by_key(|t| (t.from.is_some(), place(t)));
+    let same = |a: &Template, b: &Template| {
+        a.id == b.id && a.name == b.name && a.base == b.base && a.fields == b.fields
+    };
+    let mut offered: Vec<Template> = Vec::new();
+    for t in all {
+        let twin = offered
+            .iter()
+            .any(|o| org_of(o) != org_of(&t) && same(o, &t));
+        if !(t.from.is_some() && twin) {
+            offered.push(t);
+        }
+    }
+    offered.sort_by(by_name);
+    let custom = offered;
+    let mut groups = Vec::new();
     for (id, name) in organizations {
         let templates: Vec<Template> = custom
             .iter()

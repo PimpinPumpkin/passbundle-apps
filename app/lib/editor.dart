@@ -128,6 +128,10 @@ class _ItemEditorState extends State<ItemEditor> {
     for (final k in _identityParts.keys) k: TextEditingController(),
   };
   bool favorite = false;
+
+  /// Whether the person may change the item's websites: always for a new
+  /// item, and for an existing one only when they can see its passwords.
+  bool get websitesEditable => !editing || permissions['seePasswords'] == true;
   num? grant;
   bool hidden = true;
   String? folderId;
@@ -818,26 +822,40 @@ class _ItemEditorState extends State<ItemEditor> {
               gap(6),
               TextField(
                 controller: uris[i],
+                // Someone who can't see the item's passwords can't change
+                // where autofill sends them (core: vault.rs, encrypt_item_from).
+                readOnly: !websitesEditable,
                 keyboardType: TextInputType.url,
                 decoration: InputDecoration(
                   hintText: 'https://example.com',
-                  suffixIcon: IconButton(
-                    tooltip: 'Remove',
-                    icon: const Icon(Icons.remove_circle_outline),
-                    onPressed: () => setState(() => uris.removeAt(i)),
-                  ),
+                  suffixIcon: websitesEditable
+                      ? IconButton(
+                          tooltip: 'Remove',
+                          icon: const Icon(Icons.remove_circle_outline),
+                          onPressed: () => setState(() => uris.removeAt(i)),
+                        )
+                      : null,
                 ),
               ),
             ],
-            Align(
-              alignment: Alignment.centerLeft,
-              child: TextButton.icon(
-                onPressed: () =>
-                    setState(() => uris.add(TextEditingController())),
-                icon: const Icon(Icons.add_rounded),
-                label: const Text('Add a website'),
+            if (websitesEditable)
+              Align(
+                alignment: Alignment.centerLeft,
+                child: TextButton.icon(
+                  onPressed: () =>
+                      setState(() => uris.add(TextEditingController())),
+                  icon: const Icon(Icons.add_rounded),
+                  label: const Text('Add a website'),
+                ),
+              )
+            else
+              Padding(
+                padding: const EdgeInsets.only(top: 6),
+                child: Text(
+                  "Someone who can see this item's passwords can change its websites.",
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
               ),
-            ),
           ],
           gap(16),
           // A template's fields, under its name, as in the web vault.
