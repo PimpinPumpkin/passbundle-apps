@@ -161,15 +161,16 @@ pub fn confirm_approval_with_key<'caller>(
 /// The phone's screen went off: locks if the person chose that, or the
 /// policy says so, whether or not the app's screens are running (Kotlin's
 /// `Core.start` listens for the whole process; docs/phones.md, "Locking").
+/// Whether it locked (or will, once a slow call is done).
 #[cfg(feature = "ffi")]
 #[jni_mangle("com.passbundle.app.Core")]
-pub fn screen_off<'caller>(mut unowned_env: EnvUnowned<'caller>, _class: JClass<'caller>) {
+pub fn screen_off<'caller>(
+    mut unowned_env: EnvUnowned<'caller>,
+    _class: JClass<'caller>,
+) -> jni::sys::jboolean {
     unowned_env
-        .with_env(|_env| -> JniResult<()> {
-            crate::ffi::screen_off();
-            Ok(())
-        })
-        .resolve::<ThrowRuntimeExAndDefault>();
+        .with_env(|_env| -> JniResult<bool> { Ok(crate::ffi::screen_off()) })
+        .resolve::<ThrowRuntimeExAndDefault>()
 }
 
 /// Opens the core on the app's own folder unless it's open: the autofill

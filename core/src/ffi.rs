@@ -162,20 +162,18 @@ fn lock_if_due(app: &mut App) {
 /// The phone's screen went off (Android's broadcast, which the app's native
 /// code hears for the whole process, screens or not): locks if the person
 /// chose that, or the policy says so, now or as soon as a slow call that has
-/// the app is done.
+/// the app is done. Whether it locked now, or will once that call is done.
 #[cfg(target_os = "android")]
-pub(crate) fn screen_off() {
+pub(crate) fn screen_off() -> bool {
     let mut guard = match APP.try_lock() {
         Ok(guard) => guard,
         Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
         Err(TryLockError::WouldBlock) => {
             SLEEP_NOTICE.store(true, Ordering::SeqCst);
-            return;
+            return true;
         }
     };
-    if let Some(app) = guard.as_mut() {
-        app.sleeping();
-    }
+    guard.as_mut().is_some_and(App::sleeping)
 }
 
 fn secrets(dir: &std::path::Path) -> Box<dyn SecretStore> {

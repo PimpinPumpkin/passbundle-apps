@@ -4,7 +4,9 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.pm.ApplicationInfo
 import android.os.Build
+import android.util.Log
 
 /** The core (Rust), for the few calls Kotlin makes itself (core/src/android.rs). */
 object Core {
@@ -31,7 +33,11 @@ object Core {
         val receiver =
             object : BroadcastReceiver() {
                 override fun onReceive(context: Context, intent: Intent) {
-                    screenOff()
+                    val locked = screenOff()
+                    // Debug builds only, for the emulator tests' logs.
+                    if ((context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
+                        Log.d("PassBundle", "screen off: ${if (locked) "locks the vault" else "nothing to lock"}")
+                    }
                 }
             }
         val filter = IntentFilter(Intent.ACTION_SCREEN_OFF)
@@ -47,8 +53,8 @@ object Core {
     /** Before anything reaches the network: Android's own certificate checks need the app's context. */
     @JvmStatic external fun init(context: Context)
 
-    /** The screen went off: locks if the person chose that, or the policy says so ([start]). */
-    @JvmStatic external fun screenOff()
+    /** The screen went off: locks if the person chose that, or the policy says so ([start]); whether it does. */
+    @JvmStatic external fun screenOff(): Boolean
 
     /**
      * An item's value for autofill to fill, as UTF-8 to zero after use; null
