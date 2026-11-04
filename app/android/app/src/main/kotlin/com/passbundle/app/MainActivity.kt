@@ -45,7 +45,7 @@ class MainActivity : FlutterActivity() {
                     registerReceiver(it, filter)
                 }
             }
-        Core.init(applicationContext)
+        Core.start(applicationContext)
         Biometric.init(applicationContext)
         // How an update's download goes, and what Android's installer said (update/Updater.kt).
         val updates = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "passbundle/updates")

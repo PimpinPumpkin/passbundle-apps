@@ -39,7 +39,7 @@ class FillActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        Core.init(applicationContext)
+        Core.start(applicationContext)
         Biometric.init(applicationContext)
         Core.openIfClosed(filesDir.absolutePath)
         val fields = Fields.from(intent)

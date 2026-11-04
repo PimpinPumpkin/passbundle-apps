@@ -158,6 +158,20 @@ pub fn confirm_approval_with_key<'caller>(
         .resolve::<ThrowRuntimeExAndDefault>()
 }
 
+/// The phone's screen went off: locks if the person chose that, or the
+/// policy says so, whether or not the app's screens are running (Kotlin's
+/// `Core.start` listens for the whole process; docs/phones.md, "Locking").
+#[cfg(feature = "ffi")]
+#[jni_mangle("com.passbundle.app.Core")]
+pub fn screen_off<'caller>(mut unowned_env: EnvUnowned<'caller>, _class: JClass<'caller>) {
+    unowned_env
+        .with_env(|_env| -> JniResult<()> {
+            crate::ffi::screen_off();
+            Ok(())
+        })
+        .resolve::<ThrowRuntimeExAndDefault>();
+}
+
 /// Opens the core on the app's own folder unless it's open: the autofill
 /// service can start the app's process without its screens (or Dart).
 #[cfg(feature = "ffi")]

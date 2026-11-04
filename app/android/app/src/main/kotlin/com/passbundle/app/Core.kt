@@ -1,6 +1,10 @@
 package com.passbundle.app
 
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.os.Build
 
 /** The core (Rust), for the few calls Kotlin makes itself (core/src/android.rs). */
 object Core {
@@ -8,8 +12,43 @@ object Core {
         System.loadLibrary("passbundle_core")
     }
 
+    private var screenWatcher: BroadcastReceiver? = null
+
+    /**
+     * Before anything else of the core's, from each of the app's activities
+     * and services that use it: [init], and the phone locking (its screen
+     * going off) locking the vault if the person chose that, in the core
+     * itself, for as long as this process runs (docs/phones.md, "Locking").
+     * Autofill and passkeys can unlock the vault with biometrics while the
+     * app's screens aren't running, or show it locked, so locking can't wait
+     * for them (MainActivity tells the screens as well).
+     */
+    @JvmStatic
+    @Synchronized
+    fun start(context: Context) {
+        init(context)
+        if (screenWatcher != null) return
+        val receiver =
+            object : BroadcastReceiver() {
+                override fun onReceive(context: Context, intent: Intent) {
+                    screenOff()
+                }
+            }
+        val filter = IntentFilter(Intent.ACTION_SCREEN_OFF)
+        val app = context.applicationContext
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            app.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            app.registerReceiver(receiver, filter)
+        }
+        screenWatcher = receiver
+    }
+
     /** Before anything reaches the network: Android's own certificate checks need the app's context. */
     @JvmStatic external fun init(context: Context)
+
+    /** The screen went off: locks if the person chose that, or the policy says so ([start]). */
+    @JvmStatic external fun screenOff()
 
     /**
      * An item's value for autofill to fill, as UTF-8 to zero after use; null

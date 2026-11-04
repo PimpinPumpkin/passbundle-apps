@@ -41,7 +41,7 @@ class PasskeyProvider : CredentialProviderService() {
     ) {
         // The asset links check can reach the network: off the main thread.
         Thread {
-            Core.init(applicationContext)
+            Core.start(applicationContext)
             Core.openIfClosed(filesDir.absolutePath)
             callback.onResult(runCatching { entries(this, request) }.getOrNull() ?: BeginGetCredentialResponse())
         }.start()
