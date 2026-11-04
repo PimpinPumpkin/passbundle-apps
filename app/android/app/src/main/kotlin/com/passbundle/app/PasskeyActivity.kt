@@ -52,7 +52,7 @@ class PasskeyActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        Core.init(applicationContext)
+        Core.start(applicationContext)
         Biometric.init(applicationContext)
         Core.openIfClosed(filesDir.absolutePath)
         when (intent.getStringExtra(MODE)) {

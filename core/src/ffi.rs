@@ -143,6 +143,39 @@ fn notices(app: &mut App) {
     }
 }
 
+/// On a phone, locks first if it's time to (docs/phones.md, "Locking"), for
+/// the calls that autofill, passkeys, and the phone's own native code make.
+/// They reach the core whether or not the app's screens are running, and the
+/// screens ask whether to lock (`pb_tick`) only while they show the vault as
+/// unlocked: a vault that autofill unlocked with biometrics, with the screens
+/// closed or showing it locked, would otherwise stay open past its time.
+fn lock_if_due(app: &mut App) {
+    #[cfg(phone)]
+    {
+        notices(app);
+        let _ = app.tick(&autolock::readings());
+    }
+    #[cfg(not(phone))]
+    let _ = app;
+}
+
+/// The phone's screen went off (Android's broadcast, which the app's native
+/// code hears for the whole process, screens or not): locks if the person
+/// chose that, or the policy says so, now or as soon as a slow call that has
+/// the app is done. Whether it locked now, or will once that call is done.
+#[cfg(target_os = "android")]
+pub(crate) fn screen_off() -> bool {
+    let mut guard = match APP.try_lock() {
+        Ok(guard) => guard,
+        Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        Err(TryLockError::WouldBlock) => {
+            SLEEP_NOTICE.store(true, Ordering::SeqCst);
+            return true;
+        }
+    };
+    guard.as_mut().is_some_and(App::sleeping)
+}
+
 fn secrets(dir: &std::path::Path) -> Box<dyn SecretStore> {
     // Test builds (the test-hooks feature) can keep the refresh token in
     // memory, never in the OS's store; a release always uses the OS's.
@@ -509,12 +542,14 @@ pub extern "C" fn pb_lock() -> *mut c_char {
 /// locked, while a slow call has the app, or if there's nothing to copy.
 #[cfg(phone)]
 pub(crate) fn value_for_copy(id: &str, what: &str) -> Option<Zeroizing<String>> {
-    let guard = match APP.try_lock() {
+    let mut guard = match APP.try_lock() {
         Ok(guard) => guard,
         Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
         Err(TryLockError::WouldBlock) => return None,
     };
-    guard.as_ref()?.value_to_copy(id, what).ok()
+    let app = guard.as_mut()?;
+    lock_if_due(app);
+    app.value_to_copy(id, what).ok()
 }
 
 /// An item's value for Android's autofill to fill (android.rs): as for
@@ -522,12 +557,14 @@ pub(crate) fn value_for_copy(id: &str, what: &str) -> Option<Zeroizing<String>> 
 /// upstream's apps fill it, without the person seeing it.
 #[cfg(target_os = "android")]
 pub(crate) fn value_for_fill(id: &str, what: &str) -> Option<Zeroizing<String>> {
-    let guard = match APP.try_lock() {
+    let mut guard = match APP.try_lock() {
         Ok(guard) => guard,
         Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
         Err(TryLockError::WouldBlock) => return None,
     };
-    guard.as_ref()?.value(id, what).ok()
+    let app = guard.as_mut()?;
+    lock_if_due(app);
+    app.value(id, what).ok()
 }
 
 /// An item's value for the iOS app's Swift to put on the pasteboard
@@ -662,14 +699,15 @@ pub(crate) fn open_if_closed(dir: &str) {
 #[cfg(target_os = "android")]
 pub(crate) fn fillable(package: &str, domain: &str) -> Value {
     use crate::matching::Target;
-    let guard = match APP.try_lock() {
+    let mut guard = match APP.try_lock() {
         Ok(guard) => guard,
         Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
         Err(TryLockError::WouldBlock) => return json!({ "busy": true }),
     };
-    let Some(app) = guard.as_ref() else {
+    let Some(app) = guard.as_mut() else {
         return json!({ "locked": true, "signedOut": true });
     };
+    lock_if_due(app);
     let Some(vault) = app.vault() else {
         let signed_out = matches!(app.state(), State::SignedOut { .. });
         return json!({ "locked": true, "signedOut": signed_out });
@@ -691,7 +729,10 @@ pub(crate) fn fillable(package: &str, domain: &str) -> Value {
 /// autofill fills it (android.rs): `{ok}`, or the words to show.
 #[cfg(target_os = "android")]
 pub(crate) fn confirm_master_password(id: &str, password: &str) -> Value {
-    app_value(|app| done(app.confirm_master_password(id, password)))
+    app_value(|app| {
+        lock_if_due(app);
+        done(app.confirm_master_password(id, password))
+    })
 }
 
 /// The unlocked vault's user key, for the phone app to seal for biometric
@@ -699,14 +740,14 @@ pub(crate) fn confirm_master_password(id: &str, password: &str) -> Value {
 /// or busy.
 #[cfg(phone)]
 pub(crate) fn user_key_for_biometric() -> Option<Zeroizing<Vec<u8>>> {
-    let guard = match APP.try_lock() {
+    let mut guard = match APP.try_lock() {
         Ok(guard) => guard,
         Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
         Err(TryLockError::WouldBlock) => return None,
     };
-    Some(Zeroizing::new(
-        guard.as_ref()?.vault()?.user_key().to_bytes().to_vec(),
-    ))
+    let app = guard.as_mut()?;
+    lock_if_due(app);
+    Some(Zeroizing::new(app.vault()?.user_key().to_bytes().to_vec()))
 }
 
 /// The user key the phone app's biometric prompt opened, given back to
@@ -1446,6 +1487,7 @@ pub unsafe extern "C" fn pb_passkeys(rp_id: *const c_char) -> *mut c_char {
 /// `pb_passkeys`, for Android's JNI too.
 pub(crate) fn passkeys(rp_id: &str) -> Value {
     app_value(|app| {
+        lock_if_due(app);
         if app.vault().is_none() {
             return json!({ "locked": true });
         }
@@ -1523,8 +1565,9 @@ pub(crate) fn passkey_assert(
     let Some(hash) = hash else {
         return failed(Error::Damaged("a client data hash that isn't 32 bytes"));
     };
-    app_value(
-        |app| match app.passkey_assert(id, rp_id, &hash, user_verified) {
+    app_value(|app| {
+        lock_if_due(app);
+        match app.passkey_assert(id, rp_id, &hash, user_verified) {
             Ok(a) => json!({
                 "ok": true,
                 "authenticatorData": base64url(&a.authenticator_data),
@@ -1534,8 +1577,8 @@ pub(crate) fn passkey_assert(
                 "userHandle": (!a.user_handle.is_empty()).then(|| base64url(&a.user_handle)),
             }),
             Err(e) => failed(e),
-        },
-    )
+        }
+    })
 }
 
 /// Makes a passkey for a site (docs/core.md, "Passkeys", "Making one"), from
@@ -1588,6 +1631,7 @@ pub(crate) fn passkey_create(request: &str) -> Value {
     let user_verified = r["userVerified"].as_bool() == Some(true);
     let discoverable = r["discoverable"].as_bool() != Some(false);
     app_value(|app| {
+        lock_if_due(app);
         match app.passkey_create(&crate::app::NewPasskey {
             rp_id: &rp_id,
             rp_name: rp_name.as_deref(),
@@ -1622,7 +1666,10 @@ pub(crate) fn passkey_create(request: &str) -> Value {
 /// (Android's JNI): `{ok}`, or the words to show. Slow (the KDF).
 #[cfg(target_os = "android")]
 pub(crate) fn check_master_password(password: &str) -> Value {
-    app_value(|app| done(app.check_master_password(password)))
+    app_value(|app| {
+        lock_if_due(app);
+        done(app.check_master_password(password))
+    })
 }
 
 fn base64url(bytes: &[u8]) -> String {

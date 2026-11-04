@@ -195,6 +195,11 @@ fn allowed(url: &str) -> bool {
         return false;
     };
     let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    // A name and password before an `@` would put "localhost" in front of
+    // another host (http://localhost:80@vault.example.test).
+    if host.contains('@') {
+        return false;
+    }
     let host = if host.starts_with('[') {
         host.split(']').next().map(|h| &h[1..])
     } else {
@@ -1100,6 +1105,9 @@ mod tests {
             "ftp://localhost",
             "localhost:8000",
             "http://10.0.0.5",
+            "http://localhost:80@vault.example.test",
+            "http://localhost@vault.example.test/",
+            "http://[::1]@vault.example.test",
         ] {
             assert!(!allowed(refused), "{refused}");
         }
