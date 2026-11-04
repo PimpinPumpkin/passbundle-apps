@@ -275,6 +275,9 @@ pub struct LoginData {
 #[derive(Clone, Debug, Deserialize)]
 pub struct UriData {
     pub uri: Option<String>,
+    /// The address's checksum, encrypted, as sent.
+    #[serde(rename = "uriChecksum", default)]
+    pub uri_checksum: Option<String>,
     /// How the website is matched (matching.rs); null for the default.
     #[serde(rename = "match", default)]
     pub match_type: Option<u8>,
@@ -853,6 +856,9 @@ pub struct Kept {
     pub fido2_credentials: Option<serde_json::Value>,
     pub autofill_on_page_load: Option<bool>,
     pub password_revision_date: Option<String>,
+    /// A login's websites as sent, encrypted: an edit by someone who can't
+    /// see the item's passwords sends them back exactly so (`encrypt_item_from`).
+    pub uris_sent: Option<serde_json::Value>,
     /// Each of `fields`' upstream type (0 text, 1 hidden, 2 yes or no, 3
     /// linked) and what a linked one is linked to.
     pub field_kinds: Vec<(u8, Option<serde_json::Value>)>,
@@ -1358,6 +1364,26 @@ impl Vault {
                 ));
             }
         }
+        // Someone who can't see the item's passwords can't change its
+        // websites: autofill sends the password where they point. They go
+        // back exactly as stored, encrypted, so the server can tell
+        // (DESIGN.md, "Folders and permissions").
+        let websites_kept = match editing {
+            Some(item) if item.kind == ItemKind::Login && !self.grid(item).see_passwords => {
+                if draft.uris != item.uris {
+                    return Err(Error::Refused(
+                        "you can't see this item's passwords, so its websites stay as they are",
+                    ));
+                }
+                Some(
+                    item.kept
+                        .uris_sent
+                        .clone()
+                        .unwrap_or(serde_json::Value::Null),
+                )
+            }
+            _ => None,
+        };
         // The item's own: its key, its history, and when its password changed.
         let kept = editing.map(|i| &i.kept);
         // What the editor doesn't edit, from the item or the version restored.
@@ -1420,12 +1446,16 @@ impl Vault {
                 "linkedId": null,
             }));
         }
-        // Linked fields, nameless ones, and our own data, which the editor
-        // doesn't edit, stay, each where it was among the item's fields.
-        if let Some(item) = source {
+        // Linked fields and nameless ones, which the editor doesn't edit, stay,
+        // each where it was among the item's fields (the version's, when
+        // restoring one). Our own data (`keykeeper.*`: fill rules, template
+        // markers, expiration dates) is the item's as it is now: restoring a
+        // version never brings back a rule or a marker taken off since.
+        for (item, ours) in [(source, false), (editing.or(source), true)] {
+            let Some(item) = item else { continue };
             let kinds = &item.kept.field_kinds;
             for (at, (field, (kind, linked))) in item.fields.iter().zip(kinds).enumerate() {
-                if !field.edited_by_the_app(*kind) {
+                if !field.edited_by_the_app(*kind) && field.reserved() == ours {
                     fields.insert(
                         at.min(fields.len()),
                         json!({
@@ -1505,11 +1535,11 @@ impl Vault {
                 // Each with its checksum, as upstream's apps write it: an
                 // item with its own key shows only websites whose checksum
                 // matches, so a server can't swap one in.
-                "uris": draft.uris.iter().map(|u| json!({
+                "uris": websites_kept.clone().unwrap_or_else(|| draft.uris.iter().map(|u| json!({
                     "uri": enc(u),
                     "uriChecksum": enc(&uri_checksum(u)),
                     "match": source.and_then(|i| i.uris.iter().position(|kept| kept == u).and_then(|at| i.uri_matches.get(at).copied().flatten())),
-                })).collect::<Vec<_>>(),
+                })).collect::<Vec<_>>().into()),
                 "fido2Credentials": passkeys.or_else(|| from.and_then(|k| k.fido2_credentials.clone())),
                 "autofillOnPageLoad": from.and_then(|k| k.autofill_on_page_load),
                 "passwordRevisionDate": if password_changed {
@@ -1758,6 +1788,13 @@ impl Keyring {
             fido2_credentials: login.and_then(|l| l.fido2_credentials.clone()),
             autofill_on_page_load: login.and_then(|l| l.autofill_on_page_load),
             password_revision_date: login.and_then(|l| l.password_revision_date.clone()),
+            uris_sent: login.and_then(|l| l.uris.as_ref()).map(|uris| {
+                uris.iter()
+                    .map(|u| {
+                        serde_json::json!({ "uri": u.uri, "uriChecksum": u.uri_checksum, "match": u.match_type })
+                    })
+                    .collect()
+            }),
             field_kinds,
         };
         Ok(Item {
