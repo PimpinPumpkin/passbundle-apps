@@ -406,25 +406,34 @@ ask() {
   a shell run-as com.passbundle.app touch "files/$1"
   reached "$2" "$3"
 }
-# PassBundle offers to unlock on the sign-in form: it's locked.
-offers_unlock() {
+# The test app stopped, from the home screen. Stopping it while it's in front
+# would show what's under it, which can be PassBundle's own screen, and that
+# leaving again locks the vault with "Immediately", which isn't what's tested.
+away() {
+  a shell input keyevent KEYCODE_HOME
   a shell am force-stop com.passbundle.autofilltest
+}
+sign_in_form() {
+  away
   a shell am start -W -n com.passbundle.autofilltest/.SignInActivity > /dev/null
   tap "id=com.passbundle.autofilltest:id/username"
+}
+# PassBundle offers to unlock on the sign-in form: it's locked.
+offers_unlock() {
+  sign_in_form
   shown "^Unlock PassBundle" || { echo "$1" >&2; exit 1; }
   [ -z "$(where '^Autofill test app')" ] || { echo "$1" >&2; exit 1; }
 }
 screen_offs() { a logcat -d -s PassBundle:D 2> /dev/null | grep -c 'screen off' || true; }
 echo "Chosen Immediately: a fill handed back locks the vault"
-ask autofill-immediately autofill-immediately-chosen "PassBundle never chose Immediately."
 a shell input keyevent KEYCODE_WAKEUP
 a shell wm dismiss-keyguard
+away
+ask autofill-immediately autofill-immediately-chosen "PassBundle never chose Immediately."
 offs=$(screen_offs)
 # Unlocked as the app's screens would, then filled from the list.
 ask autofill-unlock autofill-unlocked "PassBundle never unlocked."
-a shell am force-stop com.passbundle.autofilltest
-a shell am start -W -n com.passbundle.autofilltest/.SignInActivity > /dev/null
-tap "id=com.passbundle.autofilltest:id/username"
+sign_in_form
 pick "^Autofill test app" "^autofill@example.test$" "id=com.passbundle.autofilltest:id/username"
 offers_unlock "The vault stayed unlocked after a fill with Immediately chosen."
 # Unlocked from autofill itself, then filled: the pick after unlocking still
@@ -435,8 +444,8 @@ offers_unlock "The vault stayed unlocked after unlocking from autofill and filli
 echo "Locked: as each fill was handed back."
 if [ "$(a shell getprop ro.build.version.sdk | tr -d '\r')" -ge 34 ]; then
   echo "Chosen Immediately: a passkey's sign-in handed back locks the vault"
+  away
   ask autofill-unlock autofill-unlocked "PassBundle never unlocked."
-  a shell am force-stop com.passbundle.autofilltest
   a shell am start -W -n com.passbundle.autofilltest/.PasskeySiteActivity > /dev/null
   tap "id=com.passbundle.autofilltest:id/sign_in_passkey"
   through "^Signed in with a passkey" "^ana@passkeys\.example\.test$"
