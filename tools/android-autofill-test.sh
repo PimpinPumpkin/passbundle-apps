@@ -425,13 +425,25 @@ offers_unlock() {
   [ -z "$(where '^Autofill test app')" ] || { echo "$1" >&2; exit 1; }
 }
 screen_offs() { a logcat -d -s PassBundle:D 2> /dev/null | grep -c 'screen off' || true; }
-echo "Chosen Immediately: a fill handed back locks the vault"
 a shell input keyevent KEYCODE_WAKEUP
 a shell wm dismiss-keyguard
-away
 ask autofill-immediately autofill-immediately-chosen "PassBundle never chose Immediately."
 offs=$(screen_offs)
+if [ "$(a shell getprop ro.build.version.sdk | tr -d '\r')" -ge 34 ]; then
+  echo "Chosen Immediately: a passkey's sign-in handed back locks the vault"
+  # On the test app's passkey page, still in front with the passkey it made:
+  # it keeps that only while it runs, so it isn't stopped first. Unlocked as
+  # the app's screens would.
+  ask autofill-unlock autofill-unlocked "PassBundle never unlocked."
+  tap "id=com.passbundle.autofilltest:id/sign_in_passkey"
+  through "^Signed in with a passkey" "^ana@passkeys\.example\.test$"
+  shown "^Signed in with a passkey, signature checked$"
+  offers_unlock "The vault stayed unlocked after a passkey's sign-in with Immediately chosen."
+  echo "Locked: as the passkey was handed back."
+fi
+echo "Chosen Immediately: a fill handed back locks the vault"
 # Unlocked as the app's screens would, then filled from the list.
+away
 ask autofill-unlock autofill-unlocked "PassBundle never unlocked."
 sign_in_form
 pick "^Autofill test app" "^autofill@example.test$" "id=com.passbundle.autofilltest:id/username"
@@ -442,17 +454,6 @@ tap "^Unlock PassBundle"
 pick "^Autofill test app" "^autofill@example.test$" "id=com.passbundle.autofilltest:id/username"
 offers_unlock "The vault stayed unlocked after unlocking from autofill and filling, with Immediately chosen."
 echo "Locked: as each fill was handed back."
-if [ "$(a shell getprop ro.build.version.sdk | tr -d '\r')" -ge 34 ]; then
-  echo "Chosen Immediately: a passkey's sign-in handed back locks the vault"
-  away
-  ask autofill-unlock autofill-unlocked "PassBundle never unlocked."
-  a shell am start -W -n com.passbundle.autofilltest/.PasskeySiteActivity > /dev/null
-  tap "id=com.passbundle.autofilltest:id/sign_in_passkey"
-  through "^Signed in with a passkey" "^ana@passkeys\.example\.test$"
-  shown "^Signed in with a passkey, signature checked$"
-  offers_unlock "The vault stayed unlocked after a passkey's sign-in with Immediately chosen."
-  echo "Locked: as the passkey was handed back."
-fi
 # Never the screen going off (which doesn't lock it here anyway).
 [ "$(screen_offs)" = "$offs" ] || echo "The screen went off meanwhile (PassBundle: screen off), which isn't what locked it."
 
