@@ -83,6 +83,9 @@ class PasskeyActivity : Activity() {
                 PendingIntentHandler.setBeginGetCredentialResponse(result, response ?: BeginGetCredentialResponse())
                 setResult(RESULT_OK, result)
                 finish()
+                // With "Immediately": open for the pick only, a minute at most,
+                // or locked now with nothing to pick (docs/phones.md, "Locking").
+                if (response != null) Core.offered() else Core.answered()
             }
         }
     }
@@ -126,8 +129,7 @@ class PasskeyActivity : Activity() {
                             ).put("clientExtensionResults", JSONObject())
                     val result = Intent()
                     PendingIntentHandler.setGetCredentialResponse(result, GetCredentialResponse(PublicKeyCredential(credential.toString())))
-                    setResult(RESULT_OK, result)
-                    finish()
+                    answer(result)
                 }
             }
         }
@@ -140,8 +142,7 @@ class PasskeyActivity : Activity() {
             result,
             if (words == null) GetCredentialCancellationException() else GetCredentialUnknownException(words),
         )
-        setResult(RESULT_OK, result)
-        finish()
+        answer(result)
     }
 
     // --- Making one ---
@@ -210,8 +211,7 @@ class PasskeyActivity : Activity() {
                                     ).put("clientExtensionResults", JSONObject().put("credProps", JSONObject().put("rk", true)))
                             val result = Intent()
                             PendingIntentHandler.setCreateCredentialResponse(result, CreatePublicKeyCredentialResponse(credential.toString()))
-                            setResult(RESULT_OK, result)
-                            finish()
+                            answer(result)
                         }
                     }
                 }.setNegativeButton("Cancel") { _, _ -> failCreate(null) }
@@ -246,8 +246,7 @@ class PasskeyActivity : Activity() {
         Toast.makeText(this, "PassBundle already has a passkey for this account on this site.", Toast.LENGTH_LONG).show()
         val result = Intent()
         PendingIntentHandler.setCreateCredentialException(result, CreatePublicKeyCredentialDomException(InvalidStateError()))
-        setResult(RESULT_OK, result)
-        finish()
+        answer(result)
     }
 
     private fun failCreate(words: String?) {
@@ -257,8 +256,18 @@ class PasskeyActivity : Activity() {
             result,
             if (words == null) CreateCredentialCancellationException() else CreateCredentialUnknownException(words),
         )
+        answer(result)
+    }
+
+    /**
+     * Hands a passkey, or why there's none, back to Android: the site's
+     * request is over, so with "Immediately" chosen, or the policy's, the
+     * vault locks now (docs/phones.md, "Locking").
+     */
+    private fun answer(result: Intent) {
         setResult(RESULT_OK, result)
         finish()
+        Core.answered()
     }
 
     // --- Proving who they are ---

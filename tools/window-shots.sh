@@ -5,7 +5,9 @@
 # tools/window-shots.ps1 takes Windows'. On Linux it needs a display
 # (DISPLAY, such as Xvfb's) and starts Xfce's window manager, xfwm4, with
 # its compositor, in a D-Bus session (dbus-run-session), unless one is
-# running. Needs a build with test hooks (tools/measure.sh says how).
+# running. Needs a build with test hooks (tools/measure.sh says how), which
+# lets screenshots take the window (PB_ALLOW_SCREENSHOTS; a Mac otherwise
+# leaves it out of them).
 #
 #   tools/window-shots.sh <executable> <folder> <name>
 #
@@ -37,7 +39,7 @@ for theme in light dark; do
   home=$(mktemp -d)
   XDG_DATA_HOME="$home" PB_THEME="$theme" PB_MEASURE=1 PB_MEASURE_FILE="$lines" \
     PB_MEASURE_PASSWORD='correct horse battery staple 1' PB_DATA_DIR="$data" PB_SECRETS=memory \
-    "$exe" > /dev/null 2>&1 &
+    PB_ALLOW_SCREENSHOTS=1 "$exe" > /dev/null 2>&1 &
   pid=$!
   for _ in $(seq 1 120); do
     grep -q '^ready' "$lines" 2> /dev/null && break

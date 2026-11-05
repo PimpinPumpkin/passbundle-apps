@@ -48,7 +48,7 @@ cat > "$helper/Contents/Info.plist" << EOF
 	<key>CFBundleVersion</key>
 	<string>$version</string>
 	<key>LSMinimumSystemVersion</key>
-	<string>11.0</string>
+	<string>14.0</string>
 	<key>LSUIElement</key>
 	<true/>
 </dict>

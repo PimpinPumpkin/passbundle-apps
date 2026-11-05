@@ -116,6 +116,8 @@ class PasskeySiteActivity : Activity() {
 
     private fun signIn() {
         val key = publicKey ?: return say("Make a passkey first")
+        // What an earlier sign-in said goes, so the test sees this one's answer.
+        say("Signing in")
         val challenge = challenge()
         val request =
             JSONObject()

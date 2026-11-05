@@ -208,7 +208,7 @@ jobs:
           # core's test-hooks feature, which only CI's builds have): not the
           # core, nor the updater, which is built from it.
           for program in "$dir/lib/libpassbundle_core.so" "$dir/passbundle-update"; do
-            if grep -a -q -E 'PB_DATA_DIR|PB_SECRETS|PB_UPDATE_SOURCE|PB_UPDATE_KEY|PB_UPDATE_ELEVATED_OK' "$program"; then
+            if grep -a -q -E 'PB_DATA_DIR|PB_SECRETS|PB_UPDATE_SOURCE|PB_UPDATE_KEY|PB_UPDATE_ELEVATED_OK|PB_ALLOW_SCREENSHOTS' "$program"; then
               echo "$program was built with the core's test hooks." >&2
               exit 1
             fi

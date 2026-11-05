@@ -5,7 +5,9 @@
 # the list's search), dragging the band moves the window but dragging the
 # search field doesn't, a double click on the band zooms, the lights
 # minimize, go full screen, and close, it can't be made smaller than 400 by
-# 560, and it opens again where and how big it was left. Needs a build with
+# 560, it opens again where and how big it was left, and it's kept out of
+# screenshots and screen sharing unless they're allowed (as Settings allows
+# them; here with the test builds' PB_ALLOW_SCREENSHOTS=1). Needs a build with
 # test hooks (tools/measure.sh says how), opened on the sample vault so the
 # vault shows, and the Accessibility permission CI's runners have.
 #
@@ -61,7 +63,8 @@ quit() {
 
 # What the helper says, as shell variables: X Y W H for the window, and
 # CLOSE_X CLOSE_Y (the close button's left edge and middle, from the
-# window's top left), MINIMIZED, FULL_SCREEN, and ID.
+# window's top left), MINIMIZED, FULL_SCREEN, ID, and SHARING (0 when
+# screenshots and screen sharing can't take the window).
 look() {
   eval "$("$helper" window "$pid" | python3 -c '
 import json, sys
@@ -70,7 +73,7 @@ f, c = w["frame"], w["lights"]["close"]
 print("X=%d Y=%d W=%d H=%d" % (round(f["x"]), round(f["y"]), round(f["width"]), round(f["height"])))
 if c:
     print("CLOSE_X=%d CLOSE_Y=%d" % (round(c["x"] - f["x"]), round(c["y"] + c["height"] / 2 - f["y"])))
-print("MINIMIZED=%s FULL_SCREEN=%s ID=%d" % (str(w["minimized"]).lower(), str(w["fullScreen"]).lower(), w["id"]))
+print("MINIMIZED=%s FULL_SCREEN=%s ID=%d SHARING=%d" % (str(w["minimized"]).lower(), str(w["fullScreen"]).lower(), w["id"], w["sharing"]))
 ')"
 }
 
@@ -79,6 +82,10 @@ near() { python3 -c "import sys; sys.exit(0 if abs($1 - ($2)) <= ${3:-1} else 1)
 launch
 look
 echo "Opened at ${W}x${H}+${X}+${Y}."
+
+# Out of screenshots, recordings, and screen sharing (NSWindow.sharingType).
+[ "$SHARING" = 0 ] || { echo "Screenshots can take the window (sharing state $SHARING)." >&2; exit 1; }
+echo "Kept out of screenshots and screen sharing."
 
 # The app's view fills the window: there's no title bar over it.
 view=$(awk '/^view/ { print $2 }' "$lines")
@@ -179,9 +186,12 @@ look
 left="${W}x${H}+${X}+${Y}"
 echo "Left at $left."
 quit
-launch
+# Screenshots allowed (as Settings allows them): they can take it.
+PB_ALLOW_SCREENSHOTS=1 launch
 look
 again="${W}x${H}+${X}+${Y}"
 quit
 [ "$again" = "$left" ] || { echo "It opened at $again, not where it was left ($left)." >&2; exit 1; }
 echo "The window opens again where and how big it was left."
+[ "$SHARING" != 0 ] || { echo "With screenshots allowed, the window's sharing state is still 0." >&2; exit 1; }
+echo "With screenshots allowed, they can take the window (sharing state $SHARING)."

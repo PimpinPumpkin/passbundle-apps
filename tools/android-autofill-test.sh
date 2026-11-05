@@ -397,6 +397,66 @@ if [ "$(a shell getprop ro.build.version.sdk | tr -d '\r')" -ge 34 ]; then
   echo "Signed in: the signature checks with the passkey's public key, for the test app's origin."
 fi
 
+# "Immediately" (docs/phones.md, "Locking"): with it chosen, a vault that
+# autofill or a passkey unlocked locks as soon as the fill or the passkey is
+# handed back, without waiting for the screen to go off (the app's half
+# turns that off here, so only the hand-back can lock it).
+ask() {
+  a shell run-as com.passbundle.app rm -f "files/$2" > /dev/null 2>&1 || true
+  a shell run-as com.passbundle.app touch "files/$1"
+  reached "$2" "$3"
+}
+# The test app stopped, from the home screen. Stopping it while it's in front
+# would show what's under it, which can be PassBundle's own screen, and that
+# leaving again locks the vault with "Immediately", which isn't what's tested.
+away() {
+  a shell input keyevent KEYCODE_HOME
+  a shell am force-stop com.passbundle.autofilltest
+}
+sign_in_form() {
+  away
+  a shell am start -W -n com.passbundle.autofilltest/.SignInActivity > /dev/null
+  tap "id=com.passbundle.autofilltest:id/username"
+}
+# PassBundle offers to unlock on the sign-in form: it's locked.
+offers_unlock() {
+  sign_in_form
+  shown "^Unlock PassBundle" || { echo "$1" >&2; exit 1; }
+  [ -z "$(where '^Autofill test app')" ] || { echo "$1" >&2; exit 1; }
+}
+screen_offs() { a logcat -d -s PassBundle:D 2> /dev/null | grep -c 'screen off' || true; }
+a shell input keyevent KEYCODE_WAKEUP
+a shell wm dismiss-keyguard
+ask autofill-immediately autofill-immediately-chosen "PassBundle never chose Immediately."
+offs=$(screen_offs)
+if [ "$(a shell getprop ro.build.version.sdk | tr -d '\r')" -ge 34 ]; then
+  echo "Chosen Immediately: a passkey's sign-in handed back locks the vault"
+  # On the test app's passkey page, still in front with the passkey it made:
+  # it keeps that only while it runs, so it isn't stopped first. Unlocked as
+  # the app's screens would.
+  ask autofill-unlock autofill-unlocked "PassBundle never unlocked."
+  tap "id=com.passbundle.autofilltest:id/sign_in_passkey"
+  through "^Signed in with a passkey" "^ana@passkeys\.example\.test$"
+  shown "^Signed in with a passkey, signature checked$"
+  offers_unlock "The vault stayed unlocked after a passkey's sign-in with Immediately chosen."
+  echo "Locked: as the passkey was handed back."
+fi
+echo "Chosen Immediately: a fill handed back locks the vault"
+# Unlocked as the app's screens would, then filled from the list.
+away
+ask autofill-unlock autofill-unlocked "PassBundle never unlocked."
+sign_in_form
+pick "^Autofill test app" "^autofill@example.test$" "id=com.passbundle.autofilltest:id/username"
+offers_unlock "The vault stayed unlocked after a fill with Immediately chosen."
+# Unlocked from autofill itself, then filled: the pick after unlocking still
+# fills, and locks it.
+tap "^Unlock PassBundle"
+pick "^Autofill test app" "^autofill@example.test$" "id=com.passbundle.autofilltest:id/username"
+offers_unlock "The vault stayed unlocked after unlocking from autofill and filling, with Immediately chosen."
+echo "Locked: as each fill was handed back."
+# Never the screen going off (which doesn't lock it here anyway).
+[ "$(screen_offs)" = "$offs" ] || echo "The screen went off meanwhile (PassBundle: screen off), which isn't what locked it."
+
 # The app's half can end now.
 a shell run-as com.passbundle.app touch files/autofill-done
 wait "$setup"

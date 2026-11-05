@@ -36,6 +36,10 @@ class MainFlutterWindow: NSWindow {
   private static let frameName = "PassBundle"
 
   override func awakeFromNib() {
+    // Out of screenshots, screen recordings, and screen sharing from the
+    // start; the app lets it in only if the person allowed that in Settings
+    // (`capture`; app/lib/window_chrome.dart).
+    sharingType = .none
     let flutterViewController = FlutterViewController()
     self.contentViewController = flutterViewController
     // The app draws the window's top (app/lib/window_chrome.dart): its
@@ -121,6 +125,15 @@ class MainFlutterWindow: NSWindow {
       result(nil)
     case "close":
       performClose(nil)
+      result(nil)
+    // Whether screenshots, screen recordings, and screen sharing may take
+    // the window, as the person chose in Settings.
+    case "capture":
+      guard let allowed = arguments?["allowed"] as? Bool else {
+        result(FlutterError(code: "arguments", message: "capture takes allowed", details: nil))
+        return
+      }
+      sharingType = allowed ? .readOnly : .none
       result(nil)
     default:
       result(FlutterMethodNotImplemented)
@@ -262,13 +275,7 @@ class MainFlutterWindow: NSWindow {
         doubleClicked()
       } else if event.clickCount == 1 {
         if !event.modifierFlags.contains(.command) {
-          if !NSApp.isActive {
-            if #available(macOS 14.0, *) {
-              NSApp.activate()
-            } else {
-              NSApp.activate(ignoringOtherApps: true)
-            }
-          }
+          if !NSApp.isActive { NSApp.activate() }
           if !isKeyWindow { makeKeyAndOrderFront(nil) }
         }
         performDrag(with: event)

@@ -6,7 +6,8 @@
 // permission, which CI's Mac runners give the processes they run.
 //
 //   swiftc -O tools/mac-window.swift -o mac-window
-//   mac-window window <pid>                  the window: id, frame, minimized, full screen, its lights
+//   mac-window window <pid>                  the window: id, frame, minimized, full screen, its lights,
+//                                            and whether screenshots can take it (sharing: 0 none)
 //   mac-window press <pid> close|minimize|zoom|fullscreen
 //   mac-window set <pid> frame <x> <y> <width> <height>
 //   mac-window set <pid> minimized|fullscreen true|false
@@ -64,13 +65,14 @@ func window(_ pid: pid_t) -> AXUIElement {
   fail("No window for \(pid).")
 }
 
-/// The window's id, for screencapture -l.
-func windowNumber(_ pid: pid_t, _ bounds: [String: Double]) -> Int? {
+/// What the window server says of the app's window: its id (for
+/// screencapture -l), and its sharing state (kCGWindowSharingState: 0 when
+/// screenshots and screen sharing can't take it).
+func windowInfo(_ pid: pid_t) -> [String: Any]? {
   guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] else {
     return nil
   }
-  let mine = list.filter { ($0[kCGWindowOwnerPID as String] as? Int32) == pid && ($0[kCGWindowLayer as String] as? Int) == 0 }
-  return (mine.first?[kCGWindowNumber as String] as? Int)
+  return list.first { ($0[kCGWindowOwnerPID as String] as? Int32) == pid && ($0[kCGWindowLayer as String] as? Int) == 0 }
 }
 
 func button(_ window: AXUIElement, _ name: String) -> AXUIElement {
@@ -117,9 +119,11 @@ case "window":
     let b = button(w, name)
     lights[name] = frame(b) ?? [:]
   }
+  let info = windowInfo(pid)
   print(
     json([
-      "id": windowNumber(pid, bounds) ?? 0,
+      "id": info?[kCGWindowNumber as String] as? Int ?? 0,
+      "sharing": info?[kCGWindowSharingState as String] as? Int ?? -1,
       "frame": bounds,
       "minimized": (attribute(w, kAXMinimizedAttribute) as Bool?) ?? false,
       "fullScreen": (attribute(w, "AXFullScreen") as Bool?) ?? false,

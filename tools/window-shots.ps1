@@ -47,6 +47,8 @@ foreach ($theme in 'light', 'dark') {
     $env:PB_MEASURE = '1'
     $env:PB_MEASURE_FILE = $lines
     $env:PB_MEASURE_PASSWORD = 'correct horse battery staple 1'
+    # Windows otherwise leaves the window out of screenshots.
+    $env:PB_ALLOW_SCREENSHOTS = '1'
     $app = Start-Process -FilePath $Exe -PassThru
     for ($i = 0; $i -lt 120; $i++) {
         if ((Get-Content $lines -ErrorAction SilentlyContinue) -match '^ready') { break }

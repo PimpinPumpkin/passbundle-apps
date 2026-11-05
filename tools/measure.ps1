@@ -23,6 +23,8 @@ $env:PB_MEASURE_FILE = $lines
 $env:PB_MEASURE_PASSWORD = 'correct horse battery staple 1'
 $env:PB_DATA_DIR = $data
 $env:PB_SECRETS = 'memory'
+# The window in the screenshot: Windows otherwise leaves it out.
+$env:PB_ALLOW_SCREENSHOTS = '1'
 $started = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() * 1000
 $app = Start-Process -FilePath $Exe -PassThru
 $ready = $false

@@ -1,8 +1,9 @@
 // The app's half of the autofill test (tools/android-autofill-test.sh): signs
 // in to the test server, turns on biometric unlock, and locks, as someone's
 // phone would be. Then it waits while the script fills another app's sign-in
-// form from it (the test runner uninstalls the app when its tests end), until
-// the script says it's done. Run only by that script.
+// form from it (the test runner uninstalls the app when its tests end), saves
+// what the script signs in with, chooses "Immediately" and unlocks when the
+// script asks, until the script says it's done. Run only by that script.
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -155,8 +156,10 @@ void main() {
     // it off; elsewhere the script goes on to the end.
     final untrust = File('$dir/autofill-untrust');
     final done = File('$dir/autofill-done');
+    final immediately = File('$dir/autofill-immediately');
     var end = DateTime.now().add(const Duration(minutes: 2));
     while (!untrust.existsSync() &&
+        !immediately.existsSync() &&
         !done.existsSync() &&
         DateTime.now().isBefore(end)) {
       await tester.runAsync(
@@ -186,9 +189,33 @@ void main() {
       File('$dir/autofill-untrusted').writeAsStringSync('');
     }
 
-    // Then it leaves this file (run-as), and this ends.
-    end = DateTime.now().add(const Duration(minutes: 2));
+    // Then "Immediately" (docs/phones.md, "Locking"), as the script asks
+    // with files: `autofill-immediately` chooses it here and locks;
+    // `autofill-unlock` unlocks, as the app's own screens would, while the
+    // script's app is in front. The script checks a fill or a passkey handed
+    // back locks it. Then it leaves `autofill-done` (run-as), and this ends.
+    final unlock = File('$dir/autofill-unlock');
+    end = DateTime.now().add(const Duration(minutes: 8));
     while (!done.existsSync() && DateTime.now().isBefore(end)) {
+      if (immediately.existsSync()) {
+        immediately.deleteSync();
+        // The screen going off doesn't lock it here, so only the hand-back can.
+        final chosen = Core().setPreferences({
+          'lockAfterMinutes': 0,
+          'lockOnSleep': false,
+        });
+        expect(chosen.ok, isTrue, reason: chosen.error);
+        Core().lock();
+        expect(Core().state()['state'], 'locked');
+        File('$dir/autofill-immediately-chosen').writeAsStringSync('');
+      }
+      if (unlock.existsSync()) {
+        unlock.deleteSync();
+        final unlocked = await tester.runAsync(() => Core.unlock(password));
+        expect(unlocked!.ok, isTrue, reason: unlocked.error);
+        expect(Core().state()['state'], 'unlocked');
+        File('$dir/autofill-unlocked').writeAsStringSync('');
+      }
       await tester.runAsync(
         () => Future<void>.delayed(const Duration(seconds: 1)),
       );
