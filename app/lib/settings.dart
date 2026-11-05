@@ -4,7 +4,8 @@
 // itself"), within what an organization's policy allows ("Locking by
 // policy"). Sign-ins from other devices waiting for an answer
 // (sign_in_requests.dart). On Android and the Mac, updates from PassBundle's
-// releases (updates.dart).
+// releases (updates.dart). On macOS and Windows, whether screenshots of
+// PassBundle are allowed (window_chrome.dart).
 import 'package:flutter/material.dart';
 
 import 'core.dart';
@@ -14,6 +15,7 @@ import 'theme.dart';
 import 'unlock_offer.dart';
 import 'updates.dart';
 import 'widgets.dart';
+import 'window_chrome.dart';
 
 /// The waits offered, in minutes: -1 is "when the app closes", and on phones
 /// 0 is "Immediately" (when the app leaves the screen).
@@ -83,6 +85,9 @@ class _SettingsListState extends State<SettingsList> {
   late Map<String, dynamic> preferences = core.preferences();
   late final Map<String, dynamic> policy = core.lockPolicy();
   Map<String, dynamic>? status;
+
+  /// Whether PassBundle's windows may be in screenshots (macOS and Windows).
+  late bool screenshots = keepsOutOfScreenshots && core.screenshotsAllowed();
 
   /// Browsers trusted for Android's autofill (none elsewhere).
   List<Map<String, String>> browsers = const [];
@@ -337,6 +342,23 @@ class _SettingsListState extends State<SettingsList> {
                   setState(() => this.mode = chosen);
                   onMode(chosen);
                 },
+              ),
+            // Out of screenshots, recordings, and screen sharing by default,
+            // where the OS can keep a window out (window_chrome.dart).
+            if (keepsOutOfScreenshots)
+              SwitchListTile(
+                key: const ValueKey('allow-screenshots'),
+                value: screenshots,
+                onChanged: (on) async {
+                  final answer = core.setScreenshotsAllowed(on);
+                  if (!answer.ok) return;
+                  await allowScreenshots(on);
+                  if (mounted) setState(() => screenshots = on);
+                },
+                title: const Text('Allow screenshots of PassBundle'),
+                subtitle: const Text(
+                  'When off, PassBundle stays out of screenshots, recordings, and screen sharing',
+                ),
               ),
           ],
         ),

@@ -73,6 +73,16 @@ impl Default for Approvals {
     }
 }
 
+/// Screenshots of PassBundle on a computer, kept on this device: off until
+/// the person allows them, so on macOS and Windows its windows stay out of
+/// screenshots, screen recordings, and screen sharing (DESIGN.md in the meta
+/// repo, "Screenshots"). Linux has no way to keep a window out.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Screenshots {
+    pub allow: bool,
+}
+
 impl Store {
     /// The app's own folder: the OS's local app data folder (AppData\Local on
     /// Windows, Application Support on macOS, ~/.local/share on Linux), in
@@ -209,6 +219,21 @@ impl Store {
         )
     }
 
+    /// Whether screenshots of PassBundle are allowed on this computer
+    /// (`Screenshots`); not until the person allows them.
+    pub fn screenshots(&self) -> Screenshots {
+        self.read("screenshots.json")
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn save_screenshots(&self, screenshots: &Screenshots) -> Result<()> {
+        self.write(
+            "screenshots.json",
+            &serde_json::to_string_pretty(screenshots).expect("screenshots always serialize"),
+        )
+    }
+
     pub fn dir(&self) -> &Path {
         &self.dir
     }
@@ -333,6 +358,23 @@ mod tests {
         // The choices are this device's, kept for whoever signs in next.
         assert_eq!(store.preferences(), chosen);
         assert_eq!(store.generator_options(), generating);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn keeps_screenshots_out_until_the_person_allows_them() {
+        let dir = std::env::temp_dir().join(format!("pb-store-{}", uuid::Uuid::new_v4()));
+        let store = Store::new(&dir);
+        assert_eq!(store.screenshots(), Screenshots { allow: false });
+        store
+            .save_screenshots(&Screenshots { allow: true })
+            .unwrap();
+        assert_eq!(store.screenshots(), Screenshots { allow: true });
+        // Kept for whoever signs in next, as the other choices are.
+        store.forget_vault();
+        assert_eq!(Store::new(&dir).screenshots(), Screenshots { allow: true });
+        fs::write(dir.join("screenshots.json"), "not json").unwrap();
+        assert_eq!(store.screenshots(), Screenshots { allow: false });
         let _ = fs::remove_dir_all(dir);
     }
 

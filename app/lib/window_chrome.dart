@@ -128,6 +128,27 @@ class WindowFrame {
   );
 }
 
+/// Whether this computer can keep PassBundle's window out of screenshots,
+/// screen recordings, and screen sharing: macOS (`NSWindow.sharingType`) and
+/// Windows (`SetWindowDisplayAffinity`). Linux has no way to, so Settings
+/// doesn't offer the choice there.
+bool get keepsOutOfScreenshots =>
+    !isPhone && (Platform.isMacOS || Platform.isWindows);
+
+/// Tells the runner whether the window may be captured, as the person chose
+/// in Settings (DESIGN.md, "Screenshots"). The runner keeps it out from the
+/// moment it's made, so it's never in a capture before the app says.
+Future<void> allowScreenshots(bool allowed) async {
+  if (!keepsOutOfScreenshots) return;
+  try {
+    await WindowFrameKeeper.channel.invokeMethod<void>('capture', {
+      'allowed': allowed,
+    });
+  } on MissingPluginException {
+    // A runner without it (a test).
+  }
+}
+
 /// The window, as the runner tells it, for the life of the app (the app
 /// makes a new MaterialApp, and so a new [WindowChrome], each time it locks
 /// or unlocks), and what the app tells the runner back.

@@ -176,6 +176,12 @@ class Core {
   late final _setAppearance = _lib.lookupFunction<_Str1, _Str1>(
     'pb_set_appearance',
   );
+  late final _screenshots = _lib.lookupFunction<_Str0, _Str0>(
+    'pb_screenshots',
+  );
+  late final _setScreenshots = _lib.lookupFunction<_Str1, _Str1>(
+    'pb_set_screenshots',
+  );
   late final _health = _lib.lookupFunction<_Str0, _Str0>('pb_health');
   late final _history = _lib.lookupFunction<_Str1, _Str1>('pb_history');
   late final _itemVersion = _lib.lookupFunction<_Str3, _Str3>(
@@ -641,6 +647,19 @@ class Core {
 
   Answer setAppearance(Map<String, dynamic> appearance) => Answer(
     _with([jsonEncode(appearance)], (p) => _answer(_setAppearance(p[0])))
+        as Map<String, dynamic>,
+  );
+
+  /// Whether PassBundle's windows may be in screenshots, screen recordings,
+  /// and screen sharing on this computer (window_chrome.dart): false until
+  /// the person allows them.
+  bool screenshotsAllowed() =>
+      (_answer(_screenshots()) as Map<String, dynamic>)['allow'] == true;
+
+  Answer setScreenshotsAllowed(bool allow) => Answer(
+    _with([
+          jsonEncode({'allow': allow}),
+        ], (p) => _answer(_setScreenshots(p[0])))
         as Map<String, dynamic>,
   );
 

@@ -1190,6 +1190,37 @@ pub unsafe extern "C" fn pb_set_appearance(appearance: *const c_char) -> *mut c_
     })
 }
 
+/// Whether PassBundle's windows may be in screenshots, screen recordings,
+/// and screen sharing on this computer: `{allow}`, false until the person
+/// allows them (macOS and Windows keep them out; DESIGN.md, "Screenshots").
+/// Test builds (the test-hooks feature) allow them with
+/// PB_ALLOW_SCREENSHOTS=1, for CI's screenshots of the real window; a
+/// release reads no such setting.
+#[no_mangle]
+pub extern "C" fn pb_screenshots() -> *mut c_char {
+    with_app(|app| {
+        #[cfg(feature = "test-hooks")]
+        if std::env::var("PB_ALLOW_SCREENSHOTS").as_deref() == Ok("1") {
+            return json!({ "allow": true });
+        }
+        json!(app.screenshots())
+    })
+}
+
+/// Allows screenshots of PassBundle on this computer, or keeps it out of
+/// them again: `{allow}`. `{ok}`, or the words to show.
+///
+/// # Safety
+/// `screenshots` is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_set_screenshots(screenshots: *const c_char) -> *mut c_char {
+    let screenshots = serde_json::from_str::<crate::store::Screenshots>(&text(screenshots));
+    with_app(|app| match screenshots {
+        Ok(s) => done(app.set_screenshots(s)),
+        Err(_) => failed(Error::Damaged("that choice")),
+    })
+}
+
 /// A website's icon for a login's tile (icons.rs): `{ok, icon}`, the image
 /// in base64, or `{ok, icon: null}` where there's none (or icons are off,
 /// or the vault is locked). From the server's icon service the first time,

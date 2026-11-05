@@ -1372,6 +1372,16 @@ impl App {
         self.store.appearance()
     }
 
+    /// Whether PassBundle's windows may be in screenshots, screen
+    /// recordings, and screen sharing on this computer (`store::Screenshots`).
+    pub fn screenshots(&self) -> crate::store::Screenshots {
+        self.store.screenshots()
+    }
+
+    pub fn set_screenshots(&mut self, screenshots: crate::store::Screenshots) -> Result<()> {
+        self.store.save_screenshots(&screenshots)
+    }
+
     pub fn set_appearance(&mut self, appearance: crate::store::Appearance) -> Result<()> {
         self.store.save_appearance(&appearance)?;
         if !appearance.show_icons {

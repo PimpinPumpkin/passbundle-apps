@@ -9,6 +9,11 @@
 
 #include "flutter/generated_plugin_registrant.h"
 
+// Windows 10 2004's display affinity, for SDKs from before it.
+#ifndef WDA_EXCLUDEFROMCAPTURE
+#define WDA_EXCLUDEFROMCAPTURE 0x00000011
+#endif
+
 namespace {
 
 using flutter::EncodableList;
@@ -84,6 +89,18 @@ Buttons ButtonsAt(const EncodableMap& map) {
   return buttons;
 }
 
+// Whether screenshots, screen recordings, and screen sharing may take the
+// window, as the person chose in Settings (app/lib/window_chrome.dart). Kept
+// out, it's left out of them on Windows 10 2004 and later, and shows black
+// in them before that (WDA_MONITOR), the most those versions can do.
+void AllowCapture(HWND window, bool allowed) {
+  if (allowed) {
+    SetWindowDisplayAffinity(window, WDA_NONE);
+  } else if (!SetWindowDisplayAffinity(window, WDA_EXCLUDEFROMCAPTURE)) {
+    SetWindowDisplayAffinity(window, WDA_MONITOR);
+  }
+}
+
 EncodableValue ButtonName(Win32Window::Button button) {
   switch (button) {
     case Win32Window::kMinimize:
@@ -108,6 +125,9 @@ bool FlutterWindow::OnCreate() {
   if (!Win32Window::OnCreate()) {
     return false;
   }
+  // Out of screenshots, screen recordings, and screen sharing from the
+  // start; the app lets it in only if the person allowed that (`capture`).
+  AllowCapture(GetHandle(), false);
 
   RECT frame = GetClientArea();
 
@@ -159,6 +179,16 @@ bool FlutterWindow::OnCreate() {
           }
           SetLook(std::get<bool>(dark->second),
                   static_cast<unsigned int>(ground->second.LongValue()));
+          result->Success();
+        } else if (method == "capture" && arguments) {
+          const auto allowed =
+              arguments->find(flutter::EncodableValue("allowed"));
+          if (allowed == arguments->end() ||
+              !std::holds_alternative<bool>(allowed->second)) {
+            result->Error("arguments", "capture takes allowed");
+            return;
+          }
+          AllowCapture(GetHandle(), std::get<bool>(allowed->second));
           result->Success();
         } else {
           result->NotImplemented();

@@ -210,7 +210,7 @@ jobs:
           # A release's core reads no test settings from its environment
           # (the core's test-hooks feature, which only CI's builds have).
           core=$(strings -a "$app/Contents/Frameworks/libpassbundle_core.dylib")
-          if [[ "$core" == *PB_DATA_DIR* || "$core" == *PB_SECRETS* ]]; then
+          if [[ "$core" == *PB_DATA_DIR* || "$core" == *PB_SECRETS* || "$core" == *PB_ALLOW_SCREENSHOTS* ]]; then
             echo "The core was built with its test hooks." >&2
             exit 1
           fi

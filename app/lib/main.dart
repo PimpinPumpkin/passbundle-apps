@@ -47,6 +47,11 @@ Future<void> main() async {
   // How the window's top is drawn on a computer (window_chrome.dart), known
   // before the first frame, so the app opens as it stays.
   await WindowFrameKeeper.instance.load();
+  // Out of screenshots and screen sharing unless the person allowed them
+  // (window_chrome.dart): the runner keeps the window out until it hears.
+  if (keepsOutOfScreenshots) {
+    await allowScreenshots(Core().screenshotsAllowed());
+  }
   if (measuring) {
     SchedulerBinding.instance.addPostFrameCallback((_) {
       report('first-frame ${DateTime.now().microsecondsSinceEpoch}');

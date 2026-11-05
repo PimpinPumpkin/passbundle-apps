@@ -16,7 +16,10 @@
 # - it opens no bigger than the screen, can't be made smaller than 400 by
 #   560, and opens again where and how big it was left when it closed (kept
 #   under HKCU\Software\PassBundle\Window, which this removes before and
-#   after).
+#   after);
+# - it's kept out of screenshots, recordings, and screen sharing
+#   (SetWindowDisplayAffinity), unless screenshots are allowed (as Settings
+#   allows them; here with the test builds' PB_ALLOW_SCREENSHOTS=1).
 #
 # It needs a build with test hooks (tools/measure.sh says how), opened on
 # the sample vault so the vault shows.
@@ -54,6 +57,10 @@ public static class Win {
     [DllImport("user32.dll")] public static extern IntPtr MonitorFromWindow(IntPtr window, uint flags);
     [DllImport("user32.dll")] public static extern bool GetMonitorInfo(IntPtr monitor, ref MONITORINFO info);
     [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr window, int attribute, out RECT value, int size);
+    [DllImport("user32.dll")] public static extern bool GetWindowDisplayAffinity(IntPtr window, out uint affinity);
+    public static uint Affinity(IntPtr window) {
+        uint a; if (!GetWindowDisplayAffinity(window, out a)) { return 0xFFFFFFFF; } return a;
+    }
     public static RECT Frame(IntPtr window) {
         RECT r; DwmGetWindowAttribute(window, 9 /* DWMWA_EXTENDED_FRAME_BOUNDS */, out r, Marshal.SizeOf(typeof(RECT))); return r;
     }
@@ -211,6 +218,15 @@ try {
     }
     Write-Output 'No caption: the app goes up to the window''s top.'
 
+    # Out of screenshots, recordings, and screen sharing: left out on
+    # Windows 10 2004 and later (WDA_EXCLUDEFROMCAPTURE), black before
+    # (WDA_MONITOR).
+    $affinity = [Win]::Affinity($window)
+    if ($affinity -ne 0x11 -and $affinity -ne 0x1) {
+        throw "The window's display affinity is $affinity: screenshots can take it."
+    }
+    Write-Output ('Kept out of screenshots (display affinity 0x{0:X}).' -f $affinity)
+
     # Windows hears the app's buttons as a caption's, and Flutter's window
     # lets it.
     $width = Client-Width $window
@@ -326,10 +342,16 @@ try {
     Close-App $app
     if (-not (Get-ItemProperty $key -Name Placement -ErrorAction SilentlyContinue)) { throw "Its place wasn't kept." }
 
+    # Screenshots allowed (as Settings allows them): nothing keeps it out.
+    $env:PB_ALLOW_SCREENSHOTS = '1'
     $app = Open-App
+    Remove-Item Env:PB_ALLOW_SCREENSHOTS
     $again = Get-Place $app.MainWindowHandle
     Write-Output "Opened again at $again."
+    $affinity = [Win]::Affinity($app.MainWindowHandle)
     Close-App $app
+    if ($affinity -ne 0) { throw "With screenshots allowed, the window's display affinity is $affinity." }
+    Write-Output 'With screenshots allowed, they take the window.'
     if ($again -ne $left) { throw "It opened at $again, not where it was left ($left)." }
     Write-Output 'The window opens again where and how big it was left.'
 } finally {

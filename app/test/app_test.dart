@@ -13,6 +13,7 @@ import 'package:passbundle/icons.dart';
 import 'package:passbundle/main.dart';
 import 'package:passbundle/new_item.dart';
 import 'package:passbundle/vault.dart';
+import 'package:passbundle/window_chrome.dart';
 
 import 'support.dart';
 
@@ -965,6 +966,55 @@ void main() {
       expect(find.byType(RawImage), findsNothing);
       // Nothing of them was written to the device.
       expect(Directory('$dir/icons').existsSync(), isFalse);
+    },
+  );
+
+  testWidgets(
+    'on a Mac or Windows, PassBundle stays out of screenshots until Settings allows them',
+    (tester) async {
+      setSize(tester, const Size(1280, 800));
+      final dir = openSample();
+      final told = <Object?>[];
+      final messenger = tester.binding.defaultBinaryMessenger;
+      messenger.setMockMethodCallHandler(WindowFrameKeeper.channel, (
+        call,
+      ) async {
+        if (call.method == 'capture') told.add(call.arguments);
+        return null;
+      });
+      addTearDown(
+        () => messenger.setMockMethodCallHandler(WindowFrameKeeper.channel, null),
+      );
+      expect(Core().screenshotsAllowed(), isFalse);
+      await tester.pumpWidget(const PassBundleApp());
+      await tester.enterText(find.byType(TextField), samplePassword);
+      await tester.tap(find.text('Unlock'));
+      await pumpUntil(tester, find.text('Example Mail'));
+      await tester.tap(find.byTooltip('Settings'));
+      await tester.pump();
+      await pumpUntil(tester, find.byKey(const ValueKey('show-icons')));
+      final allow = find.byKey(const ValueKey('allow-screenshots'));
+      if (!keepsOutOfScreenshots) {
+        // Linux can't keep a window out of screenshots: no choice to make.
+        expect(allow, findsNothing);
+        return;
+      }
+      expect(tester.widget<SwitchListTile>(allow).value, isFalse);
+      await tester.ensureVisible(allow);
+      await tester.pumpAndSettle();
+      await tester.tap(allow);
+      await tester.pumpAndSettle();
+      expect(told, [
+        {'allowed': true},
+      ]);
+      expect(tester.widget<SwitchListTile>(allow).value, isTrue);
+      // Kept on this device.
+      expect(Core().screenshotsAllowed(), isTrue);
+      expect(File('$dir/screenshots.json').existsSync(), isTrue);
+      await tester.tap(allow);
+      await tester.pumpAndSettle();
+      expect(told.last, {'allowed': false});
+      expect(Core().screenshotsAllowed(), isFalse);
     },
   );
 
