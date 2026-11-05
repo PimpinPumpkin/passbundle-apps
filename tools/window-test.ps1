@@ -223,7 +223,7 @@ try {
     # (WDA_MONITOR).
     $affinity = [Win]::Affinity($window)
     if ($affinity -ne 0x11 -and $affinity -ne 0x1) {
-        throw "The window's display affinity is $affinity: screenshots can take it."
+        throw "The window's display affinity is ${affinity}, so screenshots can take it."
     }
     Write-Output ('Kept out of screenshots (display affinity 0x{0:X}).' -f $affinity)
 
