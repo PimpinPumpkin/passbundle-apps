@@ -96,15 +96,15 @@ impl Store {
         self.dir.join(name)
     }
 
-    /// Writes a file whole or not at all, readable only by this user.
+    /// Writes a file whole or not at all, readable only by this user from the
+    /// moment it's made, in a folder only they can open.
     fn write(&self, name: &str, text: &str) -> Result<()> {
-        fs::create_dir_all(&self.dir)
+        private_dir(&self.dir)
             .map_err(|e| Error::Malformed(format!("can't make {}: {e}", self.dir.display())))?;
         let target = self.path(name);
         let partial = self.path(&format!("{name}.partial"));
-        fs::write(&partial, text)
+        write_new(&partial, text.as_bytes())
             .map_err(|e| Error::Malformed(format!("can't write {}: {e}", partial.display())))?;
-        restrict(&partial);
         fs::rename(&partial, &target)
             .map_err(|e| Error::Malformed(format!("can't write {}: {e}", target.display())))
     }
@@ -214,15 +214,73 @@ impl Store {
     }
 }
 
+/// Makes the app's folder, only this person's to open (mode 0700 on Linux
+/// and macOS; the folders above it as the OS makes them). A folder of theirs
+/// that's open to others, as earlier builds made it (0755, which others can
+/// open where the home folder is 755, as on many Linux computers), is closed
+/// to them too. On Windows the person's own AppData folder is already private
+/// to them.
 #[cfg(unix)]
-fn restrict(path: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-    let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+fn private_dir(dir: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+    if let Some(parent) = dir.parent().filter(|p| !p.as_os_str().is_empty()) {
+        fs::create_dir_all(parent)?;
+    }
+    match fs::DirBuilder::new().mode(0o700).create(dir) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(e),
+    }
+    // Opened, so what's checked is what's changed.
+    let folder = fs::File::open(dir)?;
+    let meta = folder.metadata()?;
+    // SAFETY: geteuid has no preconditions and can't fail.
+    let mine = meta.uid() == unsafe { libc::geteuid() };
+    if meta.is_dir() && mine && meta.mode() & 0o7777 != 0o700 {
+        folder.set_permissions(fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
 }
 
 #[cfg(not(unix))]
-fn restrict(_path: &Path) {
-    // The user's own AppData folder is already private to them.
+fn private_dir(dir: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(dir)
+}
+
+/// Writes `bytes` to a new file at `path`, made readable only by this user
+/// (mode 0600 on Linux and macOS, never wider for a moment). One left by a
+/// write that stopped part way is removed first, so nothing that was there,
+/// a link to elsewhere included, is ever written through. A file that can't
+/// be written whole is removed.
+fn write_new(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let mut file = None;
+    for _ in 0..2 {
+        match fs::remove_file(path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+        match options.open(path) {
+            Ok(opened) => {
+                file = Some(opened);
+                break;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e),
+        }
+    }
+    let mut file = file.ok_or_else(|| std::io::Error::from(std::io::ErrorKind::AlreadyExists))?;
+    let written = file.write_all(bytes);
+    drop(file);
+    if written.is_err() {
+        let _ = fs::remove_file(path);
+    }
+    written
 }
 
 #[cfg(test)]
@@ -275,6 +333,84 @@ mod tests {
         // The choices are this device's, kept for whoever signs in next.
         assert_eq!(store.preferences(), chosen);
         assert_eq!(store.generator_options(), generating);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    fn mode(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        fs::symlink_metadata(path).unwrap().permissions().mode() & 0o7777
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn makes_its_folder_and_files_only_the_persons_from_the_start() {
+        let parent = std::env::temp_dir().join(format!("pb-store-{}", uuid::Uuid::new_v4()));
+        let dir = parent.join("PassBundle");
+        let store = Store::new(&dir);
+        store.save_sync("{}").unwrap();
+        assert_eq!(mode(&dir), 0o700);
+        assert_eq!(mode(&dir.join("sync.json")), 0o600);
+        // The new file is 0600 as it's made, before anything is in it: there's
+        // no change of mode after.
+        let partial = dir.join("made.partial");
+        write_new(&partial, b"").unwrap();
+        assert_eq!(mode(&partial), 0o600);
+        let _ = fs::remove_dir_all(parent);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn closes_a_folder_an_earlier_build_left_open() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("pb-store-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&dir).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+        let store = Store::new(&dir);
+        store
+            .save_settings(&Settings {
+                server: "https://vault.example.test".into(),
+                email: "ana@example.test".into(),
+                kdf: 0,
+                kdf_iterations: 600_000,
+                kdf_memory: None,
+                kdf_parallelism: None,
+                device_identifier: "d".into(),
+            })
+            .unwrap();
+        assert_eq!(mode(&dir), 0o700);
+        assert_eq!(mode(&dir.join("settings.json")), 0o600);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn never_writes_through_what_a_stopped_write_left() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("pb-store-{}", uuid::Uuid::new_v4()));
+        let store = Store::new(&dir);
+        store.save_sync("{\"old\":1}").unwrap();
+        // A partial file left readable by others, and one that's a link to a
+        // file elsewhere: neither is written into.
+        let elsewhere = std::env::temp_dir().join(format!("pb-elsewhere-{}", uuid::Uuid::new_v4()));
+        fs::write(&elsewhere, "theirs").unwrap();
+        std::os::unix::fs::symlink(&elsewhere, dir.join("sync.json.partial")).unwrap();
+        store.save_sync("{\"new\":2}").unwrap();
+        assert_eq!(fs::read_to_string(&elsewhere).unwrap(), "theirs");
+        assert_eq!(store.sync().as_deref(), Some("{\"new\":2}"));
+        assert_eq!(mode(&dir.join("sync.json")), 0o600);
+        fs::write(dir.join("generator.json.partial"), "left").unwrap();
+        fs::set_permissions(
+            dir.join("generator.json.partial"),
+            fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
+        store
+            .save_generator_options(&generator::Options::default())
+            .unwrap();
+        assert_eq!(mode(&dir.join("generator.json")), 0o600);
+        assert!(!dir.join("generator.json.partial").exists());
+        let _ = fs::remove_file(elsewhere);
         let _ = fs::remove_dir_all(dir);
     }
 }
