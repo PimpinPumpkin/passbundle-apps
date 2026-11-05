@@ -57,6 +57,20 @@ object Core {
     @JvmStatic external fun screenOff(): Boolean
 
     /**
+     * Autofill or a passkey handed its answer back (a fill, a passkey, or
+     * none): with "Immediately" chosen, or the policy's, the vault locks now,
+     * as when the app's screens leave (docs/phones.md, "Locking"). Never waits.
+     */
+    @JvmStatic external fun answered(): Boolean
+
+    /**
+     * Autofill or a passkey unlocked the vault and handed back a list to pick
+     * from: with "Immediately", it stays open for the pick only, and locks a
+     * minute later if nothing is picked. Never waits.
+     */
+    @JvmStatic external fun offered()
+
+    /**
      * An item's value for autofill to fill, as UTF-8 to zero after use; null
      * while the vault is locked or busy, or if there's nothing to fill.
      */

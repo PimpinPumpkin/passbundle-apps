@@ -173,6 +173,34 @@ pub fn screen_off<'caller>(
         .resolve::<ThrowRuntimeExAndDefault>()
 }
 
+/// Autofill or a passkey handed its answer back (FillActivity and
+/// PasskeyActivity, as they finish): with "Immediately", the vault locks now
+/// (docs/phones.md, "Locking"). Whether it does.
+#[cfg(feature = "ffi")]
+#[jni_mangle("com.passbundle.app.Core")]
+pub fn answered<'caller>(
+    mut unowned_env: EnvUnowned<'caller>,
+    _class: JClass<'caller>,
+) -> jni::sys::jboolean {
+    unowned_env
+        .with_env(|_env| -> JniResult<bool> { Ok(crate::ffi::answered()) })
+        .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+/// Autofill or a passkey unlocked the vault and handed back a list to pick
+/// from: with "Immediately", the vault stays open for the pick only, a minute
+/// at most (docs/phones.md, "Locking").
+#[cfg(feature = "ffi")]
+#[jni_mangle("com.passbundle.app.Core")]
+pub fn offered<'caller>(mut unowned_env: EnvUnowned<'caller>, _class: JClass<'caller>) {
+    unowned_env
+        .with_env(|_env| -> JniResult<()> {
+            crate::ffi::offered();
+            Ok(())
+        })
+        .resolve::<ThrowRuntimeExAndDefault>();
+}
+
 /// Opens the core on the app's own folder unless it's open: the autofill
 /// service can start the app's process without its screens (or Dart).
 #[cfg(feature = "ffi")]

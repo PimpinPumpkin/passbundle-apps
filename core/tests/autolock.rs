@@ -223,6 +223,88 @@ fn on_a_phone_immediately_locks_when_the_app_leaves_the_screen() {
     assert!(matches!(app.state(), State::Locked { .. }));
 }
 
+/// Phones: a vault autofill or a passkey unlocked, with "Immediately"
+/// chosen, locks when the pick's answer is handed back (`left`), or a minute
+/// after the list it showed if nothing is picked, by either clock.
+#[cfg(phone)]
+#[test]
+fn on_a_phone_immediately_locks_as_autofill_hands_back_or_when_nothing_is_picked() {
+    let sample = Sample::new();
+    let mut app = sample.unlocked();
+    app.set_preferences(Preferences {
+        lock_after_minutes: Some(0),
+        lock_on_sleep: false,
+    })
+    .unwrap();
+    let (now, wall) = (Instant::now(), SystemTime::now());
+    // Before any list, nothing limits it but leaving.
+    assert_eq!(
+        app.tick_at(&Readings::default(), now + 60 * MIN, wall + 60 * MIN),
+        None
+    );
+    app.offered_at(now, wall);
+    let wait = passbundle_core::app::PICK_WAIT;
+    let almost = wait - Duration::from_secs(1);
+    assert_eq!(
+        app.tick_at(&Readings::default(), now + almost, wall + almost),
+        None
+    );
+    assert_eq!(
+        app.tick_at(&Readings::default(), now + wait, wall + wait),
+        Some(Reason::Idle)
+    );
+    assert!(matches!(app.state(), State::Locked { .. }));
+
+    // A pick, handed back: locked at once.
+    app.unlock(&sample.password).unwrap();
+    app.offered();
+    assert!(app.left());
+    assert!(matches!(app.state(), State::Locked { .. }));
+
+    // The phone asleep, its monotonic clock stopped: the wall clock counts.
+    app.unlock(&sample.password).unwrap();
+    let (now, wall) = (Instant::now(), SystemTime::now());
+    app.offered_at(now, wall);
+    assert_eq!(
+        app.tick_at(
+            &Readings::default(),
+            now + Duration::from_secs(1),
+            wall + wait
+        ),
+        Some(Reason::Idle)
+    );
+
+    // The app's screens opened and used meanwhile: they have it now, and
+    // leaving them locks it, as always with "Immediately".
+    app.unlock(&sample.password).unwrap();
+    let (now, wall) = (Instant::now(), SystemTime::now());
+    app.offered_at(now, wall);
+    app.used();
+    assert_eq!(
+        app.tick_at(&Readings::default(), now + 2 * wait, wall + 2 * wait),
+        None
+    );
+    assert!(app.left());
+}
+
+/// Phones: with a time away chosen (not "Immediately"), a list autofill
+/// showed doesn't shorten it; the time counts from the unlock as before.
+#[cfg(phone)]
+#[test]
+fn on_a_phone_a_list_from_autofill_leaves_a_chosen_time_as_it_is() {
+    let sample = Sample::new();
+    let mut app = sample.unlocked();
+    assert_eq!(app.preferences().lock_after_minutes, Some(5));
+    let (now, wall) = (Instant::now(), SystemTime::now());
+    app.offered_at(now, wall);
+    assert_eq!(
+        app.tick_at(&Readings::default(), now + 2 * MIN, wall + 2 * MIN),
+        None
+    );
+    assert!(!app.left());
+    assert!(is_unlocked(&app));
+}
+
 /// An organization's "Vault lock" policy (docs/core.md, "Locking by policy").
 fn vault_lock(data: serde_json::Value) -> Sample {
     Sample::with_policies(Some(serde_json::json!([{
@@ -271,6 +353,24 @@ fn immediately_by_policy_locks_as_the_app_leaves_the_screen_on_a_computer_too() 
         None
     );
     assert!(app.left());
+    assert!(matches!(app.state(), State::Locked { .. }));
+}
+
+#[test]
+fn immediately_by_policy_waits_a_minute_at_most_for_a_pick_from_autofill() {
+    let sample = vault_lock(serde_json::json!({ "type": "immediately" }));
+    let mut app = sample.unlocked();
+    let (now, wall) = (Instant::now(), SystemTime::now());
+    app.offered_at(now, wall);
+    let wait = passbundle_core::app::PICK_WAIT;
+    assert_eq!(
+        app.tick_at(&idle(Duration::ZERO), now + wait, wall + wait),
+        Some(Reason::Idle)
+    );
+    assert!(matches!(app.state(), State::Locked { .. }));
+    app.unlock(&sample.password).unwrap();
+    app.offered();
+    assert!(app.left(), "the pick handed back");
     assert!(matches!(app.state(), State::Locked { .. }));
 }
 

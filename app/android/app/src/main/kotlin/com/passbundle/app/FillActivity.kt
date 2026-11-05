@@ -198,5 +198,15 @@ class FillActivity : Activity() {
             setResult(RESULT_OK, Intent().putExtra(AutofillManager.EXTRA_AUTHENTICATION_RESULT, result))
         }
         finish()
+        // With "Immediately" (docs/phones.md, "Locking"): a login's values
+        // handed back lock the vault now, and so does an unlock with nothing
+        // to pick from; a list to pick from (after unlocking, or trusting a
+        // browser) keeps it open for the pick, a minute at most. A fill that
+        // didn't happen leaves that wait as it is, for another pick.
+        when (intent.getStringExtra(MODE)) {
+            FILL -> if (result != null) Core.answered()
+            UNLOCK -> if (result != null) Core.offered() else Core.answered()
+            TRUST -> if (result != null) Core.offered()
+        }
     }
 }

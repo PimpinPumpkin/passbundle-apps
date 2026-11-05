@@ -93,7 +93,16 @@ pub struct App {
     /// When the person last confirmed it's them (biometrics or the master
     /// password) to approve a sign-in; one confirmation, one approval.
     confirmed: Option<Instant>,
+    /// With "Immediately": autofill or a passkey unlocked the vault away
+    /// from the app's screens and showed what there is to pick (`offered`).
+    /// It locks when the pick's answer is handed back (`left`), or at this
+    /// time (on either clock) if nothing is picked.
+    pick_by: Option<(Instant, SystemTime)>,
 }
+
+/// How long a list that autofill or a passkey showed, having unlocked the
+/// vault with "Immediately" chosen, waits to be picked from (`App::offered`).
+pub const PICK_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// How long confirming it's you lasts, to approve a sign-in.
 const CONFIRMATION_LASTS: std::time::Duration = std::time::Duration::from_secs(60);
@@ -143,6 +152,7 @@ impl App {
             icon_session: 0,
             sign_in_requests: None,
             confirmed: None,
+            pick_by: None,
         }
     }
 
@@ -581,8 +591,27 @@ impl App {
     }
 
     /// The app was used just now (the screens say, at most about once a second).
+    /// Its screens are in front, so a wait for a pick (`offered`) is over.
     pub fn used(&mut self) {
         self.autolock.used(Instant::now(), SystemTime::now());
+        self.pick_by = None;
+    }
+
+    /// Autofill or a passkey unlocked the vault while the app's screens
+    /// weren't in front, and handed back a list to pick from (Android's
+    /// "Unlock PassBundle", docs/phones.md, "Locking"). With "Immediately"
+    /// chosen, or the policy's, the vault stays open for the pick only: it
+    /// locks when the pick's fill or passkey is handed back (`left`), or after
+    /// `PICK_WAIT` if nothing is picked.
+    pub fn offered(&mut self) {
+        self.offered_at(Instant::now(), SystemTime::now());
+    }
+
+    /// `offered`, at a given time (tests).
+    pub fn offered_at(&mut self, now: Instant, wall: SystemTime) {
+        if self.vault.is_some() && self.held().immediately() {
+            self.pick_by = Some((now + PICK_WAIT, wall + PICK_WAIT));
+        }
     }
 
     /// Locks if it's time to, from what the OS says; returns why it locked.
@@ -600,14 +629,22 @@ impl App {
     ) -> Option<Reason> {
         self.vault.as_ref()?;
         let held = self.held();
-        let reason = self.autolock.check(&held, readings, now, wall)?;
+        let checked = self.autolock.check(&held, readings, now, wall);
+        // "Immediately", and a list autofill or a passkey showed that nothing
+        // was picked from in time (`offered`).
+        let unpicked = held.immediately()
+            && self
+                .pick_by
+                .is_some_and(|(by, by_wall)| now >= by || wall >= by_wall);
+        let reason = checked.or(unpicked.then_some(Reason::Idle))?;
         self.time_up();
         Some(reason)
     }
 
     /// The app left the screen (a phone's app switcher or home, a computer's
-    /// window closed or minimized): locks if the person chose "Immediately"
-    /// on a phone, or the policy says so. Returns whether it locked.
+    /// window closed or minimized, or on Android autofill or a passkey
+    /// handing back its answer): locks if the person chose "Immediately" on
+    /// a phone, or the policy says so. Returns whether it locked.
     pub fn left(&mut self) -> bool {
         if self.vault.is_none() || !self.held().immediately() {
             return false;
@@ -628,6 +665,7 @@ impl App {
 
     /// Drops every key and everything decrypted.
     pub fn lock(&mut self) {
+        self.pick_by = None;
         self.sign_in_requests = None;
         self.confirmed = None;
         self.reprompted = None;

@@ -386,17 +386,21 @@ void main() {
     await tester.enterText(find.byType(TextField), samplePassword);
     await unlockWhenStill(tester);
     await pumpUntil(tester, find.text('Logins'));
+    // No refresh token is kept yet on Android, so syncing asks to sign in
+    // again: past that notice, which moves the screen when it shows.
+    await pumpUntil(tester, find.textContaining('Sign in again'));
 
     // A phone's own words and choices: 5 minutes away by default.
     await tester.tap(find.byTooltip('Settings'));
     await pumpUntil(tester, find.text('Lock when the phone locks'));
-    // Settings scrolls on a small screen, as CI's emulator has.
+    // Settings scrolls on a small screen, as CI's emulator has. Tapped once
+    // it holds still: a tap while the tab is still coming in lands on what's
+    // over it, and the menu never opens.
     await tester.ensureVisible(find.text('5 minutes'));
-    await tester.pump(const Duration(milliseconds: 300));
-    await tester.tap(find.text('5 minutes'));
+    await tapWhenStill(tester, find.text('5 minutes'));
     await pumpUntil(tester, find.text('Immediately'));
     expect(find.text('Away from PassBundle'), findsOneWidget);
-    await tester.tap(find.text('Immediately').last);
+    await tapWhenStill(tester, find.text('Immediately').last);
     await tester.pump(const Duration(milliseconds: 500));
     expect(Core().preferences()['lockAfterMinutes'], 0);
     await tester.tap(find.byTooltip('Items'));

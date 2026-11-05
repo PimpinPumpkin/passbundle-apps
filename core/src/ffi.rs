@@ -176,6 +176,50 @@ pub(crate) fn screen_off() -> bool {
     guard.as_mut().is_some_and(App::sleeping)
 }
 
+/// Autofill or a passkey handed its answer back: a fill's values, or a
+/// passkey's signature or new passkey, or that there's none (Kotlin's
+/// FillActivity and PasskeyActivity, as they finish). Nothing of PassBundle's
+/// is on the screen anymore, so with "Immediately" chosen, or the policy's,
+/// the vault locks now, as when the app's own screens leave (`App::left`), or
+/// as soon as a slow call that has the app is done. Whether it locked now, or
+/// may once that call is done. Never waits for the app: Kotlin calls it on
+/// the main thread.
+#[cfg(target_os = "android")]
+pub(crate) fn answered() -> bool {
+    let mut guard = match APP.try_lock() {
+        Ok(guard) => guard,
+        Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        Err(TryLockError::WouldBlock) => {
+            LEFT_NOTICE.store(true, Ordering::SeqCst);
+            return true;
+        }
+    };
+    guard.as_mut().is_some_and(App::left)
+}
+
+/// Autofill or a passkey unlocked the vault and handed back a list to pick
+/// from (Kotlin's FillActivity and PasskeyActivity): with "Immediately", the
+/// vault stays open for the pick only (`App::offered`), and if nothing is
+/// picked, locks when the wait is over. On a thread of the core's own, so it
+/// never holds up Kotlin's main thread; a check that comes first (any call
+/// autofill or a passkey makes) locks then too.
+#[cfg(target_os = "android")]
+pub(crate) fn offered() {
+    fn on_open_app(call: impl FnOnce(&mut App)) {
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            let mut guard = APP.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(app) = guard.as_mut() {
+                call(app);
+            }
+        }));
+    }
+    std::thread::spawn(|| {
+        on_open_app(App::offered);
+        std::thread::sleep(crate::app::PICK_WAIT + std::time::Duration::from_secs(1));
+        on_open_app(lock_if_due);
+    });
+}
+
 fn secrets(dir: &std::path::Path) -> Box<dyn SecretStore> {
     // Test builds (the test-hooks feature) can keep the refresh token in
     // memory, never in the OS's store; a release always uses the OS's.
