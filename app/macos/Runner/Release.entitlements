@@ -15,8 +15,9 @@
      or that took one of its own's place in its folder. So the release adds
      a library load constraint instead (the sign job): the app loads exactly
      its own libraries, by their code directory hashes, and the OS's. macOS
-     14 and later enforce that; on macOS 12 and 13 any validly signed library
-     put in the app's folder would load. And a release never takes a
+     14 and later enforce that, so the app needs macOS 14 or later (its
+     deployment target): on 12 and 13 any validly signed library put in the
+     app's folder would load. And a release never takes a
      library's path from its environment (PB_CORE_LIB is for tests only:
      app/lib/core.dart).
 

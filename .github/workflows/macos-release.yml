@@ -334,7 +334,7 @@ jobs:
           # just signed; and Rosetta's translations of them (validation
           # category 8), without which the Intel half can't run on Apple
           # silicon. The OS's own libraries are never constrained. macOS 14
-          # and later enforce it; 12 and 13 don't.
+          # and later enforce it, and the app needs 14 or later.
           constraint="$RUNNER_TEMP/library-constraint.plist"
           {
             printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>' \

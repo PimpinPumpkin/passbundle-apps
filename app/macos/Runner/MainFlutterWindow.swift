@@ -275,13 +275,7 @@ class MainFlutterWindow: NSWindow {
         doubleClicked()
       } else if event.clickCount == 1 {
         if !event.modifierFlags.contains(.command) {
-          if !NSApp.isActive {
-            if #available(macOS 14.0, *) {
-              NSApp.activate()
-            } else {
-              NSApp.activate(ignoringOtherApps: true)
-            }
-          }
+          if !NSApp.isActive { NSApp.activate() }
           if !isKeyWindow { makeKeyAndOrderFront(nil) }
         }
         performDrag(with: event)
