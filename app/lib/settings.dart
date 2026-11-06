@@ -2,12 +2,14 @@
 // agent and shared with the browser extension (docs/core.md, "Unlock with
 // Windows Hello or Touch ID"), and when the app locks by itself ("Locking by
 // itself"), within what an organization's policy allows ("Locking by
-// policy"). Sign-ins from other devices waiting for an answer
+// policy"). On Android, turning on autofill and passkeys (autofill_offer.dart).
+// Sign-ins from other devices waiting for an answer
 // (sign_in_requests.dart). On Android and the Mac, updates from PassBundle's
 // releases (updates.dart). On macOS and Windows, whether screenshots of
 // PassBundle are allowed (window_chrome.dart).
 import 'package:flutter/material.dart';
 
+import 'autofill_offer.dart';
 import 'core.dart';
 import 'icons.dart';
 import 'sign_in_requests.dart';
@@ -287,6 +289,8 @@ class _SettingsListState extends State<SettingsList> {
           footerColor: scheme.error,
           children: [unlock()],
         ),
+        // The same card the vault offers as it opens, on or not.
+        if (isAndroid) const AutofillCard(heading: 'Autofill'),
         SettingsGroup(
           title: 'Locking',
           footer: policyWait(policy),

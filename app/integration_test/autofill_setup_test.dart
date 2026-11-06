@@ -10,6 +10,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
 
+import 'package:passbundle/autofill_offer.dart';
 import 'package:passbundle/core.dart';
 import 'package:passbundle/main.dart';
 import 'package:passbundle/unlock_offer.dart';
@@ -65,6 +66,10 @@ void main() {
     // A phone with biometrics set up would offer them after signing in; this
     // turns them on in Settings instead, so it's been declined just now.
     declineOffer();
+    // The script turns on autofill itself (adb), so the vault's offer to
+    // turn it on was put off too (autofill_offer.dart; phone_test.dart
+    // checks it).
+    putOffAutofill();
     await tester.pumpWidget(PassBundleApp(key: UniqueKey()));
     await pumpUntil(tester, find.text('Sign in to PassBundle'));
     await tester.tap(find.text('Self-hosted?'));

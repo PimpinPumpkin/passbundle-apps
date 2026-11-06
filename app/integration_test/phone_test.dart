@@ -12,6 +12,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
 
+import 'package:passbundle/autofill_offer.dart';
 import 'package:passbundle/core.dart';
 import 'package:passbundle/main.dart';
 import 'package:passbundle/theme.dart';
@@ -79,10 +80,14 @@ Future<void> openItem(WidgetTester tester, String name) async {
 }
 
 /// After the master password, a phone with biometrics set up offers to
-/// unlock with them next time (unlock_offer.dart). These tests (but the one
-/// about biometric unlock) aren't about that, so it was declined just now,
-/// as "Not now" does.
-void declinedTheOffer() => declineOffer();
+/// unlock with them next time (unlock_offer.dart), and an Android phone
+/// offers to turn on autofill (autofill_offer.dart). These tests (but the
+/// ones about those) aren't about that, so they were declined just now, as
+/// "Not now" and "Later" do.
+void declinedTheOffer() {
+  declineOffer();
+  putOffAutofill();
+}
 
 // A real server the phone reaches (tools/android-app-test.sh, with
 // PB_TEST_SERVER), and an account on it with one login.
@@ -264,6 +269,8 @@ void main() {
       File('$dir/sync.json').writeAsStringSync(sampleSync);
       await Core.removeBiometric();
       await Core.openOnThisDevice();
+      // Not about autofill (the next test is).
+      putOffAutofill();
       await tester.pumpWidget(PassBundleApp(key: UniqueKey()));
       await pumpUntil(tester, find.text('Unlock PassBundle'));
       await tester.enterText(find.byType(TextField), samplePassword);
@@ -318,6 +325,93 @@ void main() {
       }
       expect((await Core.biometricStatus())['status'], 'notSetUp');
     },
+  );
+
+  testWidgets(
+    'on Android, offers to turn on autofill as the vault opens, and its buttons open Android\'s own prompt and passkey settings',
+    (tester) async {
+      // Debug builds record what would open instead of opening it, so this
+      // checks what's asked of Android without its real prompt
+      // (AutofillSetup.kt).
+      expect(await Core.useAutofillSetupStandIn(true), isTrue);
+      addTearDown(() => Core.useAutofillSetupStandIn(false));
+      final dir = (await Core.platform.invokeMethod<String>('filesDir'))!;
+      for (final kept in Directory(dir).listSync()) {
+        kept.deleteSync(recursive: true);
+      }
+      File('$dir/settings.json').writeAsStringSync(sampleSettings);
+      File('$dir/sync.json').writeAsStringSync(sampleSync);
+      await Core.openOnThisDevice();
+      declineOffer();
+
+      // A new install: Android has autofill, and PassBundle isn't its
+      // service yet. Android 14 and later have Credential Manager.
+      final status = AutofillStatus.from((await Core.autofillStatus())!);
+      expect(status.autofillSupported, isTrue);
+      expect(status.autofillOn, isFalse);
+      final passkeys = status.apiLevel >= passkeysSinceApi;
+      expect(status.passkeysAvailable, passkeys);
+      expect(status.passkeysOn, isFalse);
+
+      await tester.pumpWidget(PassBundleApp(key: UniqueKey()));
+      await pumpUntil(tester, find.text('Unlock PassBundle'));
+      await tester.enterText(find.byType(TextField), samplePassword);
+      await unlockWhenStill(tester);
+      await pumpUntil(tester, find.text('Logins'));
+      await pumpUntil(tester, find.text('Turn on autofill'));
+      expect(find.text('Use PassBundle for autofill'), findsOneWidget);
+      expect(
+        find.text('Use PassBundle for passkeys'),
+        passkeys ? findsOneWidget : findsNothing,
+      );
+
+      // Android's own prompt, for a result, naming this app.
+      await tapWhenStill(
+        tester,
+        find.byKey(const ValueKey('turn-on-autofill')),
+      );
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(await Core.autofillSetupOpened(), [
+        {
+          'for': 'autofill',
+          'action': 'android.settings.REQUEST_SET_AUTOFILL_SERVICE',
+          'data': 'package:com.passbundle.app',
+          'forResult': true,
+        },
+      ]);
+
+      // Android 14 and later: Credential Manager's own settings page, made by
+      // androidx.credentials for this app.
+      if (passkeys) {
+        await tapWhenStill(
+          tester,
+          find.byKey(const ValueKey('turn-on-passkeys')),
+        );
+        await tester.pump(const Duration(milliseconds: 300));
+        final opened = await Core.autofillSetupOpened();
+        expect(opened, hasLength(2));
+        expect(opened.last, {
+          'for': 'passkeys',
+          'pendingIntent': true,
+          'creator': 'com.passbundle.app',
+          'activity': true,
+        });
+      }
+
+      // Nothing turned on without the person: "Later" closes it, and
+      // Settings has the same card.
+      expect((await Core.autofillStatus())!['autofillOn'], isFalse);
+      await tapWhenStill(tester, find.text('Later'));
+      await pumpUntil(tester, find.byTooltip('Settings').hitTestable());
+      expect(find.text('Turn on autofill'), findsNothing);
+      expect(autofillPutOff(), isTrue);
+      await tester.tap(find.byTooltip('Settings'));
+      await pumpUntil(tester, find.byKey(const ValueKey('setup-autofill')));
+      expect(find.text('Autofill'), findsOneWidget);
+      await tester.tap(find.byTooltip('Items'));
+      await tester.pump(const Duration(milliseconds: 400));
+    },
+    skip: !Platform.isAndroid,
   );
 
   // Graphite glass on the phone's own renderer: the ground's washes and the

@@ -76,6 +76,15 @@ bool get isPhone => debugPhone ?? (Platform.isAndroid || Platform.isIOS);
 @visibleForTesting
 bool? debugPhone;
 
+/// Android, where the app helps turn on its autofill service and passkey
+/// provider (autofill_offer.dart).
+bool get isAndroid => debugAndroid ?? Platform.isAndroid;
+
+/// Tests only: Android's autofill setup on a computer, with a stand-in for
+/// the phone's own code. Null is what this is.
+@visibleForTesting
+bool? debugAndroid;
+
 /// An answer from a call that can fail: ok, or the core's words.
 class Answer {
   Answer(Map<String, dynamic> json)
@@ -496,6 +505,43 @@ class Core {
       await platform.invokeMethod<bool>('untrustBrowser', {'package': package});
     }
   }
+
+  /// Whether PassBundle is Android's autofill service and, on Android 14 and
+  /// later, a passkey provider (AutofillSetup.kt): `apiLevel`,
+  /// `autofillSupported`, `autofillOn`, `passkeysAvailable`, `passkeysOn`.
+  /// Null elsewhere.
+  static Future<Map<String, dynamic>?> autofillStatus() async {
+    if (!isAndroid) return null;
+    final status = await platform.invokeMethod<Map>('autofillStatus');
+    return status == null ? null : Map<String, dynamic>.from(status);
+  }
+
+  /// Android's own prompt to use PassBundle for autofill, or where it's
+  /// missing, the settings it's chosen in: which opened (`prompt`,
+  /// `providers`, `settings`), or null if none did.
+  static Future<String?> turnOnAutofill() async =>
+      isAndroid ? await platform.invokeMethod<String>('turnOnAutofill') : null;
+
+  /// Android 14 and later's list of passkey providers: true if it opened.
+  static Future<bool> openPasskeySettings() async =>
+      isAndroid &&
+      (await platform.invokeMethod<bool>('openPasskeySettings') ?? false);
+
+  /// For the phone tests: debug builds record what turning on autofill and
+  /// passkeys would open, instead of opening Android's prompt
+  /// (AutofillSetup.kt). False in a release build.
+  static Future<bool> useAutofillSetupStandIn(bool on) async =>
+      await platform.invokeMethod<bool>('autofillSetupStandIn', {'on': on}) ??
+      false;
+
+  /// What the stand-in recorded, in order: `for` (autofill or passkeys),
+  /// then an intent's `action`, `data`, and `forResult`, or a pending
+  /// intent's `creator` and `activity`.
+  static Future<List<Map<String, dynamic>>> autofillSetupOpened() async => [
+    for (final o
+        in await platform.invokeMethod<List>('autofillSetupOpened') ?? [])
+      Map<String, dynamic>.from(o as Map),
+  ];
 
   static Future<Map<String, dynamic>> _onPhone(
     String method, [
