@@ -402,7 +402,11 @@ void main() {
       // Settings has the same card.
       expect((await Core.autofillStatus())!['autofillOn'], isFalse);
       await tapWhenStill(tester, find.text('Later'));
-      await pumpUntil(tester, find.byTooltip('Settings').hitTestable());
+      // Gone once it has slid away (what's under it can be tapped sooner).
+      for (var i = 0; i < 50; i++) {
+        await tester.pump(const Duration(milliseconds: 100));
+        if (find.text('Turn on autofill').evaluate().isEmpty) break;
+      }
       expect(find.text('Turn on autofill'), findsNothing);
       expect(autofillPutOff(), isTrue);
       await tester.tap(find.byTooltip('Settings'));
