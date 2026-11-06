@@ -84,7 +84,7 @@ class _MarkPainter extends CustomPainter {
 }
 
 /// PassBundle's logo, as the web vault and the extension show it
-/// (passbundle-clients, brand/wordmark.py): the emerald jewel tile with the
+/// (passbundle-clients, brand/wordmark.py): the glossy emerald tile with the
 /// mark in white, then the name in lower case, "pass" bold and "bundle"
 /// lighter, in the brand's two tones. [size] is the tile's; the rest keeps
 /// the logo's proportions (a 42-unit tile, 12 to the name, the name at 31).
@@ -113,8 +113,7 @@ class Wordmark extends StatelessWidget {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          JewelTile(
-            jewel: Jewel.allItems,
+          LogoTile(
             size: size,
             // The lock is 18 of the tile's 42 units wide.
             child: Mark(size: 18 * u * 32 / 26, color: Colors.white),
@@ -141,7 +140,7 @@ class Wordmark extends StatelessWidget {
 /// An item's tile: a login's website's icon on a white tile, or its first
 /// letter on a tint of the login color where there's none, and everything
 /// else, items made from a template with a look of its own included, its
-/// category's jewel tile (passbundle-clients, item-tile.component.ts), so a
+/// category's flat tile (passbundle-clients, item-tile.component.ts), so a
 /// list is never a column of identical keys. The same on a phone, a
 /// computer, and in the web vault.
 class Avatar extends StatelessWidget {
@@ -306,28 +305,60 @@ class _SiteIconState extends State<_SiteIcon> {
   }
 }
 
-/// A jewel tile: the jewel's tone with its white glyph, a little sheen from
-/// the top left, and a shade at the bottom, like a cut stone. The same in the
-/// menu, the list, an item, and the New picker, on every screen.
+/// A kind of item's tile, flat, as passbundle.com and the web vault have it:
+/// a rounded square tinted with the jewel's tone, and its glyph in the tone
+/// itself; in the dark, a lighter tone for both. No sheen and no shadow:
+/// only the logo's tile ([LogoTile]) is glossy. The same in the menu, the
+/// list, an item, and the New picker, on every screen.
 class JewelTile extends StatelessWidget {
-  const JewelTile({super.key, required this.jewel, this.size = 36, this.child});
+  const JewelTile({super.key, required this.jewel, this.size = 36});
 
   final Jewel jewel;
   final double size;
 
-  /// In place of the jewel's glyph: the mark, on the menu's emerald.
-  final Widget? child;
-
   @override
   Widget build(BuildContext context) {
     final brightness = Theme.of(context).brightness;
-    final dark = brightness == Brightness.dark;
+    return Container(
+      width: size,
+      height: size,
+      decoration: BoxDecoration(
+        color: jewel.tint(brightness),
+        borderRadius: BorderRadius.circular(size * 0.28),
+      ),
+      alignment: Alignment.center,
+      child: Glyph(
+        jewel.glyph,
+        size: size * 0.56,
+        color: jewel.color(brightness),
+        strokeWidth: size < 28 ? 2.2 : 1.9,
+      ),
+    );
+  }
+}
+
+/// The logo's tile, the one glossy tile (passbundle-clients,
+/// brand/wordmark.py, and the app icons): emerald with a little sheen from
+/// the top left, a light top edge, a shade at the bottom, and a soft shadow,
+/// like a cut stone, holding [child] (the mark).
+class LogoTile extends StatelessWidget {
+  const LogoTile({super.key, this.size = 42, required this.child});
+
+  /// The logo's emerald, in the light and the dark alike.
+  static const emerald = Color(0xFF0E7A5A);
+
+  final double size;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final dark = Theme.of(context).brightness == Brightness.dark;
     final radius = BorderRadius.circular(size * 0.28);
     return Container(
       width: size,
       height: size,
       decoration: BoxDecoration(
-        color: jewel.color(brightness),
+        color: emerald,
         borderRadius: radius,
         boxShadow: [
           BoxShadow(
@@ -382,16 +413,7 @@ class JewelTile extends StatelessWidget {
                 ),
               ),
             ),
-            Center(
-              child:
-                  child ??
-                  Glyph(
-                    jewel.glyph,
-                    size: size * 0.56,
-                    color: Colors.white,
-                    strokeWidth: size < 28 ? 2.2 : 1.9,
-                  ),
-            ),
+            Center(child: child),
           ],
         ),
       ),

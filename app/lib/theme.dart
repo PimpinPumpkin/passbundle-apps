@@ -2,7 +2,8 @@
 // Sans Flex (bundled, so no system font changes it), and our own shapes. Light
 // and dark, or following the system. The design language: a calm ground;
 // surfaces that rise in three steps (resting, lifted, floating); and a
-// jewel-toned color for each kind of item. In the light, the ground is solid
+// jewel-toned color for each kind of item, drawn as a flat tile (only the
+// logo's tile is glossy). In the light, the ground is solid
 // and the surfaces white. Dark mode is graphite glass, as the web vault and
 // the browser extension have it (passbundle-clients, brand/look.css): a
 // neutral graphite ground with faint jewel washes, and translucent white
@@ -715,39 +716,57 @@ class _OnTheGround extends PageTransitionsTheme {
   );
 }
 
-/// A jewel tone and a glyph: a kind of item's, or a place's in the menu.
-/// Deep enough for a white glyph on it, light and dark, and a step lighter in
-/// the dark, as the web vault has them (passbundle-clients, categories.ts).
+/// A jewel tone and a glyph: a kind of item's, or a place's in the menu,
+/// drawn as a flat tile (widgets.dart, JewelTile): the tone, softly, as the
+/// tile, and the glyph in the tone itself. In the dark, a lighter, softer
+/// tone for both. The same tones as the web vault's (passbundle-clients,
+/// categories.ts) and passbundle.com's; the glyph keeps 3:1 or more on its
+/// tile, light and dark (look_test.dart).
 class Jewel {
   const Jewel(this.glyph, this.light, this.dark);
 
   /// SVG path data on a 24 by 24 grid (glyphs.dart).
   final String glyph;
+
+  /// The tone in the light: the glyph's color, and the tile's tint.
   final Color light;
+
+  /// The tone in the dark, lighter: the glyph's color, and the tile's tint.
   final Color dark;
 
+  /// How much of the tone tints the tile, over whatever it sits on: 11% in
+  /// the light, 14% in the dark.
+  static const lightTint = 0.11;
+  static const darkTint = 0.14;
+
+  /// The glyph's color.
   Color color(Brightness brightness) =>
       brightness == Brightness.dark ? dark : light;
+
+  /// The tile's color: the tone, mostly clear.
+  Color tint(Brightness brightness) => brightness == Brightness.dark
+      ? dark.withValues(alpha: darkTint)
+      : light.withValues(alpha: lightTint);
 
   /// Emerald, the logo's color: everything.
   static const allItems = Jewel(
     Glyphs.grid,
     Color(0xFF0E7A5A),
-    Color(0xFF0E7A5A),
+    Color(0xFF5FD6AE),
   );
 
-  /// Gold.
+  /// Gold, a shade deeper than the star's own so its glyph keeps 3:1.
   static const favorites = Jewel(
     Glyphs.star,
-    Color(0xFFB98310),
-    Color(0xFFB98310),
+    Color(0xFF946A0C),
+    Color(0xFFECC25E),
   );
 
   /// A bank's emerald: Health, as the web vault's menu has it.
   static const health = Jewel(
     Glyphs.health,
     Color(0xFF0E7A47),
-    Color(0xFF128752),
+    Color(0xFF6FDBA0),
   );
 }
 
@@ -775,7 +794,7 @@ class ItemKind extends Jewel {
     'Logins',
     Glyphs.key,
     Color(0xFF2448B8),
-    Color(0xFF2E55C9),
+    Color(0xFF93ADFF),
   );
 
   /// Amethyst.
@@ -785,7 +804,7 @@ class ItemKind extends Jewel {
     'Cards',
     Glyphs.card,
     Color(0xFF6B30B8),
-    Color(0xFF7A42CC),
+    Color(0xFFC6A3FF),
   );
 
   /// Turquoise.
@@ -795,7 +814,7 @@ class ItemKind extends Jewel {
     'Identities',
     Glyphs.identity,
     Color(0xFF08788A),
-    Color(0xFF0A8599),
+    Color(0xFF62D3E3),
   );
 
   /// Topaz.
@@ -805,7 +824,7 @@ class ItemKind extends Jewel {
     'Notes',
     Glyphs.note,
     Color(0xFFA9600C),
-    Color(0xFFB4690F),
+    Color(0xFFF2B766),
   );
 
   /// Onyx.
@@ -815,7 +834,7 @@ class ItemKind extends Jewel {
     'SSH keys',
     Glyphs.terminal,
     Color(0xFF353B4A),
-    Color(0xFF4A5266),
+    Color(0xFFC3C9D6),
   );
 
   /// Upstream's newer kinds, which the web vault makes where the server
@@ -827,7 +846,7 @@ class ItemKind extends Jewel {
     'Bank accounts',
     Glyphs.bank,
     Color(0xFF0E7A47),
-    Color(0xFF128752),
+    Color(0xFF6FDBA0),
   );
 
   static const driversLicense = ItemKind(
@@ -836,7 +855,7 @@ class ItemKind extends Jewel {
     'Driver\'s licenses',
     Glyphs.identity,
     Color(0xFF08788A),
-    Color(0xFF0A8599),
+    Color(0xFF62D3E3),
   );
 
   static const passport = ItemKind(
@@ -845,7 +864,7 @@ class ItemKind extends Jewel {
     'Passports',
     Glyphs.identity,
     Color(0xFF08788A),
-    Color(0xFF0A8599),
+    Color(0xFF62D3E3),
   );
 
   /// In the order the vault lists them.
@@ -877,19 +896,22 @@ abstract final class Categories {
     'sshKey': ItemKind.sshKey,
     'bank': ItemKind.bankAccount,
     // Aquamarine.
-    'wifi': Jewel(Glyphs.wifi, Color(0xFF1C7FB8), Color(0xFF1F86C2)),
+    'wifi': Jewel(Glyphs.wifi, Color(0xFF1C7FB8), Color(0xFF7CC4EF)),
     // Garnet.
-    'server': Jewel(Glyphs.server, Color(0xFFA8291F), Color(0xFFB83328)),
+    'server': Jewel(Glyphs.server, Color(0xFFA8291F), Color(0xFFFF9D92)),
     // Ruby.
-    'license': Jewel(Glyphs.license, Color(0xFFB01E54), Color(0xFFC0275F)),
-    'apiKey': Jewel(Glyphs.key, Color(0xFF353B4A), Color(0xFF4A5266)),
-    'domain': Jewel(Glyphs.globe, Color(0xFF1C7FB8), Color(0xFF1F86C2)),
-    'email': Jewel(Glyphs.envelope, Color(0xFF2448B8), Color(0xFF2E55C9)),
-    'certificate': Jewel(Glyphs.badge, Color(0xFFB01E54), Color(0xFFC0275F)),
+    'license': Jewel(Glyphs.license, Color(0xFFB01E54), Color(0xFFFF92B8)),
+    'apiKey': Jewel(Glyphs.key, Color(0xFF353B4A), Color(0xFFC3C9D6)),
+    'domain': Jewel(Glyphs.globe, Color(0xFF1C7FB8), Color(0xFF7CC4EF)),
+    'email': Jewel(Glyphs.envelope, Color(0xFF2448B8), Color(0xFF93ADFF)),
+    'certificate': Jewel(Glyphs.badge, Color(0xFFB01E54), Color(0xFFFF92B8)),
   };
 
   /// A category's jewel; a note's for one the app doesn't know.
   static Jewel of(String? category) => _looks[category] ?? ItemKind.note;
+
+  /// Every category's jewel, by the core's name for it.
+  static Map<String, Jewel> get all => _looks;
 }
 
 ThemeData passBundleTheme(Brightness brightness) {

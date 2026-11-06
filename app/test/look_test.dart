@@ -3,15 +3,18 @@
 // brightest point of each of its washes too, and the translucent cards,
 // fields, and pills laid over them, as well as the solid dialogs and menus.
 // Each page stands on the ground and its washes, and the system's bars
-// match the app, light or dark.
+// match the app, light or dark. Every tile but the logo's is flat, with its
+// glyph at 3 to 1 or more on its tint, light and dark.
 import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:passbundle/glyphs.dart';
 import 'package:passbundle/main.dart';
 import 'package:passbundle/theme.dart';
+import 'package:passbundle/widgets.dart';
 
 import 'support.dart';
 
@@ -118,7 +121,149 @@ void main() {
     });
   }
 
+  // Every tile but the logo's is flat (widgets.dart, JewelTile): the jewel's
+  // tone, mostly clear, over whatever the tile is on, and the glyph in the
+  // tone. The glyph keeps 3 to 1 or more on it, light and dark, on every
+  // surface a tile is drawn on.
+  final jewels = <String, Jewel>{
+    'All items': Jewel.allItems,
+    'Favorites': Jewel.favorites,
+    'Health': Jewel.health,
+    for (final kind in ItemKind.all) kind.kind: kind,
+    ...Categories.all,
+  };
+  for (final (name, c) in [
+    ('light', PassBundleColors.light),
+    ('graphite glass', PassBundleColors.graphiteGlass),
+    ('plain graphite', PassBundleColors.plainGraphite),
+    ('true black', PassBundleColors.trueBlack),
+  ]) {
+    test('$name: every tile\'s glyph on its tint, 3 to 1 or more', () {
+      final grounds = {
+        'the ground': c.ground,
+        for (final (i, w) in c.washes.indexed)
+          'wash ${i + 1}': Color.alphaBlend(w.color, c.ground),
+      };
+      final surfaces = {
+        for (final MapEntry(key: where, value: g) in grounds.entries) ...{
+          where: g,
+          'a card over $where': stack(g, [c.pane]),
+          'the chosen item over $where': stack(g, [c.raised]),
+          'the chosen item, picked, over $where': stack(g, [
+            c.raised,
+            c.selected,
+          ]),
+          'the menu\'s chosen entry over $where': stack(g, [c.pane, c.tint]),
+          'a chosen tab or choice over $where': stack(g, [c.pane, c.selected]),
+          'a pill over $where': stack(g, [c.chip]),
+          'the item\'s well over $where': stack(g, [c.raised, c.well]),
+          'a sunken card over $where': stack(g, [c.pane, c.sunken]),
+        },
+        'a dialog': c.dialog,
+        'a menu': c.menu,
+        'a dropdown': c.canvas,
+        'a card in a dialog': stack(c.dialog, [c.pane]),
+        'a card in Settings': stack(c.dialogGround, [c.pane]),
+      };
+      final failures = <String>[];
+      for (final MapEntry(key: kind, value: jewel) in jewels.entries) {
+        final glyph = jewel.color(c.brightness);
+        for (final MapEntry(key: on, value: s) in surfaces.entries) {
+          final tile = stack(s, [jewel.tint(c.brightness)]);
+          final ratio = contrast(glyph, tile);
+          if (ratio < 3) {
+            failures.add(
+              '$kind ${hex(glyph)} on its tile on $on ${hex(tile)}: '
+              '${ratio.toStringAsFixed(2)}',
+            );
+          }
+        }
+      }
+      expect(failures, isEmpty, reason: failures.join('\n'));
+    });
+  }
+
+  test('a tile\'s tint is its tone at 11% in the light, 14% in the dark', () {
+    expect(ItemKind.login.tint(Brightness.light).toARGB32(), 0x1C2448B8);
+    expect(ItemKind.login.tint(Brightness.dark).toARGB32(), 0x2493ADFF);
+  });
+
   setUpAll(loadFonts);
+
+  for (final dark in [true, false]) {
+    testWidgets('${dark ? 'dark' : 'light'}: an item\'s tile is flat, and only '
+        'the logo\'s is glossy', (tester) async {
+      final brightness = dark ? Brightness.dark : Brightness.light;
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: passBundleTheme(brightness),
+          home: const Scaffold(
+            body: Column(
+              children: [
+                JewelTile(jewel: ItemKind.card, size: 36),
+                Wordmark(),
+              ],
+            ),
+          ),
+        ),
+      );
+      final tile = tester.widget<Container>(
+        find
+            .descendant(
+              of: find.byType(JewelTile),
+              matching: find.byType(Container),
+            )
+            .first,
+      );
+      final decoration = tile.decoration! as BoxDecoration;
+      expect(decoration.color, ItemKind.card.tint(brightness));
+      expect(decoration.gradient, isNull);
+      expect(decoration.boxShadow, isNull);
+      // The glyph in the tone, not white, and no sheen or shade over the tint.
+      final glyph = tester.widget<Glyph>(
+        find.descendant(
+          of: find.byType(JewelTile),
+          matching: find.byType(Glyph),
+        ),
+      );
+      expect(glyph.color, ItemKind.card.color(brightness));
+      expect(
+        find.descendant(
+          of: find.byType(JewelTile),
+          matching: find.byWidgetPredicate(
+            (w) =>
+                w is DecoratedBox &&
+                w.decoration is BoxDecoration &&
+                (w.decoration as BoxDecoration).gradient != null,
+          ),
+        ),
+        findsNothing,
+      );
+      // The logo keeps its sheen and its shadow, emerald in both.
+      final logo = tester.widget<Container>(
+        find
+            .descendant(
+              of: find.byType(LogoTile),
+              matching: find.byType(Container),
+            )
+            .first,
+      );
+      expect((logo.decoration! as BoxDecoration).color, LogoTile.emerald);
+      expect((logo.decoration! as BoxDecoration).boxShadow, isNotEmpty);
+      expect(
+        find.descendant(
+          of: find.byType(LogoTile),
+          matching: find.byWidgetPredicate(
+            (w) =>
+                w is DecoratedBox &&
+                w.decoration is BoxDecoration &&
+                (w.decoration as BoxDecoration).gradient is RadialGradient,
+          ),
+        ),
+        findsOneWidget,
+      );
+    });
+  }
 
   for (final dark in [true, false]) {
     testWidgets('${dark ? 'dark' : 'light'}: the page on the ground, and the '
