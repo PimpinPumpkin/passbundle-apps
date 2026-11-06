@@ -149,15 +149,21 @@ Future<void> pumpUntil(
 /// for its own code (MainActivity.kt, AppDelegate.swift) that answers about
 /// biometrics as a phone with a fingerprint set up would. `enrolled` counts
 /// the times turning it on was asked for; each asks for the fingerprint, and
-/// the stand-in gives it unless [biometricAnswers] says no.
+/// the stand-in gives it unless [biometricAnswers] says no. With [android],
+/// it's an Android phone, which helps turn on autofill (autofill_offer.dart).
 class PhoneStandIn {
   PhoneStandIn(
     WidgetTester tester, {
     this.status = 'notSetUp',
     this.method = 'fingerprint',
+    this.android,
   }) {
     debugPhone = true;
     addTearDown(() => debugPhone = null);
+    if (android != null) {
+      debugAndroid = true;
+      addTearDown(() => debugAndroid = null);
+    }
     final messenger = tester.binding.defaultBinaryMessenger;
     messenger.setMockMethodCallHandler(Core.platform, (call) async {
       switch (call.method) {
@@ -174,6 +180,12 @@ class PhoneStandIn {
         case 'copy':
           copied.add(Map<String, dynamic>.from(call.arguments as Map));
           return true;
+        case 'autofillStatus':
+          return android?.status;
+        case 'turnOnAutofill':
+          return android?.turnOnAutofill();
+        case 'openPasskeySettings':
+          return android?.openPasskeySettings();
         default:
           return null;
       }
@@ -191,4 +203,56 @@ class PhoneStandIn {
 
   /// What was copied, as the phone's code was asked: `{id, what}`.
   final copied = <Map<String, dynamic>>[];
+
+  /// Android's autofill and passkeys, on an Android phone.
+  final AndroidStandIn? android;
+}
+
+/// What Android says about PassBundle's autofill and passkeys
+/// (AutofillSetup.kt), and its own screens for turning them on: each opens
+/// unless [opens] is false, and the person says [yes] there, which Android
+/// tells the app once it's back in front.
+class AndroidStandIn {
+  AndroidStandIn({
+    this.apiLevel = 34,
+    this.autofillSupported = true,
+    this.autofillOn = false,
+    this.passkeysAvailable = true,
+    this.passkeysOn = false,
+    this.opens = true,
+  });
+
+  int apiLevel;
+  bool autofillSupported;
+  bool autofillOn;
+  bool passkeysAvailable;
+  bool passkeysOn;
+  bool opens;
+  bool yes = true;
+
+  /// What "Turn on" opened, in order: autofill (Android's prompt) or
+  /// passkeys (the system's passkey settings).
+  final opened = <String>[];
+
+  Map<String, dynamic> get status => {
+    'apiLevel': apiLevel,
+    'autofillSupported': autofillSupported,
+    'autofillOn': autofillOn,
+    'passkeysAvailable': passkeysAvailable,
+    'passkeysOn': passkeysOn,
+  };
+
+  String? turnOnAutofill() {
+    if (!opens) return null;
+    opened.add('autofill');
+    if (yes) autofillOn = true;
+    return 'prompt';
+  }
+
+  bool openPasskeySettings() {
+    if (!opens) return false;
+    opened.add('passkeys');
+    if (yes) passkeysOn = true;
+    return true;
+  }
 }

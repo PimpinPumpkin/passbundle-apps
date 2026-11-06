@@ -13,6 +13,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import 'autofill_offer.dart';
 import 'core.dart';
 import 'editor.dart';
 import 'generator.dart';
@@ -141,6 +142,13 @@ class VaultScreenState extends State<VaultScreen> {
         if (method != null) {
           showMessage(context, 'Unlocking with $method is on.');
         }
+      }
+      // Then, on Android, turning on autofill, until it's on or the person
+      // says "Later" (autofill_offer.dart).
+      if (!saving) {
+        final said = await offerAutofill(context);
+        if (!mounted) return;
+        if (said != null) showMessage(context, said);
       }
       // Then sign-ins waiting for this account's answer, while the vault is
       // open (not while measuring, which has no server).

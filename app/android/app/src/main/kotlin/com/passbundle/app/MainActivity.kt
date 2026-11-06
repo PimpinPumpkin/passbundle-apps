@@ -15,7 +15,8 @@ import io.flutter.plugin.common.MethodChannel
 /**
  * The app's one screen, which Flutter draws. What's here is what only Android
  * does (docs/phones.md, "Talking to the OS"): the app's own folder,
- * copying straight from the core to the clipboard, and updates from GitHub.
+ * copying straight from the core to the clipboard, turning on autofill and
+ * passkeys, and updates from GitHub.
  */
 class MainActivity : FlutterActivity() {
     private var screenOff: BroadcastReceiver? = null
@@ -126,6 +127,15 @@ class MainActivity : FlutterActivity() {
                         call.argument<String>("package")?.let { Browsers.untrust(this, it) }
                         result.success(true)
                     }
+                    // Turning on autofill and passkeys: whether each is on, and
+                    // Android's own prompt or settings for them (AutofillSetup.kt).
+                    "autofillStatus" -> result.success(AutofillSetup.status(this))
+                    "turnOnAutofill" -> result.success(AutofillSetup.turnOnAutofill(this))
+                    "openPasskeySettings" -> result.success(AutofillSetup.openPasskeySettings(this))
+                    // Tests only: debug builds record what would open instead (false in a release build).
+                    "autofillSetupStandIn" ->
+                        result.success(AutofillSetup.useStandIn(this, call.argument<Boolean>("on") == true))
+                    "autofillSetupOpened" -> result.success(AutofillSetup.openedByStandIn())
                     // Updates from PassBundle's GitHub releases (update/Updater.kt).
                     "updateStatus" -> result.success(Updater.status(this))
                     "updateCheck" -> {
