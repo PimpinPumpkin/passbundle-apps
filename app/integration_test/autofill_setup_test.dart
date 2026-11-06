@@ -212,14 +212,18 @@ void main() {
         expect(chosen.ok, isTrue, reason: chosen.error);
         Core().lock();
         expect(Core().state()['state'], 'locked');
-        // The app's screens hear it at their next check (main.dart, every two
-        // seconds) before the script sends the app home. Otherwise, still
-        // showing the vault, they'd tell the core the app left, and heard
-        // during the unlock asked for next, that would lock it again
-        // ("Immediately", ffi.rs's notices).
-        await tester.runAsync(
-          () => Future<void>.delayed(const Duration(seconds: 3)),
-        );
+        // In front (Android 13 and earlier here), the app's screens show it
+        // locked at their next check (main.dart, every two seconds) before
+        // the script sends the app home. Otherwise, still showing the vault,
+        // they'd tell the core the app left, and heard during the unlock
+        // asked for next, that would lock it again ("Immediately", ffi.rs's
+        // notices). Away (Android 14, after the passkeys), nothing waits:
+        // Android freezes an app left in the background for a while, and
+        // this half would miss the script's next ask.
+        if (WidgetsBinding.instance.lifecycleState ==
+            AppLifecycleState.resumed) {
+          await pumpUntil(tester, find.text(unlockWith));
+        }
         File('$dir/autofill-immediately-chosen').writeAsStringSync('');
       }
       if (unlock.existsSync()) {
