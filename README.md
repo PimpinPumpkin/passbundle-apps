@@ -43,7 +43,7 @@ Against a real server (`tools/test-server.sh` starts a throwaway one from a pass
 PB_TEST_SERVER=$(tools/test-server.sh <passbundle-server binary> 8591 /tmp/pb-server) cargo test --test server
 ```
 
-`flutter test --tags screenshots --update-goldens` redraws `app/test/screenshots/`. With `PB_SHOWCASE` set to a folder `cargo run --example showcase -- <folder>` filled, they're drawn on a fuller sample vault (folders in folders, shared folders, items from templates), which isn't committed.
+`flutter test --tags screenshots --update-goldens` redraws `app/test/screenshots/`. With `PB_SHOWCASE` set to a folder `cargo run --example showcase -- <folder>` filled, they're drawn on a fuller sample vault (folders in folders, shared folders, items from templates), which isn't committed. Without Flutter, the App screenshots workflow (`.github/workflows/screenshots.yml`, started from the Actions tab) draws them that way and pushes them to the branch `screenshots-update`, for someone to open the pull request.
 
 The window on each computer, with a build with test hooks: `tools/mac-window-test.sh <passbundle.app>`, `tools/window-test.ps1 -Exe <passbundle.exe>`, and on Linux `DISPLAY=:98 dbus-run-session -- tools/window-test.sh <passbundle>` (under Xvfb, with xfwm4). `tools/window-shots.sh` and `tools/window-shots.ps1` take screenshots of the real window, light and dark, which CI keeps with each run (`window-shots-*`).
 
