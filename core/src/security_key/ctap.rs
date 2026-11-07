@@ -574,7 +574,14 @@ pub fn ask_nfc(device: &mut dyn Nfc, request: &KeyRequest, wait: &Wait) -> Resul
             "That isn't a security key PassBundle can use. Try another way to sign in.",
         ));
     }
-    if version == b"FIDO_2_0" {
+    // A key that speaks both says "U2F_V2" (CTAP 2.1, "Applet selection"),
+    // so one that doesn't say "FIDO_2_0" is asked authenticatorGetInfo:
+    // CTAP2 if it answers, as browsers do, else U2F.
+    let speaks_ctap2 = version == b"FIDO_2_0"
+        || link
+            .cbor(&[0x04], wait)
+            .is_ok_and(|info| info.first() == Some(&0x00));
+    if speaks_ctap2 {
         ctap2(&mut link, request, wait)
     } else {
         u2f(&mut link, request, wait)
@@ -730,9 +737,11 @@ mod tests {
 
     #[test]
     fn a_key_held_to_the_phone_signs_over_nfc() {
-        for ctap2 in [true, false] {
+        // CTAP2 only, both (which says "U2F_V2" when selected), and U2F only.
+        for (ctap2, says_u2f) in [(true, false), (true, true), (false, true)] {
             let mut nfc = SoftNfc::new(SoftKey::new("vault.example.test"));
             nfc.key.ctap2 = ctap2;
+            nfc.says_u2f = says_u2f;
             let request = request(&nfc.key);
             let no = AtomicBool::new(false);
             let answer = ask_nfc(&mut nfc, &request, &wait(&no)).unwrap();
@@ -742,10 +751,10 @@ mod tests {
                 &request.client_data_hash,
                 &answer.signature
             ));
-            if ctap2 {
-                // The command went in pieces (chaining), and the answer came back in pieces (GET RESPONSE).
-                assert!(nfc.chained && nfc.got_more, "{ctap2}");
-            }
+            // CTAP2 whenever the key speaks it: the command went in pieces
+            // (chaining), and the answer came back in pieces (GET RESPONSE).
+            assert_eq!(nfc.chained, ctap2, "{ctap2} {says_u2f}");
+            assert_eq!(nfc.got_more, ctap2, "{ctap2} {says_u2f}");
         }
     }
 
