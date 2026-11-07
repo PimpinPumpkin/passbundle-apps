@@ -6,7 +6,7 @@
 //! token.
 
 use std::path::PathBuf;
-use std::time::{Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use zeroize::Zeroizing;
 
@@ -21,9 +21,11 @@ use crate::generator_policy::GeneratorPolicy;
 use crate::kdf::{normalize_email, Prelogin};
 use crate::lock_policy::LockPolicy;
 use crate::secrets::SecretStore;
+use crate::security_key::{KeyAnswer, SecurityKeyRequest};
 use crate::server::{Device, Download, PendingSignIn, Server, Session, SignIn, TwoFactor};
 use crate::store::{Settings, Store};
 use crate::synced_settings::{self, Known};
+use crate::two_step::{self, Offer};
 use crate::vault::{Item, ItemDraft, Sync, Vault};
 
 #[derive(Debug, PartialEq, Eq)]
@@ -53,12 +55,20 @@ pub struct Saved {
     pub synced: bool,
 }
 
+/// A second step made ready (Duo's address, a security key's request), or
+/// a sign-in that went through without it.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Prepared<T> {
+    Ready(T),
+    SignedIn,
+}
+
 /// Where signing in got to.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Step {
     Done,
-    /// The second step, with the methods the server offers (0 authenticator, 1 email).
-    TwoFactor(Vec<u8>),
+    /// The second step, with what the server offers (two_step.rs).
+    TwoFactor(Offer),
 }
 
 pub struct App {
@@ -362,23 +372,49 @@ impl App {
         match signed_in {
             SignIn::Done(session) => self.signed_in(session),
             SignIn::NeedsTwoFactor(pending) => {
-                let providers = pending.providers.clone();
+                let offer = pending.offer.clone();
                 self.pending = Some(pending);
-                Ok(Step::TwoFactor(providers))
+                Ok(Step::TwoFactor(offer))
             }
         }
     }
 
-    /// Two-step login's second step. A wrong code can be tried again.
+    /// Two-step login's second step with a code: an authenticator app's, an
+    /// emailed one, a YubiKey's, or a recovery code (two_step.rs). A wrong
+    /// code can be tried again. Duo and a security key have their own
+    /// (`finish_with_duo`, `finish_with_key`).
     pub fn finish_sign_in(&mut self, provider: u8, code: &str, remember: bool) -> Result<Step> {
-        let (Some(server), Some(pending)) = (&self.server, &self.pending) else {
+        let code = match provider {
+            two_step::AUTHENTICATOR | two_step::EMAIL => code.trim().to_owned(),
+            two_step::YUBIKEY => two_step::yubikey_otp(code)?,
+            two_step::RECOVERY_CODE => two_step::recovery_code(code)?,
+            _ => {
+                return Err(Error::TwoStep(
+                    "PassBundle can't finish that kind of two-step login with a code.",
+                ))
+            }
+        };
+        let finished = self.finish_second_step(provider, code, remember);
+        match (provider, finished) {
+            (two_step::RECOVERY_CODE, Err(Error::WrongCode)) => Err(Error::TwoStep(
+                "That recovery code isn't right. Check it, or use another way to sign in.",
+            )),
+            (two_step::YUBIKEY, Err(Error::WrongCode)) => Err(Error::TwoStep(
+                "That YubiKey code didn't work. Touch your YubiKey again, or use another way to sign in.",
+            )),
+            (_, finished) => finished,
+        }
+    }
+
+    fn finish_second_step(&mut self, provider: u8, code: String, remember: bool) -> Result<Step> {
+        let (Some(server), Some(pending)) = (&self.server, &mut self.pending) else {
             return Err(Error::SignedOut);
         };
         let session = server.finish_sign_in(
             pending,
             &TwoFactor {
                 provider,
-                code: code.to_owned(),
+                code,
                 remember,
             },
         )?;
@@ -394,6 +430,87 @@ impl App {
             return Err(Error::SignedOut);
         };
         server.password_hint(&settings.email)
+    }
+
+    /// What the server offers now, new from it when what this sign-in has
+    /// is spent or old (`fresh_for`). A sign-in that went through meanwhile
+    /// (two-step login turned off elsewhere) finishes.
+    fn fresh_offer(&mut self, fresh_for: Duration) -> Result<Option<Offer>> {
+        let (Some(server), Some(pending)) = (&self.server, &mut self.pending) else {
+            return Err(Error::SignedOut);
+        };
+        if pending.spent || pending.offered_at.elapsed() > fresh_for {
+            if let Some(session) = server.renew_offer(pending)? {
+                self.pending = None;
+                self.signed_in(session)?;
+                return Ok(None);
+            }
+        }
+        Ok(self.pending.as_ref().map(|p| p.offer.clone()))
+    }
+
+    /// Duo's Universal Prompt address for this sign-in, for the browser:
+    /// a new one unless the server made this one in the last minute (Duo
+    /// gives a sign-in five minutes), or `SignedIn` if the sign-in went
+    /// through without it.
+    pub fn duo_address(&mut self) -> Result<Prepared<String>> {
+        let Some(offer) = self.fresh_offer(Duration::from_secs(60))? else {
+            return Ok(Prepared::SignedIn);
+        };
+        let duo = offer.duo.ok_or(Error::TwoStep(
+            "The server doesn't offer Duo for this account now. Use another way to sign in.",
+        ))?;
+        Ok(Prepared::Ready(duo.url))
+    }
+
+    /// Two-step login's second step with Duo: its answer as the browser
+    /// hands it back (two_step.rs, `Duo::token`).
+    pub fn finish_with_duo(&mut self, link: &str, remember: bool) -> Result<Step> {
+        let duo = self
+            .pending
+            .as_ref()
+            .and_then(|p| p.offer.duo.clone())
+            .ok_or(Error::TwoStep(
+                "That Duo answer was for another sign-in. Continue with Duo again.",
+            ))?;
+        let token = duo.token(link)?;
+        match self.finish_second_step(two_step::DUO, token, remember) {
+            Err(Error::WrongCode) => Err(Error::TwoStep(
+                "Duo didn't let this sign-in through. Continue with Duo to try again.",
+            )),
+            finished => finished,
+        }
+    }
+
+    /// The security key request for this sign-in (security_key), with a new
+    /// challenge if the last was tried or is a few minutes old, or
+    /// `SignedIn` if the sign-in went through without it.
+    pub fn security_key_request(&mut self) -> Result<Prepared<SecurityKeyRequest>> {
+        let Some(offer) = self.fresh_offer(Duration::from_secs(240))? else {
+            return Ok(Prepared::SignedIn);
+        };
+        let server = self.server.as_ref().ok_or(Error::SignedOut)?;
+        let options = offer.security_key.ok_or(Error::TwoStep(
+            "The server doesn't offer a security key for this account now. Use another way to sign in.",
+        ))?;
+        SecurityKeyRequest::new(&options, server.base()).map(Prepared::Ready)
+    }
+
+    /// Two-step login's second step with a security key's answer to
+    /// `request`, checked first (security_key::webauthn).
+    pub fn finish_with_key(
+        &mut self,
+        request: &SecurityKeyRequest,
+        answer: &KeyAnswer,
+        remember: bool,
+    ) -> Result<Step> {
+        let token = request.token(answer)?;
+        match self.finish_second_step(two_step::SECURITY_KEY, token, remember) {
+            Err(Error::WrongCode) => Err(Error::TwoStep(
+                "The server didn't take the security key's answer. Try again, or use another way to sign in.",
+            )),
+            finished => finished,
+        }
     }
 
     /// Asks the server to email the code, for a sign-in waiting on one.

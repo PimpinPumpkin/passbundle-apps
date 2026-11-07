@@ -38,7 +38,16 @@ void report(String line) {
   }
 }
 
-Future<void> main() async {
+Future<void> main(List<String> args) async {
+  // Duo's way back on Windows and Linux: the OS opened this second copy of
+  // the app with the link, which goes to the copy that's signing in
+  // (two_step.dart); this one ends before it shows.
+  if ((Platform.isWindows || Platform.isLinux) &&
+      args.isNotEmpty &&
+      args.first.startsWith('passbundle://')) {
+    Core().handOverLink(args.first);
+    exit(0);
+  }
   WidgetsFlutterBinding.ensureInitialized();
   // The app under see-through status and navigation bars, on every version
   // of Android as Android 15 and later draw it, so the ground runs under

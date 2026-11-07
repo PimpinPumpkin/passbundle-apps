@@ -1,9 +1,12 @@
 //! The core against a real PassBundle server (tools/test-server.sh), with
 //! real keys throughout: signing up an account the way an app would, signing
-//! in (with a wrong password, and with two-step login), sync, saving, editing,
-//! refusing an edit to a stale copy, trash, refreshing the session, and an
+//! in (with a wrong password, and with two-step login: an authenticator app,
+//! a recovery code, and a security key), sync, saving, editing, refusing an
+//! edit to a stale copy, trash, refreshing the session, and an
 //! organization's items. Set PB_TEST_SERVER to the server's URL; without it,
-//! these tests say so and pass.
+//! these tests say so and pass. The security key test (with the test-hooks
+//! feature, for its software key) needs a server named localhost, since
+//! WebAuthn takes only a domain: PB_TEST_SERVER_LOCALHOST.
 
 use base64::{engine::general_purpose::STANDARD, Engine};
 use passbundle_core::app::{App, State, Step};
@@ -272,17 +275,21 @@ fn two_step_login_with_an_authenticator_app() {
         )
         .unwrap();
 
-    let SignIn::NeedsTwoFactor(pending) = server.sign_in(&email, PASSWORD).unwrap() else {
+    let SignIn::NeedsTwoFactor(mut pending) = server.sign_in(&email, PASSWORD).unwrap() else {
         panic!("two-step login should be asked for");
     };
-    assert!(pending.providers.contains(&0), "{:?}", pending.providers);
+    assert!(
+        pending.offer.providers.contains(&0),
+        "{:?}",
+        pending.offer.providers
+    );
     let wrong = TwoFactor {
         provider: 0,
         code: "000000".into(),
         remember: false,
     };
     assert_eq!(
-        server.finish_sign_in(&pending, &wrong).err(),
+        server.finish_sign_in(&mut pending, &wrong).err(),
         Some(Error::WrongCode)
     );
     // The same waiting sign-in takes the right code: no second KDF. A code from
@@ -293,8 +300,229 @@ fn two_step_login_with_an_authenticator_app() {
         code: totp.code_at(now()),
         remember: false,
     };
-    let mut session = server.finish_sign_in(&pending, &right).unwrap();
+    let mut session = server.finish_sign_in(&mut pending, &right).unwrap();
     assert!(open(&server, &mut session).items.is_empty());
+}
+
+fn master_hash(email: &str) -> String {
+    MasterKey::derive(
+        PASSWORD,
+        email,
+        &Kdf::Pbkdf2 {
+            iterations: 600_000,
+        },
+    )
+    .unwrap()
+    .login_hash(PASSWORD)
+}
+
+/// Turns on an authenticator app for the account, as the web vault does.
+fn turn_on_authenticator(server: &Server, session: &mut Session, email: &str) {
+    let secret = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP";
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    server
+        .raw(
+            session,
+            "POST",
+            "/api/two-factor/authenticator",
+            Some(json!({ "key": secret, "token": Totp::parse(secret).unwrap().code_at(now), "masterPasswordHash": master_hash(email) })),
+        )
+        .unwrap();
+}
+
+/// An app of its own on a folder of its own, not signed in.
+fn new_app() -> App {
+    let dir = std::env::temp_dir().join(format!("pb-core-app-{}", uuid::Uuid::new_v4().simple()));
+    App::open(Store::new(&dir), Box::new(MemorySecretStore::default()))
+}
+
+#[test]
+fn a_recovery_code_signs_in_and_turns_two_step_login_off() {
+    let Some(server) = server() else { return };
+    let url = std::env::var("PB_TEST_SERVER").unwrap();
+    let email = new_email("recovery");
+    sign_up(&server, &email);
+    let mut session = sign_in(&server, &email);
+    turn_on_authenticator(&server, &mut session, &email);
+    let recover = server
+        .raw(
+            &mut session,
+            "POST",
+            "/api/two-factor/get-recover",
+            Some(json!({ "masterPasswordHash": master_hash(&email) })),
+        )
+        .unwrap();
+    let code = recover["code"].as_str().unwrap().to_owned();
+
+    let mut app = new_app();
+    let Step::TwoFactor(offer) = app.sign_in(&url, &email, PASSWORD).unwrap() else {
+        panic!("two-step login should be asked for");
+    };
+    // The server doesn't list it; it takes it whatever it offers.
+    assert!(!offer.providers.contains(&8), "{:?}", offer.providers);
+    assert_eq!(
+        app.finish_sign_in(8, "notmyrecoverycode", false).err(),
+        Some(Error::WrongCode)
+    );
+    // As someone might type it off paper: in capitals, in fours.
+    let typed: Vec<String> = code
+        .to_uppercase()
+        .chars()
+        .collect::<Vec<_>>()
+        .chunks(4)
+        .map(|c| c.iter().collect())
+        .collect();
+    assert_eq!(
+        app.finish_sign_in(8, &typed.join(" "), false).unwrap(),
+        Step::Done
+    );
+    assert!(app.vault().is_some());
+    // Two-step login is off now, as upstream's recovery code does.
+    let _ = sign_in(&server, &email);
+}
+
+#[test]
+fn a_yubikeys_code_and_duo_need_what_the_account_has() {
+    let Some(server) = server() else { return };
+    let url = std::env::var("PB_TEST_SERVER").unwrap();
+    let email = new_email("yubikey");
+    sign_up(&server, &email);
+    let mut session = sign_in(&server, &email);
+    turn_on_authenticator(&server, &mut session, &email);
+    let mut app = new_app();
+    let Step::TwoFactor(offer) = app.sign_in(&url, &email, PASSWORD).unwrap() else {
+        panic!("two-step login should be asked for");
+    };
+    assert_eq!(offer.providers, vec![0]);
+    // Not a YubiKey's code: refused here, before the server.
+    assert!(matches!(
+        app.finish_sign_in(3, "123456", false),
+        Err(Error::TwoStep(_))
+    ));
+    // One in the right shape, for an account without YubiKeys: the server refuses it.
+    assert!(app
+        .finish_sign_in(3, "cccccbhuinjdtrbftdrldjlrgkdeubffnkhjfjifvlbr", false)
+        .is_err());
+    // No Duo here, nor a security key.
+    assert!(matches!(app.duo_address(), Err(Error::TwoStep(_))));
+    assert!(matches!(app.security_key_request(), Err(Error::TwoStep(_))));
+    // The sign-in still waits.
+    assert!(app.signing_in());
+}
+
+/// Signing in with a security key, as a key plugged in would: the core
+/// reads the server's request, makes the client data for the server's
+/// origin, asks a key in software over CTAPHID (core/src/security_key/soft.rs),
+/// and sends its answer, which the server checks with webauthn-rs.
+#[cfg(feature = "test-hooks")]
+#[test]
+fn two_step_login_with_a_security_key() {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use passbundle_core::app::Prepared;
+    use passbundle_core::passkey::{attestation_object, authenticator_data, flags, Attested};
+    use passbundle_core::security_key::ctap::{ask_hid, Wait};
+    use passbundle_core::security_key::soft::SoftKey;
+    use std::sync::atomic::AtomicBool;
+
+    let Ok(url) = std::env::var("PB_TEST_SERVER_LOCALHOST") else {
+        eprintln!("PB_TEST_SERVER_LOCALHOST isn't set; skipping the security key test (tools/test-server.sh <bin> <port> <dir> localhost starts one).");
+        return;
+    };
+    let server = Server::new(&url, Device::this_one(&Device::new_identifier())).unwrap();
+    let email = new_email("security-key");
+    sign_up(&server, &email);
+    let mut session = sign_in(&server, &email);
+    let hash = master_hash(&email);
+
+    // The key is added as the web vault adds one.
+    let options = server
+        .raw(
+            &mut session,
+            "POST",
+            "/api/two-factor/get-webauthn-challenge",
+            Some(json!({ "masterPasswordHash": hash })),
+        )
+        .unwrap();
+    let rp_id = options["rp"]["id"].as_str().unwrap().to_owned();
+    assert_eq!(rp_id, "localhost");
+    let mut key = SoftKey::new(&rp_id);
+    let client_data = format!(
+        r#"{{"type":"webauthn.create","challenge":"{}","origin":"{url}","crossOrigin":false}}"#,
+        options["challenge"].as_str().unwrap()
+    );
+    let made = authenticator_data(
+        &rp_id,
+        flags::USER_PRESENT,
+        0,
+        Some(&Attested {
+            credential_id: &key.credential_id,
+            public: key.public(),
+        }),
+    );
+    let id = URL_SAFE_NO_PAD.encode(&key.credential_id);
+    server
+        .raw(
+            &mut session,
+            "POST",
+            "/api/two-factor/webauthn",
+            Some(json!({
+                "id": 1,
+                "name": "Software key",
+                "masterPasswordHash": hash,
+                "deviceResponse": {
+                    "id": id,
+                    "rawId": id,
+                    "type": "public-key",
+                    "response": {
+                        "attestationObject": URL_SAFE_NO_PAD.encode(attestation_object(&made)),
+                        "clientDataJson": URL_SAFE_NO_PAD.encode(client_data),
+                    },
+                },
+            })),
+        )
+        .unwrap();
+
+    let mut app = new_app();
+    let Step::TwoFactor(offer) = app.sign_in(&url, &email, PASSWORD).unwrap() else {
+        panic!("two-step login should be asked for");
+    };
+    assert!(offer.providers.contains(&7), "{:?}", offer.providers);
+    let Prepared::Ready(request) = app.security_key_request().unwrap() else {
+        panic!("a security key request");
+    };
+    assert_eq!(request.origin, url);
+    assert_eq!(request.allow, vec![key.credential_id.clone()]);
+    let canceled = AtomicBool::new(false);
+    let wait = || Wait {
+        until: std::time::Instant::now() + std::time::Duration::from_secs(10),
+        canceled: &canceled,
+    };
+
+    // An answer made for another origin, as on a phishing page, is refused
+    // by the server, and that challenge is spent.
+    let mut elsewhere = request.clone();
+    elsewhere.client_data_json = String::from_utf8(request.client_data_json.clone())
+        .unwrap()
+        .replace(&url, "http://localhost:1")
+        .into_bytes();
+    let answer = ask_hid(&mut key, &elsewhere.key_request(), &wait()).unwrap();
+    assert!(app.finish_with_key(&elsewhere, &answer, false).is_err());
+    assert!(app.signing_in());
+
+    // The next try asks the server for a new challenge, and signs in.
+    let Prepared::Ready(again) = app.security_key_request().unwrap() else {
+        panic!("a security key request");
+    };
+    assert_ne!(again.client_data_json, request.client_data_json);
+    let answer = ask_hid(&mut key, &again.key_request(), &wait()).unwrap();
+    assert_eq!(
+        app.finish_with_key(&again, &answer, false).unwrap(),
+        Step::Done
+    );
+    assert!(app.vault().is_some());
 }
 
 #[test]

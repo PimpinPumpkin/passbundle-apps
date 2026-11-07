@@ -2,7 +2,7 @@
 //! refreshing the session, sync, and saving items (docs/core.md, "Signing
 //! in" and "Network"). HTTPS only, except to this computer.
 
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -13,6 +13,7 @@ use zeroize::Zeroizing;
 use crate::crypto::{EncString, SymmetricKey};
 use crate::error::{BadAddress, Error, Result};
 use crate::kdf::{normalize_email, Kdf, MasterKey, Prelogin};
+use crate::two_step::Offer;
 use crate::vault::Sync;
 
 /// This app, as the server records it.
@@ -76,7 +77,8 @@ impl Session {
     }
 }
 
-/// Two-step login's second step: a code from an authenticator app (0) or email (1).
+/// Two-step login's second step: the method, as the server numbers them
+/// (two_step.rs), and its code or answer.
 #[derive(Clone, Debug)]
 pub struct TwoFactor {
     pub provider: u8,
@@ -91,13 +93,27 @@ pub struct PendingSignIn {
     email: String,
     login_hash: Zeroizing<String>,
     stretched: SymmetricKey,
-    /// What the server offers: 0 authenticator, 1 email, and others the core can't do yet.
-    pub providers: Vec<u8>,
+    /// What the server offers, from its latest answer.
+    pub offer: Offer,
+    /// When the server made `offer`: Duo's address and a security key's
+    /// challenge in it don't last.
+    pub(crate) offered_at: Instant,
+    /// Duo's address or the security key's challenge in `offer` was tried:
+    /// the server took it, so the next try needs a new one.
+    pub(crate) spent: bool,
+}
+
+impl PendingSignIn {
+    fn renew(&mut self, offer: Offer) {
+        self.offer = offer;
+        self.offered_at = Instant::now();
+        self.spent = false;
+    }
 }
 
 enum Token {
     Done(Session),
-    TwoFactor(Vec<u8>),
+    TwoFactor(Offer),
 }
 
 pub enum SignIn {
@@ -435,23 +451,39 @@ impl Server {
             email: normalize_email(email),
             login_hash: Zeroizing::new(master.login_hash(password)),
             stretched: master.stretch(),
-            providers: Vec::new(),
+            offer: Offer::default(),
+            offered_at: Instant::now(),
+            spent: false,
         };
         match self.token(&pending, None)? {
             Token::Done(session) => Ok(SignIn::Done(session)),
-            Token::TwoFactor(providers) => {
-                pending.providers = providers;
+            Token::TwoFactor(offer) => {
+                pending.offer = offer;
                 Ok(SignIn::NeedsTwoFactor(pending))
             }
         }
     }
 
     /// Finishes a sign-in with its second step. A wrong code leaves `pending`
-    /// as it was, for another try without deriving the master key again.
-    pub fn finish_sign_in(&self, pending: &PendingSignIn, second: &TwoFactor) -> Result<Session> {
+    /// waiting, for another try without deriving the master key again, with
+    /// what the server offers now if it said.
+    pub fn finish_sign_in(
+        &self,
+        pending: &mut PendingSignIn,
+        second: &TwoFactor,
+    ) -> Result<Session> {
+        if matches!(
+            second.provider,
+            crate::two_step::DUO | crate::two_step::SECURITY_KEY
+        ) {
+            pending.spent = true;
+        }
         match self.token(pending, Some(second))? {
             Token::Done(session) => Ok(session),
-            Token::TwoFactor(_) => Err(Error::WrongCode),
+            Token::TwoFactor(offer) => {
+                pending.renew(offer);
+                Err(Error::WrongCode)
+            }
         }
     }
 
@@ -474,6 +506,25 @@ impl Server {
             Err(Error::Server(m)) if m.starts_with(SHOWN) => Ok(Some(m[SHOWN.len()..].to_owned())),
             Err(e) => Err(e),
         }
+    }
+
+    /// Asks the server what it offers again, for a new Duo address or
+    /// security key challenge: the same request as signing in, without a
+    /// second step. If two-step login went off meanwhile, that's the
+    /// session.
+    pub fn renew_offer(&self, pending: &mut PendingSignIn) -> Result<Option<Session>> {
+        match self.token(pending, None)? {
+            Token::Done(session) => Ok(Some(session)),
+            Token::TwoFactor(offer) => {
+                pending.renew(offer);
+                Ok(None)
+            }
+        }
+    }
+
+    /// The server's address, as the app signs in to it.
+    pub fn base(&self) -> &str {
+        &self.base
     }
 
     /// Asks the server to email a sign-in code (provider 1).
@@ -524,17 +575,8 @@ impl Server {
                     web_vault: self.base.clone(),
                 });
             }
-            if let Some(providers) = body["TwoFactorProviders"].as_array() {
-                return Ok(Token::TwoFactor(
-                    providers
-                        .iter()
-                        .filter_map(|p| {
-                            p.as_str()
-                                .and_then(|s| s.parse().ok())
-                                .or_else(|| p.as_u64().map(|n| n as u8))
-                        })
-                        .collect(),
-                ));
+            if let Some(offer) = Offer::read(&body, &self.base) {
+                return Ok(Token::TwoFactor(offer));
             }
             // The server's words for a wrong email or password, or code,
             // become the core's; any other refusal (a disabled account, say)
@@ -1078,7 +1120,7 @@ mod tests {
             answer("400 Bad Request", json, SET_UP_FIRST),
         ]);
         let server = Server::new(&url, Device::this_one("")).unwrap();
-        let SignIn::NeedsTwoFactor(pending) = server
+        let SignIn::NeedsTwoFactor(mut pending) = server
             .sign_in_with(&test_prelogin(), "ana@acme.test", "correct horse battery")
             .unwrap()
         else {
@@ -1089,7 +1131,7 @@ mod tests {
             code: "123456".into(),
             remember: false,
         };
-        let refused = server.finish_sign_in(&pending, &code).err();
+        let refused = server.finish_sign_in(&mut pending, &code).err();
         assert_eq!(
             refused,
             Some(Error::SetUpTwoStepFirst {
