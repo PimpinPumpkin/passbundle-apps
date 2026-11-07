@@ -22,17 +22,34 @@ void setSize(WidgetTester tester, Size size) {
   addTearDown(tester.view.reset);
 }
 
+/// What a PassBundle server answers about itself, without signing in
+/// (`GET /api/config`): the sign-in screen checks a self-hosted server with
+/// it as the person leaves the Server field (docs/core.md, "Checking a
+/// server").
+const passBundleConfig = (
+  200,
+  {
+    'version': '2026.6.0',
+    'server': {'name': 'PassBundle'},
+  },
+);
+
 /// A server on this computer that answers each path with [answers]' JSON
-/// (status, body), and 404 otherwise; started outside the test's fake clock.
+/// (status, body), its configuration as a PassBundle server does unless
+/// [answers] says otherwise, and 404 otherwise; started outside the test's
+/// fake clock. Each request's method and path go in [asked].
 Future<String> answering(
   WidgetTester tester,
-  Map<String, (int, Object)> answers,
-) async {
+  Map<String, (int, Object)> answers, {
+  List<String>? asked,
+}) async {
+  final answered = {'/api/config': passBundleConfig, ...answers};
   final server = (await tester.runAsync(() async {
     final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
     server.listen((request) async {
+      asked?.add('${request.method} ${request.uri.path}');
       await utf8.decoder.bind(request).join();
-      final (status, body) = answers[request.uri.path] ?? (404, const {});
+      final (status, body) = answered[request.uri.path] ?? (404, const {});
       request.response.statusCode = status;
       request.response.headers.contentType = ContentType.json;
       request.response.write(jsonEncode(body));
@@ -134,8 +151,9 @@ void main() {
     'Back goes back a step: from making an account, and from two-step login, to signing in',
     (tester) async {
       setSize(tester, const Size(390, 844));
-      // A server that asks for an authenticator app's code.
-      final server = await answering(tester, {
+      // A PassBundle server that asks for an authenticator app's code.
+      final asked = <String>[];
+      final server = await answering(tester, asked: asked, {
         '/identity/accounts/prelogin': (
           200,
           {
@@ -181,6 +199,23 @@ void main() {
       await tester.pump();
       expect(find.text('Two-step login'), findsNothing);
       expect(find.text('Sign in to PassBundle'), findsOneWidget);
+
+      // Leaving the Server field checked it, and the check's answer is in:
+      // a PassBundle server, so nothing is said under the field.
+      for (var i = 0; i < 100 && !asked.contains('GET /api/config'); i++) {
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 50)),
+        );
+      }
+      expect(asked, contains('GET /api/config'));
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 500)),
+      );
+      await tester.pump();
+      final field = tester.widget<TextField>(
+        find.byKey(const ValueKey('server')),
+      );
+      expect(field.decoration?.errorText, isNull);
     },
   );
 
