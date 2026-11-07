@@ -44,6 +44,9 @@ foreach ($theme in 'light', 'dark') {
     $env:PB_MEASURE_PASSWORD = 'correct horse battery staple 1'
     # Windows otherwise leaves the window out of screenshots.
     $env:PB_ALLOW_SCREENSHOTS = '1'
+    # The mouse off where the window opens: left over its buttons (by
+    # tools/window-test.ps1's Close), Windows shows their tooltip as it opens.
+    [Shot]::SetCursorPos(0, 0) | Out-Null
     $app = Start-Process -FilePath $Exe -PassThru
     for ($i = 0; $i -lt 120; $i++) {
         if ((Get-Content $lines -ErrorAction SilentlyContinue) -match '^ready') { break }
