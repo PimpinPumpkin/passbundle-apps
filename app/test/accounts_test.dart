@@ -8,7 +8,8 @@
 // Then "All accounts": every unlocked account's items together, each labeled
 // with its account's name and color, searched together; picking another
 // account's item opens it in its own account; a new item asks which account;
-// and an account is named and colored in its Settings.
+// and an account is named and colored in its Settings. Each account's menu
+// shows its own shared folders' icons and colors.
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -16,9 +17,13 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:passbundle/accounts.dart';
 import 'package:passbundle/core.dart';
+import 'package:passbundle/glyphs.dart';
 import 'package:passbundle/main.dart';
 import 'package:passbundle/settings.dart';
+import 'package:passbundle/theme.dart';
 import 'package:passbundle/unlock_offer.dart';
+import 'package:passbundle/vault.dart';
+import 'package:passbundle/widgets.dart';
 
 import 'support.dart';
 
@@ -65,9 +70,14 @@ Future<void> openMenu(WidgetTester tester) async {
 }
 
 /// Both accounts unlocked, named Work and Personal, the personal one
-/// shown; their ids, work's first.
-Future<List<String>> unlockBoth(WidgetTester tester) async {
-  final [w, p] = openAccounts();
+/// shown; their ids, work's first. Their shared folders (by id) have the
+/// fields in [work] and [personal] set as given.
+Future<List<String>> unlockBoth(
+  WidgetTester tester, {
+  Map<String, Map<String, dynamic>> work = const {},
+  Map<String, Map<String, dynamic>> personal = const {},
+}) async {
+  final [w, p] = openAccounts(work: work, personal: personal);
   expect(Core().setAccountLabel('Work', null, w).ok, isTrue);
   expect(Core().setAccountLabel('Personal', null, p).ok, isTrue);
   await tester.pumpWidget(const PassBundleApp());
@@ -351,6 +361,54 @@ void main() {
       expect(find.widgetWithText(OutlinedButton, 'Edit'), findsOneWidget);
       expect(find.text('Gate code'), findsOneWidget);
       expect(states(), {w: 'unlocked', p: 'unlocked'});
+    },
+  );
+
+  testWidgets(
+    'each account\'s menu shows its own shared folders\' icons and colors, and an item opened from All accounts shows its own account\'s',
+    (tester) async {
+      wideWindow(tester);
+      // The same shared folder, IT, with a look of each account's own,
+      // encrypted with the sample's organization key (as the web vault
+      // writes them): a green bank for work, a red server for personal.
+      const it = '2c3d4e5f-6071-4829-9ab0-c1d2e3f40516';
+      const bank =
+          '2.8PHy8/T19vf4+fr7/P3+/w==|7B2Xuy93y0k1VHyOmkaIZFJ1l+9fFGvVYvutgOtS52GmO5NUPQdukvfgtk97QTqs|+kucnDW/LO2A98uZpe97d1zs6+5fwou5+ex2ANjDLmo=';
+      const server =
+          '2.8PHy8/T19vf4+fr7/P3+/w==|zhPgMG7iSsXHqsO++n/jMeuDiZg6hl7GL8XEyo/QSWVCsdRhEGOpeNNynxsReu33|wFtImNv1knBWT7jUvALw67oUuDL6rkjDKXmp8eA9OeQ=';
+      final [w, p] = await unlockBoth(
+        tester,
+        work: {
+          it: {'keykeeperLook': bank},
+        },
+        personal: {
+          it: {'keykeeperLook': server},
+        },
+      );
+      final menu = find.byType(Sidebar);
+      List<Jewel> tiles() => tester
+          .widgetList<JewelTile>(
+            find.descendant(of: menu, matching: find.byType(JewelTile)),
+          )
+          .map((t) => t.jewel)
+          .where((j) => j.glyph == Glyphs.bank || j.glyph == Glyphs.server)
+          .toList();
+      // The personal account, shown: its own red server.
+      expect(Core.account, p);
+      expect(tiles().map((j) => (j.glyph, j.light)), [
+        (Glyphs.server, const Color(0xFFA8291F)),
+      ]);
+
+      // A work item from All accounts opens in the work account, whose menu
+      // shows work's green bank.
+      await tester.tap(find.text('All accounts'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Example Mail'));
+      await opened(tester, 'Example Mail');
+      expect(Core.account, w);
+      expect(tiles().map((j) => (j.glyph, j.light)), [
+        (Glyphs.bank, const Color(0xFF0E7A47)),
+      ]);
     },
   );
 
