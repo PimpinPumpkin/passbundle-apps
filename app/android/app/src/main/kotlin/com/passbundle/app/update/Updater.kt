@@ -455,9 +455,23 @@ class InstallStatus : BroadcastReceiver() {
             }
             // Android closes the app as it updates it, so this is seldom heard.
             PackageInstaller.STATUS_SUCCESS -> Updater.installed(mapOf("ok" to true))
-            PackageInstaller.STATUS_FAILURE_ABORTED -> Updater.installed(mapOf("ok" to false, "error" to "The update wasn't installed."))
-            PackageInstaller.STATUS_FAILURE_STORAGE -> Updater.installed(mapOf("ok" to false, "error" to "There isn't enough space on this phone for the update."))
-            else -> Updater.installed(mapOf("ok" to false, "error" to "Android didn't install the update (status $status)."))
+            else -> Updater.installed(mapOf("ok" to false, "error" to failure(status)))
         }
+    }
+
+    companion object {
+        /** What a failed install means to the person, and what to do next: never Android's status number. */
+        fun failure(status: Int): String =
+            when (status) {
+                PackageInstaller.STATUS_FAILURE_ABORTED -> "The update wasn't installed. Tap Update to try again."
+                PackageInstaller.STATUS_FAILURE_STORAGE -> "There isn't enough space on this phone for the update. Free some space, then tap Update."
+                PackageInstaller.STATUS_FAILURE_CONFLICT ->
+                    "Android didn't install the update: a copy of PassBundle signed with another key is in the way. " +
+                        "Uninstall PassBundle, then install it from PassBundle's releases."
+                PackageInstaller.STATUS_FAILURE_INCOMPATIBLE -> "This update doesn't work on this phone's version of Android."
+                PackageInstaller.STATUS_FAILURE_INVALID -> "The update's file was damaged on the way. Tap Update to download it again."
+                PackageInstaller.STATUS_FAILURE_BLOCKED -> "This phone blocked the update. If your organization manages it, ask your IT team."
+                else -> "Android didn't install the update. Tap Update to try again."
+            }
     }
 }

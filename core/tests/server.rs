@@ -68,7 +68,14 @@ fn signs_in_syncs_saves_edits_and_trashes() {
 
     assert_eq!(
         server.sign_in(&email, "not the password").err(),
-        Some(Error::WrongPassword)
+        Some(Error::WrongSignIn)
+    );
+    // An email with no account is said the same: never which emails have one.
+    assert_eq!(
+        server
+            .sign_in(&new_email("nobody"), "not the password")
+            .err(),
+        Some(Error::WrongSignIn)
     );
     // The email as typed: the core trims and lowercases it.
     let mut session = match server
@@ -308,7 +315,7 @@ fn the_app_keeps_the_vault_locks_unlocks_offline_and_signs_out() {
     );
     assert_eq!(
         app.sign_in(&url, &email, "not the password").err(),
-        Some(Error::WrongPassword)
+        Some(Error::WrongSignIn)
     );
     assert_eq!(app.sign_in(&url, &email, PASSWORD).unwrap(), Step::Done);
     assert_eq!(
@@ -394,7 +401,7 @@ fn two_accounts_sign_in_side_by_side_and_one_signs_out() {
     // A wrong password adds nothing.
     assert_eq!(
         accounts.sign_in(&url, &work, "not the password").err(),
-        Some(Error::WrongPassword)
+        Some(Error::WrongSignIn)
     );
     assert!(accounts.summaries().is_empty());
     assert_eq!(accounts.sign_in(&url, &work, PASSWORD).unwrap(), Step::Done);

@@ -44,6 +44,15 @@ pub enum State {
     },
 }
 
+/// An item saved (`App::save`): its id, and whether the sync after it came
+/// through. When it didn't, the item is saved all the same, and this device
+/// shows it; the rest of the vault catches up at the next sync.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Saved {
+    pub id: String,
+    pub synced: bool,
+}
+
 /// Where signing in got to.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Step {
@@ -276,8 +285,9 @@ impl App {
         password: &str,
         hint: Option<&str>,
     ) -> Result<Step> {
-        // A server address that can't be used is refused before the slow part.
-        Server::new(server_url, Device::this_one(&Device::new_identifier()))?;
+        // A server address that can't be used, or that isn't a PassBundle
+        // server's, is refused before the slow part.
+        Server::new(server_url, Device::this_one(&Device::new_identifier()))?.check()?;
         let account = crate::signup::NewAccount::make(email, name, password, hint)?;
         self.register(server_url, &account, password)
     }
@@ -427,6 +437,11 @@ impl App {
             .map(GeneratorPolicy::from_sync)
             .unwrap_or_default();
         self.autolock = AutoLock::new(Instant::now(), SystemTime::now());
+    }
+
+    /// How long ago the vault kept here was synced, by its file's time.
+    pub fn kept_age(&self) -> Option<std::time::Duration> {
+        self.store.sync_age()
     }
 
     /// The account's id: the open vault's, or the kept sync's.
@@ -1114,12 +1129,18 @@ impl App {
     /// Saves an item, new (no id) or edited, then syncs. An organization's
     /// item being edited goes into `collection_ids` (its shared folders) as
     /// well, when they're given and differ from the ones it's in.
+    ///
+    /// Once the server has it, it's saved, whatever happens next: a sync
+    /// that fails then (the connection dropped, say) doesn't make it a
+    /// failure, or Save again would make a second one (`Saved::synced`).
+    /// The item as the server saved it goes in the vault kept here, so it
+    /// shows until a sync brings the rest.
     pub fn save(
         &mut self,
         id: Option<&str>,
         draft: &ItemDraft,
         collection_ids: &[String],
-    ) -> Result<()> {
+    ) -> Result<Saved> {
         let vault = self.vault.as_ref().ok_or(Error::SignedOut)?;
         let editing = id.and_then(|id| vault.item(id));
         // The editor reveals an item's secrets into its fields; one that asks
@@ -1182,20 +1203,69 @@ impl App {
         let (Some(server), Some(session)) = (&self.server, self.session.as_mut()) else {
             return Err(Error::SignedOut);
         };
-        server.save_item(session, id, body, collection_ids)?;
+        let saved = server.save_item(session, id, body, collection_ids)?;
         // Then its shared folders, which the server changes on their own:
         // saved either way, so a refusal still leaves this device up to date.
         let placed = match (moved, id) {
             (true, Some(id)) => server.set_item_collections(session, id, collection_ids),
             _ => Ok(()),
         };
-        // The move's refusal, if any, before the sync's.
         let synced = self.sync();
-        placed.and(synced)
+        if synced.is_err() {
+            // Shown as saved; a vault the answer doesn't open stays as it was.
+            let _ = self.keep_saved("ciphers", &saved);
+        }
+        // The move's refusal, if any: the item is saved, but not moved.
+        placed?;
+        Ok(Saved {
+            id: id
+                .map(str::to_owned)
+                .or_else(|| saved["id"].as_str().map(str::to_owned))
+                .unwrap_or_default(),
+            synced: synced.is_ok(),
+        })
+    }
+
+    /// Puts an item or a folder as the server saved it (its answer to the
+    /// save, which is as a sync has it) in the vault kept here (`list`:
+    /// "ciphers" or "folders"), in place of the one it was or as a new one,
+    /// and opens the vault again with it. For a save whose sync didn't come
+    /// through; the next sync replaces the whole vault with the server's.
+    /// Nothing is kept if the vault doesn't open with it.
+    fn keep_saved(&mut self, list: &str, saved: &serde_json::Value) -> Result<()> {
+        let id = saved["id"]
+            .as_str()
+            .ok_or(Error::Damaged("the server didn't say which item it saved"))?;
+        let key = self
+            .vault
+            .as_ref()
+            .ok_or(Error::SignedOut)?
+            .user_key()
+            .clone();
+        let mut kept: serde_json::Value =
+            serde_json::from_str(&self.store.sync().ok_or(Error::SignedOut)?)
+                .map_err(|_| Error::Damaged("the vault kept here"))?;
+        if kept[list].is_null() {
+            kept[list] = serde_json::json!([]);
+        }
+        let listed = kept[list]
+            .as_array_mut()
+            .ok_or(Error::Damaged("the vault kept here"))?;
+        match listed.iter_mut().find(|c| c["id"] == id) {
+            Some(was) => *was = saved.clone(),
+            None => listed.push(saved.clone()),
+        }
+        let text = kept.to_string();
+        let vault = Vault::open(&Sync::from_json(&text)?, key)?;
+        self.store.save_sync(&text)?;
+        self.vault = Some(vault);
+        Ok(())
     }
 
     /// Makes a folder, its name under the user key, as folders are
-    /// (docs/core.md, "Items"), then syncs. Answers its id.
+    /// (docs/core.md, "Items"), then syncs. Answers its id. Once the server
+    /// has made it, it's made: a sync that fails then leaves it in the vault
+    /// kept here (as `save` does), so trying again doesn't make another.
     pub fn create_folder(&mut self, name: &str) -> Result<String> {
         let name = Self::folder_name(name)?;
         let vault = self.vault.as_ref().ok_or(Error::SignedOut)?;
@@ -1204,7 +1274,10 @@ impl App {
             return Err(Error::SignedOut);
         };
         let id = server.create_folder(session, &encrypted)?;
-        self.sync()?;
+        if self.sync().is_err() {
+            let made = serde_json::json!({ "id": id, "name": encrypted, "object": "folder" });
+            let _ = self.keep_saved("folders", &made);
+        }
         Ok(id)
     }
 

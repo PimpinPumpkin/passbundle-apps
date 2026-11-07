@@ -59,7 +59,10 @@ fn out(value: Value) -> *mut c_char {
         .unwrap_or(std::ptr::null_mut())
 }
 
-const STOPPED: &str = "The core stopped unexpectedly.";
+/// A panic in the core, caught at the bridge: nothing the person did, and
+/// trying again usually works.
+const STOPPED: &str =
+    "Something went wrong inside PassBundle. Try again; if it keeps happening, quit PassBundle and open it again.";
 
 /// Runs a call on the accounts, turning a panic into an error instead of
 /// unwinding into Dart.
@@ -287,6 +290,13 @@ fn failed(e: Error) -> Value {
         "ok": false,
         "error": e.to_string(),
         "signedOut": e == Error::SignedOut,
+        // This device couldn't reach the server: the screens say they show
+        // the copy kept here, and that a change waits for the connection.
+        "offline": e.offline(),
+        // About the server's address, not the email or password: the
+        // sign-in screen says it under the server field (docs/core.md,
+        // "Checking a server").
+        "field": if e.about_the_server() { json!("server") } else { Value::Null },
         // Making an account got to the server: signing in is what's left.
         "accountMade": matches!(e, Error::AccountMade { .. }),
         // Approving a sign-in waits for biometrics or the master password.
@@ -736,6 +746,8 @@ pub unsafe extern "C" fn pb_sign_up(
         &server,
         crate::server::Device::this_one(&crate::server::Device::new_identifier()),
     )
+    // A PassBundle server there, before the slow part.
+    .and_then(|s| s.check())
     .and_then(|_| {
         crate::signup::NewAccount::make(
             &email,
@@ -795,7 +807,42 @@ pub unsafe extern "C" fn pb_unlock(account: *const c_char, password: *const c_ch
 #[no_mangle]
 pub unsafe extern "C" fn pb_sync(account: *const c_char) -> *mut c_char {
     let account = text(account);
-    with_app_waiting(&account, |app| done(app.sync()))
+    with_app_waiting(&account, |app| match app.sync() {
+        Ok(()) => json!({ "ok": true }),
+        // Offline: how old the copy kept here is, for the screens to say.
+        Err(e) if e.offline() => {
+            let mut answer = failed(e);
+            answer["keptSecondsAgo"] = json!(app.kept_age().map(|age| age.as_secs()));
+            answer
+        }
+        Err(e) => failed(e),
+    })
+}
+
+/// Whether a PassBundle server answers at an address, before signing in or
+/// making an account there (docs/core.md, "Checking a server"): `{ok}`, or
+/// what's wrong, with `field: "server"`.
+///
+/// # Safety
+/// `server` is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_check_server(server: *const c_char) -> *mut c_char {
+    let server = text(server);
+    // Its own thread, as the other calls that wait on the network.
+    out(std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                catch_unwind(AssertUnwindSafe(|| {
+                    done(
+                        crate::server::Server::new(&server, crate::server::Device::this_one(""))
+                            .and_then(|s| s.check()),
+                    )
+                }))
+                .unwrap_or_else(|_| json!({ "ok": false, "error": STOPPED }))
+            })
+            .join()
+            .unwrap_or_else(|_| json!({ "ok": false, "error": STOPPED }))
+    }))
 }
 
 /// Saves the generator's settings to the server now, or takes its newer ones
@@ -2398,7 +2445,7 @@ pub unsafe extern "C" fn pb_totp(account: *const c_char, id: *const c_char) -> *
 /// template: {id, name}}`: a field's `type` is upstream's (0 text, 1
 /// hidden, 2 yes or no), and `template` names the template a new item is
 /// made from. For an organization's item being edited, `collectionIds` are
-/// the shared folders it's to be in.
+/// the shared folders it's to be in. Answers `{ok, id, synced}`.
 ///
 /// # Safety
 /// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
@@ -2533,11 +2580,16 @@ pub unsafe extern "C" fn pb_save(
         if asks && d["grant"].as_u64() != Some(app.grant()) {
             return failed(Error::MasterPasswordFirst);
         }
-        done(app.save(
+        // Saved once the server has it: `synced` says whether the sync
+        // after it came through (App::save).
+        match app.save(
             Some(id.as_str()).filter(|i| !i.is_empty()),
             &draft,
             &collections,
-        ))
+        ) {
+            Ok(saved) => json!({ "ok": true, "id": saved.id, "synced": saved.synced }),
+            Err(e) => failed(e),
+        }
     })
 }
 

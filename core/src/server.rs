@@ -11,7 +11,7 @@ use ureq::Agent;
 use zeroize::Zeroizing;
 
 use crate::crypto::{EncString, SymmetricKey};
-use crate::error::{Error, Result};
+use crate::error::{BadAddress, Error, Result};
 use crate::kdf::{normalize_email, Kdf, MasterKey, Prelogin};
 use crate::vault::Sync;
 
@@ -143,19 +143,17 @@ impl Download {
             .timeout_recv_body(Some(ATTACHMENT_TIME))
             .build()
             .call()
-            .map_err(|e| Error::Network(e.to_string()))?;
+            .map_err(|e| Error::unreached(&self.url, &e))?;
         let status = response.status().as_u16();
         if !(200..300).contains(&status) {
-            return Err(Error::Server(format!(
-                "the file couldn't be downloaded ({status})"
-            )));
+            return Err(Error::Status(status));
         }
         response
             .body_mut()
             .with_config()
             .limit(MAX_ATTACHMENT)
             .read_to_vec()
-            .map_err(|e| Error::Network(e.to_string()))
+            .map_err(|e| Error::unreached(&self.url, &e))
     }
 }
 
@@ -303,10 +301,26 @@ impl Server {
 
     fn build(url: &str, device: Device, roots: RootCerts) -> Result<Server> {
         let base = url.trim().trim_end_matches('/').to_owned();
+        if base.is_empty() {
+            return Err(Error::BadAddress(BadAddress::Empty));
+        }
+        // A scheme with nothing after it ("https://").
+        if url.trim().ends_with("://") {
+            return Err(Error::BadAddress(BadAddress::NotAnAddress));
+        }
         if !allowed(&base) {
-            return Err(Error::Refused(
-                "PassBundle only talks to servers over HTTPS",
+            return Err(Error::BadAddress(
+                if base.starts_with("http://") || !base.contains("://") {
+                    BadAddress::NotHttps
+                } else {
+                    BadAddress::NotAnAddress
+                },
             ));
+        }
+        // A name to reach: "https://" alone, or a space in it, isn't one.
+        let host = crate::error::host_of(&base);
+        if host.is_empty() || host.contains(char::is_whitespace) {
+            return Err(Error::BadAddress(BadAddress::NotAnAddress));
         }
         // A server reached over HTTPS is only ever left for HTTPS: no
         // redirect, or link it gives, goes to plain HTTP. (Plain HTTP is
@@ -333,14 +347,15 @@ impl Server {
 
     /// Reads an answer: the body on success, the server's words otherwise.
     fn answer(
+        &self,
         response: std::result::Result<ureq::http::Response<ureq::Body>, ureq::Error>,
     ) -> Result<(u16, Value)> {
-        let mut response = response.map_err(|e| Error::Network(e.to_string()))?;
+        let mut response = response.map_err(|e| Error::unreached(&self.base, &e))?;
         let status = response.status().as_u16();
         let text = response
             .body_mut()
             .read_to_string()
-            .map_err(|e| Error::Network(e.to_string()))?;
+            .map_err(|e| Error::unreached(&self.base, &e))?;
         let body = if text.trim().is_empty() {
             Value::Null
         } else {
@@ -353,23 +368,55 @@ impl Server {
         match status {
             200..=299 => Ok(body),
             401 => Err(Error::SignedOut),
-            429 => Err(Error::Server(
-                "Too many tries. Wait a minute, then try again.".into(),
-            )),
-            _ => Err(Error::Server(
-                message_of(&body).unwrap_or_else(|| format!("error {status}")),
-            )),
+            429 => Err(Error::TooManyTries),
+            _ => Err(message_of(&body).map_or(Error::Status(status), Error::Server)),
         }
     }
 
+    /// The account's KDF settings: the first thing signing in asks, so an
+    /// address that answers, but not as a PassBundle server does (a web
+    /// page, a page that isn't there, an answer that isn't the server's),
+    /// is said to be one (`NotAServer`), never quoted.
     pub fn prelogin(&self, email: &str) -> Result<Prelogin> {
-        let (status, body) = Self::answer(
+        let (status, body) = self.answer(
             self.agent
                 .post(self.url("/identity/accounts/prelogin"))
                 .send_json(json!({ "email": normalize_email(email) })),
         )?;
-        serde_json::from_value(Self::checked(status, body)?)
-            .map_err(|e| Error::Malformed(format!("a prelogin answer the core can't read ({e})")))
+        // A page that isn't there, or a site that wants its own sign-in: not
+        // a PassBundle server. The server's own refusals (its words, too
+        // many tries, a problem of its own) say so.
+        if matches!(status, 401 | 403 | 404 | 405) {
+            return Err(self.not_a_server());
+        }
+        serde_json::from_value(Self::checked(status, body)?).map_err(|_| self.not_a_server())
+    }
+
+    fn not_a_server(&self) -> Error {
+        Error::NotAServer(crate::error::host_of(&self.base))
+    }
+
+    /// Whether a PassBundle server answers at this address, before
+    /// anything is sent to it (docs/core.md, "Checking a server"): its
+    /// configuration, which every upstream server gives without signing
+    /// in, as JSON with its version. A web page, a missing page, or
+    /// anything else is `NotAServer`; a server that can't be reached says
+    /// why (`Network`).
+    pub fn check(&self) -> Result<()> {
+        let (status, body) = self.answer(
+            self.agent
+                .get(self.url("/api/config"))
+                .config()
+                .timeout_global(Some(Duration::from_secs(15)))
+                .build()
+                .call(),
+        )?;
+        match Self::checked(status, body) {
+            Ok(body) if body["version"].is_string() => Ok(()),
+            Err(Error::TooManyTries) => Err(Error::TooManyTries),
+            Err(Error::Status(code)) if code >= 500 => Err(Error::Status(code)),
+            _ => Err(self.not_a_server()),
+        }
     }
 
     /// Signs in with the master password. The KDF settings are checked before
@@ -410,7 +457,7 @@ impl Server {
 
     /// Asks the server to email a sign-in code (provider 1).
     pub fn send_email_code(&self, pending: &PendingSignIn) -> Result<()> {
-        let (status, body) = Self::answer(
+        let (status, body) = self.answer(
             self.agent
                 .post(self.url("/api/two-factor/send-email-login"))
                 .send_json(json!({
@@ -440,7 +487,7 @@ impl Server {
             form.push(("twoFactorToken", second.code.trim()));
             form.push(("twoFactorRemember", if second.remember { "1" } else { "0" }));
         }
-        let (status, body) = Self::answer(
+        let (status, body) = self.answer(
             self.agent
                 .post(self.url("/identity/connect/token"))
                 .send_form(form),
@@ -468,20 +515,21 @@ impl Server {
                         .collect(),
                 ));
             }
-            // The server's words for a wrong password or code become the
-            // core's; any other refusal (a disabled account, say) keeps the server's.
+            // The server's words for a wrong email or password, or code,
+            // become the core's; any other refusal (a disabled account, say)
+            // keeps the server's. The server answers a wrong password and an
+            // email with no account the same ("Username or password is
+            // incorrect"), and so does the core: never which one it was.
             return Err(match message_of(&body) {
-                Some(m) if m.to_lowercase().contains("password is incorrect") => {
-                    Error::WrongPassword
-                }
+                Some(m) if m.to_lowercase().contains("password is incorrect") => Error::WrongSignIn,
                 _ if second.is_some() => Error::WrongCode,
                 Some(m) => Error::Server(m),
-                None => Error::WrongPassword,
+                None => Error::WrongSignIn,
             });
         }
         let body = Self::checked(status, body)?;
         let token: TokenResponse = serde_json::from_value(body)
-            .map_err(|e| Error::Malformed(format!("a sign-in answer the core can't read ({e})")))?;
+            .map_err(|_| Error::Malformed("a sign-in answer it doesn't know".into()))?;
         let key = EncString::parse(
             token
                 .key
@@ -489,7 +537,7 @@ impl Server {
                 .ok_or(Error::Malformed("a sign-in answer with no key".into()))?,
         )?;
         let user_key = match key.decrypt_key(&pending.stretched) {
-            Err(Error::Refused(_)) => return Err(Error::WrongPassword),
+            Err(Error::Refused(_)) => return Err(Error::WrongSignIn),
             other => other?,
         };
         Ok(Token::Done(Session {
@@ -502,7 +550,7 @@ impl Server {
 
     /// A new access token from the refresh token.
     pub fn refresh(&self, session: &mut Session) -> Result<()> {
-        let (status, body) = Self::answer(
+        let (status, body) = self.answer(
             self.agent
                 .post(self.url("/identity/connect/token"))
                 .send_form([
@@ -515,7 +563,7 @@ impl Server {
             return Err(Error::SignedOut);
         }
         let token: TokenResponse = serde_json::from_value(Self::checked(status, body)?)
-            .map_err(|e| Error::Malformed(format!("a refresh answer the core can't read ({e})")))?;
+            .map_err(|_| Error::Malformed("a session answer it doesn't know".into()))?;
         session.access_token = Zeroizing::new(token.access_token);
         if let Some(refresh) = token.refresh_token {
             session.refresh_token = Zeroizing::new(refresh);
@@ -561,7 +609,7 @@ impl Server {
                 .call(),
             _ => unreachable!("only the methods above are used"),
         };
-        let (status, body) = Self::answer(response)?;
+        let (status, body) = self.answer(response)?;
         Self::checked(status, body)
     }
 
@@ -692,7 +740,7 @@ impl Server {
             .max_redirects(0)
             .build()
             .call()
-            .map_err(|e| Error::Network(e.to_string()))?;
+            .map_err(|e| Error::unreached(&self.base, &e))?;
         if response.status().as_u16() != 200 {
             return Ok(None);
         }
@@ -701,7 +749,7 @@ impl Server {
             .with_config()
             .limit(512 * 1024)
             .read_to_vec()
-            .map_err(|e| Error::Network(e.to_string()))?;
+            .map_err(|e| Error::unreached(&self.base, &e))?;
         Ok(Some(bytes).filter(|b| !crate::icons::is_fallback(b) && crate::icons::acceptable(b)))
     }
 
@@ -807,7 +855,7 @@ impl Server {
             .and_then(|r| r.headers().get("Date"))
             .and_then(|d| d.to_str().ok())
             .and_then(crate::device_approval::parse_http_date);
-        let (status, body) = Self::answer(response)?;
+        let (status, body) = self.answer(response)?;
         Ok((Self::checked(status, body)?, server_now))
     }
 
@@ -895,7 +943,7 @@ impl Server {
         )
         // Sent, but no answer: it may be there.
         .map_err(|e| match e {
-            Error::Network(_) => Error::AccountMade {
+            Error::Network { .. } => Error::AccountMade {
                 sure: false,
                 why: Box::new(e),
             },
@@ -907,7 +955,7 @@ impl Server {
     /// For tests and setup: an unauthenticated POST.
     #[doc(hidden)]
     pub fn raw_post(&self, path: &str, body: Value) -> Result<Value> {
-        let (status, body) = Self::answer(self.agent.post(self.url(path)).send_json(body))?;
+        let (status, body) = self.answer(self.agent.post(self.url(path)).send_json(body))?;
         Self::checked(status, body)
     }
 }
@@ -1087,6 +1135,120 @@ mod tests {
         )]);
         let server = Server::new(&url, Device::this_one("")).unwrap();
         assert_eq!(server.icon("big.example").unwrap(), None);
+    }
+
+    #[test]
+    fn an_address_that_isnt_a_passbundle_server_says_so_and_never_quotes_it() {
+        let page = b"<!DOCTYPE html><html><body>Welcome to nginx!</body></html>";
+        let html = || answer("200 OK", "Content-Type: text/html\r\n", page);
+        let json = "Content-Type: application/json\r\n";
+        let not_a_server = |url: &str| Error::NotAServer(url.trim_start_matches("http://").into());
+
+        // Signing in asks for the KDF settings first: a web page there, or
+        // a page that isn't, is no PassBundle server.
+        for (status, body) in [
+            ("200 OK", &page[..]),
+            ("404 Not Found", b"Not Found"),
+            ("405 Method Not Allowed", b""),
+        ] {
+            let (url, served) =
+                answering(vec![answer(status, "Content-Type: text/html\r\n", body)]);
+            let server = Server::new(&url, Device::this_one("")).unwrap();
+            let refused = server.prelogin("ana@example.test").unwrap_err();
+            assert_eq!(refused, not_a_server(&url), "{status}");
+            assert!(refused.about_the_server());
+            assert!(!refused.to_string().contains("nginx"), "{refused}");
+            assert!(!refused.to_string().contains("DOCTYPE"), "{refused}");
+            assert_eq!(served.join().unwrap(), ["/identity/accounts/prelogin"]);
+        }
+
+        // Checking a server: its configuration, with its version, before
+        // anything is sent to it.
+        let config = br#"{"version":"2026.6.0","server":{"name":"PassBundle"}}"#;
+        let (url, served) = answering(vec![answer("200 OK", json, config), html()]);
+        let server = Server::new(&url, Device::this_one("")).unwrap();
+        assert_eq!(server.check(), Ok(()));
+        assert_eq!(server.check(), Err(not_a_server(&url)));
+        assert_eq!(served.join().unwrap(), ["/api/config", "/api/config"]);
+
+        // A server's own trouble says so, with what to do.
+        let (url, _) = answering(vec![answer("503 Service Unavailable", "", b"")]);
+        let server = Server::new(&url, Device::this_one("")).unwrap();
+        assert_eq!(server.check(), Err(Error::Status(503)));
+
+        // Nothing listening there: it couldn't connect, and it says where.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let closed = format!("http://{}", listener.local_addr().unwrap());
+        drop(listener);
+        let server = Server::new(&closed, Device::this_one("")).unwrap();
+        let refused = server.check().unwrap_err();
+        assert_eq!(
+            refused,
+            Error::Network {
+                host: closed.trim_start_matches("http://").into(),
+                why: crate::error::Unreached::NoAnswer,
+            }
+        );
+        assert!(refused.about_the_server() && refused.offline());
+    }
+
+    #[test]
+    fn an_address_that_cant_be_used_says_why() {
+        let bad = |url: &str| Server::new(url, Device::this_one("")).err();
+        assert_eq!(bad(""), Some(Error::BadAddress(BadAddress::Empty)));
+        assert_eq!(bad("   "), Some(Error::BadAddress(BadAddress::Empty)));
+        assert_eq!(
+            bad("http://vault.example.test"),
+            Some(Error::BadAddress(BadAddress::NotHttps))
+        );
+        assert_eq!(
+            bad("vault.example.test"),
+            Some(Error::BadAddress(BadAddress::NotHttps))
+        );
+        assert_eq!(
+            bad("ftp://vault.example.test"),
+            Some(Error::BadAddress(BadAddress::NotAnAddress))
+        );
+        assert_eq!(
+            bad("https://"),
+            Some(Error::BadAddress(BadAddress::NotAnAddress))
+        );
+        assert_eq!(
+            bad("https://vault example"),
+            Some(Error::BadAddress(BadAddress::NotAnAddress))
+        );
+        assert!(bad("https://vault.example.test").is_none());
+        assert!(Error::BadAddress(BadAddress::NotHttps).about_the_server());
+    }
+
+    #[test]
+    fn a_wrong_email_and_a_wrong_password_are_said_the_same() {
+        // The server's answer for both: it doesn't say which, and nor does
+        // the core, so nobody learns which emails have accounts.
+        let wrong = br#"{"error":"invalid_grant","error_description":"Username or password is incorrect. Try again","ErrorModel":{"Message":"Username or password is incorrect. Try again","Object":"error"}}"#;
+        let json = "Content-Type: application/json\r\n";
+        let (url, _) = answering(vec![
+            answer("400 Bad Request", json, wrong),
+            answer("400 Bad Request", json, wrong),
+            answer("400 Bad Request", json, b"{}"),
+        ]);
+        let server = Server::new(&url, Device::this_one("")).unwrap();
+        let said = |email: &str| {
+            server
+                .sign_in_with(&test_prelogin(), email, "not the password")
+                .err()
+        };
+        let no_account = said("nobody@example.test");
+        let wrong_password = said("ana@example.test");
+        let no_words = said("ana@example.test");
+        assert_eq!(no_account, Some(Error::WrongSignIn));
+        assert_eq!(wrong_password, no_account);
+        assert_eq!(no_words, no_account);
+        assert_eq!(
+            Error::WrongSignIn.to_string(),
+            "That email or master password isn't right."
+        );
+        assert!(!Error::WrongSignIn.about_the_server());
     }
 
     #[test]
