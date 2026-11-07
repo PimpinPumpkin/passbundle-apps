@@ -106,9 +106,17 @@ object Core {
     /**
      * The logins for an app or a page, as JSON, from the account the
      * screens show: names and usernames only, each with its `account`; or
-     * `locked`, with the `account` to unlock (Responses.kt).
+     * `locked`, with the `account` to unlock and its `accountLabel` when
+     * there's more than one; or `signedOut` (Responses.kt).
      */
     @JvmStatic external fun fillable(packageName: String, webDomain: String): String?
+
+    /**
+     * Unlocks an account with its master password, for autofill while it's
+     * locked and there's no biometric unlock (FillActivity.kt): {"ok": true},
+     * or the words to show. Slow (the KDF): off the main thread.
+     */
+    @JvmStatic external fun unlockWithMasterPassword(account: String, password: String): String?
 
     /** The master password, for a login that asks for it again: {"ok": true}, or the words to show. Slow: off the main thread. */
     @JvmStatic external fun confirmMasterPassword(account: String, id: String, password: String): String?

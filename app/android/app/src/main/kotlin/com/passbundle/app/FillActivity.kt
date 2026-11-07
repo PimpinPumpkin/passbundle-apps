@@ -7,6 +7,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Parcelable
 import android.text.InputType
+import android.view.KeyEvent
 import android.view.WindowManager
 import android.view.autofill.AutofillManager
 import android.view.inputmethod.EditorInfo
@@ -18,11 +19,14 @@ import org.json.JSONObject
  * What Android's autofill opens when someone picks one of PassBundle's
  * entries (Responses.kt): fills a login, taking its password from the core
  * only now, or unlocks first. It has no screen of its own; unlocking shows
- * Android's biometric prompt, or opens PassBundle to unlock with the master
- * password. A login that asks for the master password again asks for it in
- * a dialog here first (docs/core.md, "Asking for the master password again").
- * An app that isn't a browser PassBundle knows asks here, in PassBundle's own
- * dialog, before its web domain counts (Browsers.kt).
+ * Android's biometric prompt, or asks for the account's master password in
+ * PassBundle's own dialog, here, so the fill isn't lost; either way it hands
+ * back the logins to pick from, never a fill nobody picked (docs/phones.md,
+ * "Autofill"). A login that asks for the master password again asks for it
+ * in a dialog here first (docs/core.md, "Asking for the master password
+ * again"). An app that isn't a browser PassBundle knows asks here, in
+ * PassBundle's own dialog, before its web domain counts (Browsers.kt).
+ * Signed out, it opens PassBundle to sign in.
  */
 class FillActivity : Activity() {
     companion object {
@@ -31,9 +35,12 @@ class FillActivity : Activity() {
         const val ACCOUNT = "com.passbundle.app.account"
         const val ITEM = "com.passbundle.app.item"
         const val ASKS = "com.passbundle.app.asks"
+        /** The account to unlock's name, when there's more than one on the phone. */
+        const val LABEL = "com.passbundle.app.label"
         const val FILL = "fill"
         const val UNLOCK = "unlock"
         const val TRUST = "trust"
+        const val SIGN_IN = "signIn"
 
         /** How long the fill's own check waits for checking an app's sites (AppSites.kt). */
         private const val SITES_WAIT_MS = 2000L
@@ -48,8 +55,9 @@ class FillActivity : Activity() {
         val account = intent.getStringExtra(ACCOUNT) ?: ""
         when (intent.getStringExtra(MODE)) {
             FILL -> fill(fields, account, intent.getStringExtra(ITEM), intent.getBooleanExtra(ASKS, false))
-            UNLOCK -> unlock(fields, account)
+            UNLOCK -> unlock(fields, account, intent.getStringExtra(LABEL))
             TRUST -> trust(fields)
+            SIGN_IN -> signIn()
             else -> finishWith(null)
         }
     }
@@ -86,13 +94,37 @@ class FillActivity : Activity() {
         }.start()
     }
 
-    /** A login that asks for the master password again: its dialog, then it fills. */
-    private fun askMasterPassword(fields: Fields, account: String, item: String) {
-        val password = EditText(this).apply {
+    /**
+     * A master password field for PassBundle's own dialogs here: hidden as
+     * typed, and kept out of the keyboard's suggestions and learning.
+     */
+    private fun masterPasswordField() =
+        EditText(this).apply {
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
-            imeOptions = EditorInfo.IME_ACTION_GO
+            imeOptions = EditorInfo.IME_ACTION_GO or EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING
             hint = "Master password"
         }
+
+    /**
+     * Over another app, a master password goes only into PassBundle's own
+     * window: out of screenshots and recordings, with nothing drawn over it
+     * (Android 12 and later), and no touch counted through anything that is.
+     */
+    private fun keepPrivate(dialog: AlertDialog, onShow: () -> Unit = {}) {
+        window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) window.setHideOverlayWindows(true)
+        dialog.window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        dialog.setOnShowListener {
+            dialog.window?.decorView?.filterTouchesWhenObscured = true
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE)?.filterTouchesWhenObscured = true
+            dialog.getButton(AlertDialog.BUTTON_NEGATIVE)?.filterTouchesWhenObscured = true
+            onShow()
+        }
+    }
+
+    /** A login that asks for the master password again: its dialog, then it fills. */
+    private fun askMasterPassword(fields: Fields, account: String, item: String) {
+        val password = masterPasswordField()
         val dialog = AlertDialog.Builder(this)
             .setTitle("PassBundle")
             .setMessage("This login asks for your master password.")
@@ -107,6 +139,7 @@ class FillActivity : Activity() {
             confirm(fields, account, item, password)
             true
         }
+        keepPrivate(dialog)
         dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE)
         dialog.show()
         password.requestFocus()
@@ -179,21 +212,91 @@ class FillActivity : Activity() {
         dialog.show()
     }
 
-    /** Unlocks the account the screens show (the one autofill offered to unlock), then its logins. */
-    private fun unlock(fields: Fields, account: String) {
-        if (Biometric.status(this, account) != "setUp") {
-            // The master password is typed in PassBundle itself.
-            startActivity(Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-            Toast.makeText(this, "Unlock PassBundle, then fill again.", Toast.LENGTH_LONG).show()
-            return finishWith(null)
+    /**
+     * Unlocks the account the screens show (the one autofill offered to
+     * unlock), then hands back its logins to pick from: with its biometric
+     * unlock when it's on, else (or when that doesn't unlock, or the person
+     * would rather) with its master password, here.
+     */
+    private fun unlock(fields: Fields, account: String, label: String?) {
+        if (account.isEmpty()) return finishWith(null)
+        if (Unlocking.way(Biometric.status(this, account)) == Unlocking.Way.MASTER_PASSWORD) {
+            return unlockWithMasterPassword(fields, account, label, null)
         }
         Biometric.unlock(this, account) { unlocked, error ->
-            if (!unlocked) {
-                error?.let { Toast.makeText(this, it, Toast.LENGTH_LONG).show() }
-                return@unlock finishWith(null)
-            }
-            finishWith(Responses.forFields(this, fields))
+            if (isFinishing || isDestroyed) return@unlock
+            if (unlocked) return@unlock finishWith(Responses.forFields(this, fields))
+            // "Use master password", or the biometric unlock is off now.
+            unlockWithMasterPassword(fields, account, label, error)
         }
+    }
+
+    /**
+     * The account's master password, in PassBundle's own dialog over the app
+     * being filled (`keepPrivate`). The core unlocks that account with it,
+     * off the main thread (the KDF), as the lock screen does; then the
+     * logins to pick from. A wrong one says so and asks again; Cancel fills
+     * nothing.
+     */
+    private fun unlockWithMasterPassword(fields: Fields, account: String, label: String?, why: String?) {
+        val password = masterPasswordField()
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("Unlock PassBundle")
+            .setMessage(Unlocking.message(label, why))
+            .setView(password)
+            // Its listener is set once it shows, so a wrong password keeps it open.
+            .setPositiveButton("Unlock", null)
+            .setNegativeButton("Cancel") { _, _ -> finishWith(null) }
+            .setOnCancelListener { finishWith(null) }
+            .create()
+        var unlocking = false
+        fun submit() {
+            if (unlocking) return
+            val typed = password.text.toString()
+            password.text.clear()
+            if (typed.isEmpty()) return
+            unlocking = true
+            val button = dialog.getButton(AlertDialog.BUTTON_POSITIVE)
+            button?.isEnabled = false
+            password.isEnabled = false
+            Thread {
+                val answer = runCatching { JSONObject(Core.unlockWithMasterPassword(account, typed) ?: "{}") }.getOrNull()
+                runOnUiThread {
+                    if (isFinishing || isDestroyed) return@runOnUiThread
+                    if (answer?.optBoolean("ok") == true) {
+                        dialog.dismiss()
+                        return@runOnUiThread finishWith(Responses.forFields(this, fields))
+                    }
+                    // What went wrong, said in the dialog itself, and asked again.
+                    unlocking = false
+                    button?.isEnabled = true
+                    password.isEnabled = true
+                    val wrong = answer?.optString("error")?.takeIf { it.isNotEmpty() } ?: "Couldn't unlock PassBundle. Try again."
+                    dialog.setMessage(Unlocking.message(label, wrong))
+                    password.requestFocus()
+                }
+            }.start()
+        }
+        // The keyboard's Go, or Enter on a keyboard of keys.
+        password.setOnEditorActionListener { _, action, event ->
+            val enter = event?.keyCode == KeyEvent.KEYCODE_ENTER
+            if (action != EditorInfo.IME_ACTION_GO && !enter) return@setOnEditorActionListener false
+            if (!enter || event?.action == KeyEvent.ACTION_DOWN) submit()
+            true
+        }
+        keepPrivate(dialog) {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE)?.setOnClickListener { submit() }
+        }
+        dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE)
+        dialog.show()
+        password.requestFocus()
+    }
+
+    /** Signed out: there's nothing to fill from until the person signs in, in PassBundle itself. */
+    private fun signIn() {
+        startActivity(Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        Toast.makeText(this, "Sign in to PassBundle, then fill this in.", Toast.LENGTH_LONG).show()
+        finishWith(null)
     }
 
     private fun finishWith(result: Parcelable?) {
@@ -212,6 +315,7 @@ class FillActivity : Activity() {
             FILL -> if (result != null) Core.answered()
             UNLOCK -> if (result != null) Core.offered() else Core.answered()
             TRUST -> if (result != null) Core.offered()
+            SIGN_IN -> Unit
         }
     }
 }

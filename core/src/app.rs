@@ -386,6 +386,16 @@ impl App {
         self.signed_in(session)
     }
 
+    /// The master password hint, for the lock screen (`Server::password_hint`):
+    /// the account kept here asks its server, with no session. None when the
+    /// server emailed it to the account's email.
+    pub fn password_hint(&self) -> Result<Option<String>> {
+        let (Some(server), Some(settings)) = (&self.server, &self.settings) else {
+            return Err(Error::SignedOut);
+        };
+        server.password_hint(&settings.email)
+    }
+
     /// Asks the server to email the code, for a sign-in waiting on one.
     pub fn send_email_code(&self) -> Result<()> {
         let (Some(server), Some(pending)) = (&self.server, &self.pending) else {

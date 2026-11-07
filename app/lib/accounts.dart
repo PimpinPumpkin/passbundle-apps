@@ -2,8 +2,9 @@
 // accounts in the apps"): a work account and a personal one, say, each with
 // its own vault, lock, and settings, up to five on a device as the browser
 // extension allows. The account menu switches between them, adds one, and
-// signs out of the one shown: at the foot of the menu on a computer, on the
-// lock screen, and in a phone's Settings and its vault's header. Each can be
+// signs out of the one shown, by name: at the foot of the menu on a
+// computer (and in its Settings), on the lock screen, and in a phone's
+// Settings and its vault's header. Each can be
 // given a name (Work, Personal) and a color from the flat tile tones, which
 // label its items wherever they're listed beside other accounts': the "All
 // accounts" place, and Android's autofill and passkeys. The core keeps the
@@ -131,6 +132,12 @@ class AccountsMenu {
   bool get full => accounts.length >= most;
 
   String get fullNote => 'Up to $most accounts on this device';
+
+  /// What signing out says, naming the account it's for: the one shown.
+  String get signOutLabel => switch (entry(shown)) {
+    final shown? => 'Sign out of ${shown.email}',
+    null => 'Sign out',
+  };
 }
 
 /// What the account menu offers: switching to an account, adding one, or
@@ -247,16 +254,21 @@ class AccountMenuButton extends StatelessWidget {
           ),
         ),
         if (signOut)
-          const PopupMenuItem<_Choice>(
-            key: ValueKey('sign-out-account'),
-            value: _SignOut(),
+          PopupMenuItem<_Choice>(
+            key: const ValueKey('sign-out-account'),
+            value: const _SignOut(),
             child: Row(
               children: [
-                SizedBox(
+                const SizedBox(
                   width: 28,
                   child: Icon(Icons.logout_rounded, size: 18),
                 ),
-                Expanded(child: Text('Sign out of this account')),
+                Expanded(
+                  child: Text(
+                    menu.signOutLabel,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
               ],
             ),
           ),
@@ -378,7 +390,11 @@ class AccountsList extends StatelessWidget {
         ListTile(
           key: const ValueKey('sign-out-account'),
           leading: const Icon(Icons.logout_rounded),
-          title: const Text('Sign out of this account'),
+          title: Text(
+            menu.signOutLabel,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
           onTap: () => choose(const _SignOut()),
         ),
       ],
@@ -399,23 +415,27 @@ Future<void> showAccounts(BuildContext context, AccountsMenu menu) =>
 /// Asks before signing out of an account: its vault leaves this device, and
 /// so does its biometric unlock (on a computer, the browser extension's too).
 /// True if the person says so. [method] is its biometric unlock's name, when
-/// it's on; [email] names the account when more than one is signed in.
+/// it's on; [email] names the account it's for (the one shown), and that the
+/// others stay.
 Future<bool> askToSignOut(
   BuildContext context, {
   String? method,
   String? email,
+  bool others = false,
 }) async {
   final what = email == null ? 'the vault' : 'the vault of $email';
+  final rest = others ? ' Your other accounts stay signed in.' : '';
   final sure = await showDialog<bool>(
     context: context,
     builder: (context) => AlertDialog(
       title: const Text('Sign out?'),
       content: Text(
-        method == null
-            ? 'This removes $what from this device. Signing in again brings it back from the server.'
-            : isPhone
-            ? 'This removes $what from this phone and turns off unlocking with $method. Signing in again brings the vault back from the server.'
-            : 'This removes $what from this device and turns off unlocking with $method, in your browser extension too. Signing in again brings the vault back from the server.',
+        (method == null
+                ? 'This removes $what from this device. Signing in again brings it back from the server.'
+                : isPhone
+                ? 'This removes $what from this phone and turns off unlocking with $method. Signing in again brings the vault back from the server.'
+                : 'This removes $what from this device and turns off unlocking with $method, in your browser extension too. Signing in again brings the vault back from the server.') +
+            rest,
       ),
       actions: [
         TextButton(

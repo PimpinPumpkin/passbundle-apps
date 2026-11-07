@@ -3,6 +3,8 @@
 // own, and the choices in Settings (docs/core.md, "Locking by itself"), within
 // an organization's policy ("Locking by policy"). When the core locks,
 // whatever was open over the vault closes too.
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -32,10 +34,16 @@ Future<void> unlockSample(
 Future<void> openSettings(WidgetTester tester) async {
   await tester.tap(find.byTooltip('Settings'));
   await tester.pump();
-  // Its first line waits on the desktop agent (a real call, outside the test's clock).
-  await pumpUntil(tester, find.textContaining('Unlock with'));
+  // Its first line waits on the desktop agent (a real call, outside the
+  // test's clock): a spinner until it answers. Then, where unlocking with
+  // biometrics can work (Windows), its row; on the Mac and Linux, none.
+  await pumpUntil(tester, find.text('Lock after'));
+  await pumpUntilGone(tester, find.byKey(const ValueKey('unlock-loading')));
   await tester.pump(const Duration(milliseconds: 400));
-  expect(find.text('Lock after'), findsOneWidget);
+  expect(
+    find.textContaining('Unlock with'),
+    Platform.isWindows ? findsOneWidget : findsNothing,
+  );
 }
 
 /// What the runner sends when the OS says the computer is about to sleep.

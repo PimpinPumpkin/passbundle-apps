@@ -455,6 +455,27 @@ impl Server {
         }
     }
 
+    /// Asks for the account's master password hint (upstream's "Get master
+    /// password hint"), with no session: the server emails it, and answers
+    /// None, as it does for an email with no account. A server that can't
+    /// send email and is set to show hints answers with the hint instead,
+    /// in its words ("Your password hint is: ..."), which comes back as it.
+    /// Its other refusals keep its words ("This server is not configured to
+    /// provide password hints.").
+    pub fn password_hint(&self, email: &str) -> Result<Option<String>> {
+        const SHOWN: &str = "Your password hint is: ";
+        let (status, body) = self.answer(
+            self.agent
+                .post(self.url("/api/accounts/password-hint"))
+                .send_json(json!({ "email": normalize_email(email) })),
+        )?;
+        match Self::checked(status, body) {
+            Ok(_) => Ok(None),
+            Err(Error::Server(m)) if m.starts_with(SHOWN) => Ok(Some(m[SHOWN.len()..].to_owned())),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Asks the server to email a sign-in code (provider 1).
     pub fn send_email_code(&self, pending: &PendingSignIn) -> Result<()> {
         let (status, body) = self.answer(
@@ -1249,6 +1270,40 @@ mod tests {
             "That email or master password isn't right."
         );
         assert!(!Error::WrongSignIn.about_the_server());
+    }
+
+    #[test]
+    fn a_master_password_hint_is_emailed_or_shown_as_the_server_says() {
+        let json = "Content-Type: application/json\r\n";
+        let (url, served) = answering(vec![
+            answer("200 OK", json, b""),
+            answer(
+                "400 Bad Request",
+                json,
+                br#"{"message":"Your password hint is: the blue door","validationErrors":{"":["Your password hint is: the blue door"]},"object":"error"}"#,
+            ),
+            answer(
+                "400 Bad Request",
+                json,
+                br#"{"message":"This server is not configured to provide password hints.","object":"error"}"#,
+            ),
+        ]);
+        let server = Server::new(&url, Device::this_one("")).unwrap();
+        // Emailed: nothing to show here.
+        assert_eq!(server.password_hint("Ana@Example.test"), Ok(None));
+        // A server without email that shows hints.
+        assert_eq!(
+            server.password_hint("ana@example.test"),
+            Ok(Some("the blue door".into()))
+        );
+        // One that gives none: its words.
+        assert_eq!(
+            server.password_hint("ana@example.test"),
+            Err(Error::Server(
+                "This server is not configured to provide password hints.".into()
+            ))
+        );
+        assert_eq!(served.join().unwrap(), ["/api/accounts/password-hint"; 3]);
     }
 
     #[test]

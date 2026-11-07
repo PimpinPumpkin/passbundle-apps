@@ -223,7 +223,7 @@ class _MainKind extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = context.colors;
-    final kindName = kind == ItemKind.note ? 'Secure note' : kind.one;
+    final kindName = kind.one;
     return RestingCard(
       radius: 14,
       child: InkWell(

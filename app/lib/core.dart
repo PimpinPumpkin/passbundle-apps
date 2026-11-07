@@ -147,6 +147,9 @@ class Core {
   late final _checkServer = _lib.lookupFunction<_Str1, _Str1>(
     'pb_check_server',
   );
+  late final _passwordHint = _lib.lookupFunction<_Str1, _Str1>(
+    'pb_password_hint',
+  );
   late final _signUp = _lib.lookupFunction<_Str5, _Str5>('pb_sign_up');
   late final _finish = _lib.lookupFunction<_FinishNative, _Finish>(
     'pb_finish_sign_in',
@@ -418,6 +421,12 @@ class Core {
   /// what's wrong, [Answer.aboutTheServer].
   static Future<Answer> checkServer(String server) => _background(
     (c, _) => c._with([server], (p) => c._answer(c._checkServer(p[0]))),
+  );
+
+  /// The master password hint of the account shown, for the lock screen: its
+  /// server emails it (`hint` null), or shows it (`hint`), as it's set to.
+  static Future<Answer> passwordHint() => _background(
+    (c, a) => c._with([a], (p) => c._answer(c._passwordHint(p[0]))),
   );
 
   /// A sign-in that's done names the account signed in to: the screens show it.

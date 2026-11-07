@@ -302,6 +302,27 @@ pub fn confirmMasterPassword<'caller>(
         .resolve::<ThrowRuntimeExAndDefault>()
 }
 
+/// Unlocks an account with its master password, for autofill while it's
+/// locked and there's no biometric unlock (FillActivity.kt): `{ok}`, or the
+/// words to show, as JSON. Slow (the KDF): call it off the main thread.
+#[cfg(feature = "ffi")]
+#[jni_mangle("com.passbundle.app.Core")]
+pub fn unlock_with_master_password<'caller>(
+    mut unowned_env: EnvUnowned<'caller>,
+    _class: JClass<'caller>,
+    account: JString<'caller>,
+    password: JString<'caller>,
+) -> jstring {
+    unowned_env
+        .with_env(|env| -> JniResult<jstring> {
+            let password = zeroize::Zeroizing::new(password.try_to_string(env)?);
+            let answer =
+                crate::ffi::unlock_with_master_password(&account.try_to_string(env)?, &password);
+            Ok(env.new_string(answer.to_string())?.into_raw())
+        })
+        .resolve::<ThrowRuntimeExAndDefault>()
+}
+
 /// The logins with a passkey for a site (its ID), as JSON: names and IDs,
 /// each with its account, never a key (docs/phones.md, "Passkeys").
 #[cfg(feature = "ffi")]
