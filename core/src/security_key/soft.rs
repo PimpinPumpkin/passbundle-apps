@@ -286,6 +286,8 @@ impl Hid for SoftKey {
 /// answers given out in pieces.
 pub struct SoftNfc {
     pub key: SoftKey,
+    /// Says "U2F_V2" when selected, as a key that speaks both does.
+    pub says_u2f: bool,
     pub chained: bool,
     pub got_more: bool,
     command: Vec<u8>,
@@ -296,6 +298,7 @@ impl SoftNfc {
     pub fn new(key: SoftKey) -> SoftNfc {
         SoftNfc {
             key,
+            says_u2f: false,
             chained: false,
             got_more: false,
             command: Vec::new(),
@@ -319,7 +322,7 @@ impl Nfc for SoftNfc {
     fn transceive(&mut self, apdu: &[u8]) -> Result<Vec<u8>> {
         let (cla, ins) = (apdu[0], apdu[1]);
         if ins == 0xa4 {
-            let version: &[u8] = if self.key.ctap2 {
+            let version: &[u8] = if self.key.ctap2 && !self.says_u2f {
                 b"FIDO_2_0"
             } else {
                 b"U2F_V2"
@@ -343,6 +346,17 @@ impl Nfc for SoftNfc {
                 return Ok(vec![0x90, 0x00]);
             }
             let command = std::mem::take(&mut self.command);
+            if !self.key.ctap2 {
+                return Ok(vec![0x6d, 0x00]);
+            }
+            if command == [0x04] {
+                // authenticatorGetInfo: the versions it speaks.
+                let info = Value::Map(vec![(
+                    Value::Unsigned(1),
+                    Value::Array(vec![Value::text("U2F_V2"), Value::text("FIDO_2_0")]),
+                )]);
+                return Ok(self.give([vec![0x00], cbor::encode(&info)].concat()));
+            }
             // Held to the phone: touched already.
             let (answer, _) = self.key.get_assertion(&command[1..]);
             return Ok(self.give(answer));
