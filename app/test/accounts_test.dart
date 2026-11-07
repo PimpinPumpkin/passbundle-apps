@@ -203,8 +203,10 @@ void main() {
 
       await tester.tap(find.byTooltip('Settings'));
       await tester.pumpAndSettle();
+      // Down Settings to its accounts, then each held in view to be read
+      // and tapped (a small screen shows a few rows at a time).
       await tester.scrollUntilVisible(
-        find.text('Add account'),
+        find.text(home),
         200,
         scrollable: find
             .descendant(
@@ -213,12 +215,15 @@ void main() {
             )
             .first,
       );
+      await tester.pumpAndSettle();
       expect(find.text(work), findsOneWidget);
-      expect(find.text(home), findsOneWidget);
+      expect(find.text('Add account'), findsOneWidget);
       expect(
         find.textContaining('These settings are for $work'),
         findsOneWidget,
       );
+      await tester.ensureVisible(find.text(home));
+      await tester.pumpAndSettle();
       await tester.tap(find.text(home));
       await tester.pumpAndSettle();
       expect(find.text('Unlock PassBundle'), findsOneWidget);

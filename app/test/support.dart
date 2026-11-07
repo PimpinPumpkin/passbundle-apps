@@ -262,7 +262,7 @@ class PhoneStandIn {
   /// What the person does at each biometric prompt: true gives it.
   final biometricAnswers = <bool>[];
 
-  /// What was copied, as the phone's code was asked: `{id, what}`.
+  /// What was copied, as the phone's code was asked: `{account, id, what}`.
   final copied = <Map<String, dynamic>>[];
 
   /// Android's autofill and passkeys, on an Android phone.
