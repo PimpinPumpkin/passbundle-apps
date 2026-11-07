@@ -116,6 +116,7 @@ public static class Msaa {
     }
 }
 "@
+. (Join-Path $PSScriptRoot 'app-window.ps1')
 $noZOrder = 0x0004
 $noMove = 0x0002
 $key = 'HKCU:\Software\PassBundle\Window'
@@ -140,9 +141,10 @@ function Open-App {
         Start-Sleep -Milliseconds 500
     }
     if (-not ((Get-Content $lines -ErrorAction SilentlyContinue) -match '^ready')) { throw "The app wasn't ready within a minute." }
-    $app.Refresh()
-    if ($app.MainWindowHandle -eq [IntPtr]::Zero) { throw "The app's window didn't show." }
-    [Win]::SetForegroundWindow($app.MainWindowHandle) | Out-Null
+    # The app's window, as Windows shows it (tools/app-window.ps1).
+    $window = Wait-AppWindow $app
+    $app | Add-Member -NotePropertyName Window -NotePropertyValue $window
+    [Win]::SetForegroundWindow($window) | Out-Null
     Start-Sleep -Seconds 1
     $app
 }
@@ -184,7 +186,7 @@ function Click([IntPtr] $window, [double] $x, [double] $y, [int] $times = 1) {
 
 function Close-App($app) {
     # As the close button does: the window closes, and keeps its place.
-    [Win]::PostMessage($app.MainWindowHandle, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
+    [Win]::PostMessage($app.Window, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
     if (-not $app.WaitForExit(20000)) { Stop-Process -Id $app.Id; throw "The app didn't close." }
 }
 
@@ -200,7 +202,7 @@ try {
     $work = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
 
     $app = Open-App
-    $window = $app.MainWindowHandle
+    $window = $app.Window
     $scale = [Win]::GetDpiForWindow($window) / 96.0
     $first = Get-Place $window
     Write-Output "Opened at $first on a $($work.Width)x$($work.Height) work area, at $($scale * 100)%."
@@ -325,7 +327,7 @@ try {
     # Smaller than it may be: it stops at 400 by 560.
     Remove-Item $key -Recurse -ErrorAction SilentlyContinue
     $app = Open-App
-    $window = $app.MainWindowHandle
+    $window = $app.Window
     [Win]::SetWindowPos($window, [IntPtr]::Zero, 0, 0, 100, 100, $noZOrder -bor $noMove) | Out-Null
     $client = New-Object Win+RECT
     [Win]::GetClientRect($window, [ref] $client) | Out-Null
@@ -346,9 +348,9 @@ try {
     $env:PB_ALLOW_SCREENSHOTS = '1'
     $app = Open-App
     Remove-Item Env:PB_ALLOW_SCREENSHOTS
-    $again = Get-Place $app.MainWindowHandle
+    $again = Get-Place $app.Window
     Write-Output "Opened again at $again."
-    $affinity = [Win]::Affinity($app.MainWindowHandle)
+    $affinity = [Win]::Affinity($app.Window)
     Close-App $app
     if ($affinity -ne 0) { throw "With screenshots allowed, the window's display affinity is $affinity." }
     Write-Output 'With screenshots allowed, they take the window.'
