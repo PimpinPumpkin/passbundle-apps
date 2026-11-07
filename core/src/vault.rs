@@ -68,6 +68,10 @@ pub struct CollectionData {
     /// and permissions"), as PassBundle's server sends it.
     #[serde(default)]
     pub keykeeper: Option<Grid>,
+    /// The folder's icon and color, encrypted with the organization's key as
+    /// its name is (docs/core.md, "Folder icons"); none for the plain folder.
+    #[serde(default)]
+    pub keykeeper_look: Option<String>,
 }
 
 /// What someone can do in a shared folder, or with an item: PassBundle's
@@ -995,6 +999,8 @@ pub struct Vault {
     pub collection_orgs: HashMap<String, String>,
     /// What the person can do in each collection (shared folder).
     pub collection_grids: HashMap<String, Grid>,
+    /// Each shared folder's icon and color, opened, for those that have one.
+    pub collection_looks: HashMap<String, crate::places::Look>,
     pub organizations: HashMap<String, String>,
     pub items: Vec<Item>,
     pub damaged: Vec<DamagedItem>,
@@ -1107,6 +1113,19 @@ impl Vault {
             .iter()
             .map(|c| (c.id.clone(), c.grid()))
             .collect();
+        // A look that doesn't open, or isn't one, is the plain folder: a
+        // folder's icon is never worth an error.
+        let collection_looks = sync
+            .collections
+            .iter()
+            .filter_map(|c| {
+                let key = keys.organizations.get(&c.organization_id)?;
+                let text = EncString::parse(c.keykeeper_look.as_deref()?)
+                    .and_then(|e| e.decrypt_string(key))
+                    .ok()?;
+                Some((c.id.clone(), crate::places::parse_look(&text)?))
+            })
+            .collect();
         let mut items = Vec::new();
         let mut damaged = Vec::new();
         for cipher in &sync.ciphers {
@@ -1127,6 +1146,7 @@ impl Vault {
             collections,
             collection_orgs,
             collection_grids,
+            collection_looks,
             organizations,
             items,
             damaged,
