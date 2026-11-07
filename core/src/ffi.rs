@@ -27,6 +27,7 @@ use crate::agent::Status;
 use crate::app::{App, State, Step};
 use crate::autolock::{self, Preferences};
 use crate::error::Error;
+use crate::expiration;
 use crate::generator;
 use crate::secrets::{MemorySecretStore, OsSecretStore, SecretStore};
 use crate::store::Store;
@@ -455,6 +456,9 @@ fn summary(vault: &Vault, item: &Item) -> Value {
         // while that folder is open.
         "isTemplate": templates::definition_of(item).is_some(),
         "mspCopy": templates::is_msp_copy(item),
+        // When it expires, from today (expiration.rs): `{date, state, days,
+        // label}`, or null.
+        "expiry": expiration::view(item, expiration::Date::today()),
     })
 }
 
@@ -1487,12 +1491,15 @@ pub unsafe extern "C" fn pb_item(account: *const c_char, id: *const c_char) -> *
             .zip(&item.kept.field_kinds)
             .map(|(f, (kind, _))| json!({ "name": f.name, "hidden": f.hidden, "type": kind, "reserved": f.reserved(), "editable": f.edited_by_the_app(*kind), "value": if f.hidden || f.reserved() { None } else { Some(f.value.as_str()) } }))
             .collect();
-        // The expiration date the web vault or the extension set, if any.
+        // The expiration date set on it, if any, and when it reminds: `value`
+        // as the field holds it (null for the default) and in words.
         view["expires"] = json!(item
             .fields
             .iter()
             .find(|f| f.name == EXPIRES_FIELD)
             .map(|f| f.value.as_str()));
+        let remind = expiration::Remind::of(item);
+        view["remind"] = json!({ "value": remind.stored(), "words": remind.words() });
         // A card's and an identity's plain details, and which secrets they have.
         if let Some(card) = &item.card {
             view["card"] = json!({
@@ -1717,8 +1724,57 @@ pub unsafe extern "C" fn pb_test_icons(icons: *const c_char) -> *mut c_char {
     out(json!({ "ok": true }))
 }
 
-/// The logins with something to fix (health.rs): `{ok, items: [{id, weak,
-/// reused, unsecured}]}`. Judged away from the app's other calls.
+/// Items given expiration dates and reminder days whenever a vault opens,
+/// for tests (the test-hooks feature): `{"<item id>": {"expires":
+/// "YYYY-MM-DD", "remind": "7,1"}}`, replacing any given before; `{}` for
+/// none. Lock and unlock (or sync) for an open vault to take them.
+///
+/// # Safety
+/// `given` is null or a NUL-terminated UTF-8 string, valid for the call.
+#[cfg(feature = "test-hooks")]
+#[no_mangle]
+pub unsafe extern "C" fn pb_test_expiration(given: *const c_char) -> *mut c_char {
+    let given: std::collections::BTreeMap<String, Value> =
+        serde_json::from_str(&text(given)).unwrap_or_default();
+    *crate::vault::test_hooks::EXPIRING
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = given
+        .into_iter()
+        .filter_map(|(id, v)| {
+            let date = v["expires"].as_str()?.to_owned();
+            Some((id, (date, v["remind"].as_str().map(str::to_owned))))
+        })
+        .collect();
+    out(json!({ "ok": true }))
+}
+
+/// The expiration reminders due now for an account's open vault
+/// (expiration.rs), each said once: `{ok, title, due: {soon, expired},
+/// standing: {soon, expired}}`. `title` is what to say ("2 items expire
+/// soon"), null when nothing is due; `standing` is every item at one of its
+/// steps, shown before or not, which a computer's desktop agent is told for
+/// its tray.
+///
+/// # Safety
+/// `account` is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_reminders(account: *const c_char) -> *mut c_char {
+    let account = text(account);
+    with_app(&account, |app| match app.reminders() {
+        Ok(found) => json!({
+            "ok": true,
+            "title": expiration::words(found.due),
+            "due": found.due,
+            "standing": found.standing,
+        }),
+        Err(e) => failed(e),
+    })
+}
+
+/// The logins with something to fix (health.rs), and the items expired or
+/// expiring within 30 days (expiration.rs): `{ok, items: [{id, weak, reused,
+/// unsecured, expires}]}`, `expires` an expiring item's label, else null.
+/// Judged away from the app's other calls.
 ///
 /// # Safety
 /// `account` is null or a NUL-terminated UTF-8 string, valid for the call.
@@ -1726,16 +1782,48 @@ pub unsafe extern "C" fn pb_test_icons(icons: *const c_char) -> *mut c_char {
 pub unsafe extern "C" fn pb_health(account: *const c_char) -> *mut c_char {
     let account = text(account);
     let mut logins = None;
+    let mut expiring = Vec::new();
     let _ = app_value(&account, |app| {
-        logins = app.vault().map(crate::health::logins);
+        if let Some(vault) = app.vault() {
+            logins = Some(crate::health::logins(vault));
+            expiring = expiration::expiring(vault, expiration::Date::today())
+                .into_iter()
+                .map(|(item, status)| (item.id.clone(), expiration::label(status)))
+                .collect();
+        }
         Value::Null
     });
     let Some(logins) = logins else {
         return out(json!({ "ok": true, "items": [] }));
     };
     out(waiting(
-        || json!({ "ok": true, "items": crate::health::report(&logins) }),
+        || json!({ "ok": true, "items": health_items(crate::health::report(&logins), &expiring) }),
     ))
+}
+
+/// Health's items: each login with a password to fix, and each item expired
+/// or expiring within 30 days (`expires`, its label), each item once.
+fn health_items(issues: Vec<crate::health::Issues>, expiring: &[(String, String)]) -> Vec<Value> {
+    let label = |id: &str| {
+        expiring
+            .iter()
+            .find(|(e, _)| e == id)
+            .map(|(_, l)| l.clone())
+    };
+    let mut items: Vec<Value> = issues
+        .iter()
+        .map(|i| {
+            let mut v = json!(i);
+            v["expires"] = json!(label(&i.id));
+            v
+        })
+        .collect();
+    for (id, label) in expiring {
+        if !issues.iter().any(|i| &i.id == id) {
+            items.push(json!({ "id": id, "weak": false, "reused": 0, "unsecured": false, "expires": label }));
+        }
+    }
+    items
 }
 
 /// An item's past versions (history.rs), from the server: `{ok,
@@ -2605,7 +2693,28 @@ pub unsafe extern "C" fn pb_save(
                 }
                 _ => None,
             },
+            expiration: None,
         };
+        // The editor's "Expires" and "Remind me": a draft that names them
+        // sets both (no date clears them); one that doesn't keeps the item's.
+        let mut draft = draft;
+        if let Some(expires) = d.get("expires") {
+            let date =
+                match expires.as_str().map(str::trim).filter(|e| !e.is_empty()) {
+                    None => None,
+                    Some(text) => match expiration::Date::parse_iso(text) {
+                        Some(date) => Some(date),
+                        None => return failed(Error::Refused(
+                            "write the expiration date as year, month, and day, such as 2027-03-31",
+                        )),
+                    },
+                };
+            let remind = d["remind"]
+                .as_str()
+                .and_then(expiration::Remind::parse)
+                .unwrap_or_default();
+            draft.expiration = Some(crate::vault::Expiration { date, remind });
+        }
         if draft.name.trim().is_empty() {
             return failed(Error::Refused("an item needs a name"));
         }

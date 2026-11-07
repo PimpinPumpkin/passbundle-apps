@@ -5,10 +5,10 @@
 // unlocking it); every place an item lives is a folder.
 import 'glyphs.dart';
 
-/// What the vault's list shows: everything, favorites, the logins with
-/// something to fix (Health), a kind, Personal, Personal's items in no
-/// folder, one of the person's folders, an organization, or one of its
-/// shared folders.
+/// What the vault's list shows: everything, favorites, what's expired or
+/// expires within 30 days (Expiring soon), the items with something to fix
+/// (Health), a kind, Personal, Personal's items in no folder, one of the
+/// person's folders, an organization, or one of its shared folders.
 enum Filter {
   all,
 
@@ -16,6 +16,7 @@ enum Filter {
   /// (accounts.dart, "All accounts").
   everyAccount,
   favorites,
+  expiring,
   health,
   kind,
   personal,
@@ -146,9 +147,22 @@ class PlaceEntry {
   ];
 }
 
+/// An item's badge when it has expired or expires within 30 days
+/// (core/src/expiration.rs): "Expires in 12 days", "Expired 5 days ago";
+/// null otherwise. Cards expire with their expiry month.
+String? expiringLabel(Map<String, dynamic> item) {
+  final expiry = item['expiry'];
+  if (expiry is! Map || expiry['state'] == 'later') return null;
+  return expiry['label'] as String?;
+}
+
+/// Whether an item's expiry is past (its badge's color says so).
+bool hasExpired(Map<String, dynamic> item) =>
+    (item['expiry'] as Map?)?['state'] == 'expired';
+
 /// Whether an item shows under a filter. A template an MSP keeps up to date
 /// in a client's Templates shared folder shows only there. Health shows the
-/// logins in [health] (core/src/health.rs).
+/// items in [health] (core/src/health.rs and expiration.rs).
 bool shows(
   Map<String, dynamic> item,
   Filter filter,
@@ -159,6 +173,7 @@ bool shows(
   return switch (filter) {
     Filter.all || Filter.everyAccount => true,
     Filter.favorites => item['favorite'] == true,
+    Filter.expiring => expiringLabel(item) != null,
     Filter.health => health.containsKey(item['id']),
     Filter.kind => item['kind'] == id,
     Filter.personal => item['organizationId'] == null,
@@ -188,7 +203,8 @@ String whereIs(Map<String, dynamic> item, Places places) {
   return folder == null ? 'Personal' : 'Personal › $folder';
 }
 
-/// What a login has to fix, said briefly: "Weak password · used 3 times".
+/// What an item has to fix, said briefly: "Weak password · used 3 times",
+/// "Expires in 5 days".
 String healthIssues(Map<String, dynamic> issues) {
   final reused = (issues['reused'] as num?)?.toInt() ?? 0;
   return [
@@ -196,5 +212,6 @@ String healthIssues(Map<String, dynamic> issues) {
     if (reused > 0)
       reused == 1 ? 'Password used twice' : 'Password used ${reused + 1} times',
     if (issues['unsecured'] == true) 'Unsecured website',
+    if (issues['expires'] case final String expires) expires,
   ].join(' · ');
 }

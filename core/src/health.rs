@@ -111,6 +111,64 @@ pub fn report(logins: &[Login]) -> Vec<Issues> {
         .collect()
 }
 
+/// How healthy a person's own passwords are, in numbers only: what their
+/// organizations' owners and admins see, never which logins (DESIGN.md in
+/// the meta repo, "Members' own passwords"). The apps don't check breaches,
+/// so they never say how many are exposed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
+pub struct OwnCounts {
+    /// The logins in Personal with a password, not in the trash.
+    pub logins: u32,
+    /// Of those, with a weak password.
+    pub weak: u32,
+    /// Of those, sharing a password with another of them.
+    pub reused: u32,
+}
+
+/// The person's own logins' numbers: those in Personal (no organization's),
+/// not in the trash, with a password, judged as Health judges them. `weak`
+/// remembers each login's verdict by its id and revision, so only what
+/// changed is judged again.
+pub fn own_counts(vault: &Vault, weak: &mut HashMap<String, bool>) -> OwnCounts {
+    let own: Vec<_> = vault
+        .items
+        .iter()
+        .filter(|i| i.kind == ItemKind::Login && !i.deleted && i.organization_id.is_none())
+        .filter_map(|i| Some((i, i.password.as_ref().filter(|p| !p.is_empty())?)))
+        .collect();
+    let mut uses: HashMap<&str, u32> = HashMap::new();
+    for (_, password) in &own {
+        *uses.entry(password.as_str()).or_default() += 1;
+    }
+    let mut counts = OwnCounts {
+        logins: own.len() as u32,
+        ..OwnCounts::default()
+    };
+    let mut judged = HashMap::new();
+    for (item, password) in &own {
+        let key = format!(
+            "{}:{}",
+            item.id,
+            item.revision_date.as_deref().unwrap_or("")
+        );
+        let is_weak = *weak.entry(key.clone()).or_insert_with(|| {
+            let hints = item
+                .username
+                .as_deref()
+                .map(username_parts)
+                .unwrap_or_default();
+            let hints: Vec<&str> = hints.iter().map(String::as_str).collect();
+            strength(password, &hints) < 3
+        });
+        judged.insert(key, is_weak);
+        counts.weak += u32::from(is_weak);
+        counts.reused += u32::from(uses[password.as_str()] > 1);
+    }
+    // What's gone or changed is forgotten.
+    *weak = judged;
+    counts
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

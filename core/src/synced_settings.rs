@@ -225,6 +225,32 @@ mod tests {
     }
 
     #[test]
+    fn saving_keeps_the_web_vaults_breach_check_switch_as_it_was() {
+        // The web vault keeps "Check my passwords against known breaches
+        // after unlocking" in the same document; the apps don't use it, and
+        // never change it.
+        let base = doc(
+            r#"{"type":"passbundle.settings","rev":5,"health":{"checkAfterUnlock":false},"generator":{"length":24}}"#,
+        );
+        let here = Options {
+            length: 30,
+            ..Options::default()
+        };
+        let saved = document(&base, &here, rev_of(&base), 3);
+        assert_eq!(saved["health"], json!({ "checkAfterUnlock": false }));
+        assert_eq!(parse(&text(&saved)).unwrap()["health"], base["health"]);
+        let known = Known {
+            account: account("https://pb.test", "a@example.test"),
+            settings: base.clone(),
+            generator: Options::default(),
+        };
+        let Step::Save(again) = step(Some(&known), &known.account, &here, 3) else {
+            panic!("a change here should be saved")
+        };
+        assert_eq!(again["health"], json!({ "checkAfterUnlock": false }));
+    }
+
+    #[test]
     fn taking_them_keeps_whats_here_for_anything_missing_or_wrong() {
         let here = Options::default();
         let taken = take(

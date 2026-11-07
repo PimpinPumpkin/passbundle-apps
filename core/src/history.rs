@@ -184,6 +184,14 @@ pub fn entries(item: &Item) -> Vec<Entry> {
         .map(|f| f.value.as_str().to_owned())
         .unwrap_or_default();
     add("expires".into(), "Expires", expires, false);
+    // When it reminds, when that isn't the default (expiration.rs).
+    let remind = crate::expiration::Remind::of(item);
+    let remind = if remind.is_default() {
+        String::new()
+    } else {
+        remind.words()
+    };
+    add("remind".into(), "Remind me", remind, false);
     // Notes show only when revealed in the app, here as on the item's page.
     add(
         "notes".into(),

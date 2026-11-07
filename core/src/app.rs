@@ -121,6 +121,16 @@ pub struct App {
     /// It locks when the pick's answer is handed back (`left`), or at this
     /// time (on either clock) if nothing is picked.
     pick_by: Option<(Instant, SystemTime)>,
+    /// The person's own logins' numbers last told the server this unlock
+    /// (DESIGN.md in the meta repo, "Members' own passwords"), and whether
+    /// the server doesn't take them; forgotten when the vault locks.
+    own_health: Option<crate::health::OwnCounts>,
+    own_health_unheard: bool,
+    /// Each own login's weak-or-not, by id and revision (health::own_counts).
+    own_weak: std::collections::HashMap<String, bool>,
+    /// The desktop agent's tray was told of items to be reminded about, so
+    /// signing out tells it there are none.
+    told_agent: bool,
 }
 
 /// How long a list that autofill or a passkey showed, having unlocked the
@@ -188,6 +198,10 @@ impl App {
             sign_in_requests: None,
             confirmed: None,
             pick_by: None,
+            own_health: None,
+            own_health_unheard: false,
+            own_weak: Default::default(),
+            told_agent: false,
         }
     }
 
@@ -575,7 +589,84 @@ impl App {
         // A server without them, or one that's gone for a moment, leaves the
         // generator's settings as they are here.
         let _ = self.sync_settings();
+        self.report_own_health();
         Ok(())
+    }
+
+    /// Tells the server how many of the person's own logins have weak or
+    /// reused passwords (health.rs, `own_counts`), numbers only, for their
+    /// organizations' owners and admins: only for a confirmed member of an
+    /// organization, once each unlock and again when the numbers change, and
+    /// not again this unlock once a server says it doesn't take them. Never
+    /// fails a sync.
+    fn report_own_health(&mut self) {
+        if self.own_health_unheard {
+            return;
+        }
+        let (Some(server), Some(session), Some(vault)) =
+            (&self.server, self.session.as_mut(), &self.vault)
+        else {
+            return;
+        };
+        if !vault.in_an_organization() {
+            return;
+        }
+        let counts = crate::health::own_counts(vault, &mut self.own_weak);
+        if self.own_health == Some(counts) {
+            return;
+        }
+        match server.report_own_health(session, &counts) {
+            Ok(true) => self.own_health = Some(counts),
+            Ok(false) => self.own_health_unheard = true,
+            // Tried again at the next sync.
+            Err(_) => {}
+        }
+    }
+
+    /// What the person's own logins' numbers were last told the server as,
+    /// this unlock (`report_own_health`).
+    pub fn own_health_reported(&self) -> Option<crate::health::OwnCounts> {
+        self.own_health
+    }
+
+    /// The expiration reminders due today (expiration.rs), each marked shown
+    /// so it's said once, and every item at one of its steps whether shown
+    /// before or not. On a computer, the desktop agent's tray is told those
+    /// two numbers (and never which items), on a thread of its own.
+    pub fn reminders(&mut self) -> Result<crate::expiration::Check> {
+        let vault = self.vault.as_ref().ok_or(Error::SignedOut)?;
+        let mut shown = self.store.shown_reminders();
+        let found = crate::expiration::check(vault, &mut shown, crate::expiration::Date::today());
+        self.store.save_shown_reminders(&shown)?;
+        if found.standing.total() > 0 || self.told_agent {
+            self.tell_agent(found.standing);
+        }
+        Ok(found)
+    }
+
+    /// Tells the desktop agent how many of this account's items to remind
+    /// about, without waiting for it: an agent that doesn't know the command
+    /// never answers. Phones have no agent.
+    fn tell_agent(&mut self, counts: crate::expiration::Counts) {
+        #[cfg(not(phone))]
+        {
+            let Ok(user_id) = self.user_id() else { return };
+            let found = match &self.agent {
+                Some(found) => Ok(found.clone()),
+                None => Agent::installed(),
+            };
+            let Ok((address, program)) = found else {
+                return;
+            };
+            self.told_agent = counts.total() > 0;
+            std::thread::spawn(move || {
+                if let Ok(mut agent) = Agent::connect(&address, &program, &user_id) {
+                    let _ = agent.reminders(counts);
+                }
+            });
+        }
+        #[cfg(phone)]
+        let _ = counts;
     }
 
     /// The generator's settings and the server's copy (synced_settings):
@@ -782,6 +873,9 @@ impl App {
 
     /// Drops every key and everything decrypted.
     pub fn lock(&mut self) {
+        self.own_health = None;
+        self.own_health_unheard = false;
+        self.own_weak.clear();
         self.pick_by = None;
         self.sign_in_requests = None;
         self.confirmed = None;
@@ -800,6 +894,10 @@ impl App {
     pub fn sign_out(&mut self) {
         if self.store.has_sync() {
             let _ = self.remove_biometric();
+        }
+        // The agent's tray stops saying this account's items expire.
+        if self.told_agent {
+            self.tell_agent(crate::expiration::Counts::default());
         }
         if let Some(s) = &self.settings {
             self.secrets.forget(&s.server, &s.email);
