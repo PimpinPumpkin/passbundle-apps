@@ -468,9 +468,11 @@ pub unsafe extern "C" fn pb_open(dir: *const c_char, memory_secrets: bool) -> *m
     with_accounts(|accounts| opened(accounts))
 }
 
-/// The accounts, and the state of the one the screens show.
+/// The accounts, and the state of the one the screens show (`ok`, for the
+/// calls that answer with them when they've done what was asked).
 fn opened(accounts: &Accounts) -> Value {
     let mut answer = accounts_json(accounts);
+    answer["ok"] = json!(true);
     let active = accounts.active().unwrap_or_default().to_owned();
     if let (Value::Object(map), Value::Object(state)) =
         (&mut answer, state_of(accounts.state(&active)))
