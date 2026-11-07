@@ -27,6 +27,8 @@ import org.json.JSONObject
 class FillActivity : Activity() {
     companion object {
         const val MODE = "com.passbundle.app.mode"
+        /** The account to unlock, or the login's account: its id on this device. */
+        const val ACCOUNT = "com.passbundle.app.account"
         const val ITEM = "com.passbundle.app.item"
         const val ASKS = "com.passbundle.app.asks"
         const val FILL = "fill"
@@ -43,9 +45,10 @@ class FillActivity : Activity() {
         Biometric.init(applicationContext)
         Core.openIfClosed(filesDir.absolutePath)
         val fields = Fields.from(intent)
+        val account = intent.getStringExtra(ACCOUNT) ?: ""
         when (intent.getStringExtra(MODE)) {
-            FILL -> fill(fields, intent.getStringExtra(ITEM), intent.getBooleanExtra(ASKS, false))
-            UNLOCK -> unlock(fields)
+            FILL -> fill(fields, account, intent.getStringExtra(ITEM), intent.getBooleanExtra(ASKS, false))
+            UNLOCK -> unlock(fields, account)
             TRUST -> trust(fields)
             else -> finishWith(null)
         }
@@ -56,18 +59,19 @@ class FillActivity : Activity() {
      * a browser trusted now, or a site that names it) still matches it.
      * Android hands the app being filled the request to open this, which it
      * could keep and send again later, so nothing it was once offered fills
-     * unless it still would be. Checking a site may fetch: off the main thread.
+     * unless it still would be, from the same account. Checking a site may
+     * fetch: off the main thread.
      */
-    private fun stillMatches(fields: Fields, item: String): Boolean {
+    private fun stillMatches(fields: Fields, account: String, item: String): Boolean {
         val domain = Browsers.domain(fields.webDomain)?.takeIf { Browsers.trusts(this, fields.packageName) }
         val logins = runCatching { Responses.logins(this, fields, domain, SITES_WAIT_MS) }.getOrNull() ?: return false
-        return logins.any { it.optString("id") == item }
+        return logins.any { it.optString("id") == item && it.optString("account") == account }
     }
 
-    private fun fill(fields: Fields, item: String?, asks: Boolean) {
+    private fun fill(fields: Fields, account: String, item: String?, asks: Boolean) {
         if (item == null) return finishWith(null)
         Thread {
-            val matches = runCatching { stillMatches(fields, item) }.getOrDefault(false)
+            val matches = runCatching { stillMatches(fields, account, item) }.getOrDefault(false)
             runOnUiThread {
                 when {
                     isFinishing || isDestroyed -> Unit
@@ -75,15 +79,15 @@ class FillActivity : Activity() {
                         Toast.makeText(this, "That login doesn't fill here.", Toast.LENGTH_LONG).show()
                         finishWith(null)
                     }
-                    !asks -> finishWith(Responses.filled(this, fields, item))
-                    else -> askMasterPassword(fields, item)
+                    !asks -> finishWith(Responses.filled(this, fields, account, item))
+                    else -> askMasterPassword(fields, account, item)
                 }
             }
         }.start()
     }
 
     /** A login that asks for the master password again: its dialog, then it fills. */
-    private fun askMasterPassword(fields: Fields, item: String) {
+    private fun askMasterPassword(fields: Fields, account: String, item: String) {
         val password = EditText(this).apply {
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
             imeOptions = EditorInfo.IME_ACTION_GO
@@ -93,14 +97,14 @@ class FillActivity : Activity() {
             .setTitle("PassBundle")
             .setMessage("This login asks for your master password.")
             .setView(password)
-            .setPositiveButton("Continue") { _, _ -> confirm(fields, item, password) }
+            .setPositiveButton("Continue") { _, _ -> confirm(fields, account, item, password) }
             .setNegativeButton("Cancel") { _, _ -> finishWith(null) }
             .setOnCancelListener { finishWith(null) }
             .create()
         password.setOnEditorActionListener { _, action, _ ->
             if (action != EditorInfo.IME_ACTION_GO) return@setOnEditorActionListener false
             dialog.dismiss()
-            confirm(fields, item, password)
+            confirm(fields, account, item, password)
             true
         }
         dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE)
@@ -108,13 +112,13 @@ class FillActivity : Activity() {
         password.requestFocus()
     }
 
-    /** Checks the master password off the main thread (the KDF), then fills, unless the person left. */
-    private fun confirm(fields: Fields, item: String, password: EditText) {
+    /** Checks the account's master password off the main thread (the KDF), then fills, unless the person left. */
+    private fun confirm(fields: Fields, account: String, item: String, password: EditText) {
         val typed = password.text.toString()
         password.text.clear()
         Thread {
             val ok = try {
-                val answer = JSONObject(Core.confirmMasterPassword(item, typed) ?: "{}")
+                val answer = JSONObject(Core.confirmMasterPassword(account, item, typed) ?: "{}")
                 if (!answer.optBoolean("ok")) {
                     val words = answer.optString("error", "Couldn't check that.")
                     runOnUiThread { Toast.makeText(this, words, Toast.LENGTH_LONG).show() }
@@ -126,7 +130,7 @@ class FillActivity : Activity() {
             runOnUiThread {
                 when {
                     isFinishing || isDestroyed -> Unit
-                    ok -> finishWith(Responses.filled(this, fields, item))
+                    ok -> finishWith(Responses.filled(this, fields, account, item))
                     else -> finishWith(null)
                 }
             }
@@ -175,14 +179,15 @@ class FillActivity : Activity() {
         dialog.show()
     }
 
-    private fun unlock(fields: Fields) {
-        if (Biometric.status(this) != "setUp") {
+    /** Unlocks the account the screens show (the one autofill offered to unlock), then its logins. */
+    private fun unlock(fields: Fields, account: String) {
+        if (Biometric.status(this, account) != "setUp") {
             // The master password is typed in PassBundle itself.
             startActivity(Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
             Toast.makeText(this, "Unlock PassBundle, then fill again.", Toast.LENGTH_LONG).show()
             return finishWith(null)
         }
-        Biometric.unlock(this) { unlocked, error ->
+        Biometric.unlock(this, account) { unlocked, error ->
             if (!unlocked) {
                 error?.let { Toast.makeText(this, it, Toast.LENGTH_LONG).show() }
                 return@unlock finishWith(null)

@@ -372,6 +372,107 @@ fn the_app_keeps_the_vault_locks_unlocks_offline_and_signs_out() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// Several accounts side by side (DESIGN.md in the meta repo, "Several
+/// accounts in the apps"): a work account and a personal one signed in on
+/// one device, each with its own vault, session, and lock; signing in to one
+/// again keeps its place, and signing out of one leaves the other.
+#[test]
+fn two_accounts_sign_in_side_by_side_and_one_signs_out() {
+    use passbundle_core::accounts::Accounts;
+    use passbundle_core::secrets::SecretStore;
+    use std::sync::Arc;
+    let Some(server) = server() else { return };
+    let url = std::env::var("PB_TEST_SERVER").unwrap();
+    let (work, personal) = (new_email("work"), new_email("personal"));
+    sign_up(&server, &work);
+    sign_up(&server, &personal);
+    let dir = std::env::temp_dir().join(format!("pb-accounts-{}", uuid::Uuid::new_v4().simple()));
+    let secrets = Arc::new(MemorySecretStore::default());
+    let mut accounts = Accounts::open(&dir, secrets.clone());
+    assert!(accounts.summaries().is_empty());
+
+    // A wrong password adds nothing.
+    assert_eq!(
+        accounts.sign_in(&url, &work, "not the password").err(),
+        Some(Error::WrongPassword)
+    );
+    assert!(accounts.summaries().is_empty());
+    assert_eq!(accounts.sign_in(&url, &work, PASSWORD).unwrap(), Step::Done);
+    let w = accounts.active().unwrap().to_owned();
+    let draft = ItemDraft {
+        name: "Payroll".into(),
+        password: secret("not-a-real-password-work"),
+        ..ItemDraft::default()
+    };
+    accounts.app(&w).unwrap().save(None, &draft, &[]).unwrap();
+
+    // The second account joins the first, and the screens show it.
+    assert_eq!(
+        accounts.sign_in(&url, &personal, PASSWORD).unwrap(),
+        Step::Done
+    );
+    let p = accounts.active().unwrap().to_owned();
+    assert_ne!(w, p);
+    assert_eq!(accounts.summaries().len(), 2);
+    assert!(accounts.summaries().iter().all(|a| a.unlocked));
+    let names = |accounts: &mut Accounts, id: &str| -> Vec<String> {
+        accounts
+            .app(id)
+            .and_then(|a| a.vault())
+            .map(|v| v.items.iter().map(|i| i.name.clone()).collect())
+            .unwrap_or_default()
+    };
+    assert_eq!(names(&mut accounts, &w), vec!["Payroll".to_owned()]);
+    assert!(names(&mut accounts, &p).is_empty());
+    // Each its own session, and one install's device.
+    assert!(secrets.get(&url, &work).is_some());
+    assert!(secrets.get(&url, &personal).is_some());
+    let device = |id: &str| {
+        Store::new(dir.join("accounts").join(id))
+            .settings()
+            .unwrap()
+            .device_identifier
+    };
+    assert_eq!(device(&w), device(&p));
+
+    // Locking one leaves the other open and syncing.
+    accounts.lock(&w);
+    assert!(names(&mut accounts, &w).is_empty());
+    accounts.app(&p).unwrap().sync().unwrap();
+    assert!(matches!(accounts.state(&p), State::Unlocked { .. }));
+
+    // Signing in to the first again keeps its place: still two.
+    assert_eq!(accounts.sign_in(&url, &work, PASSWORD).unwrap(), Step::Done);
+    assert_eq!(accounts.active(), Some(w.as_str()));
+    assert_eq!(accounts.summaries().len(), 2);
+    assert_eq!(names(&mut accounts, &w), vec!["Payroll".to_owned()]);
+
+    // Signing out of the personal account leaves the work one as it was.
+    accounts.sign_out(&p);
+    assert!(secrets.get(&url, &personal).is_none());
+    assert!(secrets.get(&url, &work).is_some());
+    assert_eq!(
+        accounts
+            .summaries()
+            .into_iter()
+            .map(|a| a.id)
+            .collect::<Vec<_>>(),
+        vec![w.clone()]
+    );
+    accounts.app(&w).unwrap().sync().unwrap();
+    assert_eq!(names(&mut accounts, &w), vec!["Payroll".to_owned()]);
+
+    // A restart opens the one account, locked, from what's kept.
+    drop(accounts);
+    let mut accounts = Accounts::open(&dir, secrets.clone());
+    assert_eq!(accounts.active(), Some(w.as_str()));
+    assert!(matches!(accounts.state(&w), State::Locked { .. }));
+    accounts.app(&w).unwrap().unlock(PASSWORD).unwrap();
+    accounts.app(&w).unwrap().sync().unwrap();
+    assert_eq!(names(&mut accounts, &w), vec!["Payroll".to_owned()]);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// Attachments (docs/core.md, "Attachments"): a file uploaded the way
 /// upstream's apps upload one (its own key, and its key and name under the
 /// item's), then downloaded by the core, its MAC checked, and opened.

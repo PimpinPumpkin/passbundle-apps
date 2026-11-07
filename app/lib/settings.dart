@@ -9,6 +9,7 @@
 // PassBundle are allowed (window_chrome.dart).
 import 'package:flutter/material.dart';
 
+import 'accounts.dart';
 import 'autofill_offer.dart';
 import 'core.dart';
 import 'icons.dart';
@@ -66,6 +67,7 @@ class SettingsList extends StatefulWidget {
     super.key,
     this.email,
     this.server,
+    this.menu,
     this.mode,
     this.onMode,
   });
@@ -73,6 +75,9 @@ class SettingsList extends StatefulWidget {
   /// Who's signed in, and where, shown on a phone (a computer's sidebar has it).
   final String? email;
   final String? server;
+
+  /// On a phone, the accounts signed in here (accounts.dart).
+  final AccountsMenu? menu;
 
   /// Light, dark, or following the system, where the screen has no menu for it.
   final ThemeMode? mode;
@@ -387,7 +392,17 @@ class _SettingsListState extends State<SettingsList> {
             ],
           ),
         if (updates case final updates?) UpdatesSection(updates: updates),
-        if (email != null)
+        // On a phone: each account (the one these settings are for marked),
+        // adding one, and signing out of this one.
+        if (widget.menu case final menu?)
+          SettingsGroup(
+            title: 'Accounts',
+            footer: menu.several
+                ? 'These settings are for ${email ?? 'the account shown'}. Each account has its own.'
+                : null,
+            children: [AccountsList(menu: menu)],
+          )
+        else if (email != null)
           SettingsGroup(
             title: 'Account',
             children: [
@@ -434,12 +449,14 @@ class SettingsPage extends StatelessWidget {
     super.key,
     this.email,
     this.server,
+    this.menu,
     this.mode,
     this.onMode,
   });
 
   final String? email;
   final String? server;
+  final AccountsMenu? menu;
   final ThemeMode? mode;
   final ValueChanged<ThemeMode>? onMode;
 
@@ -455,6 +472,7 @@ class SettingsPage extends StatelessWidget {
             SettingsList(
               email: email,
               server: server,
+              menu: menu,
               mode: mode,
               onMode: onMode,
             ),
@@ -467,7 +485,10 @@ class SettingsPage extends StatelessWidget {
 
 /// Settings over the vault, on a computer.
 class SettingsDialog extends StatelessWidget {
-  const SettingsDialog({super.key});
+  const SettingsDialog({super.key, this.account});
+
+  /// With more than one account signed in, the one these settings are for.
+  final String? account;
 
   @override
   Widget build(BuildContext context) => Dialog(
@@ -486,6 +507,14 @@ class SettingsDialog extends StatelessWidget {
               style: Theme.of(context).textTheme.headlineSmall,
             ),
           ),
+          if (account case final account?)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(24, 4, 24, 0),
+              child: Text(
+                'For $account. Each account has its own.',
+                style: TextStyle(color: context.colors.muted, fontSize: 13),
+              ),
+            ),
           // Scrolls on a small screen, or with a large text size.
           const Flexible(
             child: SingleChildScrollView(
@@ -511,9 +540,12 @@ class SettingsDialog extends StatelessWidget {
 
 /// The gear that opens Settings.
 class SettingsButton extends StatelessWidget {
-  const SettingsButton({super.key, this.color});
+  const SettingsButton({super.key, this.color, this.account});
 
   final Color? color;
+
+  /// With more than one account signed in, the one Settings is for.
+  final String? account;
 
   @override
   Widget build(BuildContext context) => IconButton(
@@ -521,7 +553,7 @@ class SettingsButton extends StatelessWidget {
     icon: Icon(Icons.settings_outlined, color: color),
     onPressed: () => showDialog<void>(
       context: context,
-      builder: (_) => const SettingsDialog(),
+      builder: (_) => SettingsDialog(account: account),
     ),
   );
 }

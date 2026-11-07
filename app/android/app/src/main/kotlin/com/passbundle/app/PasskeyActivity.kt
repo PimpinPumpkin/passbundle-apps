@@ -42,6 +42,8 @@ class PasskeyActivity : Activity() {
     companion object {
         const val MODE = "com.passbundle.app.passkey.mode"
         const val ITEM = "com.passbundle.app.passkey.item"
+        /** The passkey's account: its id on this device. */
+        const val ACCOUNT = "com.passbundle.app.passkey.account"
         const val GET = "get"
         const val CREATE = "create"
         const val UNLOCK = "unlock"
@@ -56,7 +58,7 @@ class PasskeyActivity : Activity() {
         Biometric.init(applicationContext)
         Core.openIfClosed(filesDir.absolutePath)
         when (intent.getStringExtra(MODE)) {
-            GET -> get(intent.getStringExtra(ITEM))
+            GET -> get(intent.getStringExtra(ITEM), intent.getStringExtra(ACCOUNT) ?: "")
             CREATE -> create()
             UNLOCK -> unlock()
             else -> finish()
@@ -65,15 +67,22 @@ class PasskeyActivity : Activity() {
 
     // --- Unlocking, then the site's passkeys ---
 
+    /** The account the screens show, as the core says (`Core.passkeys`): its id on this device, and whether it's locked. */
+    private fun shown(): Pair<String, Boolean> {
+        val answer = runCatching { JSONObject(Core.passkeys("") ?: "{}") }.getOrDefault(JSONObject())
+        return answer.optString("account") to answer.optBoolean("locked")
+    }
+
     private fun unlock() {
         val request = PendingIntentHandler.retrieveBeginGetCredentialRequest(intent) ?: return cancel()
-        if (Biometric.status(this) != "setUp") {
+        val (account, _) = shown()
+        if (Biometric.status(this, account) != "setUp") {
             // The master password is typed in PassBundle itself.
             startActivity(Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
             Toast.makeText(this, "Unlock PassBundle, then try again.", Toast.LENGTH_LONG).show()
             return cancel()
         }
-        Biometric.unlock(this) { unlocked, error ->
+        Biometric.unlock(this, account) { unlocked, error ->
             if (!unlocked) {
                 error?.let { Toast.makeText(this, it, Toast.LENGTH_LONG).show() }
                 return@unlock cancel()
@@ -92,7 +101,7 @@ class PasskeyActivity : Activity() {
 
     // --- Signing in ---
 
-    private fun get(item: String?) {
+    private fun get(item: String?, account: String) {
         val request = PendingIntentHandler.retrieveProviderGetCredentialRequest(intent) ?: return failGet(null)
         val option = request.credentialOptions.filterIsInstance<GetPublicKeyCredentialOption>().firstOrNull() ?: return failGet(null)
         val json = runCatching { JSONObject(option.requestJson) }.getOrNull() ?: return failGet("PassBundle couldn't read the site's request.")
@@ -103,13 +112,15 @@ class PasskeyActivity : Activity() {
             if (caller == null) return@background failGet("That site doesn't let this app use its passkeys.")
             val entry =
                 JSONObject(Core.passkeys(rpId) ?: "{}").optJSONArray("items")?.let { items ->
-                    (0 until items.length()).map { items.getJSONObject(it) }.firstOrNull { it.optString("id") == item }
+                    (0 until items.length()).map { items.getJSONObject(it) }.firstOrNull {
+                        it.optString("id") == item && it.optString("account") == account
+                    }
                 } ?: return@background failGet("PassBundle doesn't have that passkey anymore.")
-            prove(item.takeIf { entry.optBoolean("reprompt") }, json.optString("userVerification", "preferred")) { verified ->
+            prove(account, item.takeIf { entry.optBoolean("reprompt") }, json.optString("userVerification", "preferred")) { verified ->
                 if (verified == null) return@prove failGet(null)
                 val clientData = if (caller.browser && option.clientDataHash != null) null else Passkeys.clientData("webauthn.get", challenge, caller)
                 val hash = clientData?.let(Passkeys::sha256) ?: option.clientDataHash!!
-                background({ JSONObject(Core.passkeyAssert(item, rpId, Passkeys.base64url(hash), verified) ?: "{}") }) { result ->
+                background({ JSONObject(Core.passkeyAssert(account, item, rpId, Passkeys.base64url(hash), verified) ?: "{}") }) { result ->
                     val answer = result ?: JSONObject()
                     if (!answer.optBoolean("ok")) return@background failGet(answer.optString("error", "PassBundle couldn't sign in with it."))
                     val credentialId = answer.getString("credentialId")
@@ -162,6 +173,8 @@ class PasskeyActivity : Activity() {
         val selection = json.optJSONObject("authenticatorSelection")
         val userName = user.optString("name")
         val site = rp.optString("name").ifEmpty { rpId }
+        // Saved in the account the screens show.
+        val (account, _) = shown()
         background({ Passkeys.caller(this, request.callingAppInfo, rpId) }) { caller ->
             if (caller == null) return@background failCreate("That site doesn't let this app save its passkeys.")
             val dialog = AlertDialog.Builder(this)
@@ -173,13 +186,14 @@ class PasskeyActivity : Activity() {
                         "${if (userName.isEmpty()) "" else ", as $userName"}, in a new login.",
                 )
                 .setPositiveButton("Save") { _, _ ->
-                    prove(null, selection?.optString("userVerification", "preferred") ?: "preferred") { verified ->
+                    prove(account, null, selection?.optString("userVerification", "preferred") ?: "preferred") { verified ->
                         if (verified == null) return@prove failCreate(null)
                         val clientData =
                             if (caller.browser && asked.clientDataHash != null) null else Passkeys.clientData("webauthn.create", json.optString("challenge"), caller)
                         val exclude = json.optJSONArray("excludeCredentials") ?: JSONArray()
                         val made =
                             JSONObject()
+                                .put("account", account)
                                 .put("rpId", rpId)
                                 .put("rpName", rp.optString("name").ifEmpty { null })
                                 .put("userHandle", user.optString("id"))
@@ -273,43 +287,45 @@ class PasskeyActivity : Activity() {
     // --- Proving who they are ---
 
     /**
-     * Has the person prove who they are when it's wanted: the master password
-     * for a login that asks for it again (`reprompt`, its id), else Face ID or
-     * a fingerprint (or the master password without them) when the site
-     * requires it or prefers it. `done(verified)`, null if they cancelled.
+     * Has the person prove who they are when it's wanted, for the passkey's
+     * account: its master password for a login that asks for it again
+     * (`reprompt`, its id), else Face ID or a fingerprint (or the master
+     * password without them) when the site requires it or prefers it.
+     * `done(verified)`, null if they cancelled.
      */
-    private fun prove(reprompt: String?, wanted: String, done: (Boolean?) -> Unit) {
+    private fun prove(account: String, reprompt: String?, wanted: String, done: (Boolean?) -> Unit) {
         // Locked (making one, say): unlocking is the proof, and it's needed anyway.
-        if (JSONObject(Core.passkeys("") ?: "{}").optBoolean("locked")) {
-            if (Biometric.status(this) != "setUp") {
+        val (shownAccount, locked) = shown()
+        if (locked && shownAccount == account) {
+            if (Biometric.status(this, account) != "setUp") {
                 startActivity(Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
                 Toast.makeText(this, "Unlock PassBundle, then try again.", Toast.LENGTH_LONG).show()
                 return done(null)
             }
-            return Biometric.unlock(this) { unlocked, error ->
+            return Biometric.unlock(this, account) { unlocked, error ->
                 error?.let { Toast.makeText(this, it, Toast.LENGTH_LONG).show() }
                 done(if (unlocked) true else null)
             }
         }
-        if (reprompt != null) return masterPassword("This login asks for your master password.", reprompt, done)
+        if (reprompt != null) return masterPassword("This login asks for your master password.", account, reprompt, done)
         if (wanted == "discouraged") return done(false)
-        if (Biometric.status(this) == "setUp") {
-            return Biometric.unlock(this) { unlocked, error ->
+        if (Biometric.status(this, account) == "setUp") {
+            return Biometric.unlock(this, account) { unlocked, error ->
                 when {
                     unlocked -> done(true)
                     // "Use master password", or a key Android voided.
                     else -> {
                         error?.let { Toast.makeText(this, it, Toast.LENGTH_LONG).show() }
-                        masterPassword("Use your master password.", null, done)
+                        masterPassword("Use your master password.", account, null, done)
                     }
                 }
             }
         }
-        if (wanted == "required") return masterPassword("This site wants to know it's you.", null, done)
+        if (wanted == "required") return masterPassword("This site wants to know it's you.", account, null, done)
         done(false)
     }
 
-    private fun masterPassword(message: String, item: String?, done: (Boolean?) -> Unit) {
+    private fun masterPassword(message: String, account: String, item: String?, done: (Boolean?) -> Unit) {
         val password =
             EditText(this).apply {
                 inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
@@ -320,7 +336,9 @@ class PasskeyActivity : Activity() {
             val typed = password.text.toString()
             password.text.clear()
             background({
-                JSONObject((if (item != null) Core.confirmMasterPassword(item, typed) else Core.checkMasterPassword(typed)) ?: "{}")
+                JSONObject(
+                    (if (item != null) Core.confirmMasterPassword(account, item, typed) else Core.checkMasterPassword(account, typed)) ?: "{}",
+                )
             }) { result ->
                 val answer = result ?: JSONObject()
                 if (answer.optBoolean("ok")) return@background done(true)

@@ -66,42 +66,50 @@ class MainActivity : FlutterActivity() {
                                 ?.getString("server_url")
                                 ?.takeIf { it.isNotBlank() },
                         )
+                    // Each call about an account names it (core.dart, Core.account).
                     "copy" -> {
+                        val account = call.argument<String>("account") ?: ""
                         val id = call.argument<String>("id")
                         val what = call.argument<String>("what")
-                        result.success(id != null && what != null && Clipboard.copy(this, id, what))
+                        result.success(id != null && what != null && Clipboard.copy(this, account, id, what))
                     }
-                    // Unlocking with the phone's biometrics (Biometric.kt).
+                    // Unlocking with the phone's biometrics (Biometric.kt), each account's its own.
                     "biometricStatus" ->
-                        result.success(mapOf("status" to Biometric.status(this), "method" to Biometric.method(this)))
+                        result.success(
+                            mapOf(
+                                "status" to Biometric.status(this, call.argument<String>("account") ?: ""),
+                                "method" to Biometric.method(this),
+                            ),
+                        )
                     "biometricEnroll" ->
-                        Biometric.enroll(this) { on, error ->
+                        Biometric.enroll(this, call.argument<String>("account") ?: "") { on, error ->
                             result.success(mapOf("ok" to (error == null), "on" to on, "error" to error))
                         }
                     "biometricUnlock" ->
-                        Biometric.unlock(this) { unlocked, error ->
+                        Biometric.unlock(this, call.argument<String>("account") ?: "") { unlocked, error ->
                             result.success(mapOf("ok" to (error == null), "unlocked" to unlocked, "error" to error))
                         }
                     // Confirming it's the person, to approve a sign-in from another device.
                     "biometricConfirmApproval" ->
-                        Biometric.unlock(this, "Approve sign-in", forApproval = true) { confirmed, error ->
+                        Biometric.unlock(this, call.argument<String>("account") ?: "", "Approve sign-in", forApproval = true) { confirmed, error ->
                             result.success(mapOf("ok" to (error == null), "confirmed" to confirmed, "error" to error))
                         }
                     // Tests only: debug builds' stand-in for Android's prompt (false in a release build).
                     "biometricStandIn" -> result.success(Biometric.useStandIn(this, call.argument<Boolean>("on") == true))
                     "biometricRemove" -> {
-                        Biometric.remove()
+                        Biometric.remove(call.argument<String>("account") ?: "")
                         result.success(mapOf("ok" to true))
                     }
                     // An attachment, into Downloads (Attachments.kt).
                     "saveAttachment" -> {
+                        val account = call.argument<String>("account") ?: ""
                         val id = call.argument<String>("id")
                         val attachment = call.argument<String>("attachmentId")
                         val name = call.argument<String>("name")
                         if (id == null || attachment == null || name == null) {
                             result.success(mapOf("ok" to false, "error" to "Couldn't save that."))
                         } else {
-                            Attachments.saveToDownloads(this, id, attachment, name) { answer -> result.success(answer) }
+                            Attachments.saveToDownloads(this, account, id, attachment, name) { answer -> result.success(answer) }
                         }
                     }
                     // A login's website, in the browser: only http and https.

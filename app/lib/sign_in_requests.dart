@@ -12,6 +12,10 @@
 // Phones show a request while PassBundle is open, or the next time it opens:
 // a prompt while it's closed needs push notifications, which wait on
 // PassBundle's own push service (docs/phones.md).
+//
+// With several accounts signed in (accounts.dart), it asks for every
+// unlocked one while a vault is shown, and each request is listed,
+// confirmed, and answered for its own account, which the prompt names.
 import 'dart:async';
 
 import 'package:flutter/material.dart';
@@ -20,10 +24,12 @@ import 'core.dart';
 import 'theme.dart';
 import 'widgets.dart';
 
-/// A sign-in waiting for this account's answer, as the core listed it.
+/// A sign-in waiting for an account's answer, as the core listed it.
 class SignInRequest {
   SignInRequest(Map<String, dynamic> json, {DateTime? listedAt})
-    : id = json['id'] as String,
+    : account = json['account'] as String?,
+      email = json['email'] as String?,
+      id = json['id'] as String,
       deviceId = json['deviceId'] as String? ?? '',
       deviceType = json['deviceType'] as String? ?? '',
       device = json['device'] as String? ?? 'A device',
@@ -32,6 +38,12 @@ class SignInRequest {
       _age = Duration(seconds: (json['ageSeconds'] as num?)?.toInt() ?? 0),
       _left = Duration(seconds: (json['secondsLeft'] as num?)?.toInt() ?? 0),
       _listedAt = listedAt ?? signInClock();
+
+  /// The account it's for, by its id on this device, and its email: the
+  /// one it was listed for, which alone answers it. Null for the account
+  /// shown.
+  final String? account;
+  final String? email;
 
   final String id;
 
@@ -47,7 +59,8 @@ class SignInRequest {
   /// together (a request from the same identifier as another type, or from
   /// another address, is another asker), or the request where there's no
   /// identifier.
-  String get asker => deviceId.isEmpty ? id : '$deviceId $deviceType $ip';
+  String get asker =>
+      deviceId.isEmpty ? id : '${account ?? ''} $deviceId $deviceType $ip';
 
   /// The requesting device, in words ("Web vault in Chrome").
   final String device;
@@ -93,12 +106,18 @@ abstract class SignInRequestSource {
   /// The requests waiting, from the server (`ok`, `requests`).
   Future<Answer> list();
 
-  /// Approves or denies one; approving may answer `confirmFirst`.
-  Future<Answer> answer(String id, String fingerprint, bool approve);
+  /// Approves or denies one, for its [account] (the one shown when null);
+  /// approving may answer `confirmFirst`.
+  Future<Answer> answer(
+    String id,
+    String fingerprint,
+    bool approve, [
+    String? account,
+  ]);
 
-  /// Asks the person to confirm it's them: biometrics, else the master
-  /// password. True once they have.
-  Future<bool> confirm(BuildContext context);
+  /// Asks the person to confirm it's them, for an [account] (the one shown
+  /// when null): biometrics, else the master password. True once they have.
+  Future<bool> confirm(BuildContext context, [String? account]);
 
   /// Whether this device asks them to before approving.
   bool get confirmApprovals;
@@ -107,26 +126,62 @@ abstract class SignInRequestSource {
   Answer setConfirmApprovals(bool on);
 }
 
-/// The core's.
+/// The core's: every unlocked account's requests, the shown one's first,
+/// each with its account.
 class CoreSignInRequests implements SignInRequestSource {
   @override
-  Future<Answer> list() => Core.signInRequests();
+  Future<Answer> list() async {
+    final shown = Core.account;
+    final unlocked = [
+      for (final a in (Core().accounts()['accounts'] as List? ?? const []))
+        if ((a as Map)['state'] == 'unlocked')
+          (a['id'] as String, a['email'] as String?),
+    ]..sort((a, b) => (a.$1 == shown ? 0 : 1) - (b.$1 == shown ? 0 : 1));
+    final requests = <Map<String, dynamic>>[];
+    Answer? failed;
+    var listed = false;
+    for (final (id, email) in unlocked) {
+      final answer = await Core.signInRequests(id);
+      if (!answer.ok) {
+        failed ??= answer;
+        continue;
+      }
+      listed = true;
+      for (final r in (answer.body['requests'] as List? ?? const [])) {
+        requests.add({
+          ...Map<String, dynamic>.from(r as Map),
+          'account': id,
+          'email': ?email,
+        });
+      }
+    }
+    if (!listed && failed != null) return failed;
+    return Answer({'ok': true, 'requests': requests});
+  }
 
   @override
-  Future<Answer> answer(String id, String fingerprint, bool approve) =>
-      whileBusy(() => Core.answerSignInRequest(id, fingerprint, approve));
+  Future<Answer> answer(
+    String id,
+    String fingerprint,
+    bool approve, [
+    String? account,
+  ]) => whileBusy(
+    () => Core.answerSignInRequest(id, fingerprint, approve, account),
+  );
 
   @override
-  Future<bool> confirm(BuildContext context) async {
-    final status = await Core.biometricStatus();
+  Future<bool> confirm(BuildContext context, [String? account]) async {
+    final status = await Core.biometricStatus(account);
     if (status['status'] == 'setUp') {
-      final answer = await whileBusy(Core.confirmApprovalWithBiometric);
+      final answer = await whileBusy(
+        () => Core.confirmApprovalWithBiometric(account),
+      );
       if (answer.ok && answer.body['confirmed'] == true) return true;
     }
     if (!context.mounted) return false;
     return await showDialog<bool>(
           context: context,
-          builder: (_) => const _ConfirmWithMasterPassword(),
+          builder: (_) => _ConfirmWithMasterPassword(account: account),
         ) ==
         true;
   }
@@ -162,6 +217,10 @@ class SignInRequests extends ChangeNotifier {
   /// A check skipped beside a slow call, made as soon as it's done.
   bool _skipped = false;
 
+  /// Counts each stop: a listing asked for before one (for the account the
+  /// vault showed then: the screens may show another now) is dropped.
+  int _session = 0;
+
   static const every = Duration(seconds: 10);
 
   /// The vault opened: asks now, then every 10 seconds.
@@ -191,10 +250,12 @@ class SignInRequests extends ChangeNotifier {
     check();
   }
 
-  /// The vault closed: forgets every request.
+  /// The vault closed (it locked, or the screens show another account):
+  /// forgets every request.
   void stop() {
     if (_running) busy.removeListener(_busyChanged);
     _running = false;
+    _session++;
     _skipped = false;
     pause();
     requests = const [];
@@ -211,9 +272,10 @@ class SignInRequests extends ChangeNotifier {
       return;
     }
     _asking = true;
+    final session = _session;
     try {
       final answer = await source.list();
-      if (!_running || !answer.ok) return;
+      if (!_running || session != _session || !answer.ok) return;
       requests = [
         for (final r
             in ((answer.body['requests'] as List?) ?? const [])
@@ -388,18 +450,19 @@ class _SignInRequestDialogState extends State<SignInRequestDialog> {
     });
     final r = request;
     if (approve && source.confirmApprovals) {
-      final confirmed = await source.confirm(context);
+      final confirmed = await source.confirm(context, r.account);
       if (!mounted) return;
       if (!confirmed) {
         setState(() => working = false);
         return;
       }
     }
-    var answer = await source.answer(r.id, r.fingerprint, approve);
-    // Confirmed too long ago (the prompt sat open): once more.
+    var answer = await source.answer(r.id, r.fingerprint, approve, r.account);
+    // Confirmed too long ago (the prompt sat open), or the request's account
+    // asks to confirm where the one shown doesn't: once more.
     if (approve && answer.body['confirmFirst'] == true && mounted) {
-      if (await source.confirm(context) && mounted) {
-        answer = await source.answer(r.id, r.fingerprint, approve);
+      if (await source.confirm(context, r.account) && mounted) {
+        answer = await source.answer(r.id, r.fingerprint, approve, r.account);
       }
     }
     if (!mounted) return;
@@ -418,7 +481,8 @@ class _SignInRequestDialogState extends State<SignInRequestDialog> {
     final r = request;
     final colors = context.colors;
     final scheme = Theme.of(context).colorScheme;
-    final email = widget.email;
+    // The account it's for, which may not be the one shown.
+    final email = r.email ?? widget.email;
     Widget detail(String label, String value) => Padding(
       padding: const EdgeInsets.only(top: 6),
       child: Row(
@@ -527,7 +591,10 @@ class _SignInRequestDialogState extends State<SignInRequestDialog> {
 
 /// The master password, to confirm it's the person approving a sign-in.
 class _ConfirmWithMasterPassword extends StatefulWidget {
-  const _ConfirmWithMasterPassword();
+  const _ConfirmWithMasterPassword({this.account});
+
+  /// The account whose master password it is (the one shown when null).
+  final String? account;
 
   @override
   State<_ConfirmWithMasterPassword> createState() =>
@@ -553,7 +620,7 @@ class _ConfirmWithMasterPasswordState
       error = null;
     });
     final answer = await whileBusy(
-      () => Core.confirmWithMasterPassword(password.text),
+      () => Core.confirmWithMasterPassword(password.text, widget.account),
     );
     if (!mounted) return;
     password.clear();
@@ -662,6 +729,9 @@ class _SignInRequestsSettingsState extends State<SignInRequestsSettings> {
               title: Text(r.device),
               subtitle: Text(
                 [
+                  // Another account's: which one.
+                  if (r.email case final email? when email != widget.email)
+                    email,
                   if (r.ip.isNotEmpty) r.ip,
                   askedAgo(r.age),
                   'expires in ${timeLeft(r.left).toLowerCase()}',

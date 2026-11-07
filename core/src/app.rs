@@ -1,7 +1,9 @@
-//! The app's state, as the screens see it: signed out, locked, or unlocked,
-//! and everything they ask for. One per process; the bridge (ffi.rs) holds it.
-//! See docs/core.md: signing in, two-step login, unlocking from the kept sync,
-//! and syncing with the kept refresh token.
+//! One account's state, as the screens see it: signed out, locked, or
+//! unlocked, and everything they ask for. One per account signed in on this
+//! device (accounts.rs, which the bridge, ffi.rs, holds), each with its own
+//! folder, keys, choices, and lock. See docs/core.md: signing in, two-step
+//! login, unlocking from the kept sync, and syncing with the kept refresh
+//! token.
 
 use std::path::PathBuf;
 use std::time::{Instant, SystemTime};
@@ -51,7 +53,19 @@ pub enum Step {
 }
 
 pub struct App {
+    /// This account's own id on this device (accounts.rs): its folder's
+    /// name, and what a phone's biometric unlock keeps its key under. Empty
+    /// for an app opened on a folder of its own (`App::open`).
+    id: String,
     store: Store,
+    /// What's the device's, not the account's: how the app looks, and
+    /// whether screenshots are allowed. The account's own store, for an app
+    /// opened on a folder of its own.
+    device: Store,
+    /// This install's device identifier, for signing in when this account
+    /// has none kept yet (accounts.rs): one per install, as upstream's apps
+    /// have it.
+    install_identifier: Option<String>,
     secrets: Box<dyn SecretStore>,
     settings: Option<Settings>,
     server: Option<Server>,
@@ -125,14 +139,26 @@ pub struct Version {
 
 impl App {
     pub fn open(store: Store, secrets: Box<dyn SecretStore>) -> App {
+        let device = store.clone();
+        App::open_in("", store, device, secrets)
+    }
+
+    /// One account of several (accounts.rs): `id` is its own on this device,
+    /// `store` its folder, and `device` the app's, for what's the device's.
+    pub fn open_in(id: &str, store: Store, device: Store, secrets: Box<dyn SecretStore>) -> App {
         let settings = store.settings();
         let server = settings
             .as_ref()
             .and_then(|s| Server::new(&s.server, Device::this_one(&s.device_identifier)).ok());
         let preferences = store.preferences();
-        crate::icons::forget_kept(store.dir());
+        if let Some(dir) = store.dir() {
+            crate::icons::forget_kept(dir);
+        }
         App {
+            id: id.to_owned(),
             store,
+            device,
+            install_identifier: None,
             secrets,
             settings,
             server,
@@ -156,13 +182,69 @@ impl App {
         }
     }
 
+    /// An app for no account: signed out, with nothing kept and nowhere to
+    /// keep anything (`Store::none`). What a call for an account that isn't
+    /// on this device sees (accounts.rs).
+    pub fn nobody() -> App {
+        App::open_in(
+            "",
+            Store::none(),
+            Store::none(),
+            Box::new(crate::secrets::MemorySecretStore::default()),
+        )
+    }
+
+    /// This account's own id on this device (accounts.rs).
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// The server and email signed in to (or being signed in to).
+    pub fn account(&self) -> Option<(&str, &str)> {
+        self.settings
+            .as_ref()
+            .map(|s| (s.server.as_str(), s.email.as_str()))
+    }
+
+    /// The device identifier a sign-in uses when this account has none kept.
+    pub fn use_install_identifier(&mut self, identifier: &str) {
+        self.install_identifier = Some(identifier.to_owned());
+    }
+
+    /// Whether a sign-in waits for its second step (`finish_sign_in`).
+    pub fn signing_in(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    /// Gives up on a sign-in waiting for its second step: the account is
+    /// as it was kept (its server and email as on this device).
+    pub fn cancel_sign_in(&mut self) {
+        self.pending = None;
+        self.settings = self.store.settings();
+        self.server = self
+            .settings
+            .as_ref()
+            .and_then(|s| Server::new(&s.server, Device::this_one(&s.device_identifier)).ok());
+    }
+
+    /// Whether this account has a vault kept on this device (it's signed
+    /// in, locked or not).
+    pub fn has_vault(&self) -> bool {
+        self.store.has_sync()
+    }
+
+    /// The account's id on its server, from the open vault or the kept sync.
+    pub fn user_id_kept(&self) -> Option<String> {
+        self.user_id().ok()
+    }
+
     /// Talks to the agent at `address`, which must be the program at `program` (tests).
     pub fn use_agent_at(&mut self, address: PathBuf, program: PathBuf) {
         self.agent = Some((address, program));
     }
 
     pub fn state(&self) -> State {
-        match (&self.settings, &self.vault, self.store.sync().is_some()) {
+        match (&self.settings, &self.vault, self.store.has_sync()) {
             (Some(s), Some(_), _) => State::Unlocked {
                 server: s.server.clone(),
                 email: s.email.clone(),
@@ -228,11 +310,13 @@ impl App {
         })
     }
 
-    /// One identifier per install, whichever account signs in.
+    /// One identifier per install, whichever account signs in: this
+    /// account's, or the install's (accounts.rs), or a new one.
     fn device_identifier(&self) -> String {
         self.settings
             .as_ref()
             .map(|s| s.device_identifier.clone())
+            .or_else(|| self.install_identifier.clone())
             .unwrap_or_else(Device::new_identifier)
     }
 
@@ -414,16 +498,17 @@ impl App {
     }
 
     /// Turns it off (for the extension too: it's one enrollment). On Android
-    /// the app's own Keystore key and the user key it sealed go instead.
+    /// the app's own Keystore key and the user key it sealed go instead, and
+    /// on iOS the Keychain item: this account's, by its id on this device.
     pub fn remove_biometric(&self) -> Result<()> {
         #[cfg(target_os = "android")]
         {
-            crate::android::remove_biometric();
+            crate::android::remove_biometric(&self.id);
             Ok(())
         }
         #[cfg(all(target_os = "ios", feature = "ffi"))]
         {
-            crate::ffi::remove_biometric();
+            crate::ffi::remove_biometric(&self.id);
             Ok(())
         }
         #[cfg(not(any(target_os = "android", all(target_os = "ios", feature = "ffi"))))]
@@ -433,6 +518,8 @@ impl App {
     /// Brings the vault up to date from the server and keeps the new sync.
     /// Signed out (the session ended) leaves the kept vault open, to read.
     pub fn sync(&mut self) -> Result<()> {
+        // The account the vault kept here is (its id on the server).
+        let kept = self.user_id().ok();
         let (Some(server), Some(settings)) = (&self.server, &self.settings) else {
             return Err(Error::SignedOut);
         };
@@ -448,6 +535,11 @@ impl App {
             }
             other => other?,
         };
+        if let Err(e) = same_account(kept.as_deref(), &sync.profile.id) {
+            self.session = None;
+            self.secrets.forget(&settings.server, &settings.email);
+            return Err(e);
+        }
         self.store.save_sync(&text)?;
         self.policy = LockPolicy::from_sync(&text);
         self.generator_policy = GeneratorPolicy::from_sync(&text);
@@ -681,7 +773,7 @@ impl App {
     /// Forgets the vault and the session on this device, and unlocking with
     /// Windows Hello or Touch ID if it was on; keeps the server and email.
     pub fn sign_out(&mut self) {
-        if self.store.sync().is_some() {
+        if self.store.has_sync() {
             let _ = self.remove_biometric();
         }
         if let Some(s) = &self.settings {
@@ -1369,25 +1461,31 @@ impl App {
     /// How the app looks on this device: whether logins show their
     /// websites' icons.
     pub fn appearance(&self) -> crate::store::Appearance {
-        self.store.appearance()
+        self.device.appearance()
     }
 
     /// Whether PassBundle's windows may be in screenshots, screen
     /// recordings, and screen sharing on this computer (`store::Screenshots`).
     pub fn screenshots(&self) -> crate::store::Screenshots {
-        self.store.screenshots()
+        self.device.screenshots()
     }
 
     pub fn set_screenshots(&mut self, screenshots: crate::store::Screenshots) -> Result<()> {
-        self.store.save_screenshots(&screenshots)
+        self.device.save_screenshots(&screenshots)
     }
 
     pub fn set_appearance(&mut self, appearance: crate::store::Appearance) -> Result<()> {
-        self.store.save_appearance(&appearance)?;
-        if !appearance.show_icons {
+        self.device.save_appearance(&appearance)?;
+        self.appearance_changed();
+        Ok(())
+    }
+
+    /// How the app looks changed (here, or for another account on this
+    /// device): with icons off, the ones kept go.
+    pub fn appearance_changed(&mut self) {
+        if !self.device.appearance().show_icons {
             self.forget_icons();
         }
-        Ok(())
     }
 
     /// What fetching a website's icon needs, away from the app (ffi.rs,
@@ -1395,7 +1493,7 @@ impl App {
     /// it's for (`keep_icon`), while the vault is open and icons are on.
     pub fn icon_source(&self) -> Option<(String, u64)> {
         self.vault.as_ref()?;
-        if !self.store.appearance().show_icons {
+        if !self.device.appearance().show_icons {
             return None;
         }
         let server = self.settings.as_ref()?.server.clone();
@@ -1623,6 +1721,37 @@ impl SignInRequestsCall {
     /// The server's list, and its clock.
     pub fn fetch(&self) -> Result<(serde_json::Value, Option<u64>)> {
         self.server.pending_sign_in_requests(&self.access_token)
+    }
+}
+
+/// A sync is for the account whose vault is kept here, by its id on the
+/// server, or for a new one (nothing kept yet): a server that answers with
+/// another account's vault is refused, and nothing of it is kept. An
+/// account's id never changes, then, once it's on this device, and two
+/// accounts here never share one (accounts.rs refuses a new one that would):
+/// the desktop agent keeps each account's biometric key by it (DESIGN.md in
+/// the meta repo, "Several accounts in the apps").
+fn same_account(kept: Option<&str>, synced: &str) -> Result<()> {
+    match kept {
+        Some(kept) if kept != synced => Err(Error::Refused(
+            "the server sent another account's vault; sign out, then sign in again",
+        )),
+        _ => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod same_account_tests {
+    use super::*;
+
+    #[test]
+    fn a_sync_is_for_the_account_kept_here_or_a_new_one() {
+        assert_eq!(same_account(None, "a"), Ok(()));
+        assert_eq!(same_account(Some("a"), "a"), Ok(()));
+        assert!(matches!(
+            same_account(Some("a"), "b"),
+            Err(Error::Refused(_))
+        ));
     }
 }
 

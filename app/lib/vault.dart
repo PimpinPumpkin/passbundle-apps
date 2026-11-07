@@ -13,6 +13,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import 'accounts.dart';
 import 'autofill_offer.dart';
 import 'core.dart';
 import 'editor.dart';
@@ -43,6 +44,7 @@ class VaultScreen extends StatefulWidget {
     required this.core,
     required this.email,
     this.server,
+    this.menu,
     required this.mode,
     required this.onMode,
     required this.onLock,
@@ -54,6 +56,10 @@ class VaultScreen extends StatefulWidget {
   final Core core;
   final String email;
   final String? server;
+
+  /// The accounts signed in here, and what the account menu does
+  /// (accounts.dart): this vault is the one shown.
+  final AccountsMenu? menu;
   final ThemeMode mode;
   final ValueChanged<ThemeMode> onMode;
   final VoidCallback onLock;
@@ -507,6 +513,7 @@ class VaultScreenState extends State<VaultScreen> {
               children: [
                 Sidebar(
                   email: widget.email,
+                  menu: widget.menu,
                   filter: filter,
                   filterId: filterId,
                   places: places,
@@ -604,6 +611,7 @@ class VaultScreenState extends State<VaultScreen> {
                         ? SettingsPage(
                             email: widget.email,
                             server: widget.server,
+                            menu: widget.menu,
                             mode: widget.mode,
                             onMode: widget.onMode,
                           )
@@ -703,6 +711,14 @@ class VaultScreenState extends State<VaultScreen> {
                 tooltip: 'Sync',
                 icon: const Icon(Icons.sync_rounded),
                 onPressed: sync,
+              ),
+            // With more than one account signed in, the one shown and the
+            // others, a tap away (Settings has them too).
+            if (widget.menu case final menu? when menu.several)
+              IconButton(
+                tooltip: 'Accounts',
+                icon: const Icon(Icons.account_circle_outlined),
+                onPressed: () => showAccounts(context, menu),
               ),
             IconButton(
               tooltip: 'Lock',
@@ -1210,6 +1226,7 @@ class Sidebar extends StatelessWidget {
     super.key,
     this.width = 248,
     required this.email,
+    this.menu,
     required this.filter,
     required this.filterId,
     required this.places,
@@ -1227,6 +1244,9 @@ class Sidebar extends StatelessWidget {
 
   final double width;
   final String email;
+
+  /// The account menu, from the email at the foot (accounts.dart).
+  final AccountsMenu? menu;
   final Filter filter;
   final String? filterId;
   final Places places;
@@ -1459,20 +1479,31 @@ class Sidebar extends StatelessWidget {
             ),
           ),
           const Divider(indent: 14, endIndent: 14),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(18, 10, 16, 0),
-            child: Text(
-              email,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(color: c.muted, fontSize: 12),
+          // The account shown: its email, which opens the account menu
+          // (switching, adding one, signing out).
+          if (menu case final menu?)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(8, 4, 8, 0),
+              child: AccountFooter(menu: menu, email: email),
+            )
+          else
+            Padding(
+              padding: const EdgeInsets.fromLTRB(18, 10, 16, 0),
+              child: Text(
+                email,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(color: c.muted, fontSize: 12),
+              ),
             ),
-          ),
           Padding(
             padding: const EdgeInsets.fromLTRB(8, 4, 8, 8),
             child: Row(
               children: [
                 ThemeButton(onMode: onMode, color: c.muted),
-                SettingsButton(color: c.muted),
+                SettingsButton(
+                  color: c.muted,
+                  account: (menu?.several ?? false) ? email : null,
+                ),
                 const Spacer(),
                 TextButton.icon(
                   onPressed: onLock,

@@ -77,14 +77,15 @@ class PasskeyProvider : CredentialProviderService() {
          * tells PendingIntents apart by it, not by their extras), so one
          * can't stand in for another and sign in as another account.
          */
-        fun pending(context: Context, mode: String, item: String? = null): PendingIntent =
+        fun pending(context: Context, mode: String, item: String? = null, account: String? = null): PendingIntent =
             PendingIntent.getActivity(
                 context,
                 0,
                 Intent(context, PasskeyActivity::class.java)
                     .setData(Uri.parse("passbundle://passkey/$mode/${UUID.randomUUID()}"))
                     .putExtra(PasskeyActivity.MODE, mode)
-                    .putExtra(PasskeyActivity.ITEM, item),
+                    .putExtra(PasskeyActivity.ITEM, item)
+                    .putExtra(PasskeyActivity.ACCOUNT, account),
                 // Mutable: Android adds the request when it starts it.
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE,
             )
@@ -120,7 +121,12 @@ class PasskeyProvider : CredentialProviderService() {
                     if (allowed != null && item.getString("credentialId") !in allowed) continue
                     val name = item.optString("userName").ifEmpty { item.optString("name") }
                     found +=
-                        PublicKeyCredentialEntry.Builder(context, name, pending(context, PasskeyActivity.GET, item.getString("id")), option)
+                        PublicKeyCredentialEntry.Builder(
+                            context,
+                            name,
+                            pending(context, PasskeyActivity.GET, item.getString("id"), item.optString("account")),
+                            option,
+                        )
                             .setDisplayName(item.optString("userDisplayName").ifEmpty { item.optString("name") })
                             .build()
                 }

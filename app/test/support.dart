@@ -71,6 +71,67 @@ String openSample({
   return dir;
 }
 
+/// The sample vault's "Gate code", which only the personal account of
+/// [openAccounts] has.
+const gateCode = '60718293-a4b5-4c63-def4-05162738495a';
+
+/// Accounts signed in on this device side by side (accounts.dart), all
+/// locked, each in its own folder as the core keeps them: the sample vault
+/// as a work account, ana.lopez@example.test on vault.example.test, without
+/// "Gate code"; as a personal one, ana@home.example.test on
+/// vault.home.example.test, with only "Gate code"; and [more] others, like
+/// the work one, as more1@example.test and on. Each opens with the sample's
+/// master password, and none locks when the computer sleeps. The work
+/// account is shown. Their ids on this device, in that order.
+List<String> openAccounts({int more = 0}) {
+  final dir = Directory.systemTemp.createTempSync('pb-app-test-').path;
+  final settings =
+      jsonDecode(File('test/sample/settings.json').readAsStringSync())
+          as Map<String, dynamic>;
+  final sync =
+      jsonDecode(File('test/sample/sync.json').readAsStringSync())
+          as Map<String, dynamic>;
+  final ciphers = (sync['ciphers'] as List).cast<Map<String, dynamic>>();
+  final ids = <String>[];
+  void keep(String email, String server, {required bool gate}) {
+    final id = '${ids.length}'.padLeft(32, 'a');
+    ids.add(id);
+    final folder = Directory('$dir/accounts/$id')..createSync(recursive: true);
+    File('${folder.path}/settings.json').writeAsStringSync(
+      jsonEncode({...settings, 'email': email, 'server': server}),
+    );
+    File('${folder.path}/sync.json').writeAsStringSync(
+      jsonEncode({
+        ...sync,
+        'ciphers': [
+          for (final c in ciphers)
+            if ((c['id'] == gateCode) == gate) c,
+        ],
+      }),
+    );
+    File('${folder.path}/preferences.json').writeAsStringSync(
+      jsonEncode({'lockAfterMinutes': 15, 'lockOnSleep': false}),
+    );
+  }
+
+  keep('ana.lopez@example.test', 'https://vault.example.test', gate: false);
+  keep('ana@home.example.test', 'https://vault.home.example.test', gate: true);
+  for (var i = 1; i <= more; i++) {
+    keep('more$i@example.test', 'https://vault.example.test', gate: false);
+  }
+  File('$dir/accounts.json').writeAsStringSync(
+    jsonEncode({
+      'accounts': [
+        for (final id in ids) {'id': id},
+      ],
+      'active': ids.first,
+    }),
+  );
+  Core().openAt(dir);
+  machineDoesntLock(false);
+  return ids;
+}
+
 /// For screenshots: the fuller sample vault core/examples/showcase.rs
 /// writes (folders in folders, shared folders, templates), from the folder
 /// PB_SHOWCASE names, with the websites' icons in its `icons` folder, if
@@ -201,7 +262,7 @@ class PhoneStandIn {
   /// What the person does at each biometric prompt: true gives it.
   final biometricAnswers = <bool>[];
 
-  /// What was copied, as the phone's code was asked: `{id, what}`.
+  /// What was copied, as the phone's code was asked: `{account, id, what}`.
   final copied = <Map<String, dynamic>>[];
 
   /// Android's autofill and passkeys, on an Android phone.

@@ -2,6 +2,11 @@
 // here, and a secret only when the person reveals it or edits it
 // (docs/core.md, "Memory"). Slow calls (signing in, unlocking, syncing,
 // saving) run on a background isolate; the screens don't read while one runs.
+//
+// Several accounts can be signed in at once (DESIGN.md in the meta repo,
+// "Several accounts in the apps"). Every call about an account names the one
+// the screens show ([Core.account]) as it was when the call was made, so a
+// call can't land on another account the screens switched to meanwhile.
 import 'dart:convert';
 import 'dart:ffi';
 import 'dart:io';
@@ -15,6 +20,12 @@ typedef _Str0 = Pointer<Utf8> Function();
 typedef _Str1 = Pointer<Utf8> Function(Pointer<Utf8>);
 typedef _Str2 = Pointer<Utf8> Function(Pointer<Utf8>, Pointer<Utf8>);
 typedef _Str3 = Pointer<Utf8> Function(
+  Pointer<Utf8>,
+  Pointer<Utf8>,
+  Pointer<Utf8>,
+);
+typedef _Str4 = Pointer<Utf8> Function(
+  Pointer<Utf8>,
   Pointer<Utf8>,
   Pointer<Utf8>,
   Pointer<Utf8>,
@@ -114,22 +125,12 @@ class Core {
     'pb_use_agent_home',
   );
   late final _startAgent = _lib.lookupFunction<_Str0, _Str0>('pb_start_agent');
-  late final _bioStatus = _lib.lookupFunction<_Str0, _Str0>(
-    'pb_biometric_status',
-  );
-  late final _bioEnroll = _lib.lookupFunction<_Str0, _Str0>(
-    'pb_biometric_enroll',
-  );
-  late final _bioUnlock = _lib.lookupFunction<_Str0, _Str0>(
-    'pb_biometric_unlock',
-  );
-  late final _bioRemove = _lib.lookupFunction<_Str0, _Str0>(
-    'pb_biometric_remove',
-  );
-  late final _bioConfirmApproval = _lib.lookupFunction<_Str0, _Str0>(
-    'pb_confirm_approval_with_biometric',
-  );
-  late final _state = _lib.lookupFunction<_Str0, _Str0>('pb_state');
+  late final _bioStatus = _lib.lookupFunction<_Str1, _Str1>('pb_biometric_status');
+  late final _bioEnroll = _lib.lookupFunction<_Str1, _Str1>('pb_biometric_enroll');
+  late final _bioUnlock = _lib.lookupFunction<_Str1, _Str1>('pb_biometric_unlock');
+  late final _bioRemove = _lib.lookupFunction<_Str1, _Str1>('pb_biometric_remove');
+  late final _bioConfirmApproval = _lib.lookupFunction<_Str1, _Str1>('pb_confirm_approval_with_biometric');
+  late final _state = _lib.lookupFunction<_Str1, _Str1>('pb_state');
   late final _servers = _lib.lookupFunction<_Str0, _Str0>('pb_servers');
   late final _signIn = _lib.lookupFunction<_Str3, _Str3>('pb_sign_in');
   late final _signUp = _lib.lookupFunction<_Str5, _Str5>('pb_sign_up');
@@ -139,48 +140,30 @@ class Core {
   late final _sendEmail = _lib.lookupFunction<_Str0, _Str0>(
     'pb_send_email_code',
   );
-  late final _unlock = _lib.lookupFunction<_Str1, _Str1>('pb_unlock');
-  late final _saveAttachment = _lib.lookupFunction<_Str2, _Str2>(
-    'pb_save_attachment',
-  );
-  late final _confirmMasterPassword = _lib.lookupFunction<_Str2, _Str2>(
-    'pb_confirm_master_password',
-  );
-  late final _signInRequests = _lib.lookupFunction<_Str0, _Str0>(
-    'pb_sign_in_requests',
-  );
-  late final _answerSignInRequest = _lib.lookupFunction<_Str3, _Str3>(
-    'pb_answer_sign_in_request',
-  );
-  late final _confirmWithMasterPassword = _lib.lookupFunction<_Str1, _Str1>(
-    'pb_confirm_with_master_password',
-  );
-  late final _approvals = _lib.lookupFunction<_Str0, _Str0>('pb_approvals');
-  late final _setApprovals = _lib.lookupFunction<_Str1, _Str1>(
-    'pb_set_approvals',
-  );
-  late final _sync = _lib.lookupFunction<_Str0, _Str0>('pb_sync');
-  late final _syncSettings = _lib.lookupFunction<_Str0, _Str0>(
-    'pb_sync_settings',
-  );
-  late final _lock = _lib.lookupFunction<_Str0, _Str0>('pb_lock');
-  late final _signOut = _lib.lookupFunction<_Str0, _Str0>('pb_sign_out');
-  late final _preferences = _lib.lookupFunction<_Str0, _Str0>('pb_preferences');
-  late final _lockPolicy = _lib.lookupFunction<_Str0, _Str0>('pb_lock_policy');
-  late final _setPreferences = _lib.lookupFunction<_Str1, _Str1>(
-    'pb_set_preferences',
-  );
-  late final _used = _lib.lookupFunction<_Str0, _Str0>('pb_used');
+  late final _unlock = _lib.lookupFunction<_Str2, _Str2>('pb_unlock');
+  late final _saveAttachment = _lib.lookupFunction<_Str3, _Str3>('pb_save_attachment');
+  late final _confirmMasterPassword = _lib.lookupFunction<_Str3, _Str3>('pb_confirm_master_password');
+  late final _signInRequests = _lib.lookupFunction<_Str1, _Str1>('pb_sign_in_requests');
+  late final _answerSignInRequest = _lib.lookupFunction<_Str4, _Str4>('pb_answer_sign_in_request');
+  late final _confirmWithMasterPassword = _lib.lookupFunction<_Str2, _Str2>('pb_confirm_with_master_password');
+  late final _approvals = _lib.lookupFunction<_Str1, _Str1>('pb_approvals');
+  late final _setApprovals = _lib.lookupFunction<_Str2, _Str2>('pb_set_approvals');
+  late final _sync = _lib.lookupFunction<_Str1, _Str1>('pb_sync');
+  late final _syncSettings = _lib.lookupFunction<_Str1, _Str1>('pb_sync_settings');
+  late final _lock = _lib.lookupFunction<_Str1, _Str1>('pb_lock');
+  late final _signOut = _lib.lookupFunction<_Str1, _Str1>('pb_sign_out');
+  late final _preferences = _lib.lookupFunction<_Str1, _Str1>('pb_preferences');
+  late final _lockPolicy = _lib.lookupFunction<_Str1, _Str1>('pb_lock_policy');
+  late final _setPreferences = _lib.lookupFunction<_Str2, _Str2>('pb_set_preferences');
+  late final _used = _lib.lookupFunction<_Str1, _Str1>('pb_used');
   late final _tick = _lib.lookupFunction<_Str0, _Str0>('pb_tick');
   late final _sleeping = _lib.lookupFunction<_Str0, _Str0>('pb_sleeping');
   late final _left = _lib.lookupFunction<_Str0, _Str0>('pb_left');
-  late final _places = _lib.lookupFunction<_Str0, _Str0>('pb_places');
-  late final _templates = _lib.lookupFunction<_Str0, _Str0>('pb_templates');
-  late final _icon = _lib.lookupFunction<_Str1, _Str1>('pb_icon');
+  late final _places = _lib.lookupFunction<_Str1, _Str1>('pb_places');
+  late final _templates = _lib.lookupFunction<_Str1, _Str1>('pb_templates');
+  late final _icon = _lib.lookupFunction<_Str2, _Str2>('pb_icon');
   late final _testIcons = _lib.lookupFunction<_Str1, _Str1>('pb_test_icons');
-  late final _keepGenerated = _lib.lookupFunction<_Str1, _Str1>(
-    'pb_keep_generated',
-  );
+  late final _keepGenerated = _lib.lookupFunction<_Str2, _Str2>('pb_keep_generated');
   late final _appearance = _lib.lookupFunction<_Str0, _Str0>('pb_appearance');
   late final _setAppearance = _lib.lookupFunction<_Str1, _Str1>(
     'pb_set_appearance',
@@ -191,43 +174,25 @@ class Core {
   late final _setScreenshots = _lib.lookupFunction<_Str1, _Str1>(
     'pb_set_screenshots',
   );
-  late final _health = _lib.lookupFunction<_Str0, _Str0>('pb_health');
-  late final _history = _lib.lookupFunction<_Str1, _Str1>('pb_history');
-  late final _itemVersion = _lib.lookupFunction<_Str3, _Str3>(
-    'pb_item_version',
-  );
-  late final _restoreVersion = _lib.lookupFunction<_Str2, _Str2>(
-    'pb_restore_version',
-  );
-  late final _deleteHistory = _lib.lookupFunction<_Str2, _Str2>(
-    'pb_delete_history',
-  );
-  late final _setFavorite = _lib.lookupFunction<_Str2, _Str2>(
-    'pb_set_favorite',
-  );
-  late final _list = _lib.lookupFunction<_Str1, _Str1>('pb_list');
-  late final _item = _lib.lookupFunction<_Str1, _Str1>('pb_item');
-  late final _reveal = _lib.lookupFunction<_Str2, _Str2>('pb_reveal');
-  late final _copy = _lib.lookupFunction<_Str2, _Str2>('pb_copy');
-  late final _totp = _lib.lookupFunction<_Str1, _Str1>('pb_totp');
-  late final _save = _lib.lookupFunction<_Str2, _Str2>('pb_save');
-  late final _trash = _lib.lookupFunction<_Str1, _Str1>('pb_trash');
-  late final _createFolder = _lib.lookupFunction<_Str1, _Str1>(
-    'pb_create_folder',
-  );
-  late final _renameFolder = _lib.lookupFunction<_Str2, _Str2>(
-    'pb_rename_folder',
-  );
-  late final _deleteFolder = _lib.lookupFunction<_Str1, _Str1>(
-    'pb_delete_folder',
-  );
-  late final _generate = _lib.lookupFunction<_Str1, _Str1>('pb_generate');
-  late final _generatorOptions = _lib.lookupFunction<_Str0, _Str0>(
-    'pb_generator_options',
-  );
-  late final _generatorPolicy = _lib.lookupFunction<_Str0, _Str0>(
-    'pb_generator_policy',
-  );
+  late final _health = _lib.lookupFunction<_Str1, _Str1>('pb_health');
+  late final _history = _lib.lookupFunction<_Str2, _Str2>('pb_history');
+  late final _itemVersion = _lib.lookupFunction<_Str4, _Str4>('pb_item_version');
+  late final _restoreVersion = _lib.lookupFunction<_Str3, _Str3>('pb_restore_version');
+  late final _deleteHistory = _lib.lookupFunction<_Str3, _Str3>('pb_delete_history');
+  late final _setFavorite = _lib.lookupFunction<_Str3, _Str3>('pb_set_favorite');
+  late final _list = _lib.lookupFunction<_Str2, _Str2>('pb_list');
+  late final _item = _lib.lookupFunction<_Str2, _Str2>('pb_item');
+  late final _reveal = _lib.lookupFunction<_Str3, _Str3>('pb_reveal');
+  late final _copy = _lib.lookupFunction<_Str3, _Str3>('pb_copy');
+  late final _totp = _lib.lookupFunction<_Str2, _Str2>('pb_totp');
+  late final _save = _lib.lookupFunction<_Str3, _Str3>('pb_save');
+  late final _trash = _lib.lookupFunction<_Str2, _Str2>('pb_trash');
+  late final _createFolder = _lib.lookupFunction<_Str2, _Str2>('pb_create_folder');
+  late final _renameFolder = _lib.lookupFunction<_Str3, _Str3>('pb_rename_folder');
+  late final _deleteFolder = _lib.lookupFunction<_Str2, _Str2>('pb_delete_folder');
+  late final _generate = _lib.lookupFunction<_Str2, _Str2>('pb_generate');
+  late final _generatorOptions = _lib.lookupFunction<_Str1, _Str1>('pb_generator_options');
+  late final _generatorPolicy = _lib.lookupFunction<_Str1, _Str1>('pb_generator_policy');
   late final _updateStatus = _lib.lookupFunction<_Str0, _Str0>(
     'pb_update_status',
   );
@@ -245,6 +210,11 @@ class Core {
   );
   late final _updateStarted = _lib.lookupFunction<_Str0, _Str0>(
     'pb_update_started',
+  );
+  late final _accounts = _lib.lookupFunction<_Str0, _Str0>('pb_accounts');
+  late final _switch = _lib.lookupFunction<_Str1, _Str1>('pb_switch');
+  late final _cancelSignIn = _lib.lookupFunction<_Str0, _Str0>(
+    'pb_cancel_sign_in',
   );
   late final _free = _lib
       .lookupFunction<
@@ -275,11 +245,24 @@ class Core {
     }
   }
 
-  /// Runs a slow call on a background isolate (the core is the same library there).
-  static Future<Answer> _background(dynamic Function(Core core) call) async =>
-      Answer(
-        Map<String, dynamic>.from(await Isolate.run(() => call(Core()) as Map)),
-      );
+  /// Runs a slow call on a background isolate (the core is the same library
+  /// there), for the account the screens show now ([account]), whichever
+  /// they show by the time it runs.
+  static Future<Answer> _background(
+    dynamic Function(Core core, String account) call,
+  ) async {
+    final account = Core.account;
+    return Answer(
+      Map<String, dynamic>.from(
+        await Isolate.run(() => call(Core(), account) as Map),
+      ),
+    );
+  }
+
+  /// The account the screens show, by its id on this device: every call
+  /// about an account is for this one, as it is when the call is made. Empty
+  /// while none is signed in, or one is being added.
+  static String account = '';
 
   String version() => _answer(_version()) as String;
 
@@ -308,12 +291,41 @@ class Core {
   });
 
   /// The app on a folder of its own: Android's app folder, or a test's, with
-  /// the refresh token in memory for tests and tools.
+  /// the refresh tokens in memory for tests and tools. The screens show the
+  /// account shown last ([accounts]).
   Map<String, dynamic> openAt(String dir, {bool memorySecrets = true}) {
     folder = dir;
-    return _with([dir], (p) => _answer(_openAt(p[0], memorySecrets)))
-        as Map<String, dynamic>;
+    final opened =
+        _with([dir], (p) => _answer(_openAt(p[0], memorySecrets)))
+            as Map<String, dynamic>;
+    account = opened['active'] as String? ?? '';
+    return opened;
   }
+
+  /// The accounts signed in here: `active` (the one the screens show, or
+  /// null), `accounts` (each `{id, server, email, state}`, in the order they
+  /// were added), `most` (how many may be), and `last` (`{server, email}`
+  /// last signed in to or out of); with the state of the active one
+  /// (`state`, `server`, `email`).
+  Map<String, dynamic> accounts() =>
+      _answer(_accounts()) as Map<String, dynamic>;
+
+  /// The screens show this account now; the one they showed stays as it
+  /// is. Answers as [accounts].
+  Answer switchTo(String id) {
+    final answer = Answer(
+      _with([id], (p) => _answer(_switch(p[0]))) as Map<String, dynamic>,
+    );
+    if (answer.body['active'] is String) {
+      account = answer.body['active'] as String;
+    }
+    return answer;
+  }
+
+  /// Gives up a sign-in waiting for its second step, and the account being
+  /// added. Answers as [accounts].
+  Map<String, dynamic> cancelSignIn() =>
+      _answer(_cancelSignIn()) as Map<String, dynamic>;
 
   /// The folder the vault is kept in, once opened on one: where the app keeps
   /// the little it remembers itself (unlock_offer.dart).
@@ -344,17 +356,34 @@ class Core {
   /// configuration), which only the app's Kotlin can read; read at start.
   static String? _managedOnPhone;
 
-  /// "signedOut", "locked", or "unlocked", with "server" and "email".
-  Map<String, dynamic> state() => _answer(_state()) as Map<String, dynamic>;
+  /// The account's "signedOut", "locked", or "unlocked", with "server" and
+  /// "email"; for none, "signedOut" with the server and email last signed
+  /// in to or out of.
+  Map<String, dynamic> state([String? id]) =>
+      _with([id ?? account], (p) => _answer(_state(p[0])))
+          as Map<String, dynamic>;
 
+  /// Signs in: to an account here already with the same server and email,
+  /// or a new one, which joins the others. Once it's done, the screens show
+  /// it ([account]).
   static Future<Answer> signIn(String server, String email, String password) =>
-      _background(
-        (c) => c._with([
-          server,
-          email,
-          password,
-        ], (p) => c._answer(c._signIn(p[0], p[1], p[2]))),
+      _signedIn(
+        _background(
+          (c, _) => c._with([
+            server,
+            email,
+            password,
+          ], (p) => c._answer(c._signIn(p[0], p[1], p[2]))),
+        ),
       );
+
+  /// A sign-in that's done names the account signed in to: the screens show it.
+  static Future<Answer> _signedIn(Future<Answer> signing) async {
+    final answer = await signing;
+    final signedIn = answer.body['account'];
+    if (answer.ok && signedIn is String) account = signedIn;
+    return answer;
+  }
 
   /// Makes an account on the server, then signs in to it (docs/core.md,
   /// "Making an account"). [name] and [hint] may be empty.
@@ -364,30 +393,35 @@ class Core {
     String name,
     String password,
     String hint,
-  ) => _background(
-    (c) => c._with([
-      server,
-      email,
-      name,
-      password,
-      hint,
-    ], (p) => c._answer(c._signUp(p[0], p[1], p[2], p[3], p[4]))),
+  ) => _signedIn(
+    _background(
+      (c, _) => c._with([
+        server,
+        email,
+        name,
+        password,
+        hint,
+      ], (p) => c._answer(c._signUp(p[0], p[1], p[2], p[3], p[4]))),
+    ),
   );
 
   static Future<Answer> finishSignIn(
     int provider,
     String code,
     bool remember,
-  ) => _background(
-    (c) =>
-        c._with([code], (p) => c._answer(c._finish(provider, p[0], remember))),
+  ) => _signedIn(
+    _background(
+      (c, _) => c._with([
+        code,
+      ], (p) => c._answer(c._finish(provider, p[0], remember))),
+    ),
   );
 
   static Future<Answer> sendEmailCode() =>
-      _background((c) => c._answer(c._sendEmail()));
+      _background((c, _) => c._answer(c._sendEmail()));
 
   static Future<Answer> unlock(String password) => _background(
-    (c) => c._with([password], (p) => c._answer(c._unlock(p[0]))),
+    (c, a) => c._with([a, password], (p) => c._answer(c._unlock(p[0], p[1]))),
   );
 
   /// Downloads one of an item's attachments, opens it, and saves it to the
@@ -401,91 +435,122 @@ class Core {
   ) async => isPhone
       ? Answer(
           await _onPhone('saveAttachment', {
+            'account': account,
             'id': id,
             'attachmentId': attachmentId,
             'name': name,
           }),
         )
       : _background(
-          (c) => c._with([
+          (c, a) => c._with([
+            a,
             id,
             attachmentId,
-          ], (p) => c._answer(c._saveAttachment(p[0], p[1]))),
+          ], (p) => c._answer(c._saveAttachment(p[0], p[1], p[2]))),
         );
 
   /// The master password, for an item that asks for it again (docs/core.md,
   /// "Asking for the master password again"): then its secrets may be used.
   static Future<Answer> confirmMasterPassword(String id, String password) =>
       _background(
-        (c) => c._with([
+        (c, a) => c._with([
+          a,
           id,
           password,
-        ], (p) => c._answer(c._confirmMasterPassword(p[0], p[1]))),
+        ], (p) => c._answer(c._confirmMasterPassword(p[0], p[1], p[2]))),
       );
 
-  static Future<Answer> sync() => _background((c) => c._answer(c._sync()));
+  static Future<Answer> sync() =>
+      _background((c, a) => c._with([a], (p) => c._answer(c._sync(p[0]))));
 
-  /// Sign-ins waiting for this account's answer (docs/core.md, "Approving a
+  /// Sign-ins waiting for an account's answer (docs/core.md, "Approving a
   /// sign-in"), from the server: `requests`, each `{id, device, ip,
-  /// fingerprint, ageSeconds, secondsLeft}`, newest first.
-  static Future<Answer> signInRequests() =>
-      _background((c) => c._answer(c._signInRequests()));
+  /// fingerprint, ageSeconds, secondsLeft}`, newest first. The account the
+  /// screens show, or [id].
+  static Future<Answer> signInRequests([String? id]) {
+    final asked = id;
+    return _background(
+      (c, a) =>
+          c._with([asked ?? a], (p) => c._answer(c._signInRequests(p[0]))),
+    );
+  }
 
-  /// Approves or denies one. Approving takes the phrase the person was
+  /// Approves or denies one, for the account it was listed for ([id], or
+  /// the one the screens show). Approving takes the phrase the person was
   /// shown, and may answer `confirmFirst`: confirm it's them, then again.
   static Future<Answer> answerSignInRequest(
-    String id,
+    String requestId,
     String fingerprint,
-    bool approve,
-  ) => _background(
-    (c) => c._with([
-      id,
-      fingerprint,
-      approve ? 'true' : 'false',
-    ], (p) => c._answer(c._answerSignInRequest(p[0], p[1], p[2]))),
-  );
+    bool approve, [
+    String? id,
+  ]) {
+    final asked = id;
+    return _background(
+      (c, a) => c._with([
+        asked ?? a,
+        requestId,
+        fingerprint,
+        approve ? 'true' : 'false',
+      ], (p) => c._answer(c._answerSignInRequest(p[0], p[1], p[2], p[3]))),
+    );
+  }
 
   /// The master password, as the person confirming it's them to approve a
-  /// sign-in.
-  static Future<Answer> confirmWithMasterPassword(String password) =>
-      _background(
-        (c) => c._with([
-          password,
-        ], (p) => c._answer(c._confirmWithMasterPassword(p[0]))),
-      );
+  /// sign-in to an account ([id], or the one the screens show).
+  static Future<Answer> confirmWithMasterPassword(
+    String password, [
+    String? id,
+  ]) {
+    final asked = id;
+    return _background(
+      (c, a) => c._with([
+        asked ?? a,
+        password,
+      ], (p) => c._answer(c._confirmWithMasterPassword(p[0], p[1]))),
+    );
+  }
 
   /// Whether approving a sign-in asks for biometrics or the master password
-  /// first, on this device.
-  bool confirmApprovals() =>
-      (_answer(_approvals()) as Map?)?['confirm'] != false;
+  /// first, for an account on this device ([id], or the one the screens
+  /// show).
+  bool confirmApprovals([String? id]) =>
+      (_with([id ?? account], (p) => _answer(_approvals(p[0]))) as Map?)?['confirm'] !=
+      false;
 
-  Answer setConfirmApprovals(bool on) => Answer(
-    _with([on ? 'true' : 'false'], (p) => _answer(_setApprovals(p[0])))
+  Answer setConfirmApprovals(bool on, [String? id]) => Answer(
+    _with([
+          id ?? account,
+          on ? 'true' : 'false',
+        ], (p) => _answer(_setApprovals(p[0], p[1])))
         as Map<String, dynamic>,
   );
 
   /// Saves the generator's settings to the server, so they're the same on
   /// the person's other devices (core/src/synced_settings.rs).
-  static Future<Answer> syncSettings() =>
-      _background((c) => c._answer(c._syncSettings()));
+  static Future<Answer> syncSettings() => _background(
+    (c, a) => c._with([a], (p) => c._answer(c._syncSettings(p[0]))),
+  );
 
   static Future<Answer> save(String? id, Map<String, dynamic> draft) =>
       _background(
-        (c) => c._with([
+        (c, a) => c._with([
+          a,
           id ?? '',
           jsonEncode(draft),
-        ], (p) => c._answer(c._save(p[0], p[1]))),
+        ], (p) => c._answer(c._save(p[0], p[1], p[2]))),
       );
 
   /// Unlocking with Windows Hello or Touch ID, through the desktop agent, or
   /// on a phone with its own biometrics, through the app's Kotlin or Swift:
   /// `status` is setUp, notSetUp, unavailable, or noAgent, and `method` its name.
-  static Future<Map<String, dynamic>> biometricStatus() async {
-    if (isPhone) return _onPhone('biometricStatus');
+  static Future<Map<String, dynamic>> biometricStatus([String? id]) async {
+    final asked = id ?? account;
+    if (isPhone) return _onPhone('biometricStatus', {'account': asked});
     return Map<String, dynamic>.from(
       await Isolate.run(() {
         final core = Core();
-        return core._answer(core._bioStatus()) as Map;
+        return core._with([asked], (p) => core._answer(core._bioStatus(p[0])))
+            as Map;
       }),
     );
   }
@@ -553,31 +618,51 @@ class Core {
   /// Starts the desktop agent installed next to the app if it isn't running
   /// (its tray, and Windows Hello). Windows and macOS, where the tray is.
   static Future<Answer> startAgent() =>
-      _background((c) => c._answer(c._startAgent()));
+      _background((c, _) => c._answer(c._startAgent()));
 
-  /// Turns it on (the agent asks); `on` says whether the person agreed.
+  /// Turns it on for the account the screens show (the agent asks, or the
+  /// phone); `on` says whether the person agreed.
   static Future<Answer> enrollBiometric() async => isPhone
-      ? Answer(await _onPhone('biometricEnroll'))
-      : _background((c) => c._answer(c._bioEnroll()));
+      ? Answer(await _onPhone('biometricEnroll', {'account': account}))
+      : _background(
+          (c, a) => c._with([a], (p) => c._answer(c._bioEnroll(p[0]))),
+        );
 
-  /// Unlocks with it; `unlocked` is false if the person cancelled.
+  /// Unlocks that account with it; `unlocked` is false if the person cancelled.
   static Future<Answer> unlockWithBiometric() async => isPhone
-      ? Answer(await _onPhone('biometricUnlock'))
-      : _background((c) => c._answer(c._bioUnlock()));
+      ? Answer(await _onPhone('biometricUnlock', {'account': account}))
+      : _background(
+          (c, a) => c._with([a], (p) => c._answer(c._bioUnlock(p[0]))),
+        );
 
   /// The same biometrics, as the person confirming it's them to approve a
-  /// sign-in (or to turn off asking for that), and nothing else: its prompt
-  /// says "Approve sign-in" where the OS shows the app's words, and the core
-  /// only compares the key with the open vault's. `confirmed` is false if
-  /// the person cancelled.
-  static Future<Answer> confirmApprovalWithBiometric() async => isPhone
-      ? Answer(await _onPhone('biometricConfirmApproval'))
-      : _background((c) => c._answer(c._bioConfirmApproval()));
+  /// sign-in to an account ([id], or the one the screens show), or to turn
+  /// off asking for that, and nothing else: its prompt says "Approve
+  /// sign-in" where the OS shows the app's words, and the core only compares
+  /// the key with that account's open vault's. `confirmed` is false if the
+  /// person cancelled.
+  static Future<Answer> confirmApprovalWithBiometric([String? id]) async {
+    final asked = id;
+    return isPhone
+        ? Answer(
+            await _onPhone('biometricConfirmApproval', {
+              'account': asked ?? account,
+            }),
+          )
+        : _background(
+            (c, a) => c._with([
+              asked ?? a,
+            ], (p) => c._answer(c._bioConfirmApproval(p[0]))),
+          );
+  }
 
-  /// Turns it off, for the browser extension too (on a computer).
+  /// Turns it off for the account the screens show, for the browser
+  /// extension too (on a computer).
   static Future<Answer> removeBiometric() async => isPhone
-      ? Answer(await _onPhone('biometricRemove'))
-      : _background((c) => c._answer(c._bioRemove()));
+      ? Answer(await _onPhone('biometricRemove', {'account': account}))
+      : _background(
+          (c, a) => c._with([a], (p) => c._answer(c._bioRemove(p[0]))),
+        );
 
   /// A sign-in Android's autofill offered to save (name, username, password,
   /// uri), once; null if there's none. The editor opens with it.
@@ -598,55 +683,85 @@ class Core {
   void useAgentHome(String home, String program) =>
       _with([home, program], (p) => _answer(_useAgentHome(p[0], p[1])));
 
-  static Future<Answer> trash(String id) =>
-      _background((c) => c._with([id], (p) => c._answer(c._trash(p[0]))));
+  static Future<Answer> trash(String id) => _background(
+    (c, a) => c._with([a, id], (p) => c._answer(c._trash(p[0], p[1]))),
+  );
 
   /// Makes a folder, renames one, or deletes one (its items stay, in no
   /// folder); each syncs after.
   static Future<Answer> createFolder(String name) => _background(
-    (c) => c._with([name], (p) => c._answer(c._createFolder(p[0]))),
+    (c, a) =>
+        c._with([a, name], (p) => c._answer(c._createFolder(p[0], p[1]))),
   );
 
   static Future<Answer> renameFolder(String id, String name) => _background(
-    (c) => c._with([id, name], (p) => c._answer(c._renameFolder(p[0], p[1]))),
+    (c, a) => c._with([
+      a,
+      id,
+      name,
+    ], (p) => c._answer(c._renameFolder(p[0], p[1], p[2]))),
   );
 
   static Future<Answer> deleteFolder(String id) => _background(
-    (c) => c._with([id], (p) => c._answer(c._deleteFolder(p[0]))),
+    (c, a) => c._with([a, id], (p) => c._answer(c._deleteFolder(p[0], p[1]))),
   );
 
-  Map<String, dynamic> lock() => _answer(_lock()) as Map<String, dynamic>;
+  /// Locks an account ([id], or the one the screens show); the others stay
+  /// as they are. Answers its state.
+  Map<String, dynamic> lock([String? id]) =>
+      _with([id ?? account], (p) => _answer(_lock(p[0])))
+          as Map<String, dynamic>;
 
-  Map<String, dynamic> signOut() => _answer(_signOut()) as Map<String, dynamic>;
+  /// Signs out of an account ([id], or the one the screens show): its
+  /// vault, session, and biometric unlock are forgotten, and the others stay
+  /// as they are. Answers as [accounts]; the screens show the first of the
+  /// others, if any.
+  Map<String, dynamic> signOut([String? id]) {
+    final answer =
+        _with([id ?? account], (p) => _answer(_signOut(p[0])))
+            as Map<String, dynamic>;
+    account = answer['active'] as String? ?? '';
+    return answer;
+  }
 
   /// When to lock by itself: `lockAfterMinutes` (null: only when the app
   /// closes) and `lockOnSleep` (when the screen locks or the computer sleeps).
   Map<String, dynamic> preferences() =>
-      _answer(_preferences()) as Map<String, dynamic>;
+      _with([account], (p) => _answer(_preferences(p[0])))
+          as Map<String, dynamic>;
 
   /// The organizations' "Vault lock" policy, which Settings keeps to:
   /// `maxMinutes` (the longest wait, or null), `immediately`, `onSystemLock`,
   /// and `signOut`; and `removeUnlockWithPin`, their "Remove Unlock with
   /// PIN" policy, under which the app doesn't offer biometric unlock itself.
   Map<String, dynamic> lockPolicy() =>
-      _answer(_lockPolicy()) as Map<String, dynamic>;
+      _with([account], (p) => _answer(_lockPolicy(p[0])))
+          as Map<String, dynamic>;
 
   Answer setPreferences(Map<String, dynamic> preferences) => Answer(
-    _with([jsonEncode(preferences)], (p) => _answer(_setPreferences(p[0])))
+    _with([
+          account,
+          jsonEncode(preferences),
+        ], (p) => _answer(_setPreferences(p[0], p[1])))
         as Map<String, dynamic>,
   );
 
-  /// The person used the app just now.
-  void used() => _answer(_used());
+  /// The person used the app just now, in the account the screens show.
+  void used() => _with([account], (p) => _answer(_used(p[0])));
 
-  /// Locks if it's time to (the core decides, from what the OS says):
-  /// `locked` says whether the vault is locked now.
+  /// Locks each account whose time is up (the core decides, from what the
+  /// OS says, by each account's choices and policy): `locked` says whether
+  /// one locked just now, and `unlocked` whether any still is; with the
+  /// accounts as they are now, as [accounts] (`busy` while a slow call has
+  /// the core).
   Map<String, dynamic> tick() => _answer(_tick()) as Map<String, dynamic>;
 
-  /// The OS says the computer is about to sleep: locks if the person chose that.
-  /// The app left the screen: locks if the person chose "Immediately" (phones).
+  /// The app left the screen: each account locks if its person chose
+  /// "Immediately" (phones), or its policy says so. `locked` says whether one did.
   Map<String, dynamic> left() => _answer(_left()) as Map<String, dynamic>;
 
+  /// The OS says the computer is about to sleep: each account locks if its
+  /// person chose that, or its policy says so. `locked` says whether one did.
   Map<String, dynamic> sleeping() =>
       _answer(_sleeping()) as Map<String, dynamic>;
 
@@ -654,7 +769,9 @@ class Core {
   /// and `organizations`, each with its shared folders (`collections`), each
   /// `{id, name, label, depth, parentId}`, nested by name, and a shared
   /// folder with what the person can do in it (`grid`, `canCreate`).
-  Map<String, dynamic> places() => _answer(_places()) as Map<String, dynamic>;
+  Map<String, dynamic> places() =>
+      _with([account], (p) => _answer(_places(p[0])))
+          as Map<String, dynamic>;
 
   /// A website's icon for a login's tile (core/src/icons.rs): the image,
   /// or null where there's none, icons are off, or the vault is locked. The
@@ -662,7 +779,7 @@ class Core {
   /// server the first time, on a background isolate.
   static Future<Uint8List?> icon(String host) async {
     final answer = await _background(
-      (c) => c._with([host], (p) => c._answer(c._icon(p[0]))),
+      (c, a) => c._with([a, host], (p) => c._answer(c._icon(p[0], p[1]))),
     );
     final icon = answer.ok ? answer.body['icon'] as String? : null;
     return icon == null ? null : base64Decode(icon);
@@ -680,7 +797,7 @@ class Core {
   /// 30 seconds (on a phone, through the phone's own code).
   Future<Answer> copyGenerated(String shown) async {
     final kept = Answer(
-      _with([shown], (p) => _answer(_keepGenerated(p[0])))
+      _with([account, shown], (p) => _answer(_keepGenerated(p[0], p[1])))
           as Map<String, dynamic>,
     );
     if (!kept.ok) return kept;
@@ -711,48 +828,53 @@ class Core {
 
   /// The logins with something to fix (core/src/health.rs): `items`, each
   /// `{id, weak, reused, unsecured}`. Judged on a background isolate.
-  static Future<Answer> health() => _background((c) => c._answer(c._health()));
+  static Future<Answer> health() =>
+      _background((c, a) => c._with([a], (p) => c._answer(c._health(p[0]))));
 
   /// An item's past versions (core/src/history.rs), from the server:
   /// `{hidePasswords, canRestore, canClear, unreadable, versions: [{id,
   /// revisionDate, savedBy, opens, restorable, changes, rows}]}`.
-  static Future<Answer> history(String id) =>
-      _background((c) => c._with([id], (p) => c._answer(c._history(p[0]))));
+  static Future<Answer> history(String id) => _background(
+    (c, a) => c._with([a, id], (p) => c._answer(c._history(p[0], p[1]))),
+  );
 
   /// One version beside the item now (`rows`, each `{label, version,
   /// current, secret, changed}`), its secrets shown when [reveal].
   Answer itemVersion(String id, String versionId, {bool reveal = false}) =>
       Answer(
         _with(
-          [id, versionId, '$reveal'],
-          (p) => _answer(_itemVersion(p[0], p[1], p[2])),
+          [account, id, versionId, '$reveal'],
+          (p) => _answer(_itemVersion(p[0], p[1], p[2], p[3])),
         ) as Map<String, dynamic>,
       );
 
   /// Restores a version, as a normal edit, then syncs.
   static Future<Answer> restoreVersion(String id, String versionId) =>
       _background(
-        (c) => c._with([
+        (c, a) => c._with([
+          a,
           id,
           versionId,
-        ], (p) => c._answer(c._restoreVersion(p[0], p[1]))),
+        ], (p) => c._answer(c._restoreVersion(p[0], p[1], p[2]))),
       );
 
   /// Clears an item's history (no version), or deletes one version.
   static Future<Answer> deleteHistory(String id, [String? versionId]) =>
       _background(
-        (c) => c._with([
+        (c, a) => c._with([
+          a,
           id,
           versionId ?? '',
-        ], (p) => c._answer(c._deleteHistory(p[0], p[1]))),
+        ], (p) => c._answer(c._deleteHistory(p[0], p[1], p[2]))),
       );
 
   /// Favorites an item or not, then syncs.
   static Future<Answer> setFavorite(String id, bool favorite) => _background(
-    (c) => c._with([
+    (c, a) => c._with([
+      a,
       id,
       '$favorite',
-    ], (p) => c._answer(c._setFavorite(p[0], p[1]))),
+    ], (p) => c._answer(c._setFavorite(p[0], p[1], p[2]))),
   );
 
   /// Opens a website in the browser: only http and https. Phones and the
@@ -782,18 +904,21 @@ class Core {
   /// (core/src/templates.rs): `[{name, templates: [{id, name, base,
   /// category, fields: [{label, kind, value}]}]}]`.
   List<Map<String, dynamic>> templates() =>
-      (_answer(_templates()) as List).cast<Map<String, dynamic>>();
+      (_with([account], (p) => _answer(_templates(p[0]))) as List)
+          .cast<Map<String, dynamic>>();
 
   List<Map<String, dynamic>> list(String query) =>
-      (_with([query], (p) => _answer(_list(p[0]))) as List)
+      (_with([account, query], (p) => _answer(_list(p[0], p[1]))) as List)
           .cast<Map<String, dynamic>>();
 
   Map<String, dynamic>? item(String id) =>
-      _with([id], (p) => _answer(_item(p[0]))) as Map<String, dynamic>?;
+      _with([account, id], (p) => _answer(_item(p[0], p[1])))
+          as Map<String, dynamic>?;
 
   /// A secret, while the person reveals it or edits: `password`, `notes`, `totp`, or `field:<index>`.
   String? reveal(String id, String what) =>
-      _with([id, what], (p) => _answer(_reveal(p[0], p[1]))) as String?;
+      _with([account, id, what], (p) => _answer(_reveal(p[0], p[1], p[2])))
+          as String?;
 
   /// Copies without the value passing through Dart; secrets clear after 30
   /// seconds. On phones the app's own code (Kotlin, Swift) takes it from the
@@ -801,6 +926,7 @@ class Core {
   Future<Answer> copy(String id, String what) async {
     if (isPhone) {
       final copied = await platform.invokeMethod<bool>('copy', {
+        'account': account,
         'id': id,
         'what': what,
       });
@@ -810,27 +936,30 @@ class Core {
       });
     }
     return Answer(
-      _with([id, what], (p) => _answer(_copy(p[0], p[1])))
+      _with([account, id, what], (p) => _answer(_copy(p[0], p[1], p[2])))
           as Map<String, dynamic>,
     );
   }
 
   Map<String, dynamic>? totp(String id) =>
-      _with([id], (p) => _answer(_totp(p[0]))) as Map<String, dynamic>?;
+      _with([account, id], (p) => _answer(_totp(p[0], p[1])))
+          as Map<String, dynamic>?;
 
   /// The generator's last choices on this device (core/src/generator.rs):
   /// `kind` (`password` or `passphrase`), `length`, `uppercase`,
   /// `lowercase`, `digits`, `symbols`, `avoidAmbiguous`, `words`,
   /// `separator`, `capitalize`, and `includeNumber`.
   Map<String, dynamic> generatorOptions() =>
-      _answer(_generatorOptions()) as Map<String, dynamic>;
+      _with([account], (p) => _answer(_generatorOptions(p[0])))
+          as Map<String, dynamic>;
 
   /// The organizations' "Password generator" policy: `kind` (the only kind
   /// allowed, or null), `minLength`, `uppercase`, `lowercase`, `digits`,
   /// `symbols`, `minDigits`, `minSymbols`, `minWords`, `capitalize`, and
   /// `includeNumber`.
   Map<String, dynamic> generatorPolicy() =>
-      _answer(_generatorPolicy()) as Map<String, dynamic>;
+      _with([account], (p) => _answer(_generatorPolicy(p[0])))
+          as Map<String, dynamic>;
 
   /// A new password or passphrase for the editor's field: `{ok, password,
   /// options}`, with the choices held to the organizations' policy, or the
@@ -838,7 +967,8 @@ class Core {
   /// the next ones.
   Answer generate([Map<String, dynamic>? options]) => Answer(
     _with([
+      account,
       options == null ? 'null' : jsonEncode(options),
-    ], (p) => _answer(_generate(p[0]))) as Map<String, dynamic>,
+    ], (p) => _answer(_generate(p[0], p[1]))) as Map<String, dynamic>,
   );
 }

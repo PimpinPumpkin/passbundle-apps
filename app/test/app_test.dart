@@ -1154,9 +1154,10 @@ void main() {
       expect(made, hasLength(20));
       await tester.tap(find.text('Copy password'));
       await tester.pump();
-      // The value never passes through here: the phone's code takes it from the core.
+      // The value never passes through here: the phone's code takes it from
+      // the core, for the account shown.
       expect(phone.copied, [
-        {'id': '', 'what': 'generated'},
+        {'account': Core.account, 'id': '', 'what': 'generated'},
       ]);
       expect(find.textContaining('It clears in 30 seconds'), findsOneWidget);
       await tester.tap(find.byTooltip('Items'));

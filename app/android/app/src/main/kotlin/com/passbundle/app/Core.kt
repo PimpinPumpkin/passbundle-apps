@@ -8,7 +8,12 @@ import android.content.pm.ApplicationInfo
 import android.os.Build
 import android.util.Log
 
-/** The core (Rust), for the few calls Kotlin makes itself (core/src/android.rs). */
+/**
+ * The core (Rust), for the few calls Kotlin makes itself (core/src/android.rs).
+ * A call about an account names it by its id on this device (`account`),
+ * as the core answered it: the account a login, a passkey, or a biometric
+ * key is from (DESIGN.md in the meta repo, "Several accounts in the apps").
+ */
 object Core {
     init {
         System.loadLibrary("passbundle_core")
@@ -71,48 +76,57 @@ object Core {
     @JvmStatic external fun offered()
 
     /**
-     * An item's value for autofill to fill, as UTF-8 to zero after use; null
-     * while the vault is locked or busy, or if there's nothing to fill.
+     * An item's value for autofill to fill, from its account, as UTF-8 to
+     * zero after use; null while that account is locked or busy, or if
+     * there's nothing to fill.
      */
-    @JvmStatic external fun value(id: String, what: String): ByteArray?
+    @JvmStatic external fun value(account: String, id: String, what: String): ByteArray?
 
     /**
      * An item's value for the clipboard, as [value], but never a secret the
      * person's shared folder hides from them (null then too).
      */
-    @JvmStatic external fun copyValue(id: String, what: String): ByteArray?
+    @JvmStatic external fun copyValue(account: String, id: String, what: String): ByteArray?
 
-    /** The unlocked vault's user key, to seal for biometric unlock; zero it after use. Null while locked. */
-    @JvmStatic external fun userKey(): ByteArray?
+    /** An unlocked account's user key, to seal for its biometric unlock; zero it after use. Null while locked. */
+    @JvmStatic external fun userKey(account: String): ByteArray?
 
-    /** Opens the kept vault with the user key biometric unlock opened: "" if it opened, else the words to show. */
-    @JvmStatic external fun unlockWithKey(key: ByteArray): String?
+    /** Opens an account's kept vault with the user key its biometric unlock opened: "" if it opened, else the words to show. */
+    @JvmStatic external fun unlockWithKey(account: String, key: ByteArray): String?
 
-    /** The same key, given back to confirm it's the person approving a sign-in, never to unlock: "" if it's the open vault's. */
-    @JvmStatic external fun confirmApprovalWithKey(key: ByteArray): String?
+    /** The same key, given back to confirm it's the person approving a sign-in to that account, never to unlock: "" if it's its open vault's. */
+    @JvmStatic external fun confirmApprovalWithKey(account: String, key: ByteArray): String?
 
     /** Opens the core on the app's own folder unless it's open (autofill can start the app without its screens). */
     @JvmStatic external fun openIfClosed(dir: String)
 
     /** Writes an attachment into a file Android opened for it: {"ok": true}, or the words to show. Slow: off the main thread. */
-    @JvmStatic external fun writeAttachmentTo(id: String, attachmentId: String, fd: Int): String?
+    @JvmStatic external fun writeAttachmentTo(account: String, id: String, attachmentId: String, fd: Int): String?
 
-    /** The logins for an app or a page, as JSON: names and usernames only (Responses.kt). */
+    /**
+     * The logins for an app or a page, as JSON, from the account the
+     * screens show: names and usernames only, each with its `account`; or
+     * `locked`, with the `account` to unlock (Responses.kt).
+     */
     @JvmStatic external fun fillable(packageName: String, webDomain: String): String?
 
     /** The master password, for a login that asks for it again: {"ok": true}, or the words to show. Slow: off the main thread. */
-    @JvmStatic external fun confirmMasterPassword(id: String, password: String): String?
+    @JvmStatic external fun confirmMasterPassword(account: String, id: String, password: String): String?
 
-    /** The master password as proof the person is who they are, for a passkey: {"ok": true}, or the words. Slow. */
-    @JvmStatic external fun checkMasterPassword(password: String): String?
+    /** An account's master password as proof the person is who they are, for a passkey: {"ok": true}, or the words. Slow. */
+    @JvmStatic external fun checkMasterPassword(account: String, password: String): String?
 
-    /** The logins with a passkey for a site (its ID), as JSON: names and IDs, never a key (PasskeyProvider.kt). */
+    /**
+     * The logins with a passkey for a site (its ID), as JSON, from the
+     * account the screens show: names and IDs, each with its `account`, never
+     * a key; or `locked`, with the `account` to unlock (PasskeyProvider.kt).
+     */
     @JvmStatic external fun passkeys(rpId: String): String?
 
-    /** Signs in with a login's passkey, the client data hash in base64url: JSON (ffi.rs). Slow: off the main thread. */
-    @JvmStatic external fun passkeyAssert(id: String, rpId: String, clientDataHash: String, userVerified: Boolean): String?
+    /** Signs in with a login's passkey, from its account, the client data hash in base64url: JSON (ffi.rs). Slow: off the main thread. */
+    @JvmStatic external fun passkeyAssert(account: String, id: String, rpId: String, clientDataHash: String, userVerified: Boolean): String?
 
-    /** Makes a passkey from the request as JSON, answering JSON (ffi.rs). Slow, it's saved first: off the main thread. */
+    /** Makes a passkey from the request as JSON (with the `account` it goes in), answering JSON (ffi.rs). Slow, it's saved first: off the main thread. */
     @JvmStatic external fun passkeyCreate(request: String): String?
 
     /**

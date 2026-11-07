@@ -8,7 +8,9 @@
 // open prompt's place, with Approve held a moment, only when its identifier,
 // type, and address are all the same (otherwise the prompt closes and the new
 // one prompts on its own); and Settings lists the waiting ones, and asks to
-// confirm before turning confirming off. The core's side (the phrase, the key, refusing an
+// confirm before turning confirming off; and another account's request (with
+// several accounts signed in) names that account, and is confirmed and
+// answered for it. The core's side (the phrase, the key, refusing an
 // approval nobody confirmed) has its own tests, against a real server, and
 // the meta repo's end-to-end test approves a real web vault's sign-in.
 import 'package:flutter/material.dart';
@@ -64,8 +66,18 @@ class StandIn implements SignInRequestSource {
   @override
   Future<Answer> list() async => Answer({'ok': true, 'requests': requests});
 
+  /// The accounts each answer and confirmation were for.
+  final answeredFor = <String?>[];
+  final confirmedFor = <String?>[];
+
   @override
-  Future<Answer> answer(String id, String fingerprint, bool approve) async {
+  Future<Answer> answer(
+    String id,
+    String fingerprint,
+    bool approve, [
+    String? account,
+  ]) async {
+    answeredFor.add(account);
     if (approve && confirmAgain > 0) {
       confirmAgain--;
       return Answer({
@@ -79,8 +91,9 @@ class StandIn implements SignInRequestSource {
   }
 
   @override
-  Future<bool> confirm(BuildContext context) async {
+  Future<bool> confirm(BuildContext context, [String? account]) async {
     confirms++;
+    confirmedFor.add(account);
     return confirmed;
   }
 }
@@ -152,6 +165,30 @@ void main() {
         find.text('Approved. Web vault in Chrome is signing in.'),
         findsOneWidget,
       );
+    },
+  );
+
+  testWidgets(
+    'another account\'s request names that account, and is confirmed and answered for it',
+    (tester) async {
+      final source = StandIn();
+      final home = 'b' * 32;
+      await review(tester, source, {
+        ...waiting('r1'),
+        'account': home,
+        'email': 'dana@home.example.test',
+      });
+      expect(
+        find.text(
+          'Web vault in Chrome is asking to sign in as dana@home.example.test.',
+        ),
+        findsOneWidget,
+      );
+      await tester.tap(find.text('Approve'));
+      await tester.pumpAndSettle();
+      expect(source.confirmedFor, [home]);
+      expect(source.answeredFor, [home]);
+      expect(source.answered, [('r1', phrase, true)]);
     },
   );
 

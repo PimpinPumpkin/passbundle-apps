@@ -144,11 +144,15 @@ class _SignInRequests implements SignInRequestSource {
   });
 
   @override
-  Future<Answer> answer(String id, String fingerprint, bool approve) async =>
-      Answer({'ok': true});
+  Future<Answer> answer(
+    String id,
+    String fingerprint,
+    bool approve, [
+    String? account,
+  ]) async => Answer({'ok': true});
 
   @override
-  Future<bool> confirm(BuildContext context) async => true;
+  Future<bool> confirm(BuildContext context, [String? account]) async => true;
 
   @override
   bool confirmApprovals = true;
