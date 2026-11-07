@@ -326,9 +326,11 @@ fn state_of(state: State) -> Value {
 }
 
 /// The accounts signed in here, as the account menu shows them: `{active,
-/// accounts: [{id, server, email, state}], most, last: {server, email},
-/// signingIn}`. `active` is the one the screens show (null when none is
-/// signed in); `last` the server and email last signed in to or out of.
+/// accounts: [{id, server, email, state, name, tone}], most, tones, last:
+/// {server, email}}`. `active` is the one the screens show (null when none
+/// is signed in); `name` what the person calls an account (null until they
+/// name it), and `tone` its color, one of `tones`; `last` the server and
+/// email last signed in to or out of.
 fn accounts_json(accounts: &Accounts) -> Value {
     let list: Vec<Value> = accounts
         .summaries()
@@ -339,6 +341,8 @@ fn accounts_json(accounts: &Accounts) -> Value {
                 "server": a.server,
                 "email": a.email,
                 "state": if a.unlocked { "unlocked" } else { "locked" },
+                "name": a.name,
+                "tone": a.tone,
             })
         })
         .collect();
@@ -346,8 +350,17 @@ fn accounts_json(accounts: &Accounts) -> Value {
         "active": accounts.active(),
         "accounts": list,
         "most": crate::accounts::MOST,
+        "tones": crate::accounts::TONES,
         "last": accounts.last().map(|l| json!({ "server": l.server, "email": l.email })),
     })
+}
+
+/// What an item is labeled with when it's listed beside other accounts'
+/// (autofill, passkeys): its account's name, or email, while more than one
+/// account is signed in here; nothing otherwise.
+#[cfg(target_os = "android")]
+fn account_label(accounts: &Accounts, id: &str) -> Option<String> {
+    (accounts.summaries().len() > 1).then(|| accounts.label(id))
 }
 
 fn kind(kind: ItemKind) -> &'static str {
@@ -455,9 +468,11 @@ pub unsafe extern "C" fn pb_open(dir: *const c_char, memory_secrets: bool) -> *m
     with_accounts(|accounts| opened(accounts))
 }
 
-/// The accounts, and the state of the one the screens show.
+/// The accounts, and the state of the one the screens show (`ok`, for the
+/// calls that answer with them when they've done what was asked).
 fn opened(accounts: &Accounts) -> Value {
     let mut answer = accounts_json(accounts);
+    answer["ok"] = json!(true);
     let active = accounts.active().unwrap_or_default().to_owned();
     if let (Value::Object(map), Value::Object(state)) =
         (&mut answer, state_of(accounts.state(&active)))
@@ -485,6 +500,51 @@ pub unsafe extern "C" fn pb_switch(account: *const c_char) -> *mut c_char {
     with_accounts(|accounts| match accounts.switch(&account) {
         Ok(()) => opened(accounts),
         Err(e) => failed(e),
+    })
+}
+
+/// Names an account here and picks its color, from `{name, tone}`: `name`
+/// (empty or null for its email) at most 40 characters, `tone` one of
+/// `pb_accounts`' `tones` (null keeps its color). Kept on this device only.
+/// Answers as `pb_accounts`, or the words to show.
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_set_account_label(
+    account: *const c_char,
+    label: *const c_char,
+) -> *mut c_char {
+    let account = text(account);
+    let label: Value = serde_json::from_str(&text(label)).unwrap_or(Value::Null);
+    let (name, tone) = (label["name"].as_str(), label["tone"].as_str());
+    with_accounts(|accounts| match accounts.set_label(&account, name, tone) {
+        Ok(()) => opened(accounts),
+        Err(e) => failed(e),
+    })
+}
+
+/// What a search finds in every unlocked account (the "All accounts"
+/// place): each item's summary, as `pb_list` gives it, with its account's
+/// id on this device (`account`), by name. Nothing of a locked account.
+///
+/// # Safety
+/// `query` is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_list_all(query: *const c_char) -> *mut c_char {
+    let query = text(query);
+    with_accounts(|accounts| {
+        Value::Array(
+            accounts
+                .search_all(&query)
+                .into_iter()
+                .map(|(id, vault, item)| {
+                    let mut listed = summary(vault, item);
+                    listed["account"] = json!(id);
+                    listed
+                })
+                .collect(),
+        )
     })
 }
 
@@ -938,11 +998,13 @@ pub(crate) fn open_if_closed(dir: &str) {
 }
 
 /// The logins for an Android app or the page a browser shows, for its
-/// autofill (android.rs), from the account the screens show: names and
-/// usernames only, each with its account's id on this device (`account`),
-/// which filling it names. `locked` while that account's vault isn't open
-/// (with the account to unlock), `signedOut` with no account, and `busy`
-/// while a slow call has the app.
+/// autofill (android.rs), from every unlocked account: names and usernames
+/// only, each with its account's id on this device (`account`), which
+/// filling it names, and with more than one account here, the account's
+/// name or email (`accountLabel`). `locked` while no account is unlocked
+/// (with the account the screens show, to unlock), `signedOut` with no
+/// account, and `busy` while a slow call has the app. `account` is the one
+/// the screens show.
 #[cfg(target_os = "android")]
 pub(crate) fn fillable(package: &str, domain: &str) -> Value {
     use crate::matching::Target;
@@ -953,24 +1015,32 @@ pub(crate) fn fillable(package: &str, domain: &str) -> Value {
         return json!({ "locked": true, "signedOut": true });
     };
     lock_if_due(accounts);
-    let Some(app) = accounts.active_app() else {
+    let Some(shown) = accounts.active().map(str::to_owned) else {
         return json!({ "locked": true, "signedOut": true });
     };
-    let account = app.id().to_owned();
-    let Some(vault) = app.vault() else {
-        return json!({ "locked": true, "signedOut": false, "account": account });
-    };
+    if accounts.unlocked().next().is_none() {
+        return json!({ "locked": true, "signedOut": false, "account": shown });
+    }
     let target = if domain.is_empty() {
         Target::App(package)
     } else {
         Target::Website(domain)
     };
-    let items: Vec<Value> = vault
-        .matching(&target)
-        .iter()
-        .map(|i| json!({ "id": i.id, "account": account, "name": i.name, "username": i.username, "reprompt": i.kept.reprompt != 0 }))
+    let items: Vec<Value> = accounts
+        .fillable(&target)
+        .into_iter()
+        .map(|(account, i)| {
+            json!({
+                "id": i.id,
+                "account": account,
+                "accountLabel": account_label(accounts, account),
+                "name": i.name,
+                "username": i.username,
+                "reprompt": i.kept.reprompt != 0,
+            })
+        })
         .collect();
-    json!({ "locked": false, "account": account, "items": items })
+    json!({ "locked": false, "account": shown, "items": items })
 }
 
 /// The master password, for a login that asks for it again before Android's
@@ -1832,11 +1902,14 @@ pub(crate) fn write_attachment_to(account: &str, id: &str, attachment_id: &str, 
 }
 
 /// The logins with a passkey for a site (its ID), for a phone's list of
-/// passkeys (docs/phones.md, "Passkeys"), from the account the screens show:
-/// `{locked, account}` (the account to unlock), or `{account, items: [{id,
-/// account, name, userName, userDisplayName, credentialId, userHandle,
+/// passkeys (docs/phones.md, "Passkeys"), from every unlocked account:
+/// `{locked, account}` while none is (the account the screens show, to
+/// unlock), or `{account, accounts: [{id, label}], items: [{id, account,
+/// accountLabel, name, userName, userDisplayName, credentialId, userHandle,
 /// discoverable, reprompt}]}`, the IDs in base64url, each with its account's
-/// id on this device, which signing with it names. Never a key.
+/// id on this device, which signing with it names, and with more than one
+/// account here, its name or email. `accounts` are the unlocked ones, the
+/// one shown first, where a new passkey can go. Never a key.
 ///
 /// # Safety
 /// `rp_id` is null or a NUL-terminated UTF-8 string, valid for the call.
@@ -1849,22 +1922,30 @@ pub unsafe extern "C" fn pb_passkeys(rp_id: *const c_char) -> *mut c_char {
 pub(crate) fn passkeys(rp_id: &str) -> Value {
     accounts_value(|accounts| {
         lock_if_due(accounts);
-        let Some(app) = accounts.active_app() else {
+        let Some(shown) = accounts.active().map(str::to_owned) else {
             return json!({ "locked": true, "signedOut": true });
         };
-        let account = app.id().to_owned();
-        if app.vault().is_none() {
-            return json!({ "locked": true, "account": account });
+        // The unlocked accounts, the one shown first: where a new passkey
+        // can go.
+        let several = accounts.summaries().len() > 1;
+        let mut unlocked: Vec<Value> = accounts
+            .unlocked()
+            .map(|(id, _)| json!({ "id": id, "label": accounts.label(id) }))
+            .collect();
+        unlocked.sort_by_key(|a| a["id"] != json!(shown));
+        if unlocked.is_empty() {
+            return json!({ "locked": true, "account": shown });
         }
-        let items: Vec<Value> = app
+        let items: Vec<Value> = accounts
             .passkeys_for(rp_id)
             .into_iter()
-            .filter_map(|item| {
+            .filter_map(|(account, item)| {
                 let passkey = item.passkey.as_ref()?;
                 let raw = crate::passkey::credential_id(&passkey.credential_id).ok()?;
                 Some(json!({
                     "id": item.id,
                     "account": account,
+                    "accountLabel": several.then(|| accounts.label(account)),
                     "name": item.name,
                     "userName": passkey.user_name,
                     "userDisplayName": passkey.user_display_name,
@@ -1876,7 +1957,7 @@ pub(crate) fn passkeys(rp_id: &str) -> Value {
                 }))
             })
             .collect();
-        json!({ "locked": false, "account": account, "items": items })
+        json!({ "locked": false, "account": shown, "accounts": unlocked, "items": items })
     })
 }
 

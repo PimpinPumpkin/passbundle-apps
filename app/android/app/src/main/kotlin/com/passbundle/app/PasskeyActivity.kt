@@ -173,17 +173,66 @@ class PasskeyActivity : Activity() {
         val selection = json.optJSONObject("authenticatorSelection")
         val userName = user.optString("name")
         val site = rp.optString("name").ifEmpty { rpId }
-        // Saved in the account the screens show.
-        val (account, _) = shown()
         background({ Passkeys.caller(this, request.callingAppInfo, rpId) }) { caller ->
             if (caller == null) return@background failCreate("That site doesn't let this app save its passkeys.")
+            // Which account it goes in: with more than one unlocked, the
+            // person picks (the one the screens show first); else the one
+            // unlocked, or the one shown, which proving who they are unlocks.
+            chooseAccount { account, label ->
+                if (account == null) return@chooseAccount failCreate(null)
+                confirmCreate(account, label, caller, asked, json, rpId, site, userName, selection, rp, user)
+            }
+        }
+    }
+
+    /**
+     * The account a new passkey goes in: with more than one unlocked, a
+     * choice of them (`done(null, null)` if the person cancels); else the
+     * one unlocked, or the one the screens show.
+     */
+    private fun chooseAccount(done: (String?, String?) -> Unit) {
+        val answer = runCatching { JSONObject(Core.passkeys("") ?: "{}") }.getOrDefault(JSONObject())
+        val unlocked = answer.optJSONArray("accounts") ?: JSONArray()
+        val choices = (0 until unlocked.length()).mapNotNull { unlocked.optJSONObject(it) }
+        if (choices.size < 2) {
+            val only = choices.firstOrNull()
+            return done(only?.optString("id") ?: answer.optString("account"), null)
+        }
+        val labels = choices.map { it.optString("label") }.toTypedArray()
+        val dialog =
+            AlertDialog.Builder(this)
+                .setTitle("Save the passkey in which account?")
+                .setItems(labels) { _, which -> done(choices[which].optString("id"), labels[which]) }
+                .setNegativeButton("Cancel") { _, _ -> done(null, null) }
+                .setOnCancelListener { done(null, null) }
+                .create()
+        dialog.setOnShowListener { dialog.window?.decorView?.filterTouchesWhenObscured = true }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) window.setHideOverlayWindows(true)
+        dialog.show()
+    }
+
+    /** "Save a passkey in PassBundle?" for the site, in [account] ([label] names it, with more than one), then making it. */
+    private fun confirmCreate(
+        account: String,
+        label: String?,
+        caller: Passkeys.Caller,
+        asked: CreatePublicKeyCredentialRequest,
+        json: JSONObject,
+        rpId: String,
+        site: String,
+        userName: String,
+        selection: JSONObject?,
+        rp: JSONObject,
+        user: JSONObject,
+    ) {
             val dialog = AlertDialog.Builder(this)
                 .setTitle("Save a passkey in PassBundle?")
                 // The site's ID, which the passkey is bound to, first: the name is
                 // whatever the site says it is.
                 .setMessage(
                     "For $rpId${if (site == rpId) "" else " (says it's $site)"}" +
-                        "${if (userName.isEmpty()) "" else ", as $userName"}, in a new login.",
+                        "${if (userName.isEmpty()) "" else ", as $userName"}, in a new login" +
+                        "${if (label == null) "" else " in $label"}.",
                 )
                 .setPositiveButton("Save") { _, _ ->
                     prove(account, null, selection?.optString("userVerification", "preferred") ?: "preferred") { verified ->
@@ -233,7 +282,6 @@ class PasskeyActivity : Activity() {
                 .create()
             guard(dialog)
             dialog.show()
-        }
     }
 
     /**

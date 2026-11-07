@@ -3,12 +3,35 @@
 // its own vault, lock, and settings, up to five on a device as the browser
 // extension allows. The account menu switches between them, adds one, and
 // signs out of the one shown: at the foot of the menu on a computer, on the
-// lock screen, and in a phone's Settings and its vault's header. The core
-// keeps the accounts apart (core/src/accounts.rs); this only draws, and asks.
+// lock screen, and in a phone's Settings and its vault's header. Each can be
+// given a name (Work, Personal) and a color from the flat tile tones, which
+// label its items wherever they're listed beside other accounts': the "All
+// accounts" place, and Android's autofill and passkeys. The core keeps the
+// accounts apart (core/src/accounts.rs); this only draws, and asks.
 import 'package:flutter/material.dart';
 
 import 'core.dart';
 import 'theme.dart';
+
+/// The colors an account can be shown in, by the core's names for them
+/// (core/src/accounts.rs, `TONES`): the flat tile tones the vault draws its
+/// kinds and places in (theme.dart), so an account's label reads like a tile.
+const accountTones = <String, Jewel>{
+  'sapphire': ItemKind.login,
+  'emerald': Jewel.allItems,
+  'amethyst': ItemKind.card,
+  'topaz': ItemKind.note,
+  'ruby': Jewel('', Color(0xFFB01E54), Color(0xFFFF92B8)),
+  'turquoise': ItemKind.identity,
+  'garnet': Jewel('', Color(0xFFA8291F), Color(0xFFFF9D92)),
+  'aquamarine': Jewel('', Color(0xFF1C7FB8), Color(0xFF7CC4EF)),
+  'onyx': ItemKind.sshKey,
+  'gold': Jewel.favorites,
+};
+
+/// Tells the screens an account's name or color changed (Settings), so the
+/// menu and the labels show it.
+final accountsChanged = ValueNotifier<int>(0);
 
 /// One account signed in here, as the core lists it.
 class AccountEntry {
@@ -16,7 +39,9 @@ class AccountEntry {
     : id = json['id'] as String,
       email = json['email'] as String? ?? '',
       server = json['server'] as String? ?? '',
-      unlocked = json['state'] == 'unlocked';
+      unlocked = json['state'] == 'unlocked',
+      name = json['name'] as String?,
+      tone = json['tone'] as String? ?? 'sapphire';
 
   /// Its id on this device.
   final String id;
@@ -24,8 +49,20 @@ class AccountEntry {
   final String server;
   final bool unlocked;
 
+  /// What the person calls it (Work, Personal), or null until they name it.
+  final String? name;
+
+  /// Its color, by the core's name for it ([accountTones]).
+  final String tone;
+
   /// Its server's name.
   String get host => Uri.tryParse(server)?.host ?? server;
+
+  /// What it's called: its name, else its email.
+  String get label => name ?? email;
+
+  /// Its color's jewel.
+  Jewel get jewel => accountTones[tone] ?? ItemKind.login;
 }
 
 /// The accounts, the one the screens show, and what the account menu does
@@ -62,6 +99,22 @@ class AccountsMenu {
 
   /// The one the screens show, by its id.
   final String shown;
+
+  /// One account, by its id; null for one that isn't here.
+  AccountEntry? entry(String? id) {
+    for (final a in accounts) {
+      if (a.id == id) return a;
+    }
+    return null;
+  }
+
+  /// The ones unlocked now, the one shown first.
+  List<AccountEntry> get unlocked => [
+    for (final a in accounts)
+      if (a.unlocked && a.id == shown) a,
+    for (final a in accounts)
+      if (a.unlocked && a.id != shown) a,
+  ];
 
   /// How many may be signed in here.
   final int most;
@@ -150,9 +203,23 @@ class AccountMenuButton extends StatelessWidget {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      Text(a.email, overflow: TextOverflow.ellipsis),
+                      Row(
+                        children: [
+                          AccountDot(entry: a),
+                          const SizedBox(width: 8),
+                          Flexible(
+                            child: Text(
+                              a.label,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                        ],
+                      ),
                       Text(
-                        a.unlocked ? a.host : '${a.host} · Locked',
+                        [
+                          if (a.name != null) a.email else a.host,
+                          if (!a.unlocked) 'Locked',
+                        ].join(' · '),
                         overflow: TextOverflow.ellipsis,
                         style: TextStyle(color: c.muted, fontSize: 12),
                       ),
@@ -216,9 +283,13 @@ class AccountFooter extends StatelessWidget {
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
         child: Row(
           children: [
+            if (menu.entry(menu.shown) case final shown? when menu.several) ...[
+              AccountDot(entry: shown),
+              const SizedBox(width: 6),
+            ],
             Flexible(
               child: Text(
-                email,
+                menu.entry(menu.shown)?.label ?? email,
                 overflow: TextOverflow.ellipsis,
                 style: TextStyle(color: c.muted, fontSize: 12),
               ),
@@ -273,9 +344,24 @@ class AccountsList extends StatelessWidget {
                   ? Theme.of(context).colorScheme.primary
                   : c.muted,
             ),
-            title: Text(a.email, maxLines: 1, overflow: TextOverflow.ellipsis),
+            title: Row(
+              children: [
+                AccountDot(entry: a),
+                const SizedBox(width: 8),
+                Flexible(
+                  child: Text(
+                    a.label,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ],
+            ),
             subtitle: Text(
-              a.unlocked ? a.host : '${a.host} · Locked',
+              [
+                if (a.name != null) a.email else a.host,
+                if (!a.unlocked) 'Locked',
+              ].join(' · '),
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
             ),
@@ -344,4 +430,201 @@ Future<bool> askToSignOut(
     ),
   );
   return sure == true;
+}
+
+/// An account's color, as a dot beside its name.
+class AccountDot extends StatelessWidget {
+  const AccountDot({super.key, required this.entry, this.size = 10});
+
+  final AccountEntry entry;
+  final double size;
+
+  @override
+  Widget build(BuildContext context) => Container(
+    width: size,
+    height: size,
+    decoration: BoxDecoration(
+      color: entry.jewel.color(Theme.of(context).brightness),
+      shape: BoxShape.circle,
+    ),
+  );
+}
+
+/// Which account an item is in, where several accounts' are listed
+/// together: its name (or email) in a pill of its color, as the item's
+/// kind's tile is tinted.
+class AccountBadge extends StatelessWidget {
+  const AccountBadge({super.key, required this.entry});
+
+  final AccountEntry entry;
+
+  @override
+  Widget build(BuildContext context) {
+    final brightness = Theme.of(context).brightness;
+    return Padding(
+      padding: const EdgeInsets.only(left: 8),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 120),
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            color: entry.jewel.tint(brightness),
+            borderRadius: BorderRadius.circular(7),
+          ),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+            child: Text(
+              entry.label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: entry.jewel.color(brightness),
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Which account a new item goes in, where more than one is unlocked: each
+/// unlocked one, the one shown first. Its id, or null if the person
+/// cancels; the one shown's, without asking, when it's the only one.
+Future<String?> chooseAccount(BuildContext context, AccountsMenu menu) async {
+  final unlocked = menu.unlocked;
+  if (unlocked.length < 2) return menu.shown;
+  return showDialog<String>(
+    context: context,
+    builder: (context) => SimpleDialog(
+      title: const Text('Save it in which account?'),
+      children: [
+        for (final a in unlocked)
+          SimpleDialogOption(
+            key: ValueKey('choose-account-${a.id}'),
+            onPressed: () => Navigator.pop(context, a.id),
+            padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+            child: Row(
+              children: [
+                AccountDot(entry: a, size: 12),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(a.label, overflow: TextOverflow.ellipsis),
+                      if (a.name != null)
+                        Text(
+                          a.email,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            color: context.colors.muted,
+                            fontSize: 12,
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+      ],
+    ),
+  );
+}
+
+/// Settings' name and color for the account shown: what it's called where
+/// accounts are listed together, and the color its items are labeled in.
+/// Kept on this device only.
+class AccountLabelEditor extends StatefulWidget {
+  const AccountLabelEditor({super.key, required this.entry});
+
+  final AccountEntry entry;
+
+  @override
+  State<AccountLabelEditor> createState() => _AccountLabelEditorState();
+}
+
+class _AccountLabelEditorState extends State<AccountLabelEditor> {
+  late final name = TextEditingController(text: widget.entry.name ?? '');
+  late String tone = widget.entry.tone;
+  String? error;
+
+  @override
+  void dispose() {
+    name.dispose();
+    super.dispose();
+  }
+
+  void save({String? tone}) {
+    final answer = Core().setAccountLabel(
+      name.text,
+      tone,
+      widget.entry.id,
+    );
+    setState(() {
+      error = answer.ok ? null : answer.error;
+      if (answer.ok && tone != null) this.tone = tone;
+    });
+    if (answer.ok) accountsChanged.value++;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final brightness = Theme.of(context).brightness;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          TextField(
+            key: const ValueKey('account-name'),
+            controller: name,
+            maxLength: 40,
+            decoration: InputDecoration(
+              labelText: 'Name',
+              hintText: 'Work, Personal',
+              errorText: error,
+              counterText: '',
+            ),
+            onChanged: (_) => save(),
+          ),
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              for (final MapEntry(key: t, value: jewel) in accountTones.entries)
+                Semantics(
+                  label: t,
+                  selected: t == tone,
+                  button: true,
+                  child: InkResponse(
+                    key: ValueKey('account-tone-$t'),
+                    onTap: () => save(tone: t),
+                    radius: 18,
+                    child: Container(
+                      width: 28,
+                      height: 28,
+                      decoration: BoxDecoration(
+                        color: jewel.color(brightness),
+                        shape: BoxShape.circle,
+                        border: t == tone
+                            ? Border.all(
+                                color: Theme.of(context).colorScheme.onSurface,
+                                width: 2.5,
+                              )
+                            : null,
+                      ),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
 }

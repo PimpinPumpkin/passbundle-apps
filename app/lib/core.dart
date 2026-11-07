@@ -212,6 +212,10 @@ class Core {
     'pb_update_started',
   );
   late final _accounts = _lib.lookupFunction<_Str0, _Str0>('pb_accounts');
+  late final _listAll = _lib.lookupFunction<_Str1, _Str1>('pb_list_all');
+  late final _setAccountLabel = _lib.lookupFunction<_Str2, _Str2>(
+    'pb_set_account_label',
+  );
   late final _switch = _lib.lookupFunction<_Str1, _Str1>('pb_switch');
   late final _cancelSignIn = _lib.lookupFunction<_Str0, _Str0>(
     'pb_cancel_sign_in',
@@ -321,6 +325,24 @@ class Core {
     }
     return answer;
   }
+
+  /// Names an account ([id], or the one the screens show) and picks its
+  /// color: [name] (empty for its email) and [tone], one of [accounts]'
+  /// `tones` (null keeps its color). Kept on this device only. Answers as
+  /// [accounts], or the words to show.
+  Answer setAccountLabel(String name, String? tone, [String? id]) => Answer(
+    _with([
+          id ?? account,
+          jsonEncode({'name': name, 'tone': tone}),
+        ], (p) => _answer(_setAccountLabel(p[0], p[1])))
+        as Map<String, dynamic>,
+  );
+
+  /// What a search finds in every unlocked account (the "All accounts"
+  /// place), by name: each item as [list] has it, with its `account`.
+  List<Map<String, dynamic>> listAll(String query) =>
+      (_with([query], (p) => _answer(_listAll(p[0]))) as List? ?? const [])
+          .cast<Map<String, dynamic>>();
 
   /// Gives up a sign-in waiting for its second step, and the account being
   /// added. Answers as [accounts].
@@ -776,10 +798,16 @@ class Core {
   /// A website's icon for a login's tile (core/src/icons.rs): the image,
   /// or null where there's none, icons are off, or the vault is locked. The
   /// core keeps it in memory while the vault is open; it waits on the
-  /// server the first time, on a background isolate.
-  static Future<Uint8List?> icon(String host) async {
+  /// server the first time, on a background isolate. Asked of the login's
+  /// own account's server ([id], or the one the screens show), never
+  /// another's.
+  static Future<Uint8List?> icon(String host, [String? id]) async {
+    final asked = id;
     final answer = await _background(
-      (c, a) => c._with([a, host], (p) => c._answer(c._icon(p[0], p[1]))),
+      (c, a) => c._with([
+        asked ?? a,
+        host,
+      ], (p) => c._answer(c._icon(p[0], p[1]))),
     );
     final icon = answer.ok ? answer.body['icon'] as String? : null;
     return icon == null ? null : base64Decode(icon);

@@ -15,7 +15,9 @@ import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * What PassBundle offers Android's autofill (docs/phones.md, "Autofill"): the
- * matching logins by name and username, each filled only when picked (through
+ * matching logins of every unlocked account, by name and username (and, with
+ * more than one account on the phone, the account's name), each filled only
+ * from its own account when picked (through
  * FillActivity, which takes the password from the core then), or "Unlock
  * PassBundle" while the vault is locked. A page's domain counts only from a
  * browser (Browsers.kt); another app that can open web links and gives one is
@@ -131,7 +133,7 @@ object Responses {
             @Suppress("DEPRECATION")
             // A site's login in an app says which site it's from, as a browser's address bar would.
             val username = item.optString("username").takeIf { !item.isNull("username") && it.isNotEmpty() }
-            val subtitle = listOfNotNull(username, item.optString("from").ifEmpty { null }).joinToString(" · ").ifEmpty { null }
+            val subtitle = subtitle(username, item.optString("from").ifEmpty { null }, item.optString("accountLabel").ifEmpty { null })
             val dataset = Dataset.Builder(presentation(context, item.optString("name"), subtitle))
             // Placeholders: the values come from FillActivity once this one is picked.
             for (field in ids) {
@@ -154,6 +156,14 @@ object Responses {
         }
         return response.build()
     }
+
+    /**
+     * A login's second line in Android's list: its username, the site it's
+     * from (a site's login in an app, as a browser's address bar would say),
+     * and with more than one account on the phone, its account's name.
+     */
+    fun subtitle(username: String?, from: String?, account: String?): String? =
+        listOfNotNull(username, from, account).joinToString(" · ").ifEmpty { null }
 
     /** One login's values for the fields, from its account, taken from the core only now that it was picked. */
     fun filled(context: Context, fields: Fields, account: String, item: String): Dataset? {

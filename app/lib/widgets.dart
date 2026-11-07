@@ -150,6 +150,7 @@ class Avatar extends StatelessWidget {
     required this.kind,
     this.category,
     this.iconHost,
+    this.account,
     this.size = 36,
   });
 
@@ -162,6 +163,7 @@ class Avatar extends StatelessWidget {
         kind: item['kind'] as String,
         category: item['category'] as String?,
         iconHost: item['iconHost'] as String?,
+        account: item['account'] as String?,
         size: size,
       );
 
@@ -173,6 +175,10 @@ class Avatar extends StatelessWidget {
 
   /// A login's website, for its icon (core/src/icons.rs).
   final String? iconHost;
+
+  /// Its account, when it's listed beside other accounts' ("All
+  /// accounts"): its icon comes from that account's server.
+  final String? account;
   final double size;
 
   /// The first letter or digit of a name, or nothing when it has none.
@@ -196,7 +202,12 @@ class Avatar extends StatelessWidget {
     }
     final host = iconHost;
     if (host != null) {
-      return _SiteIcon(host: host, size: size, letter: letterTile(context));
+      return _SiteIcon(
+        host: host,
+        account: account,
+        size: size,
+        letter: letterTile(context),
+      );
     }
     return letterTile(context);
   }
@@ -230,11 +241,13 @@ class Avatar extends StatelessWidget {
 class _SiteIcon extends StatefulWidget {
   const _SiteIcon({
     required this.host,
+    this.account,
     required this.size,
     required this.letter,
   });
 
   final String host;
+  final String? account;
   final double size;
   final Widget letter;
 
@@ -256,19 +269,21 @@ class _SiteIconState extends State<_SiteIcon> {
   @override
   void didUpdateWidget(_SiteIcon old) {
     super.didUpdateWidget(old);
-    if (old.host != widget.host) ask();
+    if (old.host != widget.host || old.account != widget.account) ask();
   }
 
   void ask() {
-    final known = siteIcons.now(widget.host);
+    final known = siteIcons.now(widget.host, widget.account);
     if (!identical(known, SiteIcons.unknown)) {
       setState(() => icon = known as ui.Image?);
       return;
     }
     icon = null;
-    final host = widget.host;
-    siteIcons.of(host).then((found) {
-      if (mounted && widget.host == host) setState(() => icon = found);
+    final (host, account) = (widget.host, widget.account);
+    siteIcons.of(host, account).then((found) {
+      if (mounted && widget.host == host && widget.account == account) {
+        setState(() => icon = found);
+      }
     });
   }
 

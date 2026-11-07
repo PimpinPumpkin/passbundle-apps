@@ -55,7 +55,8 @@ class PassBundleAutofill : AutofillService() {
          * channel method). The screens take it unlocked, so the core says then
          * whether it's a new password for a login it has: the one login for
          * the same app or site with the same username, by the rules autofill
-         * fills with. That login's `id` comes with it, to update it.
+         * fills with, in any unlocked account. That login's `id` and its
+         * `account` come with it, to update it there.
          */
         @Synchronized
         fun takeSave(): Map<String, String>? {
@@ -68,7 +69,11 @@ class PassBundleAutofill : AutofillService() {
                 (0 until items.length())
                     .map { items.getJSONObject(it) }
                     .filter { !it.isNull("username") && it.optString("username") == save["username"] }
-            return if (same.size == 1) save + ("id" to same[0].getString("id")) else save
+            return if (same.size == 1) {
+                save + ("id" to same[0].getString("id")) + ("account" to same[0].optString("account"))
+            } else {
+                save
+            }
         }
 
         @Synchronized

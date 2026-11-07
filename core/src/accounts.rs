@@ -7,7 +7,8 @@
 //! in it (`App::nobody`).
 //!
 //! Kept in the app's folder:
-//! - `accounts.json`: the accounts, in the order they were added, the one
+//! - `accounts.json`: the accounts, in the order they were added, each
+//!   with the name and color the person gave it (Work, Personal), the one
 //!   the screens showed last, this install's device identifier, and the
 //!   server and email last signed in to or out of (for the sign-in screen).
 //!   Nothing secret.
@@ -22,6 +23,7 @@
 //! An install from before several accounts kept its one account in the
 //! app's folder itself; opening carries it over as the first account.
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -41,6 +43,25 @@ use crate::vault::Vault;
 
 /// The most accounts signed in on one device, as the browser extension allows.
 pub const MOST: usize = 5;
+
+/// The colors an account can be shown in: the flat tile tones the apps draw
+/// items' kinds in (app/lib/theme.dart), by name. A new account gets the
+/// first one no other account here has.
+pub const TONES: [&str; 10] = [
+    "sapphire",
+    "emerald",
+    "amethyst",
+    "topaz",
+    "ruby",
+    "turquoise",
+    "garnet",
+    "aquamarine",
+    "onyx",
+    "gold",
+];
+
+/// The longest name an account can be given, in characters.
+pub const NAME_LONGEST: usize = 40;
 
 /// An account's own files, which an install from before several accounts
 /// kept in the app's folder: carried over into the account's folder, with
@@ -70,6 +91,21 @@ struct Index {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Entry {
     id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tone: Option<String>,
+}
+
+/// What the person calls an account here, and its color: its own on this
+/// device, never sent anywhere.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Label {
+    /// Work, Personal: none until the person names it (the screens show
+    /// its email then).
+    pub name: Option<String>,
+    /// One of `TONES`.
+    pub tone: String,
 }
 
 /// The server and email last signed in to or out of, for the sign-in screen.
@@ -86,6 +122,8 @@ pub struct Summary {
     pub server: String,
     pub email: String,
     pub unlocked: bool,
+    pub name: Option<String>,
+    pub tone: String,
 }
 
 pub struct Accounts {
@@ -109,6 +147,8 @@ pub struct Accounts {
     last: Option<Last>,
     /// The agent's address and program, when not the installed one (tests).
     agent: Option<(PathBuf, PathBuf)>,
+    /// Each account's name and color, by its id.
+    labels: HashMap<String, Label>,
 }
 
 /// An account's id on this device: 32 hex digits, made here.
@@ -213,8 +253,23 @@ impl Accounts {
             install,
             last: index.last.clone(),
             agent: None,
+            labels: HashMap::new(),
         };
         accounts.list = kept.iter().map(|id| accounts.app_for(id)).collect();
+        // Each one's name and color as kept, a color of its own where it has
+        // none (an install from before, a sign-in that finished as the app
+        // stopped), and a name only as the person gave it.
+        for id in &kept {
+            let entry = index.accounts.iter().find(|e| &e.id == id);
+            let name = entry
+                .and_then(|e| e.name.clone())
+                .and_then(|n| named(&n).ok().flatten());
+            let tone = entry
+                .and_then(|e| e.tone.clone())
+                .filter(|t| TONES.contains(&t.as_str()));
+            let tone = tone.unwrap_or_else(|| accounts.free_tone());
+            accounts.labels.insert(id.clone(), Label { name, tone });
+        }
         accounts.save();
         accounts
     }
@@ -246,8 +301,13 @@ impl Accounts {
             accounts: self
                 .list
                 .iter()
-                .map(|a| Entry {
-                    id: a.id().to_owned(),
+                .map(|a| {
+                    let label = self.labels.get(a.id());
+                    Entry {
+                        id: a.id().to_owned(),
+                        name: label.and_then(|l| l.name.clone()),
+                        tone: label.map(|l| l.tone.clone()),
+                    }
                 })
                 .collect(),
             active: self.active.clone(),
@@ -265,14 +325,123 @@ impl Accounts {
             .iter()
             .map(|app| {
                 let (server, email) = app.account().unwrap_or_default();
+                let label = self.labels.get(app.id()).cloned().unwrap_or_default();
                 Summary {
                     id: app.id().to_owned(),
                     server: server.to_owned(),
                     email: email.to_owned(),
                     unlocked: app.vault().is_some(),
+                    name: label.name,
+                    tone: label.tone,
                 }
             })
             .collect()
+    }
+
+    /// The first color no account here has (the first again when all ten
+    /// are taken, which five accounts never do).
+    fn free_tone(&self) -> String {
+        TONES
+            .iter()
+            .find(|t| !self.labels.values().any(|l| l.tone == **t))
+            .unwrap_or(&TONES[0])
+            .to_string()
+    }
+
+    /// What an account is called here: the name the person gave it, else
+    /// its email.
+    pub fn label(&self, id: &str) -> String {
+        self.labels
+            .get(id)
+            .and_then(|l| l.name.clone())
+            .or_else(|| {
+                self.get(id)
+                    .and_then(App::account)
+                    .map(|(_, e)| e.to_owned())
+            })
+            .unwrap_or_default()
+    }
+
+    /// Names an account here and picks its color: `name` trimmed (none to
+    /// go back to its email), at most `NAME_LONGEST` characters; `tone` one of
+    /// `TONES`, or none to keep its color. Kept on this device only.
+    pub fn set_label(&mut self, id: &str, name: Option<&str>, tone: Option<&str>) -> Result<()> {
+        if !self.list.iter().any(|a| a.id() == id) {
+            return Err(Error::SignedOut);
+        }
+        let name = match name {
+            Some(name) => named(name)?,
+            None => None,
+        };
+        if tone.is_some_and(|t| !TONES.contains(&t)) {
+            return Err(Error::Refused("that isn't one of the colors"));
+        }
+        let free = self.free_tone();
+        let label = self.labels.entry(id.to_owned()).or_insert(Label {
+            name: None,
+            tone: free,
+        });
+        label.name = name;
+        if let Some(tone) = tone {
+            label.tone = tone.to_owned();
+        }
+        self.save();
+        Ok(())
+    }
+
+    /// Each unlocked account's logins for an app or a website (autofill),
+    /// with the account each is in: the one the screens show first, then
+    /// the others in the order they were added.
+    pub fn fillable<'a>(
+        &'a self,
+        target: &crate::matching::Target<'_>,
+    ) -> Vec<(&'a str, &'a crate::vault::Item)> {
+        self.unlocked_shown_first()
+            .flat_map(|(id, vault)| vault.matching(target).into_iter().map(move |i| (id, i)))
+            .collect()
+    }
+
+    /// Each unlocked account's logins with a passkey for a site (by its ID),
+    /// with the account each is in, as `fillable` orders them.
+    pub fn passkeys_for<'a>(&'a self, rp_id: &str) -> Vec<(&'a str, &'a crate::vault::Item)> {
+        let mut found = Vec::new();
+        for app in self.shown_first() {
+            for item in app.passkeys_for(rp_id) {
+                found.push((app.id(), item));
+            }
+        }
+        found
+    }
+
+    /// What a search finds in every unlocked account, with the account
+    /// each item is in and its vault: by name, as one account's list is,
+    /// and for the same name, the one shown first.
+    pub fn search_all<'a>(
+        &'a self,
+        query: &str,
+    ) -> Vec<(&'a str, &'a Vault, &'a crate::vault::Item)> {
+        let mut found: Vec<(&str, &Vault, &crate::vault::Item)> = self
+            .unlocked_shown_first()
+            .flat_map(|(id, vault)| vault.search(query).into_iter().map(move |i| (id, vault, i)))
+            .collect();
+        // Stable: within a name, the account order stays.
+        found.sort_by_key(|(_, _, i)| i.name.to_lowercase());
+        found
+    }
+
+    /// The accounts, the one shown first.
+    fn shown_first(&self) -> impl Iterator<Item = &App> {
+        let shown = self.active.as_deref();
+        self.list
+            .iter()
+            .filter(move |a| Some(a.id()) == shown)
+            .chain(self.list.iter().filter(move |a| Some(a.id()) != shown))
+    }
+
+    /// Each unlocked account's vault, the one shown first.
+    fn unlocked_shown_first(&self) -> impl Iterator<Item = (&str, &Vault)> {
+        self.shown_first()
+            .filter_map(|a| a.vault().map(|v| (a.id(), v)))
     }
 
     /// The account the screens show, if any is signed in.
@@ -447,6 +616,8 @@ impl Accounts {
                 return Err(Error::AlreadyHere);
             }
             let id = app.id().to_owned();
+            let tone = self.free_tone();
+            self.labels.insert(id.clone(), Label { name: None, tone });
             self.list.push(app);
             id
         } else {
@@ -522,6 +693,7 @@ impl Accounts {
             });
         }
         let id = app.id().to_owned();
+        self.labels.remove(&id);
         remove_folder(&self.folders(), &id);
         if self.signing_in.as_deref() == Some(id.as_str()) {
             self.signing_in = None;
@@ -642,6 +814,22 @@ impl Accounts {
     }
 }
 
+/// A name for an account, as the person typed it: trimmed, none when
+/// empty; refused when longer than `NAME_LONGEST` or holding a control
+/// character.
+fn named(name: &str) -> Result<Option<String>> {
+    let name = name.trim();
+    if name.chars().count() > NAME_LONGEST {
+        return Err(Error::Refused("an account's name is at most 40 characters"));
+    }
+    if name.chars().any(char::is_control) {
+        return Err(Error::Refused(
+            "an account's name can't hold that character",
+        ));
+    }
+    Ok((!name.is_empty()).then(|| name.to_owned()))
+}
+
 /// Removes an account's folder: only one named as this device names them.
 fn remove_folder(folders: &Path, id: &str) {
     if is_id(id) {
@@ -707,7 +895,11 @@ fn carry_over(dir: &Path, index: &mut Index) {
         return;
     }
     if !index.accounts.iter().any(|e| e.id == id) {
-        index.accounts.push(Entry { id: id.clone() });
+        index.accounts.push(Entry {
+            id: id.clone(),
+            name: None,
+            tone: None,
+        });
     }
     index.active = Some(id);
 }
@@ -777,7 +969,12 @@ mod tests {
                 "collectionIds": [],
                 "name": enc(login),
                 "notes": null,
-                "login": { "username": enc(email), "password": enc("not-a-real-password"), "uris": [] },
+                "login": {
+                    "username": enc(email),
+                    "password": enc("not-a-real-password"),
+                    // A site both accounts have a login for.
+                    "uris": [{ "uri": enc("https://shared.example.test/sign-in"), "match": null }],
+                },
             }],
             "policies": [],
         })
@@ -1302,6 +1499,136 @@ mod tests {
         assert_eq!(accounts.summaries().len(), 1);
         // Asked again, it's a new one.
         assert_ne!(accounts.app("").unwrap().id(), adding_id);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn names_and_colors_are_each_accounts_own_and_kept() {
+        let dir = new_dir();
+        let w = keep(&dir, work());
+        let p = keep(&dir, personal());
+        let mut accounts = open(&dir);
+        // A color each, a different one; no name until one is given.
+        let tones: Vec<String> = accounts.summaries().into_iter().map(|s| s.tone).collect();
+        assert_eq!(tones, vec!["sapphire", "emerald"]);
+        assert_eq!(accounts.label(&w), work().email);
+        accounts
+            .set_label(&w, Some("  Work "), Some("ruby"))
+            .unwrap();
+        // Found by id: the folders' order is their ids' (no accounts.json).
+        let of = |accounts: &Accounts, id: &str| {
+            let s = accounts
+                .summaries()
+                .into_iter()
+                .find(|s| s.id == id)
+                .unwrap();
+            (s.name, s.tone)
+        };
+        assert_eq!(
+            of(&accounts, &w),
+            (Some("Work".to_owned()), "ruby".to_owned())
+        );
+        assert_eq!(accounts.label(&w), "Work");
+        assert_eq!(accounts.label(&p), personal().email);
+        // Only a name a person would type, and only the colors there are.
+        let long = "x".repeat(NAME_LONGEST + 1);
+        assert!(matches!(
+            accounts.set_label(&w, Some(&long), None),
+            Err(Error::Refused(_))
+        ));
+        assert!(matches!(
+            accounts.set_label(&w, Some("Wo\nrk"), None),
+            Err(Error::Refused(_))
+        ));
+        assert!(matches!(
+            accounts.set_label(&w, None, Some("plaid")),
+            Err(Error::Refused(_))
+        ));
+        assert_eq!(
+            accounts.set_label("0123456789abcdef0123456789abcdef", Some("Mine"), None),
+            Err(Error::SignedOut)
+        );
+        assert_eq!(accounts.label(&w), "Work");
+        accounts.set_label(&p, Some("Personal"), None).unwrap();
+        let personal_tone = of(&accounts, &p).1;
+        assert_ne!(personal_tone, "ruby");
+        // Kept on this device, for the next start.
+        drop(accounts);
+        let mut again = open(&dir);
+        assert_eq!(of(&again, &w), (Some("Work".to_owned()), "ruby".to_owned()));
+        assert_eq!(
+            of(&again, &p),
+            (Some("Personal".to_owned()), personal_tone.clone())
+        );
+        // An empty name goes back to the email.
+        again.set_label(&p, Some(" "), None).unwrap();
+        assert_eq!(again.label(&p), personal().email);
+        // Signing out forgets its name; a new account gets a free color.
+        again.sign_out(&w);
+        let first_free = TONES.iter().find(|t| **t != personal_tone).unwrap();
+        assert_eq!(again.free_tone(), *first_free);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn every_unlocked_accounts_logins_fill_and_search_together_each_with_its_account() {
+        use crate::matching::Target;
+        let dir = new_dir();
+        let w = keep(&dir, work());
+        let p = keep(&dir, personal());
+        let mut accounts = open(&dir);
+        accounts.switch(&p).unwrap();
+        accounts.app(&w).unwrap().unlock(work().password).unwrap();
+        accounts
+            .app(&p)
+            .unwrap()
+            .unlock(personal().password)
+            .unwrap();
+        let site = Target::Website("shared.example.test");
+        // Both accounts' logins for the site, the shown one's first.
+        let filled: Vec<(String, String)> = accounts
+            .fillable(&site)
+            .into_iter()
+            .map(|(id, i)| (id.to_owned(), i.name.clone()))
+            .collect();
+        assert_eq!(
+            filled,
+            vec![
+                (p.clone(), personal().login.to_owned()),
+                (w.clone(), work().login.to_owned())
+            ]
+        );
+        // Searching every account: by name, each with its account.
+        let found: Vec<(String, String)> = accounts
+            .search_all("")
+            .into_iter()
+            .map(|(id, _, i)| (id.to_owned(), i.name.clone()))
+            .collect();
+        assert_eq!(
+            found,
+            vec![
+                (p.clone(), "Bank".to_owned()),
+                (w.clone(), "Payroll".to_owned())
+            ]
+        );
+        let paid: Vec<&str> = accounts
+            .search_all("pay")
+            .into_iter()
+            .map(|(id, _, _)| id)
+            .collect();
+        assert_eq!(paid, vec![w.as_str()]);
+        // A locked account offers nothing.
+        accounts.lock(&w);
+        let filled: Vec<&str> = accounts
+            .fillable(&site)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        assert_eq!(filled, vec![p.as_str()]);
+        assert!(accounts.search_all("pay").is_empty());
+        accounts.lock(&p);
+        assert!(accounts.fillable(&site).is_empty());
+        assert!(accounts.passkeys_for("shared.example.test").is_empty());
         let _ = fs::remove_dir_all(dir);
     }
 

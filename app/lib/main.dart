@@ -105,6 +105,12 @@ class _PassBundleAppState extends State<PassBundleApp> {
   /// Adding another account: the sign-in screen, and back to the one shown.
   bool adding = false;
 
+  /// What the vault opens to show, when the screens switched to its account
+  /// to show it (an item picked in "All accounts", say), and for which
+  /// screen: dropped once that screen is gone.
+  VaultStart? start;
+  String? startScreen;
+
   /// Unlocked just now with the master password (signing in, or the lock
   /// screen's field), not biometrics: a phone may offer biometrics for next
   /// time (unlock_offer.dart).
@@ -141,6 +147,8 @@ class _PassBundleAppState extends State<PassBundleApp> {
     state = core.state();
     computer.setMethodCallHandler(fromComputer);
     HardwareKeyboard.instance.addHandler(keyPressed);
+    // An account's name or color changed (Settings): the menus show it.
+    accountsChanged.addListener(refresh);
     lifecycle = AppLifecycleListener(
       // "Immediately" locks as the app leaves the screen: each account whose
       // choice, or policy, that is.
@@ -172,6 +180,7 @@ class _PassBundleAppState extends State<PassBundleApp> {
 
   @override
   void dispose() {
+    accountsChanged.removeListener(refresh);
     lifecycle.dispose();
     ticker?.cancel();
     HardwareKeyboard.instance.removeHandler(keyPressed);
@@ -194,6 +203,17 @@ class _PassBundleAppState extends State<PassBundleApp> {
   /// Shows another account, unlocked or not; the one shown stays as it is.
   void switchTo(String id) {
     core.switchTo(id);
+    start = null;
+    refresh();
+  }
+
+  /// Shows another account's vault, opening what was picked from it there
+  /// (an item from "All accounts", a new item in the account chosen for it).
+  void openIn(String id, VaultStart where) {
+    if (core.switchTo(id).ok) {
+      start = where;
+      startScreen = '$id unlocked';
+    }
     refresh();
   }
 
@@ -337,6 +357,8 @@ class _PassBundleAppState extends State<PassBundleApp> {
         // Measuring uses a sample vault with no server behind it.
         syncOnOpen: !measuring,
         offerBiometric: withPassword,
+        start: start,
+        onOpenIn: openIn,
       );
       if (measuring && !_readyReported) {
         _readyReported = true;
@@ -357,6 +379,7 @@ class _PassBundleAppState extends State<PassBundleApp> {
     // whatever was open over the one shown, as locking does.
     screen = '${adding ? 'adding' : Core.account} ${state['state']}';
     final shown = pages.putIfAbsent(screen, WindowPages.new);
+    if (screen != startScreen) start = null;
     return Listener(
       onPointerDown: (_) => used(),
       onPointerMove: (_) => used(),
