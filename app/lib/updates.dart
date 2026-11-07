@@ -417,7 +417,7 @@ class _UpdatesSectionState extends State<UpdatesSection> {
         title: 'Updates',
         footer: store != null
             ? null
-            : 'The daily check is as PassBundle opens. Checking asks GitHub, '
+            : 'PassBundle checks once a day, when it opens. Checking asks GitHub, '
                   'where PassBundle is published, and nothing else.',
         children: [
           ListTile(

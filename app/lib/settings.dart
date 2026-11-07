@@ -1,8 +1,12 @@
 // Settings: unlocking with Windows Hello or Touch ID, through the desktop
 // agent and shared with the browser extension (docs/core.md, "Unlock with
-// Windows Hello or Touch ID"), and when the app locks by itself ("Locking by
+// Windows Hello or Touch ID"), only where it can work (Windows, and phones'
+// own biometrics: the Mac's Touch ID waits on code signing, and Linux has no
+// agent), and when the app locks by itself ("Locking by
 // itself"), within what an organization's policy allows ("Locking by
 // policy"). On Android, turning on autofill and passkeys (autofill_offer.dart).
+// The account shown, and signing out of it, which says which; on a phone,
+// importing and exporting in the web vault.
 // Sign-ins from other devices waiting for an answer
 // (sign_in_requests.dart). On Android and the Mac, updates from PassBundle's
 // releases (updates.dart). On macOS and Windows, whether screenshots of
@@ -71,7 +75,12 @@ class SettingsList extends StatefulWidget {
     this.named,
     this.mode,
     this.onMode,
+    this.onSignOut,
   });
+
+  /// On a computer, signing out of the account shown ([email]), once the
+  /// person says so (main.dart asks): a phone's [menu] has it.
+  final VoidCallback? onSignOut;
 
   /// With more than one account signed in, the one these settings are for:
   /// its name and color are set here (accounts.dart).
@@ -196,11 +205,16 @@ class _SettingsListState extends State<SettingsList> {
     await refresh();
   }
 
+  /// Whether unlocking with biometrics can work here at all: not on the
+  /// Mac (yet) or Linux, where the core says it's unsupported.
+  bool get unlockOffered => status?['status'] != 'unsupported';
+
   Widget unlock() {
     final status = this.status;
     final method = (status?['method'] as String?) ?? 'Windows Hello';
     if (status == null) {
       return const SizedBox(
+        key: ValueKey('unlock-loading'),
         height: 72,
         child: Center(
           child: SizedBox(
@@ -289,16 +303,27 @@ class _SettingsListState extends State<SettingsList> {
     final mode = this.mode;
     final onMode = widget.onMode;
     final email = widget.email;
+    final webVault = widget.server;
     return Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        SettingsGroup(
-          title: 'Unlock',
-          footer: note,
-          footerColor: scheme.error,
-          children: [unlock()],
-        ),
+        if (unlockOffered)
+          SettingsGroup(
+            title: 'Unlock',
+            footer: note,
+            footerColor: scheme.error,
+            children: [unlock()],
+          )
+        else if (note != null)
+          // What didn't change, where the Unlock group would have said it.
+          Padding(
+            padding: const EdgeInsets.fromLTRB(4, 20, 4, 0),
+            child: Text(
+              note!,
+              style: TextStyle(color: scheme.error, fontSize: 13),
+            ),
+          ),
         // The same card the vault offers as it opens, on or not.
         if (isAndroid) const AutofillCard(heading: 'Autofill'),
         SettingsGroup(
@@ -397,6 +422,31 @@ class _SettingsListState extends State<SettingsList> {
             ],
           ),
         if (updates case final updates?) UpdatesSection(updates: updates),
+        // On a phone, which has no menu for them: importing and exporting
+        // are the web vault's, which opens in the browser.
+        if (isPhone && webVault != null)
+          SettingsGroup(
+            title: 'Web vault',
+            footer: 'These open in your browser.',
+            children: [
+              for (final (key, label, path) in [
+                ('web-import', 'Import', '/#/tools/import'),
+                ('web-export', 'Export', '/#/tools/export'),
+                ('web-vault', 'Open the web vault', '/#/vault'),
+              ])
+                ListTile(
+                  key: ValueKey(key),
+                  title: Text(label),
+                  trailing: const Icon(Icons.open_in_new_rounded, size: 20),
+                  onTap: () async {
+                    final opened = await Core.openWebsite('$webVault$path');
+                    if (!opened && mounted) {
+                      setState(() => note = 'Couldn\'t open the web vault.');
+                    }
+                  },
+                ),
+            ],
+          ),
         // With more than one account: what this one's called where they're
         // listed together, and its color.
         if (widget.named ?? _shownOf(widget.menu) case final entry?)
@@ -433,6 +483,18 @@ class _SettingsListState extends State<SettingsList> {
                         overflow: TextOverflow.ellipsis,
                       ),
               ),
+              // Signing out of this account, by name; the others stay.
+              if (widget.onSignOut case final signOut?)
+                ListTile(
+                  key: const ValueKey('settings-sign-out'),
+                  leading: const Icon(Icons.logout_rounded),
+                  title: Text(
+                    'Sign out of $email',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  onTap: signOut,
+                ),
             ],
           ),
         // About: the logo, and this version where the app knows it.
@@ -502,13 +564,26 @@ class SettingsPage extends StatelessWidget {
 
 /// Settings over the vault, on a computer.
 class SettingsDialog extends StatelessWidget {
-  const SettingsDialog({super.key, this.account, this.named});
+  const SettingsDialog({
+    super.key,
+    this.account,
+    this.named,
+    this.email,
+    this.server,
+    this.onSignOut,
+  });
 
   /// With more than one account signed in, the one these settings are for.
   final String? account;
 
   /// And its name and color, which are set here.
   final AccountEntry? named;
+
+  /// The account shown, and where, with signing out of it: Settings closes,
+  /// then main.dart asks.
+  final String? email;
+  final String? server;
+  final VoidCallback? onSignOut;
 
   @override
   Widget build(BuildContext context) => Dialog(
@@ -539,7 +614,17 @@ class SettingsDialog extends StatelessWidget {
           Flexible(
             child: SingleChildScrollView(
               padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
-              child: SettingsList(named: named),
+              child: SettingsList(
+                named: named,
+                email: email,
+                server: server,
+                onSignOut: onSignOut == null
+                    ? null
+                    : () {
+                        Navigator.pop(context);
+                        onSignOut!();
+                      },
+              ),
             ),
           ),
           Padding(
@@ -560,7 +645,15 @@ class SettingsDialog extends StatelessWidget {
 
 /// The gear that opens Settings.
 class SettingsButton extends StatelessWidget {
-  const SettingsButton({super.key, this.color, this.account, this.named});
+  const SettingsButton({
+    super.key,
+    this.color,
+    this.account,
+    this.named,
+    this.email,
+    this.server,
+    this.onSignOut,
+  });
 
   final Color? color;
 
@@ -570,13 +663,42 @@ class SettingsButton extends StatelessWidget {
   /// And its name and color, which are set there.
   final AccountEntry? named;
 
+  /// The account shown, and signing out of it ([SettingsDialog]).
+  final String? email;
+  final String? server;
+  final VoidCallback? onSignOut;
+
   @override
   Widget build(BuildContext context) => IconButton(
     tooltip: 'Settings',
     icon: Icon(Icons.settings_outlined, color: color),
-    onPressed: () => showDialog<void>(
-      context: context,
-      builder: (_) => SettingsDialog(account: account, named: named),
+    onPressed: () => showSettingsDialog(
+      context,
+      account: account,
+      named: named,
+      email: email,
+      server: server,
+      onSignOut: onSignOut,
     ),
   );
 }
+
+/// Settings over the vault, on a computer: from the gear, and the Mac's
+/// PassBundle menu (Settings…, Command-comma).
+Future<void> showSettingsDialog(
+  BuildContext context, {
+  String? account,
+  AccountEntry? named,
+  String? email,
+  String? server,
+  VoidCallback? onSignOut,
+}) => showDialog<void>(
+  context: context,
+  builder: (_) => SettingsDialog(
+    account: account,
+    named: named,
+    email: email,
+    server: server,
+    onSignOut: onSignOut,
+  ),
+);

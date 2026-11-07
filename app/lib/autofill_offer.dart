@@ -6,8 +6,9 @@
 // Android 14 and later a second row opens the system's list of passkey
 // providers, where the person switches PassBundle on. Each row says On, with a check, once Android says so: the app asks
 // again each time it's back in front. "Later", or closing the sheet, isn't
-// asked again; Settings keeps the same card. Nothing turns on without the
-// person's yes in Android's own screens, and unlocking is as it was.
+// asked again; the vault says Settings has the same card, a tap away.
+// Nothing turns on without the person's yes in Android's own screens, and
+// unlocking is as it was.
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -101,8 +102,12 @@ void putOffAutofill() {
   }
 }
 
+/// What the vault says after "Later": where it is from now on (with a way
+/// to Settings).
+const autofillLater = 'You can turn on autofill in Settings any time.';
+
 /// As the vault opens on Android: the step, if [offersAutofill]. What to say
-/// once it closes ("Autofill is on."), or null.
+/// once it closes ("Autofill is on.", or [autofillLater]), or null.
 Future<String?> offerAutofill(BuildContext context) async {
   if (!isAndroid || autofillPutOff()) return null;
   final status = await readAutofillStatus();
@@ -114,7 +119,7 @@ Future<String?> offerAutofill(BuildContext context) async {
   );
   if (after == null || !after.autofillOn) {
     putOffAutofill();
-    return null;
+    return autofillLater;
   }
   final passkeys = setupRows(after).contains((SetupRow.passkeys, true));
   return passkeys ? 'Autofill and passkeys are on.' : 'Autofill is on.';

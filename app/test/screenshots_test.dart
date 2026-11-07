@@ -366,10 +366,9 @@ void main() {
       openSample();
       Core().useAgentHome(home, program);
       for (var i = 0; i < 100; i++) {
-        if ((await tester.runAsync(Core.biometricStatus))!['status'] !=
-            'noAgent') {
-          break;
-        }
+        // Until it's up: no agent yet (on the Mac and Linux, nothing to offer).
+        final status = (await tester.runAsync(Core.biometricStatus))!['status'];
+        if (!const {'noAgent', 'unsupported'}.contains(status)) break;
         await tester.runAsync(
           () => Future<void>.delayed(const Duration(milliseconds: 100)),
         );

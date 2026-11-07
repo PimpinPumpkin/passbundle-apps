@@ -17,6 +17,7 @@
 // unlocked one while a vault is shown, and each request is listed,
 // confirmed, and answered for its own account, which the prompt names.
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 
@@ -762,10 +763,14 @@ class _SignInRequestsSettingsState extends State<SignInRequestsSettings> {
             });
           },
           title: const Text('Confirm before approving'),
+          // How it asks here: the phone's biometrics, Windows Hello (the
+          // only computer's that works yet), or the master password.
           subtitle: Text(
             isPhone
                 ? 'With your fingerprint or face, or your master password'
-                : 'With Windows Hello, Touch ID, or your master password',
+                : Platform.isWindows
+                ? 'With Windows Hello or your master password'
+                : 'With your master password',
           ),
         ),
       ],

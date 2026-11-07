@@ -220,6 +220,7 @@ void main() {
     // script's app is in front. The script checks a fill or a passkey handed
     // back locks it. Then it leaves `autofill-done` (run-as), and this ends.
     final unlock = File('$dir/autofill-unlock');
+    final noBiometric = File('$dir/autofill-no-biometric');
     end = DateTime.now().add(const Duration(minutes: 8));
     while (!done.existsSync() && DateTime.now().isBefore(end)) {
       if (immediately.existsSync()) {
@@ -252,6 +253,17 @@ void main() {
         expect(unlocked!.ok, isTrue, reason: unlocked.error);
         expect(Core().state()['state'], 'unlocked');
         File('$dir/autofill-unlocked').writeAsStringSync('');
+      }
+      // `autofill-no-biometric`: biometric unlock off, and locked, so
+      // autofill asks for the master password itself.
+      if (noBiometric.existsSync()) {
+        noBiometric.deleteSync();
+        final removed = await tester.runAsync(Core.removeBiometric);
+        expect(removed!.ok, isTrue, reason: removed.error);
+        expect((await Core.biometricStatus())['status'], isNot('setUp'));
+        Core().lock();
+        expect(Core().state()['state'], 'locked');
+        File('$dir/autofill-no-biometric-done').writeAsStringSync('');
       }
       await tester.runAsync(
         () => Future<void>.delayed(const Duration(seconds: 1)),

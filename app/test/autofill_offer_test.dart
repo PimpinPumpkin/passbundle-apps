@@ -245,6 +245,12 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text(step), findsNothing);
       expect(autofillPutOff(), isTrue);
+      // Where it is from now on, a tap away.
+      expect(
+        find.text('You can turn on autofill in Settings any time.'),
+        findsOneWidget,
+      );
+      expect(find.widgetWithText(SnackBarAction, 'Settings'), findsOneWidget);
       expect(android.opened, isEmpty);
       expect(android.autofillOn, isFalse);
 

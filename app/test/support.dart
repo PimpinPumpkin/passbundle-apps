@@ -206,6 +206,24 @@ Future<void> pumpUntil(
   throw TestFailure('Never showed up: $finder');
 }
 
+/// Pumps until something is gone (a spinner, say), giving slow core calls
+/// real time.
+Future<void> pumpUntilGone(
+  WidgetTester tester,
+  Finder finder, {
+  Duration timeout = const Duration(seconds: 20),
+}) async {
+  final end = DateTime.now().add(timeout);
+  while (DateTime.now().isBefore(end)) {
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 50)),
+    );
+    await tester.pump();
+    if (finder.evaluate().isEmpty) return;
+  }
+  throw TestFailure('Never went: $finder');
+}
+
 /// A phone, on this computer: the phone's words and screens, with a stand-in
 /// for its own code (MainActivity.kt, AppDelegate.swift) that answers about
 /// biometrics as a phone with a fingerprint set up would. `enrolled` counts
@@ -238,6 +256,11 @@ class PhoneStandIn {
         case 'biometricRemove':
           status = 'notSetUp';
           return {'ok': true};
+        // The phone's prompt, which the lock screen starts by itself as the
+        // app opens: the person cancels it unless [unlockAnswers] says yes.
+        case 'biometricUnlock':
+          unlockPrompts++;
+          return {'ok': true, 'unlocked': false};
         case 'copy':
           copied.add(Map<String, dynamic>.from(call.arguments as Map));
           return true;
@@ -258,6 +281,9 @@ class PhoneStandIn {
   String status;
   final String method;
   var enrolled = 0;
+
+  /// The times unlocking with it was asked for (each one cancelled).
+  var unlockPrompts = 0;
 
   /// What the person does at each biometric prompt: true gives it.
   final biometricAnswers = <bool>[];

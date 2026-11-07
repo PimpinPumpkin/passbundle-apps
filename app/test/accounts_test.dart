@@ -109,7 +109,8 @@ void main() {
       expect(find.text(home), findsOneWidget);
       expect(find.text('vault.home.example.test · Locked'), findsOneWidget);
       expect(find.text('Add account'), findsOneWidget);
-      expect(find.text('Sign out of this account'), findsOneWidget);
+      // Signing out names the account it's for: the one shown.
+      expect(find.text('Sign out of $work'), findsOneWidget);
       await tester.tap(find.text(home));
       await tester.pumpAndSettle();
       // The personal account, locked; the work one stays open.
@@ -175,12 +176,16 @@ void main() {
     await tester.pumpWidget(const PassBundleApp());
     await unlock(tester, 'Example Mail');
     await openMenu(tester);
-    await tester.tap(find.text('Sign out of this account'));
+    await tester.tap(find.text('Sign out of $work'));
     // It asks the agent whether biometric unlock is on first.
     await pumpUntil(tester, find.text('Sign out?'));
     await tester.pumpAndSettle();
     // It says which account's vault leaves.
     expect(find.textContaining('the vault of $work'), findsOneWidget);
+    expect(
+      find.textContaining('Your other accounts stay signed in.'),
+      findsOneWidget,
+    );
     await tester.tap(find.widgetWithText(FilledButton, 'Sign out'));
     await pumpUntil(tester, find.text('Unlock PassBundle'));
     await tester.pumpAndSettle();
@@ -386,8 +391,10 @@ void main() {
       final [w, p] = await unlockBoth(tester);
       await tester.tap(find.byTooltip('Settings'));
       await tester.pump();
-      // Its first line waits on the desktop agent (a real call).
-      await pumpUntil(tester, find.textContaining('Unlock with'));
+      // Its first line waits on the desktop agent (a real call): a spinner
+      // until it answers.
+      await pumpUntil(tester, find.text('Lock after'));
+      await pumpUntilGone(tester, find.byKey(const ValueKey('unlock-loading')));
       await tester.pump(const Duration(milliseconds: 400));
       expect(find.textContaining('For $home'), findsOneWidget);
       final name = find.byKey(const ValueKey('account-name'));

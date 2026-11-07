@@ -247,8 +247,36 @@ class _SignInScreenState extends State<SignInScreen> {
     }
   }
 
+  /// Android's Back goes back a step: from two-step login or making an
+  /// account to signing in, and from adding an account to the one shown,
+  /// before it leaves the app. Not while a call is out.
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) => PopScope(
+    canPop: providers == null && !creating && widget.onCancel == null,
+    onPopInvokedWithResult: (popped, _) {
+      if (popped || working) return;
+      if (providers != null) {
+        setState(() {
+          providers = null;
+          error = null;
+          emailSent = false;
+          code.clear();
+        });
+      } else if (creating) {
+        setState(() {
+          creating = false;
+          error = null;
+          password.clear();
+          confirm.clear();
+        });
+      } else {
+        widget.onCancel?.call();
+      }
+    },
+    child: _screen(context),
+  );
+
+  Widget _screen(BuildContext context) {
     final step = providers;
     if (step != null) return _secondStep(context, step);
     if (creating) return _createAccount(context);
@@ -515,7 +543,7 @@ class _SignInScreenState extends State<SignInScreen> {
             onChanged: working
                 ? null
                 : (v) => setState(() => remember = v ?? false),
-            title: const Text('Don\'t ask again on this device for a while'),
+            title: const Text('Don\'t ask again on this device for 30 days'),
             controlAffinity: ListTileControlAffinity.leading,
             contentPadding: EdgeInsets.zero,
           ),
@@ -553,10 +581,18 @@ class UnlockScreen extends StatefulWidget {
     required this.onUnlocked,
     required this.onSignOut,
     this.menu,
+    this.promptBiometric = false,
+    this.onPrompted,
   });
 
   final String email;
   final String server;
+
+  /// On a phone, as the app opens or comes back to the front locked: ask
+  /// for the biometric by itself, once ([onPrompted] says it was), rather
+  /// than bringing up the keyboard. Not after the person pressed Lock.
+  final bool promptBiometric;
+  final VoidCallback? onPrompted;
 
   /// The accounts signed in here: with more than one, switching to another
   /// (it stays as it is; this one stays locked).
@@ -575,12 +611,16 @@ class _UnlockScreenState extends State<UnlockScreen> {
   final password = TextEditingController(
     text: _measuring ? (testSetting('PB_MEASURE_PASSWORD') ?? '') : '',
   );
+  final passwordFocus = FocusNode();
   String? error;
   bool working = false;
   bool hidden = true;
 
   /// "Windows Hello" or "Touch ID" when this account can unlock with it here.
   String? method;
+
+  /// The prompt asked for by itself is up ([promptIfAsked]).
+  bool prompting = false;
 
   @override
   void initState() {
@@ -589,16 +629,89 @@ class _UnlockScreenState extends State<UnlockScreen> {
       WidgetsBinding.instance.addPostFrameCallback((_) => unlock());
     } else {
       Core.biometricStatus().then((status) {
-        if (mounted && status['status'] == 'setUp') {
-          setState(() => method = status['method'] as String);
+        if (!mounted) return;
+        final setUp = status['status'] == 'setUp';
+        if (setUp) setState(() => method = status['method'] as String);
+        // On a phone the field waited for this, so the keyboard doesn't come
+        // up under the biometric prompt.
+        if (setUp) {
+          promptIfAsked();
+        } else if (isPhone) {
+          passwordFocus.requestFocus();
         }
       });
     }
   }
 
-  Future<void> unlockWithBiometric() async {
+  @override
+  void didUpdateWidget(UnlockScreen old) {
+    super.didUpdateWidget(old);
+    // Back to the front, locked, with this screen already showing: once
+    // it's drawn again.
+    if (widget.promptBiometric && !old.promptBiometric) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) promptIfAsked();
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    passwordFocus.dispose();
+    super.dispose();
+  }
+
+  /// The phone's own prompt, by itself, when the app asks for it (it opened
+  /// or came back locked): once. Cancelling it leaves the master password.
+  void promptIfAsked() {
+    if (!isPhone ||
+        !widget.promptBiometric ||
+        method == null ||
+        working ||
+        prompting) {
+      return;
+    }
+    prompting = true;
+    widget.onPrompted?.call();
+    unlockWithBiometric(byItself: true).whenComplete(() => prompting = false);
+  }
+
+  /// The master password hint, from the account's server: emailed to the
+  /// account's email, or shown here when the server is set to show it.
+  Future<void> getHint() async {
+    setState(() => working = true);
+    final answer = await whileBusy(Core.passwordHint);
+    if (!mounted) return;
+    setState(() => working = false);
+    final hint = answer.body['hint'] as String?;
+    await showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Master password hint'),
+        content: Text(
+          !answer.ok
+              ? answer.error ?? 'Couldn\'t get your hint. Try again.'
+              : hint != null
+              ? 'Your hint: $hint'
+              : 'If your account has a hint, your server emailed it to ${widget.email}.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('OK'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Unlocks with the phone's biometrics, or the desktop agent's. Asked
+  /// for [byItself] (the app opened or came back locked), the field stays
+  /// as it is meanwhile, and a cancel brings up the keyboard for the master
+  /// password instead.
+  Future<void> unlockWithBiometric({bool byItself = false}) async {
     setState(() {
-      working = true;
+      if (!byItself) working = true;
       error = null;
     });
     final answer = await whileBusy(Core.unlockWithBiometric);
@@ -613,6 +726,7 @@ class _UnlockScreenState extends State<UnlockScreen> {
       // An out-of-date setup was turned off: the master password, then turn it on again.
       if (!answer.ok) method = null;
     });
+    if (byItself) passwordFocus.requestFocus();
   }
 
   Future<void> unlock() async {
@@ -640,8 +754,10 @@ class _UnlockScreenState extends State<UnlockScreen> {
       heading(context, 'Unlock PassBundle', widget.email),
       TextField(
         controller: password,
+        focusNode: passwordFocus,
         obscureText: hidden,
-        autofocus: true,
+        // On a phone, once it's known there's no biometric prompt to come.
+        autofocus: !isPhone,
         enabled: !working,
         enableSuggestions: false,
         autocorrect: false,
@@ -671,7 +787,13 @@ class _UnlockScreenState extends State<UnlockScreen> {
           label: Text('Unlock with $method'),
         ),
       ],
-      const SizedBox(height: 18),
+      // First run, or a while away: the hint the account was made with.
+      TextButton(
+        key: const ValueKey('password-hint'),
+        onPressed: working ? null : getHint,
+        child: const Text('Get your master password hint'),
+      ),
+      const SizedBox(height: 6),
       Text(
         Uri.tryParse(widget.server)?.host ?? widget.server,
         textAlign: TextAlign.center,
@@ -702,7 +824,8 @@ class _UnlockScreenState extends State<UnlockScreen> {
                 final sure = await askToSignOut(
                   context,
                   method: method,
-                  email: (widget.menu?.several ?? false) ? widget.email : null,
+                  email: widget.email,
+                  others: widget.menu?.several ?? false,
                 );
                 if (sure) widget.onSignOut();
               },

@@ -21,7 +21,10 @@
 #      login, with the new password, and the app's half saves it;
 #   6. the app's Settings lists the test app as a trusted browser, and
 #      stopping trusting it there means the website's login isn't offered
-#      on its screen again (Android 11 and later, as for trusting it).
+#      on its screen again (Android 11 and later, as for trusting it);
+#   7. locked with biometric unlock off, "Unlock PassBundle" asks for the
+#      master password in PassBundle's own dialog (a wrong one says so),
+#      then offers the login, which fills once it's picked.
 #
 # Needs an emulator, a test server (PB_TEST_SERVER, tools/test-server.sh), and
 # what tools/android-app-test.sh needs.
@@ -456,6 +459,31 @@ offers_unlock "The vault stayed unlocked after unlocking from autofill and filli
 echo "Locked: as each fill was handed back."
 # Never the screen going off (which doesn't lock it here anyway).
 [ "$(screen_offs)" = "$offs" ] || echo "The screen went off meanwhile (PassBundle: screen off), which isn't what locked it."
+
+# Locked with no biometric unlock (docs/phones.md, "Autofill"): autofill asks
+# for the master password in PassBundle's own dialog, a wrong one says so and
+# asks again, and the right one unlocks, then offers the logins: nothing fills
+# until one is picked, and the pick fills it (and, with "Immediately", locks).
+echo "Locked without biometric unlock: the master password in PassBundle's own dialog, then the login"
+away
+ask autofill-no-biometric autofill-no-biometric-done "PassBundle never turned biometric unlock off."
+sign_in_form
+tap "^Unlock PassBundle"
+shown "^Enter your master password to fill this in" || exit 1
+[ -z "$(where '^autofill@example.test$')" ] || { echo "Something filled before the master password was given." >&2; exit 1; }
+# Typed, then Enter, as the keyboard's Go would (its Unlock button can sit
+# under the keyboard on a small screen).
+type_in "not%sthe%spassword"
+a shell input keyevent KEYCODE_ENTER
+shown "^That master password isn't right" || exit 1
+type_in "${password// /%s}"
+a shell input keyevent KEYCODE_ENTER
+shown "^Autofill test app" || exit 1
+# Unlocked, and only offered: nothing is filled until it's picked.
+[ -z "$(where '^autofill@example.test$')" ] || { echo "Unlocking filled a login nobody picked." >&2; exit 1; }
+pick "^Autofill test app" "^autofill@example.test$" "id=com.passbundle.autofilltest:id/username"
+offers_unlock "The vault stayed unlocked after unlocking with the master password from autofill and filling, with Immediately chosen."
+echo "Filled: unlocked with the master password from autofill, then the login picked."
 
 # The app's half can end now.
 a shell run-as com.passbundle.app touch files/autofill-done

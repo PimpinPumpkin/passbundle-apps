@@ -60,6 +60,10 @@ class VaultStart {
 /// screens below it.
 const wideWidth = 900.0;
 
+/// Settings asked for from outside the vault's screens (the Mac's PassBundle
+/// menu, Settings…): the vault shown opens them.
+final settingsAsked = ValueNotifier<int>(0);
+
 bool isWide(BuildContext context) =>
     MediaQuery.sizeOf(context).width >= wideWidth;
 
@@ -183,6 +187,7 @@ class VaultScreenState extends State<VaultScreen> {
     reload();
     lifecycle;
     updates?.addListener(updateFound);
+    settingsAsked.addListener(openSettings);
     // Read now, before the first sync has the core.
     final offer = widget.offerBiometric && mayOfferBiometric(widget.core);
     WidgetsBinding.instance.addPostFrameCallback((_) async {
@@ -213,7 +218,16 @@ class VaultScreenState extends State<VaultScreen> {
       if (!saving) {
         final said = await offerAutofill(context);
         if (!mounted) return;
-        if (said != null) showMessage(context, said);
+        if (said == autofillLater) {
+          // Put off: where it is from now on, a tap away.
+          showMessage(
+            context,
+            autofillLater,
+            action: ('Settings', openSettings),
+          );
+        } else if (said != null) {
+          showMessage(context, said);
+        }
       }
       // Then sign-ins waiting for this account's answer, while the vault is
       // open (not while measuring, which has no server).
@@ -239,6 +253,7 @@ class VaultScreenState extends State<VaultScreen> {
     signInRequests.removeListener(promptForSignIns);
     signInRequests.stop();
     updates?.removeListener(updateFound);
+    settingsAsked.removeListener(openSettings);
     lifecycle.dispose();
     search.dispose();
     // The vault closed (it locked, or the person signed out): its websites'
@@ -390,6 +405,19 @@ class VaultScreenState extends State<VaultScreen> {
     _ => null,
   };
 
+  /// What an empty list says, by what it shows: a search that found
+  /// nothing, a clean Health, or a place with nothing in it yet.
+  String get emptyNote {
+    if (query.isNotEmpty) return 'Nothing matches “${query.trim()}”.';
+    return switch (filter) {
+      Filter.health => 'Nothing to fix: no weak, reused, or unsecured passwords.',
+      Filter.favorites => 'No favorites yet. Star an item to add it here.',
+      Filter.all || Filter.everyAccount => 'No items yet. New adds one.',
+      Filter.folder || Filter.collection => 'Nothing in this folder yet.',
+      _ => 'Nothing here yet.',
+    };
+  }
+
   void choose(Filter f, [String? id]) {
     final searchesChange = (filter == Filter.everyAccount) !=
         (f == Filter.everyAccount);
@@ -514,14 +542,34 @@ class VaultScreenState extends State<VaultScreen> {
     ),
   );
 
-  /// Import and export are the web vault's: it opens there.
-  Future<void> openImport() async {
+  /// Import, export, and the trash are the web vault's: each opens there,
+  /// at [path] ("/#/tools/import").
+  Future<void> openWebVault(String path) async {
     final server = widget.server;
-    final opened =
-        server != null && await Core.openWebsite('$server/#/tools/import');
+    final opened = server != null && await Core.openWebsite('$server$path');
     if (!opened && mounted) {
       showMessage(context, 'Couldn\'t open the web vault.');
     }
+  }
+
+  /// Settings, asked for from outside (the Mac's menu) or after putting off
+  /// autofill: a dialog on a computer, the tab on a phone.
+  void openSettings() {
+    if (!mounted) return;
+    if (!isWide(context)) {
+      setState(() => tab = 2);
+      return;
+    }
+    final menu = widget.menu;
+    final several = menu != null && menu.several;
+    showSettingsDialog(
+      context,
+      account: several ? widget.email : null,
+      named: menu != null && several ? menu.entry(menu.shown) : null,
+      email: widget.email,
+      server: widget.server,
+      onSignOut: menu?.onSignOut,
+    );
   }
 
   /// Moves an item to the trash, once the person says so: true if it went.
@@ -554,6 +602,12 @@ class VaultScreenState extends State<VaultScreen> {
     }
     setState(() => selected = null);
     reload();
+    // Restoring it is the web vault's: its trash, a tap away.
+    showMessage(
+      context,
+      'Moved $name to the trash.',
+      action: ('Open trash', () => openWebVault('/#/vault?type=trash')),
+    );
     return true;
   }
 
@@ -588,7 +642,7 @@ class VaultScreenState extends State<VaultScreen> {
       context: context,
       builder: (context) => AlertDialog(
         title: Text('Delete the folder $name?'),
-        content: const Text('Its items stay in your vault, in no folder.'),
+        content: const Text('Its items stay in Personal, in no folder.'),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context, false),
@@ -619,6 +673,7 @@ class VaultScreenState extends State<VaultScreen> {
         core: widget.core,
         id: id,
         places: places,
+        server: widget.server,
         phone: true,
         onEdit: () => edit(id),
         onChanged: reload,
@@ -655,6 +710,7 @@ class VaultScreenState extends State<VaultScreen> {
             core: widget.core,
             id: selected!,
             places: places,
+            server: widget.server,
             onEdit: () => edit(selected),
             onChanged: reload,
             onTrash: (name) => trash(selected!, name),
@@ -670,6 +726,7 @@ class VaultScreenState extends State<VaultScreen> {
               children: [
                 Sidebar(
                   email: widget.email,
+                  server: widget.server,
                   menu: widget.menu,
                   everyAccount: everyAccount.length,
                   filter: filter,
@@ -678,7 +735,8 @@ class VaultScreenState extends State<VaultScreen> {
                   items: everything,
                   toFix: health.length,
                   onGenerator: openGeneratorTool,
-                  onImport: openImport,
+                  onImport: () => openWebVault('/#/tools/import'),
+                  onExport: () => openWebVault('/#/tools/export'),
                   onChoose: choose,
                   onNewFolder: newFolder,
                   onRenameFolder: renameFolder,
@@ -700,6 +758,7 @@ class VaultScreenState extends State<VaultScreen> {
                     accounts: filter == Filter.everyAccount
                         ? widget.menu
                         : null,
+                    empty: emptyNote,
                     selected: selected,
                     syncing: syncing,
                     onSearch: (q) {
@@ -958,9 +1017,13 @@ class VaultScreenState extends State<VaultScreen> {
           SliverFillRemaining(
             hasScrollBody: false,
             child: Center(
-              child: Text(
-                query.isEmpty ? 'Nothing here' : 'Nothing matches',
-                style: TextStyle(color: c.muted),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 32),
+                child: Text(
+                  emptyNote,
+                  textAlign: TextAlign.center,
+                  style: TextStyle(color: c.muted),
+                ),
               ),
             ),
           )
@@ -1170,10 +1233,21 @@ class VaultScreenState extends State<VaultScreen> {
   });
 }
 
-void showMessage(BuildContext context, String text) =>
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(text), duration: const Duration(seconds: 3)),
-    );
+/// A quiet note at the bottom, with what to do next when there's an
+/// [action]: its label, and what it does.
+void showMessage(
+  BuildContext context,
+  String text, {
+  (String, VoidCallback)? action,
+}) => ScaffoldMessenger.of(context).showSnackBar(
+  SnackBar(
+    content: Text(text),
+    duration: Duration(seconds: action == null ? 3 : 6),
+    action: action == null
+        ? null
+        : SnackBarAction(label: action.$1, onPressed: action.$2),
+  ),
+);
 
 /// The kinds of item on a phone, each its jewel tile with how many there
 /// are: two to a row, or one when the names' words need the room (a large
@@ -1440,6 +1514,7 @@ class Sidebar extends StatelessWidget {
     super.key,
     this.width = 248,
     required this.email,
+    this.server,
     this.menu,
     this.everyAccount = 0,
     required this.filter,
@@ -1449,6 +1524,7 @@ class Sidebar extends StatelessWidget {
     this.toFix = 0,
     this.onGenerator,
     this.onImport,
+    this.onExport,
     required this.onChoose,
     required this.onNewFolder,
     required this.onRenameFolder,
@@ -1459,6 +1535,9 @@ class Sidebar extends StatelessWidget {
 
   final double width;
   final String email;
+
+  /// Its server, for Settings' account row.
+  final String? server;
 
   /// The account menu, from the email at the foot (accounts.dart).
   final AccountsMenu? menu;
@@ -1475,9 +1554,11 @@ class Sidebar extends StatelessWidget {
   /// How many logins Health has something to fix for.
   final int toFix;
 
-  /// The Tools: the generator, and import and export (the web vault's).
+  /// The Tools: the generator, and import and export (the web vault's,
+  /// which open there).
   final VoidCallback? onGenerator;
   final VoidCallback? onImport;
+  final VoidCallback? onExport;
   final void Function(Filter, [String?]) onChoose;
   final VoidCallback onNewFolder;
   final void Function(String id, String name) onRenameFolder;
@@ -1490,6 +1571,11 @@ class Sidebar extends StatelessWidget {
     final c = context.colors;
     int count(Filter f, [String? id]) =>
         items.where((i) => shows(i, f, id)).length;
+    // What opens in the web vault, in the browser, says so.
+    final webVaultMark = Tooltip(
+      message: 'Opens the web vault',
+      child: Icon(Icons.open_in_new_rounded, size: 15, color: c.muted),
+    );
     Widget entry({
       required Widget tile,
       required String label,
@@ -1697,9 +1783,18 @@ class Sidebar extends StatelessWidget {
                   if (onImport != null)
                     entry(
                       tile: outline(Glyphs.download),
-                      label: 'Import and export',
+                      label: 'Import',
                       on: false,
                       tap: onImport!,
+                      trailing: webVaultMark,
+                    ),
+                  if (onExport != null)
+                    entry(
+                      tile: outline(Glyphs.download),
+                      label: 'Export',
+                      on: false,
+                      tap: onExport!,
+                      trailing: webVaultMark,
                     ),
                 ],
                 const SizedBox(height: 8),
@@ -1734,6 +1829,9 @@ class Sidebar extends StatelessWidget {
                   named: (menu?.several ?? false)
                       ? menu!.entry(menu!.shown)
                       : null,
+                  email: email,
+                  server: server,
+                  onSignOut: menu?.onSignOut,
                 ),
                 const Spacer(),
                 TextButton.icon(
@@ -1766,7 +1864,11 @@ class ItemList extends StatelessWidget {
     this.badges = true,
     this.accounts,
     this.banner,
+    this.empty = 'Nothing here yet.',
   });
+
+  /// What it says with nothing to show: why, by what it shows.
+  final String empty;
 
   /// What the list shows: All items, a kind, a folder.
   final String title;
@@ -1888,7 +1990,14 @@ class ItemList extends StatelessWidget {
         Expanded(
           child: items.isEmpty
               ? Center(
-                  child: Text('Nothing here', style: TextStyle(color: c.muted)),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 24),
+                    child: Text(
+                      empty,
+                      textAlign: TextAlign.center,
+                      style: TextStyle(color: c.muted),
+                    ),
+                  ),
                 )
               : ListView.builder(
                   padding: const EdgeInsets.fromLTRB(10, 2, 10, 12),
@@ -2036,11 +2145,15 @@ class ItemPane extends StatefulWidget {
     required this.onEdit,
     required this.onTrash,
     this.onChanged,
+    this.server,
     this.phone = false,
   });
 
   /// It changed here (favorited, a version restored): the list reads again.
   final VoidCallback? onChanged;
+
+  /// The account's server, where the web vault edits what the app doesn't.
+  final String? server;
 
   final Core core;
   final String id;
@@ -2161,6 +2274,12 @@ class _ItemPaneState extends State<ItemPane> {
       showMessage(context, 'Couldn\'t open $uri.');
     }
   }
+
+  /// The web vault, with this item's editor open: it edits SSH keys and the
+  /// newer kinds, which the app doesn't yet.
+  Future<void> editInWebVault() => openSite(
+    '${widget.server}/#/vault?itemId=${Uri.encodeQueryComponent(widget.id)}&action=edit',
+  );
 
   /// Whether the person may do something with the item (`edit`,
   /// `seePasswords`, `delete`, ...), as their shared folders allow (the
@@ -2331,13 +2450,35 @@ class _ItemPaneState extends State<ItemPane> {
       size: widget.phone ? 22 : 20,
       onChanged: favorite,
     ),
-    // Some kinds are the web vault's to edit, for now, and some items the
+    // Some kinds are the web vault's to edit, for now (SSH keys and the
+    // newer kinds), which it says, with the way there; and some items the
     // person's shared folder lets them see only.
     if (item['editable'] != false)
       Padding(
         padding: const EdgeInsets.symmetric(horizontal: 4),
         child: OutlinedButton(onPressed: edit, child: const Text('Edit')),
-      ),
+      )
+    else if (item['editInWebVault'] == true && widget.server != null)
+      // A phone's top bar has room for an icon only.
+      widget.phone
+          ? IconButton(
+              key: const ValueKey('edit-in-web-vault'),
+              tooltip: 'Edit in web vault',
+              icon: const Icon(Icons.open_in_new_rounded),
+              onPressed: editInWebVault,
+            )
+          : Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 4),
+              child: Tooltip(
+                message: 'PassBundle edits this kind in the web vault, for now',
+                child: OutlinedButton.icon(
+                  key: const ValueKey('edit-in-web-vault'),
+                  onPressed: editInWebVault,
+                  icon: const Icon(Icons.open_in_new_rounded, size: 16),
+                  label: const Text('Edit in web vault'),
+                ),
+              ),
+            ),
     if (may(item, 'delete'))
       IconButton(
         tooltip: 'Move to trash',

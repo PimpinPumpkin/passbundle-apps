@@ -35,6 +35,13 @@ class MainFlutterWindow: NSWindow {
   /// Where macOS keeps the window's frame between launches.
   private static let frameName = "PassBundle"
 
+  /// The PassBundle menu's Settings… (Command-comma): the app opens Settings
+  /// over the vault shown (app/lib/main.dart, `fromComputer`). The menu
+  /// finds it through the window, which is first in the responder chain.
+  @objc func showSettings(_ sender: Any?) {
+    computer?.invokeMethod("settings", arguments: nil)
+  }
+
   override func awakeFromNib() {
     // Out of screenshots, screen recordings, and screen sharing from the
     // start; the app lets it in only if the person allowed that in Settings

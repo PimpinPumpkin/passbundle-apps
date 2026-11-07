@@ -565,7 +565,7 @@ class _ItemEditorState extends State<ItemEditor> {
     final what =
         (template?['name'] as String?) ??
         templateName ??
-        (kind == 'note' ? 'Secure note' : ItemKind.of(kind).one);
+        ItemKind.of(kind).one;
     // "Wi-Fi network" and "API key" keep their capitals; "Login" doesn't.
     final first = what.split(' ').first;
     final keep =

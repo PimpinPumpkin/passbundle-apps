@@ -603,7 +603,10 @@ fn method() -> &'static str {
 
 /// Whether this account can unlock with Windows Hello or Touch ID here:
 /// "setUp", "notSetUp", "unavailable", or "noAgent" (the desktop agent isn't
-/// running), with the method's name.
+/// running), with the method's name. "unsupported" where it can't work at
+/// all, so the screens don't offer it: the Mac, until the agent's Touch ID
+/// is signed (DESIGN.md, "Biometric unlock"), and Linux, which has no agent.
+/// An agent that says it can (the test builds' stand-in) is taken at its word.
 ///
 /// # Safety
 /// `account` is null or a NUL-terminated UTF-8 string, valid for the call.
@@ -611,14 +614,37 @@ fn method() -> &'static str {
 pub unsafe extern "C" fn pb_biometric_status(account: *const c_char) -> *mut c_char {
     let account = text(account);
     with_app_waiting(&account, |app| {
-        let status = match app.biometric_status() {
-            Ok(Status::SetUp) => "setUp",
-            Ok(Status::NotSetUp) => "notSetUp",
-            Ok(Status::Unavailable) => "unavailable",
-            Err(Error::NoAgent) => "noAgent",
-            Err(_) => "unavailable",
-        };
+        let status = biometric_status_here(app.biometric_status());
         json!({ "status": status, "method": method() })
+    })
+}
+
+/// What the screens are told about unlocking with biometrics, from what the
+/// agent says (`pb_biometric_status`).
+fn biometric_status_here(said: crate::Result<Status>) -> &'static str {
+    let windows = cfg!(target_os = "windows");
+    match said {
+        Ok(Status::SetUp) => "setUp",
+        Ok(Status::NotSetUp) => "notSetUp",
+        Ok(Status::Unavailable) if windows => "unavailable",
+        Err(Error::NoAgent) if windows => "noAgent",
+        Err(_) if windows => "unavailable",
+        Ok(Status::Unavailable) | Err(_) => "unsupported",
+    }
+}
+
+/// The account's master password hint, for the lock screen: `{ok, hint}`,
+/// the hint when the server shows it, or null when it emailed it to the
+/// account's email; or the words to show.
+///
+/// # Safety
+/// `account` is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_password_hint(account: *const c_char) -> *mut c_char {
+    let account = text(account);
+    with_app_waiting(&account, |app| match app.password_hint() {
+        Ok(hint) => json!({ "ok": true, "hint": hint }),
+        Err(e) => failed(e),
     })
 }
 
@@ -1066,7 +1092,13 @@ pub(crate) fn fillable(package: &str, domain: &str) -> Value {
         return json!({ "locked": true, "signedOut": true });
     };
     if accounts.unlocked().next().is_none() {
-        return json!({ "locked": true, "signedOut": false, "account": shown });
+        // Which account unlocking opens, by name, when there's more than one.
+        return json!({
+            "locked": true,
+            "signedOut": false,
+            "account": shown,
+            "accountLabel": account_label(accounts, &shown),
+        });
     }
     let target = if domain.is_empty() {
         Target::App(package)
@@ -1099,6 +1131,21 @@ pub(crate) fn confirm_master_password(account: &str, id: &str, password: &str) -
         on_account(accounts, account, |app| {
             done(app.confirm_master_password(id, password))
         })
+    })
+}
+
+/// Unlocks an account with its master password, for Android's autofill
+/// while it's locked and there's no biometric unlock (FillActivity.kt): as
+/// the lock screen does (`pb_unlock`), the account named. `{ok}`, or the
+/// words to show.
+#[cfg(target_os = "android")]
+pub(crate) fn unlock_with_master_password(account: &str, password: &str) -> Value {
+    accounts_value(|accounts| {
+        lock_if_due(accounts);
+        if account.is_empty() {
+            return failed(Error::SignedOut);
+        }
+        on_account(accounts, account, |app| done(app.unlock(password)))
     })
 }
 
@@ -1508,14 +1555,15 @@ pub unsafe extern "C" fn pb_item(account: *const c_char, id: *const c_char) -> *
             });
         }
         // The app edits logins, notes, cards, and identities, where the
-        // person may; the web vault edits SSH keys and the newer kinds.
-        view["editable"] = json!(
-            matches!(
-                item.kind,
-                ItemKind::Login | ItemKind::SecureNote | ItemKind::Card | ItemKind::Identity
-            ) && vault.grid(item).edit
-                && vault.grid(item).see_passwords
+        // person may; the web vault edits SSH keys and the newer kinds, and
+        // the item says so (`editInWebVault`), so Edit isn't just gone.
+        let may_edit = vault.grid(item).edit && vault.grid(item).see_passwords;
+        let app_edits = matches!(
+            item.kind,
+            ItemKind::Login | ItemKind::SecureNote | ItemKind::Card | ItemKind::Identity
         );
+        view["editable"] = json!(app_edits && may_edit);
+        view["editInWebVault"] = json!(!app_edits && may_edit && !item.deleted);
         view
     })
 }

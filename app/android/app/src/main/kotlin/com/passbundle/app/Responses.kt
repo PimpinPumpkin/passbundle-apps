@@ -19,7 +19,8 @@ import java.util.concurrent.atomic.AtomicInteger
  * more than one account on the phone, the account's name), each filled only
  * from its own account when picked (through
  * FillActivity, which takes the password from the core then), or "Unlock
- * PassBundle" while the vault is locked. A page's domain counts only from a
+ * PassBundle" while the vault is locked, or "Sign in to PassBundle" with no
+ * account on the phone (Unlocking.offer). A page's domain counts only from a
  * browser (Browsers.kt); another app that can open web links and gives one is
  * offered to be trusted as a browser, in PassBundle's own dialog.
  */
@@ -37,7 +38,15 @@ object Responses {
      * account, for these fields: the account by its id on this device, as
      * the core named it.
      */
-    fun pending(context: Context, fields: Fields, mode: String, account: String, item: String? = null, asks: Boolean = false) =
+    fun pending(
+        context: Context,
+        fields: Fields,
+        mode: String,
+        account: String,
+        item: String? = null,
+        asks: Boolean = false,
+        label: String? = null,
+    ) =
         PendingIntent.getActivity(
             context,
             requests.incrementAndGet(),
@@ -45,7 +54,8 @@ object Responses {
                 .putExtra(FillActivity.MODE, mode)
                 .putExtra(FillActivity.ACCOUNT, account)
                 .putExtra(FillActivity.ITEM, item)
-                .putExtra(FillActivity.ASKS, asks),
+                .putExtra(FillActivity.ASKS, asks)
+                .putExtra(FillActivity.LABEL, label),
             // Mutable: Android adds the screen's structure when it starts it.
             PendingIntent.FLAG_CANCEL_CURRENT or PendingIntent.FLAG_MUTABLE,
         ).intentSender
@@ -104,15 +114,27 @@ object Responses {
         val trusted = claimed != null && Browsers.trusts(context, fields.packageName)
         val domain = claimed.takeIf { trusted }
         val answer = JSONObject(Core.fillable(fields.packageName, domain ?: "") ?: return null)
-        if (answer.optBoolean("busy") || answer.optBoolean("signedOut")) return null
-        val save = saveInfo(fields)
-        if (answer.optBoolean("locked")) {
-            // The app's sites checked meanwhile, for once the person unlocks.
-            if (domain == null) AppSites.warm(context, fields.packageName)
+        val offer = Unlocking.offer(answer.optBoolean("busy"), answer.optBoolean("signedOut"), answer.optBoolean("locked"))
+        if (offer == Unlocking.Offer.NOTHING) return null
+        if (offer == Unlocking.Offer.SIGN_IN) {
+            // No account here: PassBundle opens to sign in; nothing to save to yet.
             return FillResponse.Builder()
                 .setAuthentication(
                     ids,
-                    pending(context, fields, FillActivity.UNLOCK, answer.optString("account")),
+                    pending(context, fields, FillActivity.SIGN_IN, ""),
+                    presentation(context, "Sign in to PassBundle", "to fill this in"),
+                )
+                .build()
+        }
+        val save = saveInfo(fields)
+        if (offer == Unlocking.Offer.UNLOCK) {
+            // The app's sites checked meanwhile, for once the person unlocks.
+            if (domain == null) AppSites.warm(context, fields.packageName)
+            val label = answer.optString("accountLabel").takeIf { !answer.isNull("accountLabel") && it.isNotEmpty() }
+            return FillResponse.Builder()
+                .setAuthentication(
+                    ids,
+                    pending(context, fields, FillActivity.UNLOCK, answer.optString("account"), label = label),
                     presentation(context, "Unlock PassBundle", "to fill this in"),
                 )
                 .apply { save?.let { setSaveInfo(it) } }

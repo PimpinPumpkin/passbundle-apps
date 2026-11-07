@@ -116,6 +116,15 @@ class _PassBundleAppState extends State<PassBundleApp> {
   /// time (unlock_offer.dart).
   bool withPassword = false;
 
+  /// Asks the phone's lock screen to start the biometric prompt by itself
+  /// (sign_in.dart, `UnlockScreen.promptBiometric`): as the app opens
+  /// locked, and each time it comes back to the front locked, never after
+  /// the person pressed Lock or while it's in use. Counted against how many
+  /// the lock screen has taken, so one never waits for a later lock.
+  int biometricAsks = 1;
+  int biometricAsksTaken = 0;
+  bool get promptBiometric => biometricAsks > biometricAsksTaken;
+
   /// While unlocked, asks the core every two seconds whether to lock by itself.
   Timer? ticker;
   DateTime lastUsed = DateTime(0);
@@ -145,6 +154,9 @@ class _PassBundleAppState extends State<PassBundleApp> {
     accounts = core.accounts();
     Core.account = accounts['active'] as String? ?? '';
     state = core.state();
+    // Opened unlocked (Android's autofill unlocked it in this process): no
+    // prompt waits for a later lock.
+    if (state['state'] != 'locked') biometricAsksTaken = biometricAsks;
     computer.setMethodCallHandler(fromComputer);
     HardwareKeyboard.instance.addHandler(keyPressed);
     // An account's name or color changed (Settings): the menus show it.
@@ -161,6 +173,10 @@ class _PassBundleAppState extends State<PassBundleApp> {
       onShow: () {
         if (seen(core.accounts()) != seen(accounts)) refresh();
         if (anyUnlocked) tick();
+        // Back locked: the phone's lock screen asks for the biometric.
+        if (!adding && core.state()['state'] == 'locked') {
+          setState(() => biometricAsks = biometricAsksTaken + 1);
+        }
       },
     );
     watch();
@@ -196,6 +212,8 @@ class _PassBundleAppState extends State<PassBundleApp> {
       state = core.state();
       signingInAgain = false;
       this.withPassword = withPassword;
+      // Shown unlocked (or signed out): an ask from before is done with.
+      if (state['state'] != 'locked') biometricAsksTaken = biometricAsks;
     });
     watch();
   }
@@ -242,7 +260,8 @@ class _PassBundleAppState extends State<PassBundleApp> {
     final sure = await askToSignOut(
       context,
       method: status['status'] == 'setUp' ? status['method'] as String? : null,
-      email: several ? state['email'] as String? : null,
+      email: state['email'] as String?,
+      others: several,
     );
     if (!sure) return;
     core.signOut();
@@ -273,6 +292,11 @@ class _PassBundleAppState extends State<PassBundleApp> {
         anyUnlocked &&
         core.sleeping()['locked'] == true) {
       refresh();
+    }
+    // The Mac's PassBundle menu, Settings… (Command-comma): the vault
+    // shown opens them; locked, there's nothing to set yet.
+    if (call.method == 'settings' && state['state'] == 'unlocked') {
+      settingsAsked.value++;
     }
   }
 
@@ -328,6 +352,8 @@ class _PassBundleAppState extends State<PassBundleApp> {
         email: email!,
         server: server!,
         menu: menu,
+        promptBiometric: promptBiometric,
+        onPrompted: () => setState(() => biometricAsksTaken = biometricAsks),
         onUnlocked: (ms) {
           if (measuring) {
             report('unlocked ${ms ?? 0} ms, ${core.list('').length} items');
@@ -351,6 +377,8 @@ class _PassBundleAppState extends State<PassBundleApp> {
         onMode: (m) => setState(() => mode = m),
         onLock: () {
           core.lock();
+          // Locked by the person: the lock screen waits for them.
+          biometricAsksTaken = biometricAsks;
           refresh();
         },
         onSignInAgain: () => setState(() => signingInAgain = true),

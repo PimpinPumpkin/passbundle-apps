@@ -603,7 +603,7 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('Delete the folder Personal?'), findsOneWidget);
       expect(
-        find.text('Its items stay in your vault, in no folder.'),
+        find.text('Its items stay in Personal, in no folder.'),
         findsOneWidget,
       );
       await tester.tap(find.text('Delete folder'));
@@ -723,7 +723,8 @@ void main() {
       await tester.tap(find.text('New'));
       await tester.pumpAndSettle();
       expect(find.text('What are you saving?'), findsOneWidget);
-      for (final kind in ['Login', 'Secure note', 'Card', 'Identity']) {
+      // A note is a note, as the menu's Notes say.
+      for (final kind in ['Login', 'Note', 'Card', 'Identity']) {
         expect(find.text(kind), findsOneWidget);
       }
       expect(find.text('Wi-Fi network'), findsNothing);
@@ -862,8 +863,11 @@ void main() {
     final menu = find.byType(Sidebar);
     await tester.tap(find.descendant(of: menu, matching: find.text('Health')));
     await tester.pump();
-    // The sample's passwords are strong, each used once.
-    expect(find.text('Nothing here'), findsOneWidget);
+    // The sample's passwords are strong, each used once: it says so.
+    expect(
+      find.text('Nothing to fix: no weak, reused, or unsecured passwords.'),
+      findsOneWidget,
+    );
     await tester.tap(
       find.descendant(of: menu, matching: find.text('Generator')),
     );
@@ -1222,7 +1226,7 @@ void main() {
         for (final kind in [
           'Card',
           'Identity',
-          'Secure note',
+          'Note',
           'Login',
           'Domain',
         ]) {
