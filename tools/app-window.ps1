@@ -9,10 +9,9 @@
 # Maximize, or Close when the mouse rests on one, which is in front, shown,
 # and owned by nothing. Then a screenshot took the tooltip's frame, gone a
 # moment later (none: "Parameter is not valid"), and the smallest-size check
-# sized the tooltip (98 by 98). This finds the
-# runner's window by its class (FLUTTER_RUNNER_WIN32_WINDOW,
-# app/windows/runner/win32_window.cpp), and waits until Windows shows it, not
-# minimized, with a frame.
+# sized the tooltip (98 by 98). This finds the runner's window by its class
+# (FLUTTER_RUNNER_WIN32_WINDOW, app/windows/runner/win32_window.cpp), and
+# waits until Windows shows it, not minimized, with a frame.
 
 Add-Type @"
 using System;
