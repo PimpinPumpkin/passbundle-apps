@@ -63,31 +63,43 @@ class SiteIcons {
     _waiting.clear();
   }
 
+  /// Each icon is kept by its account and host: asked of that account's own
+  /// server, for its own logins ("All accounts" lists several accounts').
+  static String _key(String host, String? account) =>
+      '${account ?? Core.account} $host';
+
   /// What's known for a host now, without waiting: the icon, null for none,
-  /// or [unknown].
-  Object? now(String host) => _known.containsKey(host) ? _known[host] : unknown;
+  /// or [unknown]. For a login of [account], or of the account shown.
+  Object? now(String host, [String? account]) {
+    final key = _key(host, account);
+    return _known.containsKey(key) ? _known[key] : unknown;
+  }
 
   static const unknown = Object();
 
-  /// A host's icon, or null: asked of the core four at a time.
-  Future<ui.Image?> of(String host) {
+  /// A host's icon, or null: asked of the core four at a time, of [account]'s
+  /// server (the account shown's when null).
+  Future<ui.Image?> of(String host, [String? account]) {
     if (!on) return Future.value(null);
-    if (_known.containsKey(host)) return Future.value(_known[host]);
-    final waiting = _waiting[host];
+    final key = _key(host, account);
+    if (_known.containsKey(key)) return Future.value(_known[key]);
+    final waiting = _waiting[key];
     if (waiting != null) return waiting.future;
     final made = Completer<ui.Image?>();
-    _waiting[host] = made;
-    _queue.add(host);
+    _waiting[key] = made;
+    _queue.add(key);
     _next();
     return made.future;
   }
 
   void _next() {
     while (_running < 4 && _queue.isNotEmpty) {
-      final host = _queue.removeFirst();
+      final key = _queue.removeFirst();
+      final split = key.indexOf(' ');
+      final (account, host) = (key.substring(0, split), key.substring(split + 1));
       final session = _session;
       _running++;
-      Core.icon(host)
+      Core.icon(host, account)
           .then<ui.Image?>(
             (bytes) => bytes == null ? null : draw(bytes),
             onError: (Object _) => null,
@@ -95,8 +107,8 @@ class SiteIcons {
           .then((icon) {
             _running--;
             if (session == _session) {
-              _known[host] = icon;
-              _waiting.remove(host)?.complete(icon);
+              _known[key] = icon;
+              _waiting.remove(key)?.complete(icon);
             }
             _next();
           });

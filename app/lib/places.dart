@@ -11,6 +11,10 @@ import 'glyphs.dart';
 /// shared folders.
 enum Filter {
   all,
+
+  /// Every unlocked account's items, with several accounts signed in
+  /// (accounts.dart, "All accounts").
+  everyAccount,
   favorites,
   health,
   kind,
@@ -153,7 +157,7 @@ bool shows(
 }) {
   if (item['mspCopy'] == true && filter != Filter.collection) return false;
   return switch (filter) {
-    Filter.all => true,
+    Filter.all || Filter.everyAccount => true,
     Filter.favorites => item['favorite'] == true,
     Filter.health => health.containsKey(item['id']),
     Filter.kind => item['kind'] == id,

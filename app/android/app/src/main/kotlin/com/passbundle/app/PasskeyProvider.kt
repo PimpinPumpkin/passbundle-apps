@@ -127,7 +127,14 @@ class PasskeyProvider : CredentialProviderService() {
                             pending(context, PasskeyActivity.GET, item.getString("id"), item.optString("account")),
                             option,
                         )
-                            .setDisplayName(item.optString("userDisplayName").ifEmpty { item.optString("name") })
+                            .setDisplayName(
+                                // With more than one account on the phone, which one's it is.
+                                Responses.subtitle(
+                                    item.optString("userDisplayName").ifEmpty { item.optString("name") },
+                                    null,
+                                    item.optString("accountLabel").ifEmpty { null },
+                                ),
+                            )
                             .build()
                 }
             }

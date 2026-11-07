@@ -31,6 +31,31 @@ import 'updates.dart';
 import 'widgets.dart';
 import 'window_chrome.dart';
 
+/// Where a vault opens when the screens switch to its account from
+/// another one's: from "All accounts" (an item picked there), choosing the
+/// account for a new item, or a sign-in Android's autofill offers to save
+/// (accounts.dart).
+class VaultStart {
+  const VaultStart({
+    this.filter = Filter.all,
+    this.item,
+    this.newItem = false,
+    this.save,
+  });
+
+  /// The place shown.
+  final Filter filter;
+
+  /// The item opened.
+  final String? item;
+
+  /// New item's picker, its account chosen already.
+  final bool newItem;
+
+  /// The sign-in to save, for the editor (with the login's `id` to update).
+  final Map<String, dynamic>? save;
+}
+
 /// The menu, the list, and an item side by side, from this wide; a phone's
 /// screens below it.
 const wideWidth = 900.0;
@@ -51,6 +76,8 @@ class VaultScreen extends StatefulWidget {
     required this.onSignInAgain,
     this.syncOnOpen = true,
     this.offerBiometric = false,
+    this.start,
+    this.onOpenIn,
   });
 
   final Core core;
@@ -72,6 +99,14 @@ class VaultScreen extends StatefulWidget {
   /// unlock for next time (unlock_offer.dart).
   final bool offerBiometric;
 
+  /// Where it opens, when the screens switched to its account to show
+  /// something (an item from "All accounts", say).
+  final VaultStart? start;
+
+  /// Shows another account's vault, opening [VaultStart] there: what's
+  /// picked from another account is opened in its own account.
+  final void Function(String account, VaultStart start)? onOpenIn;
+
   @override
   State<VaultScreen> createState() => VaultScreenState();
 }
@@ -87,6 +122,13 @@ class VaultScreenState extends State<VaultScreen> {
 
   /// Every item, whatever the search: the menu's counts.
   List<Map<String, dynamic>> everything = [];
+
+  /// Every unlocked account's items, with several accounts signed in ("All
+  /// accounts"): what the search finds there while it's shown, else all.
+  List<Map<String, dynamic>> everyAccount = [];
+
+  /// More than one account is signed in here.
+  bool get several => widget.menu?.several ?? false;
   Places places = Places.empty;
 
   /// The logins with something to fix, by id (core/src/health.rs): judged
@@ -131,6 +173,7 @@ class VaultScreenState extends State<VaultScreen> {
   @override
   void initState() {
     super.initState();
+    if (widget.start case final start?) filter = start.filter;
     reload();
     lifecycle;
     updates?.addListener(updateFound);
@@ -139,8 +182,18 @@ class VaultScreenState extends State<VaultScreen> {
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       if (widget.syncOnOpen) sync();
       updateFound();
+      // What it was opened to show, from another account's vault.
+      if (widget.start case final start?) {
+        if (start.item case final id?) {
+          isWide(context) ? setState(() => selected = id) : open(id);
+        }
+        if (start.newItem) unawaited(newItem(ask: false));
+        if (start.save case final save?) {
+          unawaited(edit(save['id'] as String?, save));
+        }
+      }
       // A sign-in to save opens the editor; the offer waits for another time.
-      final saving = await saveOffered();
+      final saving = widget.start?.save != null || await saveOffered();
       if (!mounted) return;
       if (!saving && offer) {
         final method = await offerBiometricUnlock(context);
@@ -165,6 +218,16 @@ class VaultScreenState extends State<VaultScreen> {
     });
   }
 
+  /// Another account locked or unlocked: "All accounts" lists what's
+  /// unlocked now, and nothing more of one that locked.
+  @override
+  void didUpdateWidget(VaultScreen old) {
+    super.didUpdateWidget(old);
+    String unlocked(AccountsMenu? menu) =>
+        [for (final a in menu?.unlocked ?? const <AccountEntry>[]) a.id].join(',');
+    if (unlocked(old.menu) != unlocked(widget.menu)) reload();
+  }
+
   @override
   void dispose() {
     signInRequests.removeListener(promptForSignIns);
@@ -184,13 +247,25 @@ class VaultScreenState extends State<VaultScreen> {
   }
 
   /// A sign-in Android's autofill offered to save: the editor, filled in.
-  /// True if there was one.
+  /// True if there was one. A new password for a login it has comes with
+  /// that login's id and account, and opens in that account; a new login,
+  /// with more than one account unlocked, asks which account it goes in.
   Future<bool> saveOffered() async {
     if (!mounted) return false;
     final save = await Core.pendingSave();
     if (save == null || !mounted) return false;
-    // A new password for a login it has comes with that login's id.
-    unawaited(edit(save['id'] as String?, save));
+    final id = save['id'] as String?;
+    var account = save['account'] as String? ?? Core.account;
+    if (id == null && widget.menu != null) {
+      final chosen = await chooseAccount(context, widget.menu!);
+      if (chosen == null || !mounted) return true;
+      account = chosen;
+    }
+    if (account != Core.account && widget.onOpenIn != null) {
+      widget.onOpenIn!(account, VaultStart(save: save));
+      return true;
+    }
+    unawaited(edit(account == Core.account ? id : null, save));
     return true;
   }
 
@@ -198,8 +273,12 @@ class VaultScreenState extends State<VaultScreen> {
   void reload() {
     if (busy.value) return;
     setState(() {
-      all = widget.core.list(query);
-      everything = query.isEmpty ? all : widget.core.list('');
+      final searching = filter == Filter.everyAccount ? '' : query;
+      all = widget.core.list(searching);
+      everything = searching.isEmpty ? all : widget.core.list('');
+      everyAccount = several
+          ? widget.core.listAll(filter == Filter.everyAccount ? query : '')
+          : const [];
       places = Places(widget.core.places());
       if (selected != null && widget.core.item(selected!) == null) {
         selected = null;
@@ -241,7 +320,7 @@ class VaultScreenState extends State<VaultScreen> {
   }
 
   List<Map<String, dynamic>> get shown => [
-    for (final i in all)
+    for (final i in filter == Filter.everyAccount ? everyAccount : all)
       if (shows(i, filter, filterId, health: health))
         // Health says what each login has to fix.
         if (filter == Filter.health)
@@ -253,6 +332,7 @@ class VaultScreenState extends State<VaultScreen> {
   /// What the list shows, by name, for its header.
   String? get placeName => switch (filter) {
     Filter.all => null,
+    Filter.everyAccount => 'All accounts',
     Filter.favorites => 'Favorites',
     Filter.health => 'Health',
     Filter.kind => ItemKind.of(filterId ?? '').many,
@@ -282,13 +362,55 @@ class VaultScreenState extends State<VaultScreen> {
     _ => null,
   };
 
-  void choose(Filter f, [String? id]) => setState(() {
-    filter = f;
-    filterId = id;
-  });
+  void choose(Filter f, [String? id]) {
+    final searchesChange = (filter == Filter.everyAccount) !=
+        (f == Filter.everyAccount);
+    setState(() {
+      filter = f;
+      filterId = id;
+    });
+    // The search is every account's there, and this one's elsewhere.
+    if (searchesChange && query.isNotEmpty) reload();
+  }
 
-  /// New item: the picker (the main kinds, then templates), then its editor.
-  Future<void> newItem() async {
+  /// An item picked from a list: opened, in its own account. One of another
+  /// account's ("All accounts") shows that account's vault with it open.
+  void pick(Map<String, dynamic> item) {
+    final id = item['id'] as String;
+    final account = item['account'] as String?;
+    if (account != null && account != Core.account && widget.onOpenIn != null) {
+      widget.onOpenIn!(
+        account,
+        VaultStart(filter: Filter.everyAccount, item: id),
+      );
+      return;
+    }
+    if (isWide(context)) {
+      setState(() => selected = id);
+    } else {
+      open(id);
+    }
+  }
+
+  /// New item: which account it goes in, with more than one unlocked (the
+  /// chosen account's vault opens to make it there), then the picker (the
+  /// main kinds, then templates), then its editor.
+  Future<void> newItem({bool ask = true}) async {
+    if (ask && widget.menu != null) {
+      final account = await chooseAccount(context, widget.menu!);
+      if (account == null || !mounted) return;
+      if (account != Core.account && widget.onOpenIn != null) {
+        widget.onOpenIn!(
+          account,
+          VaultStart(
+            filter: filter == Filter.everyAccount ? filter : Filter.all,
+            newItem: true,
+          ),
+        );
+        return;
+      }
+    }
+    if (!mounted) return;
     final wide = isWide(context);
     final choice = await chooseNewItem(
       context,
@@ -514,6 +636,7 @@ class VaultScreenState extends State<VaultScreen> {
                 Sidebar(
                   email: widget.email,
                   menu: widget.menu,
+                  everyAccount: everyAccount.length,
                   filter: filter,
                   filterId: filterId,
                   places: places,
@@ -537,7 +660,11 @@ class VaultScreenState extends State<VaultScreen> {
                       Filter.folder,
                       Filter.noFolder,
                       Filter.collection,
+                      Filter.everyAccount,
                     }.contains(filter),
+                    accounts: filter == Filter.everyAccount
+                        ? widget.menu
+                        : null,
                     selected: selected,
                     syncing: syncing,
                     onSearch: (q) {
@@ -546,7 +673,7 @@ class VaultScreenState extends State<VaultScreen> {
                     },
                     onNew: newItem,
                     onSync: sync,
-                    onSelect: (id) => setState(() => selected = id),
+                    onSelect: pick,
                   ),
                 ),
                 // The item, beside the list, as the web vault's side panel:
@@ -839,6 +966,12 @@ class VaultScreenState extends State<VaultScreen> {
           ),
         ),
       ),
+      // Every unlocked account's items together, with more than one
+      // account signed in.
+      if (several) ...[
+        const SliverToBoxAdapter(child: SizedBox(height: 12)),
+        everyAccountCard(),
+      ],
       if (favorites.isNotEmpty) ...[heading('Favorites'), itemCard(favorites)],
       heading(
         'Folders',
@@ -899,12 +1032,52 @@ class VaultScreenState extends State<VaultScreen> {
   Widget itemCard(List<Map<String, dynamic>> items) =>
       card(items.length, (context, i, radius) {
         final item = items[i];
+        final account = filter == Filter.everyAccount
+            ? widget.menu?.entry(item['account'] as String?)
+            : null;
         return PhoneItemRow(
           item: item,
           radius: radius,
-          onTap: () => open(item['id'] as String),
+          badge: account == null ? null : AccountBadge(entry: account),
+          onTap: () => pick(item),
         );
       });
+
+  /// "All accounts", on a phone: a card of its own, above the favorites.
+  Widget everyAccountCard() => card(1, (context, i, radius) {
+    final c = context.colors;
+    return InkWell(
+      key: const ValueKey('every-account'),
+      borderRadius: radius,
+      onTap: () => choose(Filter.everyAccount),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: 56),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 8, 12, 8),
+          child: Row(
+            children: [
+              const JewelTile(jewel: Jewel.allItems, size: 40),
+              const SizedBox(width: 12),
+              const Expanded(
+                child: Text(
+                  'All accounts',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+                ),
+              ),
+              Text(
+                '${everyAccount.length}',
+                style: TextStyle(color: c.muted, fontSize: 14),
+              ),
+              const SizedBox(width: 6),
+              Glyph(Glyphs.chevron, size: 18, color: c.muted, strokeWidth: 2),
+            ],
+          ),
+        ),
+      ),
+    );
+  });
 
   /// An owner and its folders, on a card: the owner first, its folders a
   /// step in, nested ones further.
@@ -1087,11 +1260,15 @@ class PhoneItemRow extends StatelessWidget {
     required this.item,
     required this.radius,
     required this.onTap,
+    this.badge,
   });
 
   final Map<String, dynamic> item;
   final BorderRadius radius;
   final VoidCallback onTap;
+
+  /// Its account's, where several accounts' items are listed together.
+  final Widget? badge;
 
   @override
   Widget build(BuildContext context) {
@@ -1146,6 +1323,7 @@ class PhoneItemRow extends StatelessWidget {
                     semanticLabel: 'Favorite',
                   ),
                 ),
+              ?badge,
               const SizedBox(width: 6),
               Glyph(Glyphs.chevron, size: 18, color: c.muted, strokeWidth: 2),
             ],
@@ -1227,6 +1405,7 @@ class Sidebar extends StatelessWidget {
     this.width = 248,
     required this.email,
     this.menu,
+    this.everyAccount = 0,
     required this.filter,
     required this.filterId,
     required this.places,
@@ -1247,6 +1426,9 @@ class Sidebar extends StatelessWidget {
 
   /// The account menu, from the email at the foot (accounts.dart).
   final AccountsMenu? menu;
+
+  /// How many items every unlocked account has, for "All accounts".
+  final int everyAccount;
   final Filter filter;
   final String? filterId;
   final Places places;
@@ -1385,6 +1567,16 @@ class Sidebar extends StatelessWidget {
             child: ListView(
               padding: const EdgeInsets.symmetric(horizontal: 8),
               children: [
+                // Every unlocked account's items together, with more than
+                // one account signed in; "All items" are this one's.
+                if (menu?.several ?? false)
+                  entry(
+                    tile: const Icon(Icons.layers_outlined, size: 20),
+                    label: 'All accounts',
+                    on: filter == Filter.everyAccount,
+                    tap: () => onChoose(Filter.everyAccount),
+                    count: everyAccount,
+                  ),
                 entry(
                   tile: const JewelTile(jewel: Jewel.allItems, size: 24),
                   label: 'All items',
@@ -1503,6 +1695,9 @@ class Sidebar extends StatelessWidget {
                 SettingsButton(
                   color: c.muted,
                   account: (menu?.several ?? false) ? email : null,
+                  named: (menu?.several ?? false)
+                      ? menu!.entry(menu!.shown)
+                      : null,
                 ),
                 const Spacer(),
                 TextButton.icon(
@@ -1533,6 +1728,7 @@ class ItemList extends StatelessWidget {
     required this.onSync,
     required this.onSelect,
     this.badges = true,
+    this.accounts,
     this.banner,
   });
 
@@ -1544,13 +1740,17 @@ class ItemList extends StatelessWidget {
 
   /// Where each item is, beside it (not while one folder is shown).
   final bool badges;
+
+  /// Each item's account, beside it, where several accounts' are listed
+  /// together ("All accounts").
+  final AccountsMenu? accounts;
   final List<Map<String, dynamic>> items;
   final String? selected;
   final bool syncing;
   final ValueChanged<String> onSearch;
   final VoidCallback onNew;
   final VoidCallback onSync;
-  final ValueChanged<String> onSelect;
+  final ValueChanged<Map<String, dynamic>> onSelect;
 
   @override
   Widget build(BuildContext context) {
@@ -1659,7 +1859,11 @@ class ItemList extends StatelessWidget {
                   itemCount: items.length,
                   itemBuilder: (context, i) {
                     final item = items[i];
-                    final on = item['id'] == selected;
+                    final account = item['account'] as String?;
+                    final on =
+                        item['id'] == selected &&
+                        (account == null || account == Core.account);
+                    final badge = accounts?.entry(account);
                     final subtitle = item['subtitle'] as String;
                     return Padding(
                       padding: const EdgeInsets.symmetric(vertical: 2),
@@ -1677,7 +1881,7 @@ class ItemList extends StatelessWidget {
                           borderRadius: BorderRadius.circular(12),
                           child: InkWell(
                             borderRadius: BorderRadius.circular(12),
-                            onTap: () => onSelect(item['id'] as String),
+                            onTap: () => onSelect(item),
                             child: Padding(
                               padding: const EdgeInsets.symmetric(
                                 horizontal: 12,
@@ -1729,6 +1933,7 @@ class ItemList extends StatelessWidget {
                                   if (badges &&
                                       (item['where'] as String?) != null)
                                     WhereBadge(item['where'] as String),
+                                  if (badge != null) AccountBadge(entry: badge),
                                 ],
                               ),
                             ),

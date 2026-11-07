@@ -68,9 +68,14 @@ class SettingsList extends StatefulWidget {
     this.email,
     this.server,
     this.menu,
+    this.named,
     this.mode,
     this.onMode,
   });
+
+  /// With more than one account signed in, the one these settings are for:
+  /// its name and color are set here (accounts.dart).
+  final AccountEntry? named;
 
   /// Who's signed in, and where, shown on a phone (a computer's sidebar has it).
   final String? email;
@@ -392,6 +397,14 @@ class _SettingsListState extends State<SettingsList> {
             ],
           ),
         if (updates case final updates?) UpdatesSection(updates: updates),
+        // With more than one account: what this one's called where they're
+        // listed together, and its color.
+        if (widget.named ?? _shownOf(widget.menu) case final entry?)
+          SettingsGroup(
+            title: 'This account',
+            footer: 'Its name and color label its items where accounts are listed together. Kept on this device.',
+            children: [AccountLabelEditor(key: ValueKey(entry.id), entry: entry)],
+          ),
         // On a phone: each account (the one these settings are for marked),
         // adding one, and signing out of this one.
         if (widget.menu case final menu?)
@@ -443,6 +456,10 @@ class _SettingsListState extends State<SettingsList> {
   }
 }
 
+/// The account shown, when more than one is signed in.
+AccountEntry? _shownOf(AccountsMenu? menu) =>
+    (menu?.several ?? false) ? menu!.entry(menu.shown) : null;
+
 /// Settings as a tab of its own, on a phone.
 class SettingsPage extends StatelessWidget {
   const SettingsPage({
@@ -485,10 +502,13 @@ class SettingsPage extends StatelessWidget {
 
 /// Settings over the vault, on a computer.
 class SettingsDialog extends StatelessWidget {
-  const SettingsDialog({super.key, this.account});
+  const SettingsDialog({super.key, this.account, this.named});
 
   /// With more than one account signed in, the one these settings are for.
   final String? account;
+
+  /// And its name and color, which are set here.
+  final AccountEntry? named;
 
   @override
   Widget build(BuildContext context) => Dialog(
@@ -516,10 +536,10 @@ class SettingsDialog extends StatelessWidget {
               ),
             ),
           // Scrolls on a small screen, or with a large text size.
-          const Flexible(
+          Flexible(
             child: SingleChildScrollView(
-              padding: EdgeInsets.fromLTRB(20, 0, 20, 8),
-              child: SettingsList(),
+              padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
+              child: SettingsList(named: named),
             ),
           ),
           Padding(
@@ -540,12 +560,15 @@ class SettingsDialog extends StatelessWidget {
 
 /// The gear that opens Settings.
 class SettingsButton extends StatelessWidget {
-  const SettingsButton({super.key, this.color, this.account});
+  const SettingsButton({super.key, this.color, this.account, this.named});
 
   final Color? color;
 
   /// With more than one account signed in, the one Settings is for.
   final String? account;
+
+  /// And its name and color, which are set there.
+  final AccountEntry? named;
 
   @override
   Widget build(BuildContext context) => IconButton(
@@ -553,7 +576,7 @@ class SettingsButton extends StatelessWidget {
     icon: Icon(Icons.settings_outlined, color: color),
     onPressed: () => showDialog<void>(
       context: context,
-      builder: (_) => SettingsDialog(account: account),
+      builder: (_) => SettingsDialog(account: account, named: named),
     ),
   );
 }
