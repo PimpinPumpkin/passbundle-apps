@@ -1071,7 +1071,7 @@ pub unsafe extern "C" fn pb_lock_policy(account: *const c_char) -> *mut c_char {
 }
 
 /// # Safety
-/// `preferences` is null or a NUL-terminated UTF-8 string, valid for the call.
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
 #[no_mangle]
 pub unsafe extern "C" fn pb_set_preferences(
     account: *const c_char,
@@ -1580,7 +1580,7 @@ pub unsafe extern "C" fn pb_health(account: *const c_char) -> *mut c_char {
 /// (`pb_item_version` shows them).
 ///
 /// # Safety
-/// `id` is null or a NUL-terminated UTF-8 string, valid for the call.
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
 #[no_mangle]
 pub unsafe extern "C" fn pb_history(account: *const c_char, id: *const c_char) -> *mut c_char {
     let account = text(account);
@@ -1731,7 +1731,7 @@ pub unsafe extern "C" fn pb_delete_history(
 /// Makes a folder: `{ok, id}`, or the words to show.
 ///
 /// # Safety
-/// `name` is null or a NUL-terminated UTF-8 string, valid for the call.
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
 #[no_mangle]
 pub unsafe extern "C" fn pb_create_folder(
     account: *const c_char,
@@ -1763,7 +1763,7 @@ pub unsafe extern "C" fn pb_rename_folder(
 /// Deletes a folder; its items stay, in no folder: `{ok}`, or the words to show.
 ///
 /// # Safety
-/// `id` is null or a NUL-terminated UTF-8 string, valid for the call.
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
 #[no_mangle]
 pub unsafe extern "C" fn pb_delete_folder(
     account: *const c_char,
@@ -2187,7 +2187,8 @@ pub unsafe extern "C" fn pb_approvals(account: *const c_char) -> *mut c_char {
 /// (`confirmFirst` otherwise), and uses that up.
 ///
 /// # Safety
-/// `confirm` is null or a NUL-terminated UTF-8 string ("true" or "false").
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the
+/// call; `confirm` is "true" or "false".
 #[no_mangle]
 pub unsafe extern "C" fn pb_set_approvals(
     account: *const c_char,
@@ -2473,7 +2474,7 @@ pub unsafe extern "C" fn pb_trash(account: *const c_char, id: *const c_char) -> 
 /// `{ok, password, options}`, with the choices it was made with.
 ///
 /// # Safety
-/// `options` is null or a NUL-terminated UTF-8 string, valid for the call.
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
 #[no_mangle]
 pub unsafe extern "C" fn pb_generate(
     account: *const c_char,
@@ -2501,7 +2502,7 @@ pub unsafe extern "C" fn pb_generate(
 /// (`App::keep_generated`): `{ok}`.
 ///
 /// # Safety
-/// `shown` is null or a NUL-terminated UTF-8 string, valid for the call.
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
 #[no_mangle]
 pub unsafe extern "C" fn pb_keep_generated(
     account: *const c_char,
