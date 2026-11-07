@@ -236,7 +236,7 @@ object SecurityKeys {
                 } else {
                     nfc.enableReaderMode(activity, { found ->
                         val message = Ndef.get(found)?.cachedNdefMessage ?: return@enableReaderMode
-                        message.records.firstNotNullOfOrNull { record -> record.toUri()?.toString()?.let(::codeFrom) }
+                        message.records.firstNotNullOfOrNull { record -> record.toUri()?.toString()?.let { codeFrom(it) } }
                             ?.let { code -> activity.runOnUiThread { onCode(code) } }
                     }, readerFlags, null)
                 }
