@@ -170,7 +170,7 @@ void main() {
         find.textContaining('Hold your security key to the back of your phone'),
         findsOneWidget,
       );
-      await tester.tap(find.text('Don\'t ask again on this device for a while'));
+      await tester.tap(find.text('Don\'t ask again on this device for 30 days'));
       await tester.pump();
       await tester.tap(find.text('Use security key'));
       await tester.pump();
@@ -325,7 +325,7 @@ void main() {
       );
       // No "don't ask again": there won't be anything to ask.
       expect(
-        find.text('Don\'t ask again on this device for a while'),
+        find.text('Don\'t ask again on this device for 30 days'),
         findsNothing,
       );
       await tester.enterText(

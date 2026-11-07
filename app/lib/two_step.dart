@@ -456,7 +456,7 @@ class _TwoStepScreenState extends State<TwoStepScreen> {
             onChanged: working
                 ? null
                 : (v) => setState(() => remember = v ?? false),
-            title: const Text('Don\'t ask again on this device for a while'),
+            title: const Text('Don\'t ask again on this device for 30 days'),
             controlAffinity: ListTileControlAffinity.leading,
             contentPadding: EdgeInsets.zero,
           ),
