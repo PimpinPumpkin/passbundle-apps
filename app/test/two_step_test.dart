@@ -85,6 +85,8 @@ void main() {
     await tester.pumpWidget(
       MaterialApp(
         home: TwoStepScreen(
+          // A screen of its own each time, as each sign-in's is.
+          key: UniqueKey(),
           offer: {'ok': true, 'step': 'twoFactor', ...offer},
           calls: calls,
           onSignedIn: () => heard.add('signedIn'),
@@ -336,7 +338,11 @@ void main() {
       expect(find.text('Two-step login is off'), findsOneWidget);
       expect(shown.heard, isEmpty);
       await tester.tap(find.text('OK'));
-      await tester.pumpAndSettle();
+      // The dialog fades out; the screen's button keeps spinning until the
+      // vault replaces it, so this can't wait for everything to settle.
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(find.text('Two-step login is off'), findsNothing);
       expect(shown.calls.asked, ['finish recoveryCode ABCD EFGH IJKL']);
       expect(shown.heard, ['signedIn']);
     },
