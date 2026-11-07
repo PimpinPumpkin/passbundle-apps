@@ -518,6 +518,8 @@ impl App {
     /// Brings the vault up to date from the server and keeps the new sync.
     /// Signed out (the session ended) leaves the kept vault open, to read.
     pub fn sync(&mut self) -> Result<()> {
+        // The account the vault kept here is (its id on the server).
+        let kept = self.user_id().ok();
         let (Some(server), Some(settings)) = (&self.server, &self.settings) else {
             return Err(Error::SignedOut);
         };
@@ -533,6 +535,11 @@ impl App {
             }
             other => other?,
         };
+        if let Err(e) = same_account(kept.as_deref(), &sync.profile.id) {
+            self.session = None;
+            self.secrets.forget(&settings.server, &settings.email);
+            return Err(e);
+        }
         self.store.save_sync(&text)?;
         self.policy = LockPolicy::from_sync(&text);
         self.generator_policy = GeneratorPolicy::from_sync(&text);
@@ -1714,6 +1721,37 @@ impl SignInRequestsCall {
     /// The server's list, and its clock.
     pub fn fetch(&self) -> Result<(serde_json::Value, Option<u64>)> {
         self.server.pending_sign_in_requests(&self.access_token)
+    }
+}
+
+/// A sync is for the account whose vault is kept here, by its id on the
+/// server, or for a new one (nothing kept yet): a server that answers with
+/// another account's vault is refused, and nothing of it is kept. An
+/// account's id never changes, then, once it's on this device, and two
+/// accounts here never share one (accounts.rs refuses a new one that would):
+/// the desktop agent keeps each account's biometric key by it (DESIGN.md in
+/// the meta repo, "Several accounts in the apps").
+fn same_account(kept: Option<&str>, synced: &str) -> Result<()> {
+    match kept {
+        Some(kept) if kept != synced => Err(Error::Refused(
+            "the server sent another account's vault; sign out, then sign in again",
+        )),
+        _ => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod same_account_tests {
+    use super::*;
+
+    #[test]
+    fn a_sync_is_for_the_account_kept_here_or_a_new_one() {
+        assert_eq!(same_account(None, "a"), Ok(()));
+        assert_eq!(same_account(Some("a"), "a"), Ok(()));
+        assert!(matches!(
+            same_account(Some("a"), "b"),
+            Err(Error::Refused(_))
+        ));
     }
 }
 
