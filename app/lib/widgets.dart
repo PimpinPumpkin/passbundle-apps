@@ -421,31 +421,35 @@ class LogoTile extends StatelessWidget {
   }
 }
 
-/// Light, dark, or following the system.
-class ThemeMenu extends StatelessWidget {
-  const ThemeMenu({
-    super.key,
-    required this.mode,
-    required this.onMode,
-    this.color,
-  });
+/// The light or dark button, as on the website: a moon while the app is
+/// light and a sun while it's dark, and a tap switches. Switching back to
+/// what the computer uses follows the computer again; Settings keeps the
+/// three-way choice.
+class ThemeButton extends StatelessWidget {
+  const ThemeButton({super.key, required this.onMode, this.color});
 
-  final ThemeMode mode;
   final ValueChanged<ThemeMode> onMode;
   final Color? color;
 
+  /// What a tap chooses, when the app shows [dark] and the computer uses
+  /// [system].
+  static ThemeMode next({required bool dark, required Brightness system}) {
+    final wanted = dark ? Brightness.light : Brightness.dark;
+    if (wanted == system) return ThemeMode.system;
+    return dark ? ThemeMode.light : ThemeMode.dark;
+  }
+
   @override
-  Widget build(BuildContext context) => PopupMenuButton<ThemeMode>(
-    tooltip: 'Theme',
-    icon: Icon(Icons.contrast_rounded, color: color),
-    initialValue: mode,
-    onSelected: onMode,
-    itemBuilder: (_) => const [
-      PopupMenuItem(value: ThemeMode.system, child: Text('Follow the system')),
-      PopupMenuItem(value: ThemeMode.light, child: Text('Light')),
-      PopupMenuItem(value: ThemeMode.dark, child: Text('Dark')),
-    ],
-  );
+  Widget build(BuildContext context) {
+    final dark = Theme.of(context).brightness == Brightness.dark;
+    return IconButton(
+      tooltip: dark ? 'Switch to light mode' : 'Switch to dark mode',
+      icon: Glyph(dark ? Glyphs.sun : Glyphs.moon, size: 22, color: color),
+      onPressed: () => onMode(
+        next(dark: dark, system: MediaQuery.platformBrightnessOf(context)),
+      ),
+    );
+  }
 }
 
 /// A centered card for the sign-in and unlock screens.

@@ -518,7 +518,6 @@ class VaultScreenState extends State<VaultScreen> {
                   onNewFolder: newFolder,
                   onRenameFolder: renameFolder,
                   onDeleteFolder: deleteFolder,
-                  mode: widget.mode,
                   onMode: widget.onMode,
                   onLock: widget.onLock,
                 ),
@@ -1222,7 +1221,6 @@ class Sidebar extends StatelessWidget {
     required this.onNewFolder,
     required this.onRenameFolder,
     required this.onDeleteFolder,
-    required this.mode,
     required this.onMode,
     required this.onLock,
   });
@@ -1246,7 +1244,6 @@ class Sidebar extends StatelessWidget {
   final VoidCallback onNewFolder;
   final void Function(String id, String name) onRenameFolder;
   final void Function(String id, String name) onDeleteFolder;
-  final ThemeMode mode;
   final ValueChanged<ThemeMode> onMode;
   final VoidCallback onLock;
 
@@ -1474,7 +1471,7 @@ class Sidebar extends StatelessWidget {
             padding: const EdgeInsets.fromLTRB(8, 4, 8, 8),
             child: Row(
               children: [
-                ThemeMenu(mode: mode, onMode: onMode, color: c.muted),
+                ThemeButton(onMode: onMode, color: c.muted),
                 SettingsButton(color: c.muted),
                 const Spacer(),
                 TextButton.icon(

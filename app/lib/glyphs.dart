@@ -57,6 +57,11 @@ abstract final class Glyphs {
       'M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z M4 4l16 16';
   static const chevron = 'M9 6l6 6-6 6';
   static const plus = 'M12 5v14 M5 12h14';
+
+  // The light or dark button (the website's, site/theme.mjs in Passbundle).
+  static const moon = 'M20.5 14.5A8.5 8.5 0 0 1 9.5 3.5a8.5 8.5 0 1 0 11 11Z';
+  static const sun =
+      'M12 16a4 4 0 1 0 0-8 4 4 0 0 0 0 8Z M12 2.5v2 M12 19.5v2 M4.6 4.6l1.4 1.4 M18 18l1.4 1.4 M2.5 12h2 M19.5 12h2 M4.6 19.4 6 18 M18 6l1.4-1.4';
 }
 
 /// A glyph, stroked (or filled) in the icon color.
