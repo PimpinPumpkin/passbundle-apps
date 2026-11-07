@@ -32,11 +32,12 @@ use std::time::{Instant, SystemTime};
 
 use serde::{Deserialize, Serialize};
 
-use crate::app::{App, State, Step};
+use crate::app::{App, Prepared, State, Step};
 use crate::autolock::{Readings, Reason};
 use crate::error::{Error, Result};
 use crate::kdf::normalize_email;
 use crate::secrets::SecretStore;
+use crate::security_key::{KeyAnswer, SecurityKeyRequest};
 use crate::server::Device;
 use crate::store::{self, Appearance, Screenshots, Store};
 use crate::vault::Vault;
@@ -592,6 +593,61 @@ impl Accounts {
     pub fn send_email_code(&mut self) -> Result<()> {
         let id = self.signing_in.clone().ok_or(Error::SignedOut)?;
         self.get(&id).ok_or(Error::SignedOut)?.send_email_code()
+    }
+
+    /// Duo's address for the sign-in waiting for its second step
+    /// (`App::duo_address`), or `SignedIn` if it went through without it.
+    pub fn duo_address(&mut self) -> Result<Prepared<String>> {
+        let id = self.signing_in.clone().ok_or(Error::SignedOut)?;
+        let asked = self.app_kept(&id).ok_or(Error::SignedOut)?.duo_address();
+        match asked {
+            Ok(Prepared::SignedIn) => self.after(&id, Ok(Step::Done)).map(|_| Prepared::SignedIn),
+            other => other,
+        }
+    }
+
+    /// Two-step login's second step with Duo's answer, for the sign-in waiting for it.
+    pub fn finish_with_duo(&mut self, link: &str, remember: bool) -> Result<Step> {
+        let id = self.signing_in.clone().ok_or(Error::SignedOut)?;
+        let finished = self
+            .app_kept(&id)
+            .ok_or(Error::SignedOut)?
+            .finish_with_duo(link, remember);
+        self.after(&id, finished)
+    }
+
+    /// The security key request for the sign-in waiting for its second step
+    /// (`App::security_key_request`), and which sign-in it's for.
+    pub fn security_key_request(&mut self) -> Result<Prepared<(String, SecurityKeyRequest)>> {
+        let id = self.signing_in.clone().ok_or(Error::SignedOut)?;
+        let asked = self
+            .app_kept(&id)
+            .ok_or(Error::SignedOut)?
+            .security_key_request();
+        match asked {
+            Ok(Prepared::Ready(request)) => Ok(Prepared::Ready((id, request))),
+            Ok(Prepared::SignedIn) => self.after(&id, Ok(Step::Done)).map(|_| Prepared::SignedIn),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Two-step login's second step with a security key's answer, for the
+    /// sign-in `security_key_request` was for, if it's still the one waiting.
+    pub fn finish_with_key(
+        &mut self,
+        id: &str,
+        request: &SecurityKeyRequest,
+        answer: &KeyAnswer,
+        remember: bool,
+    ) -> Result<Step> {
+        if self.signing_in.as_deref() != Some(id) {
+            return Err(Error::TwoStep("That sign-in was given up. Sign in again."));
+        }
+        let finished = self
+            .app_kept(id)
+            .ok_or(Error::SignedOut)?
+            .finish_with_key(request, answer, remember);
+        self.after(id, finished)
     }
 
     /// Where a sign-in got to.

@@ -106,9 +106,12 @@ dbus = "0.9"
 [target.'cfg(target_os = "macos")'.dependencies]
 plist = "1"
 
+# Windows: also its WebAuthn API, for security keys at sign-in
+# (src/security_key/windows.rs).
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
+    "Win32_Networking_WindowsWebServices",
     "Win32_Security",
     "Win32_Security_Authorization",
     "Win32_Storage_FileSystem",

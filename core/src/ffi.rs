@@ -24,7 +24,7 @@ use zeroize::Zeroizing;
 
 use crate::accounts::Accounts;
 use crate::agent::Status;
-use crate::app::{App, State, Step};
+use crate::app::{App, Prepared, State, Step};
 use crate::autolock::{self, Preferences};
 use crate::error::Error;
 use crate::generator;
@@ -314,9 +314,17 @@ fn done(result: crate::Result<()>) -> Value {
 fn step(result: crate::Result<Step>) -> Value {
     match result {
         Ok(Step::Done) => json!({ "ok": true, "step": "done" }),
-        Ok(Step::TwoFactor(providers)) => {
-            json!({ "ok": true, "step": "twoFactor", "providers": providers })
-        }
+        Ok(Step::TwoFactor(offer)) => json!({
+            "ok": true,
+            "step": "twoFactor",
+            // The methods offered that the apps do (two_step.rs); a
+            // recovery code (8) always works besides.
+            "providers": offer.providers,
+            "email": offer.email,
+            "yubikeyNfc": offer.yubikey_nfc,
+            // How this device reaches a security key, or null where it can't.
+            "securityKey": crate::security_key::here(),
+        }),
         Err(e) => failed(e),
     }
 }
@@ -811,6 +819,100 @@ pub unsafe extern "C" fn pb_finish_sign_in(
 #[no_mangle]
 pub extern "C" fn pb_send_email_code() -> *mut c_char {
     with_accounts_waiting(|accounts| done(accounts.send_email_code()))
+}
+
+/// Duo's address for the sign-in waiting for its second step, for the
+/// browser: `{ok, url}`, or the answer of a sign-in that went through
+/// without it (as `pb_sign_in`'s). On Windows and Linux, this app becomes
+/// the one `passbundle://` links open first, for Duo's way back
+/// (two_step.rs, `take_links`).
+#[no_mangle]
+pub extern "C" fn pb_duo_start() -> *mut c_char {
+    with_accounts_waiting(|accounts| match accounts.duo_address() {
+        Ok(Prepared::Ready(url)) => match crate::two_step::take_links() {
+            Ok(()) => json!({ "ok": true, "url": url }),
+            Err(e) => failed(e),
+        },
+        Ok(Prepared::SignedIn) => signed_in(accounts, Ok(Step::Done)),
+        Err(e) => failed(e),
+    })
+}
+
+/// Two-step login's second step with Duo's answer, the link the browser
+/// came back with: the same answer as `pb_sign_in`.
+///
+/// # Safety
+/// `link` is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_duo_finish(link: *const c_char, remember: bool) -> *mut c_char {
+    let link = text(link);
+    with_accounts_waiting(|accounts| {
+        let result = accounts.finish_with_duo(&link, remember);
+        signed_in(accounts, result)
+    })
+}
+
+/// Two-step login's second step with a security key (security_key): the
+/// server's request, then the key asked (which waits for the person, so
+/// the other calls don't wait on it), then the answer sent. The same answer
+/// as `pb_sign_in`.
+#[no_mangle]
+pub extern "C" fn pb_security_key_sign_in(remember: bool) -> *mut c_char {
+    out(std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                let mut prepared = None;
+                let asked = accounts_value(|accounts| match accounts.security_key_request() {
+                    Ok(Prepared::Ready(request)) => {
+                        prepared = Some(request);
+                        json!({ "ok": true })
+                    }
+                    Ok(Prepared::SignedIn) => signed_in(accounts, Ok(Step::Done)),
+                    Err(e) => failed(e),
+                });
+                let Some((id, request)) = prepared else {
+                    return asked;
+                };
+                let answer =
+                    match catch_unwind(AssertUnwindSafe(|| crate::security_key::ask(&request))) {
+                        Ok(Ok(answer)) => answer,
+                        Ok(Err(e)) => return failed(e),
+                        Err(_) => return json!({ "ok": false, "error": STOPPED }),
+                    };
+                accounts_value(|accounts| {
+                    let result = accounts.finish_with_key(&id, &request, &answer, remember);
+                    signed_in(accounts, result)
+                })
+            })
+            .join()
+            .unwrap_or_else(|_| json!({ "ok": false, "error": STOPPED }))
+    }))
+}
+
+/// Stops a security key's wait (`pb_security_key_sign_in`), from any thread.
+#[no_mangle]
+pub extern "C" fn pb_security_key_cancel() -> *mut c_char {
+    crate::security_key::cancel();
+    out(json!({ "ok": true }))
+}
+
+/// A second copy of the app, opened by the OS with Duo's link (Windows and
+/// Linux): leaves it for the copy that's signing in, which picks it up with
+/// `pb_handed_over_link`. Whether it was a link to leave.
+///
+/// # Safety
+/// `link` is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_hand_over_link(link: *const c_char) -> *mut c_char {
+    let link = text(link);
+    let left = crate::two_step::hand_over(&Store::default_dir(), &link);
+    out(json!({ "ok": left }))
+}
+
+/// The link a second copy of the app left (`pb_hand_over_link`), once, or null.
+#[no_mangle]
+pub extern "C" fn pb_handed_over_link() -> *mut c_char {
+    out(json!(crate::two_step::handed_over(&Store::default_dir())))
 }
 
 /// # Safety

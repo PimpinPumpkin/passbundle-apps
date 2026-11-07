@@ -11,6 +11,7 @@ import 'package:flutter/material.dart';
 import 'accounts.dart';
 import 'core.dart';
 import 'theme.dart';
+import 'two_step.dart';
 import 'widgets.dart';
 
 final _measuring = testSetting('PB_MEASURE') == '1';
@@ -109,11 +110,9 @@ class _SignInScreenState extends State<SignInScreen> {
   }
   late final email = TextEditingController(text: widget.email ?? '');
   final password = TextEditingController();
-  final code = TextEditingController();
   String? error;
   bool working = false;
   bool hidden = true;
-  bool remember = false;
 
   /// Making an account instead (docs/core.md, "Making an account").
   bool creating = false;
@@ -121,10 +120,8 @@ class _SignInScreenState extends State<SignInScreen> {
   final confirm = TextEditingController();
   final hint = TextEditingController();
 
-  /// The second step's methods, once the server asks for one: 0 authenticator, 1 email.
-  List<int>? providers;
-  int provider = 0;
-  bool emailSent = false;
+  /// The second step, once the server asks for one: what it offers (two_step.dart).
+  Map<String, dynamic>? twoStep;
 
   Future<void> signIn() async {
     final typed = password.text;
@@ -145,15 +142,10 @@ class _SignInScreenState extends State<SignInScreen> {
   /// Where signing in got to: the vault, two-step login, or why not.
   void signedIn(Answer answer) {
     if (answer.ok && answer.body['step'] == 'twoFactor') {
-      final offered = (answer.body['providers'] as List).cast<int>();
-      final usable = offered.where((p) => p == 0 || p == 1).toList();
       setState(() {
         working = false;
-        providers = usable;
-        provider = usable.contains(0) ? 0 : (usable.isEmpty ? -1 : 1);
-        error = usable.isEmpty
-            ? 'This account uses a kind of two-step login this app can\'t do yet.'
-            : null;
+        twoStep = answer.body;
+        error = null;
       });
     } else if (answer.ok) {
       widget.onSignedIn();
@@ -216,51 +208,19 @@ class _SignInScreenState extends State<SignInScreen> {
     signedIn(answer);
   }
 
-  Future<void> sendEmail() async {
-    setState(() => working = true);
-    final answer = await whileBusy(Core.sendEmailCode);
-    if (!mounted) return;
-    setState(() {
-      working = false;
-      emailSent = answer.ok;
-      error = answer.ok ? null : answer.error;
-    });
-  }
-
-  Future<void> finish() async {
-    setState(() {
-      working = true;
-      error = null;
-    });
-    final answer = await whileBusy(
-      () => Core.finishSignIn(provider, code.text.trim(), remember),
-    );
-    if (!mounted) return;
-    if (answer.ok) {
-      widget.onSignedIn();
-    } else {
-      code.clear();
-      setState(() {
-        working = false;
-        error = answer.error;
-      });
-    }
-  }
-
   /// Android's Back goes back a step: from two-step login or making an
   /// account to signing in, and from adding an account to the one shown,
   /// before it leaves the app. Not while a call is out.
   @override
   Widget build(BuildContext context) => PopScope(
-    canPop: providers == null && !creating && widget.onCancel == null,
+    canPop: twoStep == null && !creating && widget.onCancel == null,
     onPopInvokedWithResult: (popped, _) {
       if (popped || working) return;
-      if (providers != null) {
+      if (twoStep != null) {
+        // The two-step screen stops a security key or Duo it was waiting on.
         setState(() {
-          providers = null;
+          twoStep = null;
           error = null;
-          emailSent = false;
-          code.clear();
         });
       } else if (creating) {
         setState(() {
@@ -277,8 +237,16 @@ class _SignInScreenState extends State<SignInScreen> {
   );
 
   Widget _screen(BuildContext context) {
-    final step = providers;
-    if (step != null) return _secondStep(context, step);
+    final step = twoStep;
+    if (step != null) {
+      return TwoStepScreen(
+        // Each sign-in's second step starts afresh.
+        key: ObjectKey(step),
+        offer: step,
+        onSignedIn: widget.onSignedIn,
+        onStartOver: () => setState(() => twoStep = null),
+      );
+    }
     if (creating) return _createAccount(context);
     return Centered(
       children: [
@@ -492,85 +460,6 @@ class _SignInScreenState extends State<SignInScreen> {
         ),
     ],
   );
-
-  Widget _secondStep(BuildContext context, List<int> step) {
-    final viaEmail = provider == 1;
-    return Centered(
-      children: [
-        heading(
-          context,
-          'Two-step login',
-          viaEmail
-              ? (emailSent ? 'We emailed you a code.' : 'Get a code by email.')
-              : 'Enter the code from your authenticator app.',
-        ),
-        if (step.length > 1)
-          SegmentedButton<int>(
-            showSelectedIcon: false,
-            segments: const [
-              ButtonSegment(value: 0, label: Text('Authenticator app')),
-              ButtonSegment(value: 1, label: Text('Email')),
-            ],
-            selected: {provider},
-            onSelectionChanged: (s) => setState(() => provider = s.first),
-          ),
-        if (step.length > 1) const SizedBox(height: 16),
-        if (viaEmail && !emailSent)
-          WorkingButton(
-            label: 'Email me a code',
-            working: working,
-            onPressed: sendEmail,
-          )
-        else ...[
-          TextField(
-            controller: code,
-            enabled: !working && provider >= 0,
-            autofocus: true,
-            keyboardType: TextInputType.number,
-            autofillHints: const [AutofillHints.oneTimeCode],
-            onSubmitted: (_) => finish(),
-            decoration: InputDecoration(
-              labelText: 'Code',
-              errorText: error,
-              // An email code that checked out can still lead to setting up
-              // two-step login in the web vault, with its address.
-              errorMaxLines: 6,
-            ),
-          ),
-          const SizedBox(height: 8),
-          CheckboxListTile(
-            value: remember,
-            onChanged: working
-                ? null
-                : (v) => setState(() => remember = v ?? false),
-            title: const Text('Don\'t ask again on this device for 30 days'),
-            controlAffinity: ListTileControlAffinity.leading,
-            contentPadding: EdgeInsets.zero,
-          ),
-          const SizedBox(height: 8),
-          WorkingButton(label: 'Continue', working: working, onPressed: finish),
-        ],
-        if (error != null && viaEmail && !emailSent) ...[
-          const SizedBox(height: 12),
-          Text(
-            error!,
-            style: TextStyle(color: Theme.of(context).colorScheme.error),
-          ),
-        ],
-        const SizedBox(height: 8),
-        TextButton(
-          onPressed: working
-              ? null
-              : () => setState(() {
-                  providers = null;
-                  error = null;
-                  emailSent = false;
-                }),
-          child: const Text('Start over'),
-        ),
-      ],
-    );
-  }
 }
 
 class UnlockScreen extends StatefulWidget {

@@ -7,6 +7,11 @@
     <uses-permission android:name="android.permission.HIDE_OVERLAY_WINDOWS" />
     <!-- Installing an update from PassBundle's GitHub releases, which Android asks the person about every time (update/Updater.kt). -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <!-- Security keys and YubiKey codes held to the phone, for two-step login (SecurityKeys.kt). -->
+    <uses-permission android:name="android.permission.NFC" />
+    <uses-feature android:name="android.hardware.nfc" android:required="false" />
+    <!-- Security keys plugged in, for two-step login (SecurityKeys.kt); Android asks the person each time. -->
+    <uses-feature android:name="android.hardware.usb.host" android:required="false" />
     <application
         android:label="PassBundle"
         android:name="${applicationName}"
@@ -56,6 +61,21 @@
             android:excludeFromRecents="true"
             android:taskAffinity=""
             android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+        <!-- Duo's way back from the browser at sign-in; no screen of its own (LinkActivity.kt). -->
+        <activity
+            android:name=".LinkActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:taskAffinity=""
+            android:theme="@android:style/Theme.Translucent.NoTitleBar">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="passbundle" android:host="duo-callback" />
+            </intent-filter>
+        </activity>
         <!-- PassBundle as Android's passkey provider, Android 14 and later (PasskeyProvider.kt). -->
         <service
             android:name=".PasskeyProvider"

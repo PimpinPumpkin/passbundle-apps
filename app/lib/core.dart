@@ -157,6 +157,24 @@ class Core {
   late final _sendEmail = _lib.lookupFunction<_Str0, _Str0>(
     'pb_send_email_code',
   );
+  late final _duoStart = _lib.lookupFunction<_Str0, _Str0>('pb_duo_start');
+  late final _duoFinish = _lib
+      .lookupFunction<
+        Pointer<Utf8> Function(Pointer<Utf8>, Bool),
+        Pointer<Utf8> Function(Pointer<Utf8>, bool)
+      >('pb_duo_finish');
+  late final _securityKey = _lib.lookupFunction<_FlagNative, _Flag>(
+    'pb_security_key_sign_in',
+  );
+  late final _securityKeyCancel = _lib.lookupFunction<_Str0, _Str0>(
+    'pb_security_key_cancel',
+  );
+  late final _handOverLink = _lib.lookupFunction<_Str1, _Str1>(
+    'pb_hand_over_link',
+  );
+  late final _handedOverLink = _lib.lookupFunction<_Str0, _Str0>(
+    'pb_handed_over_link',
+  );
   late final _unlock = _lib.lookupFunction<_Str2, _Str2>('pb_unlock');
   late final _saveAttachment = _lib.lookupFunction<_Str3, _Str3>('pb_save_attachment');
   late final _confirmMasterPassword = _lib.lookupFunction<_Str3, _Str3>('pb_confirm_master_password');
@@ -471,6 +489,38 @@ class Core {
 
   static Future<Answer> sendEmailCode() =>
       _background((c, _) => c._answer(c._sendEmail()));
+
+  /// Duo's address for the sign-in waiting for its second step, for the
+  /// browser (two_step.dart): `{ok, url}`, or a sign-in that went through
+  /// without it, as [signIn] answers.
+  static Future<Answer> duoStart() =>
+      _signedIn(_background((c, _) => c._answer(c._duoStart())));
+
+  /// The second step with Duo's answer: the link the browser came back with.
+  static Future<Answer> duoFinish(String link, bool remember) => _signedIn(
+    _background(
+      (c, _) =>
+          c._with([link], (p) => c._answer(c._duoFinish(p[0], remember))),
+    ),
+  );
+
+  /// The second step with a security key: the core asks the key (this
+  /// device's own dialog on Windows, a key plugged in on Linux and the Mac,
+  /// one held to the phone or plugged in on Android), as long as the
+  /// server's request says or until [securityKeyCancel].
+  static Future<Answer> securityKeySignIn(bool remember) =>
+      _signedIn(_background((c, _) => c._answer(c._securityKey(remember))));
+
+  /// Stops a security key's wait ([securityKeySignIn]).
+  void securityKeyCancel() => _answer(_securityKeyCancel());
+
+  /// A second copy of the app that the OS opened with Duo's link (Windows
+  /// and Linux) leaves it for the copy that's signing in: whether it was one.
+  bool handOverLink(String link) =>
+      (_with([link], (p) => _answer(_handOverLink(p[0]))) as Map)['ok'] == true;
+
+  /// The link a second copy left ([handOverLink]), once, or null.
+  String? handedOverLink() => _answer(_handedOverLink()) as String?;
 
   static Future<Answer> unlock(String password) => _background(
     (c, a) => c._with([a, password], (p) => c._answer(c._unlock(p[0], p[1]))),
