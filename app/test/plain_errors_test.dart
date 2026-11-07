@@ -270,6 +270,8 @@ void main() {
           'Saved. PassBundle couldn\'t sync the rest just now, and will next time.',
         ),
       );
+      // Gone, once its way out is done.
+      await tester.pump(const Duration(milliseconds: 600));
       expect(find.widgetWithText(TextField, 'Name'), findsNothing);
       // It shows already, and the server was asked to save it once.
       expect(find.text('Saved once'), findsOneWidget);
