@@ -1,0 +1,157 @@
+# Redraws the app's committed screenshots (app/test/screenshots, which
+# app/test/screenshots_test.dart draws with --update-goldens): they need
+# Flutter, which not every computer working on PassBundle has. The first job
+# draws them as the README says, on the fuller showcase vault
+# (core/examples/showcase.rs), with a throwaway server for version history
+# and the desktop agent's test build for unlocking with a biometric, and
+# keeps them with the run. When they changed, the last job pushes them to
+# the branch screenshots-update and leaves a link to open the pull request
+# in the run's summary. Someone opens that pull request by hand: the
+# repository doesn't let workflows open pull requests, and it shouldn't.
+#
+# It runs only when started from the Actions tab, never on a pull request,
+# so only code already on a branch here runs. Only the last job can write to
+# the repository, and it runs no code from the repository: it copies in
+# files named like screenshots, checks they're PNGs, and pushes them.
+name: App screenshots
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: screenshots
+  cancel-in-progress: false
+
+env:
+  FLUTTER_VERSION: 3.47.6
+  FLUTTER_COMMIT: 5fc346839b5d0eef006ed8404392afb4dfae428d
+
+jobs:
+  draw:
+    name: Draw the screenshots
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: PimpinPumpkin/passbundle-server
+          ref: keykeeper
+          path: server
+          persist-credentials: false
+      - name: Build dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential libssl-dev libdbus-1-dev pkg-config
+      - name: Install the pinned Rust toolchains
+        run: |
+          (cd core && rustup toolchain install)
+          (cd agent && rustup toolchain install)
+          (cd server && rustup toolchain install)
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: |
+            core
+            agent
+            server
+          key: screenshots
+      - name: The core with its test hooks, the agent's test build, and the showcase vault
+        run: |
+          (cd core && cargo build --locked --release --features ffi,test-hooks)
+          (cd agent && cargo build --locked --features test-authenticator)
+          (cd core && cargo run --locked --quiet --example showcase -- "$RUNNER_TEMP/showcase")
+      - name: Build the server, and start it
+        run: |
+          (cd server && cargo build --features sqlite)
+          echo "PB_TEST_SERVER=$(tools/test-server.sh server/target/debug/vaultwarden 8591 "$RUNNER_TEMP/server")" >> "$GITHUB_ENV"
+      - name: Install Flutter at the pinned release
+        run: |
+          git clone --quiet --depth 1 --branch "$FLUTTER_VERSION" https://github.com/flutter/flutter.git "$RUNNER_TEMP/flutter"
+          test "$(git -C "$RUNNER_TEMP/flutter" rev-parse HEAD)" = "$FLUTTER_COMMIT"
+          echo "$RUNNER_TEMP/flutter/bin" >> "$GITHUB_PATH"
+      - name: Turn off analytics
+        run: |
+          flutter config --no-analytics
+          flutter --disable-analytics
+      - name: Draw them
+        working-directory: app
+        run: |
+          export PB_CORE_LIB="$GITHUB_WORKSPACE/core/target/release/libpassbundle_core.so"
+          export PB_TEST_AGENT="$GITHUB_WORKSPACE/agent/target/debug/passbundle-agent"
+          export PB_SHOWCASE="$RUNNER_TEMP/showcase"
+          # Every test draws here, none skipped: the server's and the agent's
+          # need these.
+          : "${PB_TEST_SERVER:?}"
+          test -x "$PB_TEST_AGENT"
+          # All of them anew, so one that no test draws any more doesn't stay.
+          rm -f test/screenshots/*.png
+          flutter test --tags screenshots --update-goldens --reporter expanded
+          ls test/screenshots
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: screenshots
+          path: app/test/screenshots/*.png
+          if-no-files-found: error
+          retention-days: 7
+      - name: The server's log
+        if: failure()
+        run: cat "$RUNNER_TEMP/server/server.log" || true
+
+  branch:
+    name: Push the new screenshots
+    needs: draw
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: screenshots
+          path: ${{ runner.temp }}/shots
+      - name: Copy in the screenshots, and nothing else
+        env:
+          SHOTS: ${{ runner.temp }}/shots
+        run: |
+          set -euo pipefail
+          for f in "$SHOTS"/* "$SHOTS"/.[!.]*; do
+            [ -e "$f" ] || continue
+            name=$(basename "$f")
+            if ! [[ "$name" =~ ^[a-z0-9-]+\.png$ ]] || [ -L "$f" ] || [ ! -f "$f" ] ||
+              [ "$(head -c 8 "$f" | od -An -tx1 | tr -d ' \n')" != 89504e470d0a1a0a ] ||
+              [ "$(wc -c < "$f")" -gt 10485760 ]; then
+              echo "Not a screenshot: $name" >&2
+              exit 1
+            fi
+          done
+          count=$(find "$SHOTS" -maxdepth 1 -name '*.png' -type f | wc -l | tr -d ' ')
+          [ "$count" -gt 0 ] || { echo "No screenshots came back." >&2; exit 1; }
+          # The set as drawn: one that no test draws any more goes.
+          rm -f app/test/screenshots/*.png
+          cp "$SHOTS"/*.png app/test/screenshots/
+          echo "Copied $count screenshots."
+      - name: Push them to screenshots-update if they changed
+        run: |
+          set -euo pipefail
+          if [ -z "$(git status --porcelain -- app/test/screenshots)" ]; then
+            echo "The screenshots haven't changed." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c screenshots-update
+          git add -A -- app/test/screenshots
+          git commit -q -m "The app's screenshots, redrawn as the app looks now"
+          git push --force origin screenshots-update
+          {
+            echo "New screenshots are on the branch screenshots-update."
+            echo
+            echo "[Open the pull request](https://github.com/${GITHUB_REPOSITORY}/compare/${GITHUB_REF_NAME}...screenshots-update?expand=1)."
+          } >> "$GITHUB_STEP_SUMMARY"

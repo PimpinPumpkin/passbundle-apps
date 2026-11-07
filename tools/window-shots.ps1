@@ -18,20 +18,15 @@ using System;
 using System.Runtime.InteropServices;
 public static class Shot {
     [StructLayout(LayoutKind.Sequential)]
-    public struct RECT { public int Left, Top, Right, Bottom; }
-    [StructLayout(LayoutKind.Sequential)]
     public struct POINT { public int X, Y; }
     [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr window, ref POINT point);
     [DllImport("user32.dll")] public static extern uint GetDpiForWindow(IntPtr window);
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr window);
     [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
     [DllImport("user32.dll")] public static extern void mouse_event(uint flags, int x, int y, uint data, UIntPtr extra);
-    [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr window, int attribute, out RECT value, int size);
-    public static RECT Frame(IntPtr window) {
-        RECT r; DwmGetWindowAttribute(window, 9 /* DWMWA_EXTENDED_FRAME_BOUNDS */, out r, Marshal.SizeOf(typeof(RECT))); return r;
-    }
 }
 "@
+. (Join-Path $PSScriptRoot 'app-window.ps1')
 Add-Type -AssemblyName System.Drawing
 New-Item -ItemType Directory -Force -Path $Out | Out-Null
 $sample = Join-Path $PSScriptRoot '..\app\test\sample'
@@ -49,14 +44,18 @@ foreach ($theme in 'light', 'dark') {
     $env:PB_MEASURE_PASSWORD = 'correct horse battery staple 1'
     # Windows otherwise leaves the window out of screenshots.
     $env:PB_ALLOW_SCREENSHOTS = '1'
+    # The mouse off where the window opens: left over its buttons (by
+    # tools/window-test.ps1's Close), Windows shows their tooltip as it opens.
+    [Shot]::SetCursorPos(0, 0) | Out-Null
     $app = Start-Process -FilePath $Exe -PassThru
     for ($i = 0; $i -lt 120; $i++) {
         if ((Get-Content $lines -ErrorAction SilentlyContinue) -match '^ready') { break }
         if ($app.HasExited) { throw 'The app quit before it was ready.' }
         Start-Sleep -Milliseconds 500
     }
-    $app.Refresh()
-    $window = $app.MainWindowHandle
+    if (-not ((Get-Content $lines -ErrorAction SilentlyContinue) -match '^ready')) { throw "The app wasn't ready within a minute." }
+    # The app's window, as Windows shows it (tools/app-window.ps1).
+    $window = Wait-AppWindow $app
     [Shot]::SetForegroundWindow($window) | Out-Null
     Start-Sleep -Seconds 1
     # An item, the first in the list, chosen: its actions show along the
@@ -73,9 +72,12 @@ foreach ($theme in 'light', 'dark') {
     # Off the window, so nothing shows as under the mouse.
     [Shot]::SetCursorPos(0, 0) | Out-Null
     Start-Sleep -Milliseconds 1500
-    $frame = [Shot]::Frame($window)
+    $frame = [AppWindow]::Frame($window)
     $width = $frame.Right - $frame.Left
     $height = $frame.Bottom - $frame.Top
+    if ($width -le 0 -or $height -le 0) {
+        throw "The app's window has no size to take ($($width)x$($height)). The app's windows: $([AppWindow]::Describe($app.Id))."
+    }
     $bitmap = New-Object System.Drawing.Bitmap $width, $height
     [System.Drawing.Graphics]::FromImage($bitmap).CopyFromScreen($frame.Left, $frame.Top, 0, 0, $bitmap.Size)
     $shot = Join-Path $Out "$Name-$theme.png"

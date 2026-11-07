@@ -43,18 +43,37 @@ Future<void> pumpUntil(
 /// Taps something once the screen has stopped moving under it: it can be
 /// hit, and it's in the same place for a few frames (a keyboard closing
 /// moves the screen after a field is typed in, and a tap mid-move misses).
-Future<void> tapWhenStill(WidgetTester tester, Finder finder) async {
+///
+/// With [inList], it's a row of a list that scrolls (Settings, on CI's small
+/// screen), and it's scrolled into view whenever it can't be hit: rows above
+/// it fill in as their answers come from the phone (the autofill card, the
+/// biometric row), and each one pushes it down, out of view.
+Future<void> tapWhenStill(
+  WidgetTester tester,
+  Finder finder, {
+  bool inList = false,
+}) async {
   Offset? last;
   var still = 0;
   final end = DateTime.now().add(const Duration(seconds: 30));
   while (still < 3 && DateTime.now().isBefore(end)) {
     await tester.pump(const Duration(milliseconds: 100));
     final found = finder.hitTestable().evaluate();
+    if (found.isEmpty && inList && finder.evaluate().isNotEmpty) {
+      await tester.ensureVisible(finder);
+    }
     final at = found.isEmpty ? null : tester.getCenter(finder);
     still = at != null && at == last ? still + 1 : 0;
     last = at;
   }
-  if (still < 3) throw TestFailure('Never held still: $finder');
+  if (still < 3) {
+    final why = finder.evaluate().isEmpty
+        ? 'not there'
+        : last == null
+        ? 'there, but never where a tap reaches it'
+        : 'still moving, last at $last';
+    throw TestFailure('Never held still ($why): $finder');
+  }
   await tester.tap(finder);
 }
 
@@ -496,11 +515,16 @@ void main() {
     // A phone's own words and choices: 5 minutes away by default.
     await tester.tap(find.byTooltip('Settings'));
     await pumpUntil(tester, find.text('Lock when the phone locks'));
-    // Settings scrolls on a small screen, as CI's emulator has. Tapped once
-    // it holds still: a tap while the tab is still coming in lands on what's
-    // over it, and the menu never opens.
-    await tester.ensureVisible(find.text('5 minutes'));
-    await tapWhenStill(tester, find.text('5 minutes'));
+    // Settings fills in as Android answers: on Android, the autofill card
+    // above Locking shows once Android says whether PassBundle is its
+    // service, and pushes the rows under it down (out of view on CI's small
+    // screen, where Settings scrolls).
+    if (Platform.isAndroid) {
+      await pumpUntil(tester, find.text('Use PassBundle for autofill'));
+    }
+    // Tapped once it's in view and holds still: a tap while the tab is still
+    // coming in lands on what's over it, and the menu never opens.
+    await tapWhenStill(tester, find.text('5 minutes'), inList: true);
     await pumpUntil(tester, find.text('Immediately'));
     expect(find.text('Away from PassBundle'), findsOneWidget);
     await tapWhenStill(tester, find.text('Immediately').last);

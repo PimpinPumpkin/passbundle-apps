@@ -116,6 +116,7 @@ public static class Msaa {
     }
 }
 "@
+. (Join-Path $PSScriptRoot 'app-window.ps1')
 $noZOrder = 0x0004
 $noMove = 0x0002
 $key = 'HKCU:\Software\PassBundle\Window'
@@ -133,6 +134,9 @@ function Open-App {
     $env:PB_DATA_DIR = $data
     $lines = [IO.Path]::GetTempFileName()
     $env:PB_MEASURE_FILE = $lines
+    # The mouse off where the window opens: left over its buttons (by the
+    # last instance's Close), Windows shows their tooltip as it opens.
+    [Win]::SetCursorPos(0, 0) | Out-Null
     $app = Start-Process -FilePath $Exe -PassThru
     for ($i = 0; $i -lt 120; $i++) {
         if ((Get-Content $lines -ErrorAction SilentlyContinue) -match '^ready') { break }
@@ -140,9 +144,10 @@ function Open-App {
         Start-Sleep -Milliseconds 500
     }
     if (-not ((Get-Content $lines -ErrorAction SilentlyContinue) -match '^ready')) { throw "The app wasn't ready within a minute." }
-    $app.Refresh()
-    if ($app.MainWindowHandle -eq [IntPtr]::Zero) { throw "The app's window didn't show." }
-    [Win]::SetForegroundWindow($app.MainWindowHandle) | Out-Null
+    # The app's window, as Windows shows it (tools/app-window.ps1).
+    $window = Wait-AppWindow $app
+    $app | Add-Member -NotePropertyName Window -NotePropertyValue $window
+    [Win]::SetForegroundWindow($window) | Out-Null
     Start-Sleep -Seconds 1
     $app
 }
@@ -184,8 +189,19 @@ function Click([IntPtr] $window, [double] $x, [double] $y, [int] $times = 1) {
 
 function Close-App($app) {
     # As the close button does: the window closes, and keeps its place.
-    [Win]::PostMessage($app.MainWindowHandle, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
+    [Win]::PostMessage($app.Window, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
     if (-not $app.WaitForExit(20000)) { Stop-Process -Id $app.Id; throw "The app didn't close." }
+}
+
+# What Windows does after a click, once it's done: the app's thread answers
+# between frames, later on a busy runner. Up to three seconds.
+function Wait-Until([scriptblock] $Condition) {
+    $end = (Get-Date).AddSeconds(3)
+    while (-not (& $Condition)) {
+        if ((Get-Date) -gt $end) { return $false }
+        Start-Sleep -Milliseconds 50
+    }
+    $true
 }
 
 function Expect-Hit([IntPtr] $window, [string] $what, [double] $x, [double] $y, [int] $expected, [string] $name) {
@@ -200,7 +216,7 @@ try {
     $work = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
 
     $app = Open-App
-    $window = $app.MainWindowHandle
+    $window = $app.Window
     $scale = [Win]::GetDpiForWindow($window) / 96.0
     $first = Get-Place $window
     Write-Output "Opened at $first on a $($work.Width)x$($work.Height) work area, at $($scale * 100)%."
@@ -283,14 +299,14 @@ try {
 
     # A double click on the band maximizes, and again restores.
     Click $window ($width - 250) 20 2
-    if (-not [Win]::IsZoomed($window)) { throw "A double click on the band didn't maximize." }
+    if (-not (Wait-Until { [Win]::IsZoomed($window) })) { throw "A double click on the band didn't maximize." }
     Click $window ((Client-Width $window) - 250) 20 2
-    if ([Win]::IsZoomed($window)) { throw "A second double click didn't restore." }
+    if (-not (Wait-Until { -not [Win]::IsZoomed($window) })) { throw "A second double click didn't restore." }
     Write-Output 'A double click on the band maximizes, and restores.'
 
     # The buttons: minimize, and back.
     Click $window ((Client-Width $window) - 46 * 2.5) 16
-    if (-not [Win]::IsIconic($window)) { throw "Minimize didn't." }
+    if (-not (Wait-Until { [Win]::IsIconic($window) })) { throw "Minimize didn't." }
     [Win]::ShowWindow($window, 9) | Out-Null # SW_RESTORE
     Start-Sleep -Seconds 1
     [Win]::SetForegroundWindow($window) | Out-Null
@@ -299,7 +315,7 @@ try {
     # Maximize: the app's content exactly on the screen's work area, none
     # of it off the screen; then restore.
     Click $window ((Client-Width $window) - 46 * 1.5) 16
-    if (-not [Win]::IsZoomed($window)) { throw "Maximize didn't." }
+    if (-not (Wait-Until { [Win]::IsZoomed($window) })) { throw "Maximize didn't." }
     $info = New-Object Win+MONITORINFO
     $info.Size = [Runtime.InteropServices.Marshal]::SizeOf($info)
     [Win]::GetMonitorInfo([Win]::MonitorFromWindow($window, 2), [ref] $info) | Out-Null
@@ -314,7 +330,7 @@ try {
     Expect-Hit $window 'Restore, maximized' ((Client-Width $window) - 46 * 1.5) 16 9 'HTMAXBUTTON'
     Expect-Hit $window 'The very top, maximized' ((Client-Width $window) / 2) 0 2 'HTCAPTION'
     Click $window ((Client-Width $window) - 46 * 1.5) 16
-    if ([Win]::IsZoomed($window)) { throw "Restore didn't." }
+    if (-not (Wait-Until { -not [Win]::IsZoomed($window) })) { throw "Restore didn't." }
     Write-Output 'Maximize and restore.'
 
     # Close.
@@ -325,7 +341,7 @@ try {
     # Smaller than it may be: it stops at 400 by 560.
     Remove-Item $key -Recurse -ErrorAction SilentlyContinue
     $app = Open-App
-    $window = $app.MainWindowHandle
+    $window = $app.Window
     [Win]::SetWindowPos($window, [IntPtr]::Zero, 0, 0, 100, 100, $noZOrder -bor $noMove) | Out-Null
     $client = New-Object Win+RECT
     [Win]::GetClientRect($window, [ref] $client) | Out-Null
@@ -346,9 +362,9 @@ try {
     $env:PB_ALLOW_SCREENSHOTS = '1'
     $app = Open-App
     Remove-Item Env:PB_ALLOW_SCREENSHOTS
-    $again = Get-Place $app.MainWindowHandle
+    $again = Get-Place $app.Window
     Write-Output "Opened again at $again."
-    $affinity = [Win]::Affinity($app.MainWindowHandle)
+    $affinity = [Win]::Affinity($app.Window)
     Close-App $app
     if ($affinity -ne 0) { throw "With screenshots allowed, the window's display affinity is $affinity." }
     Write-Output 'With screenshots allowed, they take the window.'

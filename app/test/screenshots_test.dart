@@ -327,6 +327,10 @@ void main() {
       await save(id, 'Contoso Mail (work)', 'not-a-real-password-3', '995');
       await tester.pumpWidget(PassBundleApp(themeMode: theme));
       await pumpUntil(tester, find.text('Contoso Mail (work)'));
+      // Past the sync the vault starts as it opens: its spinner turns until
+      // the server answers, in real time, so the test's clock never settles
+      // while it shows (and the screenshots show the Sync button).
+      await pumpUntil(tester, find.byTooltip('Sync'));
       await tester.tap(find.text('Contoso Mail (work)').first);
       await tester.pump();
       await tester.ensureVisible(find.text('Version history'));

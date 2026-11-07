@@ -36,7 +36,16 @@ Future<void> pumpUntil(
 /// Taps once the screen holds still: hit-testable, and in the same place for
 /// a few frames (the keyboard going away moves the screen, and on a small
 /// screen it covers what's under it).
-Future<void> tapWhenStill(WidgetTester tester, Finder finder) async {
+///
+/// With [inList], it's a row of a list that scrolls (Settings, on CI's small
+/// screen), and it's scrolled into view whenever it can't be hit: rows above
+/// it fill in as their answers come from the phone (the autofill card, the
+/// biometric row), and each one pushes it down, out of view.
+Future<void> tapWhenStill(
+  WidgetTester tester,
+  Finder finder, {
+  bool inList = false,
+}) async {
   FocusManager.instance.primaryFocus?.unfocus();
   Offset? last;
   var still = 0;
@@ -44,11 +53,21 @@ Future<void> tapWhenStill(WidgetTester tester, Finder finder) async {
   while (still < 3 && DateTime.now().isBefore(end)) {
     await tester.pump(const Duration(milliseconds: 100));
     final found = finder.hitTestable().evaluate();
+    if (found.isEmpty && inList && finder.evaluate().isNotEmpty) {
+      await tester.ensureVisible(finder);
+    }
     final at = found.isEmpty ? null : tester.getCenter(finder);
     still = at != null && at == last ? still + 1 : 0;
     last = at;
   }
-  if (still < 3) throw TestFailure('Never held still: $finder');
+  if (still < 3) {
+    final why = finder.evaluate().isEmpty
+        ? 'not there'
+        : last == null
+        ? 'there, but never where a tap reaches it'
+        : 'still moving, last at $last';
+    throw TestFailure('Never held still ($why): $finder');
+  }
   await tester.tap(finder);
 }
 
@@ -179,10 +198,10 @@ void main() {
       await tester.tap(find.byTooltip('Settings'));
       await pumpUntil(tester, find.text('Browsers you trust for autofill'));
       expect(find.text('com.passbundle.autofilltest'), findsOneWidget);
-      // Down Settings as far as it (a small screen shows only the top).
-      await tester.ensureVisible(find.text('Stop trusting'));
-      await tester.pump(const Duration(milliseconds: 400));
-      await tester.tap(find.text('Stop trusting'));
+      // Down Settings as far as it (a small screen shows only the top),
+      // once the autofill card above has come in and pushed it down.
+      await pumpUntil(tester, find.text('Use PassBundle for autofill'));
+      await tapWhenStill(tester, find.text('Stop trusting'), inList: true);
       for (var i = 0; i < 50; i++) {
         await tester.pump(const Duration(milliseconds: 100));
         if (find.text('Browsers you trust for autofill').evaluate().isEmpty) {
