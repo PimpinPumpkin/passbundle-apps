@@ -157,25 +157,20 @@ pub(crate) fn host_of(url: &str) -> String {
 /// showing its words.
 fn why_unreached(e: &ureq::Error) -> Unreached {
     use std::io::ErrorKind;
+    // The TLS errors, rustls's and the OS verifier's, say which part failed,
+    // as their own error or inside an io error from the connection: a
+    // certificate the OS doesn't trust (expired, for another name, from an
+    // authority it doesn't know) is one this device won't send to.
+    let certificate = e.to_string().to_lowercase().contains("certificate");
     match e {
-        ureq::Error::HostNotFound => return Unreached::NotFound,
-        ureq::Error::Timeout(_) => return Unreached::TimedOut,
-        ureq::Error::Io(io) => {
-            return match io.kind() {
-                ErrorKind::TimedOut | ErrorKind::WouldBlock => Unreached::TimedOut,
-                _ if lookup_failed(io) => Unreached::NotFound,
-                _ => Unreached::NoAnswer,
-            }
+        ureq::Error::HostNotFound => Unreached::NotFound,
+        ureq::Error::Timeout(_) => Unreached::TimedOut,
+        ureq::Error::Io(io) if matches!(io.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock) => {
+            Unreached::TimedOut
         }
-        _ => {}
-    }
-    // The TLS errors: rustls's and the OS verifier's say which part failed.
-    // A certificate the OS doesn't trust (expired, for another name, from
-    // an authority it doesn't know) is one this device won't send to.
-    if e.to_string().to_lowercase().contains("certificate") {
-        Unreached::Certificate
-    } else {
-        Unreached::NoAnswer
+        ureq::Error::Io(io) if lookup_failed(io) => Unreached::NotFound,
+        _ if certificate => Unreached::Certificate,
+        _ => Unreached::NoAnswer,
     }
 }
 
@@ -338,6 +333,15 @@ mod tests {
         assert_eq!(
             cert,
             "PassBundle didn't connect to vault.example.test:8443: its certificate isn't trusted on this device. If it's your organization's server, ask your IT team."
+        );
+        // The same inside an io error from the connection, as iOS's verifier
+        // gives it.
+        assert_eq!(
+            said(io(
+                std::io::ErrorKind::InvalidData,
+                "invalid peer certificate: Other(OtherError(\"not trusted\"))"
+            )),
+            cert
         );
         assert!(Error::unreached(url, &ureq::Error::HostNotFound).offline());
         assert!(Error::unreached(url, &ureq::Error::HostNotFound).about_the_server());
