@@ -125,14 +125,11 @@ impl Store {
         let Some(dir) = &self.dir else {
             return Err(Error::SignedOut);
         };
-        private_dir(dir)
-            .map_err(|e| Error::Malformed(format!("can't make {}: {e}", dir.display())))?;
+        private_dir(dir).map_err(disk)?;
         let target = dir.join(name);
         let partial = dir.join(format!("{name}.partial"));
-        write_new(&partial, text.as_bytes())
-            .map_err(|e| Error::Malformed(format!("can't write {}: {e}", partial.display())))?;
-        fs::rename(&partial, &target)
-            .map_err(|e| Error::Malformed(format!("can't write {}: {e}", target.display())))
+        write_new(&partial, text.as_bytes()).map_err(disk)?;
+        fs::rename(&partial, &target).map_err(disk)
     }
 
     pub(crate) fn read(&self, name: &str) -> Option<String> {
@@ -203,6 +200,15 @@ impl Store {
 
     pub fn save_sync(&self, text: &str) -> Result<()> {
         self.write("sync.json", text)
+    }
+
+    /// How long ago the last sync was kept, by its file's time.
+    pub fn sync_age(&self) -> Option<std::time::Duration> {
+        let modified = fs::metadata(self.path("sync.json")?)
+            .ok()?
+            .modified()
+            .ok()?;
+        std::time::SystemTime::now().duration_since(modified).ok()
     }
 
     /// Signing out forgets the vault; the server and email stay, to sign in again.
@@ -294,6 +300,14 @@ pub(crate) fn private_dir(dir: &Path) -> std::io::Result<()> {
 #[cfg(not(unix))]
 pub(crate) fn private_dir(dir: &Path) -> std::io::Result<()> {
     fs::create_dir_all(dir)
+}
+
+/// A file or folder this device didn't let PassBundle write: out of space,
+/// or something else (its words are the OS's, which nobody needs to read).
+fn disk(e: std::io::Error) -> Error {
+    Error::Disk {
+        full: e.kind() == std::io::ErrorKind::StorageFull,
+    }
 }
 
 /// Writes `bytes` to a new file at `path`, made readable only by this user

@@ -38,8 +38,10 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
-fn lost(e: std::io::Error) -> Error {
-    Error::Network(format!("the desktop agent stopped answering ({e})"))
+/// The agent's socket failed partway: it stopped answering. (Its words are
+/// the OS's, which nobody needs to read.)
+fn lost(_: std::io::Error) -> Error {
+    Error::AgentStopped
 }
 
 /// Overwrites a user key in a message before it's dropped.
@@ -81,7 +83,7 @@ impl Agent {
         std::process::Command::new(&program)
             .spawn()
             .map(|_| true)
-            .map_err(|e| Error::Network(format!("the desktop agent didn't start ({e})")))
+            .map_err(|_| Error::NoAgent)
     }
 
     /// Connects to the agent at `address`, which must be the program at

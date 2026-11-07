@@ -3,7 +3,9 @@
 // field is cleared at once (docs/core.md, "Memory"). People sign in to
 // PassBundle's own server without being asked; a server an organization set
 // by policy is used and shown; and someone hosting their own types it in,
-// behind "Self-hosted?".
+// behind "Self-hosted?". Their server is checked as they leave its field, and
+// before anything is sent to it (docs/core.md, "Checking a server"): what's
+// wrong with it is said under that field, not under the master password.
 import 'package:flutter/material.dart';
 
 import 'accounts.dart';
@@ -63,6 +65,48 @@ class _SignInScreenState extends State<SignInScreen> {
 
   String get signInTo =>
       managed ?? (selfHosted ? serverAddress(server.text) : ours);
+
+  /// What's wrong with the server typed in, under its field: it can't be
+  /// reached, or it isn't a PassBundle server.
+  String? serverError;
+
+  /// The server field: leaving it checks the server.
+  late final FocusNode serverFocus = FocusNode()
+    ..addListener(() {
+      if (!serverFocus.hasFocus && mounted) checkServer();
+    });
+
+  /// Counts the checks, so only the newest one's answer is shown.
+  int checks = 0;
+
+  /// Checks the server typed in, as the person leaves its field. Nothing is
+  /// said about an empty field until they sign in.
+  Future<void> checkServer() async {
+    if (!selfHosted || managed != null || server.text.trim().isEmpty) return;
+    final asked = ++checks;
+    final typed = server.text;
+    final answer = await Core.checkServer(serverAddress(typed));
+    if (!mounted || asked != checks || typed != server.text) return;
+    setState(() => serverError = answer.ok ? null : answer.error);
+  }
+
+  /// An answer about the server rather than the email or master password,
+  /// when the person typed the server: said under its field. True if it was.
+  bool aboutTheServer(Answer answer) {
+    if (answer.ok || !answer.aboutTheServer || !selfHosted) return false;
+    setState(() {
+      working = false;
+      error = null;
+      serverError = answer.error;
+    });
+    return true;
+  }
+
+  @override
+  void dispose() {
+    serverFocus.dispose();
+    super.dispose();
+  }
   late final email = TextEditingController(text: widget.email ?? '');
   final password = TextEditingController();
   final code = TextEditingController();
@@ -89,11 +133,12 @@ class _SignInScreenState extends State<SignInScreen> {
     setState(() {
       working = true;
       error = null;
+      serverError = null;
     });
     final answer = await whileBusy(
       () => Core.signIn(signInTo, email.text.trim(), typed),
     );
-    if (!mounted) return;
+    if (!mounted || aboutTheServer(answer)) return;
     signedIn(answer);
   }
 
@@ -147,6 +192,7 @@ class _SignInScreenState extends State<SignInScreen> {
     setState(() {
       working = true;
       error = null;
+      serverError = null;
     });
     final answer = await whileBusy(
       () => Core.signUp(
@@ -157,7 +203,7 @@ class _SignInScreenState extends State<SignInScreen> {
         hint.text.trim(),
       ),
     );
-    if (!mounted) return;
+    if (!mounted || aboutTheServer(answer)) return;
     if (answer.body['accountMade'] == true) {
       // The account is there: signing in is what's left, with the same email.
       setState(() {
@@ -215,18 +261,7 @@ class _SignInScreenState extends State<SignInScreen> {
               ? null
               : 'Your organization\'s server: ${Uri.tryParse(managed!)?.host ?? managed}',
         ),
-        if (selfHosted) ...[
-          TextField(
-            controller: server,
-            enabled: !working,
-            keyboardType: TextInputType.url,
-            decoration: const InputDecoration(
-              labelText: 'Server',
-              hintText: 'vault.example.com',
-            ),
-          ),
-          const SizedBox(height: 12),
-        ],
+        if (selfHosted) _serverField(),
         TextField(
           controller: email,
           enabled: !working,
@@ -278,7 +313,10 @@ class _SignInScreenState extends State<SignInScreen> {
           TextButton(
             onPressed: working
                 ? null
-                : () => setState(() => selfHosted = !selfHosted),
+                : () => setState(() {
+                    selfHosted = !selfHosted;
+                    serverError = null;
+                  }),
             child: Text(
               selfHosted ? 'Use PassBundle\'s server' : 'Self-hosted?',
             ),
@@ -295,15 +333,24 @@ class _SignInScreenState extends State<SignInScreen> {
     );
   }
 
+  /// The server someone hosts themselves, with what's wrong with it.
   Widget _serverField() => Column(
     children: [
       TextField(
+        key: const ValueKey('server'),
         controller: server,
+        focusNode: serverFocus,
         enabled: !working,
         keyboardType: TextInputType.url,
-        decoration: const InputDecoration(
+        autocorrect: false,
+        onChanged: (_) {
+          if (serverError != null) setState(() => serverError = null);
+        },
+        decoration: InputDecoration(
           labelText: 'Server',
           hintText: 'vault.example.com',
+          errorText: serverError,
+          errorMaxLines: 4,
         ),
       ),
       const SizedBox(height: 12),
@@ -409,7 +456,10 @@ class _SignInScreenState extends State<SignInScreen> {
         TextButton(
           onPressed: working
               ? null
-              : () => setState(() => selfHosted = !selfHosted),
+              : () => setState(() {
+                    selfHosted = !selfHosted;
+                    serverError = null;
+                  }),
           child: Text(selfHosted ? 'Use PassBundle\'s server' : 'Self-hosted?'),
         ),
     ],

@@ -96,17 +96,28 @@ bool get isAndroid => debugAndroid ?? Platform.isAndroid;
 @visibleForTesting
 bool? debugAndroid;
 
-/// An answer from a call that can fail: ok, or the core's words.
+/// An answer from a call that can fail: ok, or the core's words (plain
+/// words with what to do next; core/src/error.rs).
 class Answer {
   Answer(Map<String, dynamic> json)
     : ok = json['ok'] == true,
       error = json['error'] as String?,
       signedOut = json['signedOut'] == true,
+      offline = json['offline'] == true,
+      aboutTheServer = json['field'] == 'server',
       body = json;
 
   final bool ok;
   final String? error;
   final bool signedOut;
+
+  /// This device couldn't reach the server: offline, or the server is down.
+  final bool offline;
+
+  /// It's about the server's address (it can't be reached, or isn't a
+  /// PassBundle server), not the email or master password: the sign-in
+  /// screen says it under the server field.
+  final bool aboutTheServer;
   final Map<String, dynamic> body;
 }
 
@@ -133,6 +144,9 @@ class Core {
   late final _state = _lib.lookupFunction<_Str1, _Str1>('pb_state');
   late final _servers = _lib.lookupFunction<_Str0, _Str0>('pb_servers');
   late final _signIn = _lib.lookupFunction<_Str3, _Str3>('pb_sign_in');
+  late final _checkServer = _lib.lookupFunction<_Str1, _Str1>(
+    'pb_check_server',
+  );
   late final _signUp = _lib.lookupFunction<_Str5, _Str5>('pb_sign_up');
   late final _finish = _lib.lookupFunction<_FinishNative, _Finish>(
     'pb_finish_sign_in',
@@ -399,6 +413,13 @@ class Core {
         ),
       );
 
+  /// Whether a PassBundle server answers at an address, before signing in or
+  /// making an account there (docs/core.md, "Checking a server"): ok, or
+  /// what's wrong, [Answer.aboutTheServer].
+  static Future<Answer> checkServer(String server) => _background(
+    (c, _) => c._with([server], (p) => c._answer(c._checkServer(p[0]))),
+  );
+
   /// A sign-in that's done names the account signed in to: the screens show it.
   static Future<Answer> _signedIn(Future<Answer> signing) async {
     final answer = await signing;
@@ -553,6 +574,9 @@ class Core {
     (c, a) => c._with([a], (p) => c._answer(c._syncSettings(p[0]))),
   );
 
+  /// Saves an item from the editor: `id` (the new one's, for a new item),
+  /// and `synced`, false when the sync after saving didn't come through
+  /// (it's saved all the same, and shows here; core/src/app.rs, `save`).
   static Future<Answer> save(String? id, Map<String, dynamic> draft) =>
       _background(
         (c, a) => c._with([

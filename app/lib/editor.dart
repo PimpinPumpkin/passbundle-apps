@@ -15,11 +15,21 @@ import 'places.dart';
 import 'theme.dart';
 import 'widgets.dart';
 
-/// Opens the editor; resolves to the saved item's id ('' for a new one), or
-/// null if cancelled. A new item is the kind or template `choice` picked,
-/// going to `place` (as [_ItemEditorState.place] says it) unless the person
-/// picks another.
-Future<String?> openEditor(
+/// What the editor saved: the item's id ('' for a new one), and whether the
+/// sync after saving came through. When it didn't, the item is saved all the
+/// same and shows on this device (core/src/app.rs, `save`): the editor
+/// closes, so it's never saved twice.
+class EditorSaved {
+  const EditorSaved(this.id, {this.synced = true});
+
+  final String id;
+  final bool synced;
+}
+
+/// Opens the editor; resolves to what was saved, or null if cancelled. A
+/// new item is the kind or template `choice` picked, going to `place` (as
+/// [_ItemEditorState.place] says it) unless the person picks another.
+Future<EditorSaved?> openEditor(
   BuildContext context, {
   required Core core,
   required Places places,
@@ -38,7 +48,7 @@ Future<String?> openEditor(
     place: place,
   );
   if (asDialog) {
-    return showDialog<String>(
+    return showDialog<EditorSaved>(
       context: context,
       builder: (context) => Dialog(
         clipBehavior: Clip.antiAlias,
@@ -50,7 +60,7 @@ Future<String?> openEditor(
       ),
     );
   }
-  return Navigator.of(context).push<String>(
+  return Navigator.of(context).push<EditorSaved>(
     MaterialPageRoute(fullscreenDialog: true, builder: (_) => editor),
   );
 }
@@ -412,11 +422,16 @@ class _ItemEditorState extends State<ItemEditor> {
     final answer = await whileBusy(() => Core.save(widget.id, draft));
     if (!mounted) return;
     if (answer.ok) {
-      Navigator.of(context).pop(widget.id ?? '');
+      Navigator.of(context).pop(
+        EditorSaved(widget.id ?? '', synced: answer.body['synced'] != false),
+      );
     } else {
       setState(() {
         working = false;
-        error = answer.error;
+        // Offline, nothing was saved: what's typed stays, for another try.
+        error = answer.offline
+            ? 'Not saved. ${answer.error} What you typed is still here.'
+            : answer.error;
       });
     }
   }

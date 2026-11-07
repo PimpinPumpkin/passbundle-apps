@@ -27,7 +27,7 @@ void main() {
   setUpAll(loadFonts);
 
   testWidgets(
-    'with nothing kept, it asks to sign in, and says when the server can\'t be reached',
+    'with nothing kept, it asks to sign in, and says under the server field when it can\'t be reached',
     (tester) async {
       setSize(tester, const Size(1280, 800));
       openEmpty();
@@ -50,10 +50,17 @@ void main() {
         'anything',
       );
       await tester.tap(find.text('Sign in'));
-      await pumpUntil(
-        tester,
-        find.textContaining('Couldn\'t reach the server'),
+      // Under the server field, which is what's wrong, with what to do: never
+      // under the master password, nor the OS's words.
+      final unreached = find.descendant(
+        of: find.byKey(const ValueKey('server')),
+        matching: find.text(
+          'PassBundle couldn\'t connect to 127.0.0.1:9. Check that this device is online, then try again.',
+        ),
       );
+      await pumpUntil(tester, unreached);
+      expect(find.textContaining('os error'), findsNothing);
+      expect(find.textContaining('Connection refused'), findsNothing);
       // The field doesn't keep the master password.
       expect(find.text('anything'), findsNothing);
 
@@ -68,7 +75,10 @@ void main() {
       await tester.tap(find.text('Sign in'));
       await pumpUntil(
         tester,
-        find.textContaining('only talks to servers over HTTPS'),
+        find.descendant(
+          of: find.byKey(const ValueKey('server')),
+          matching: find.textContaining('starts with https://'),
+        ),
       );
     },
   );
@@ -125,11 +135,15 @@ void main() {
         find.text('The hint can\'t give away your master password.'),
         findsOneWidget,
       );
-      // Right: the core makes the account's keys, then can't reach the server.
+      // Right: the core checks the server first, which can't be reached,
+      // and says so under its field.
       await passwords('correct horse battery', 'correct horse battery');
       await pumpUntil(
         tester,
-        find.textContaining('Couldn\'t reach the server'),
+        find.descendant(
+          of: find.byKey(const ValueKey('server')),
+          matching: find.textContaining('couldn\'t connect to 127.0.0.1:9'),
+        ),
       );
       // The fields don't keep the master password.
       expect(find.text('correct horse battery'), findsNothing);

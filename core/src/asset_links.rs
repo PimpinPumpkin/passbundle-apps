@@ -120,19 +120,16 @@ pub fn fetch(rp_id: &str) -> Result<String> {
     let mut response = agent
         .get(&url)
         .call()
-        .map_err(|e| Error::Network(e.to_string()))?;
+        .map_err(|e| Error::unreached(&url, &e))?;
     if response.status().as_u16() != 200 {
-        return Err(Error::Server(format!(
-            "the site's asset links couldn't be read ({})",
-            response.status().as_u16()
-        )));
+        return Err(Error::Status(response.status().as_u16()));
     }
     response
         .body_mut()
         .with_config()
         .limit(MOST)
         .read_to_string()
-        .map_err(|e| Error::Network(e.to_string()))
+        .map_err(|e| Error::unreached(&url, &e))
 }
 
 /// Whether the site lets this app use its sign-in credentials, from what was

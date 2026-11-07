@@ -188,8 +188,12 @@ void main() {
         FocusManager.instance.primaryFocus?.unfocus();
         await tapWhenStill(tester, find.text('Sign in'));
         await pumpUntil(tester, find.textContaining('certificate'));
+        // Said once, under the server field, with what to do.
         expect(
-          find.textContaining('Couldn\'t reach the server'),
+          find.descendant(
+            of: find.byKey(const ValueKey('server')),
+            matching: find.textContaining('isn\'t trusted on this device'),
+          ),
           findsOneWidget,
         );
       } finally {

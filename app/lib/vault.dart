@@ -137,6 +137,12 @@ class VaultScreenState extends State<VaultScreen> {
   bool syncing = false;
   bool signedOut = false;
 
+  /// This device couldn't reach the server at the last sync: how many
+  /// seconds old the copy kept here is (0 when it isn't known), or null when
+  /// it could. The vault says it shows that copy, instead of an error each
+  /// time it opens.
+  int? offline;
+
   /// On a phone: the items (0), the generator (1), or Settings (2).
   int tab = 0;
 
@@ -312,11 +318,33 @@ class VaultScreenState extends State<VaultScreen> {
     setState(() {
       syncing = false;
       signedOut = answer.signedOut;
+      offline = answer.offline
+          ? (answer.body['keptSecondsAgo'] as num?)?.toInt() ?? 0
+          : null;
     });
-    if (!answer.ok && !answer.signedOut) {
+    if (!answer.ok && !answer.signedOut && !answer.offline) {
       showMessage(context, answer.error ?? 'Couldn\'t sync.');
     }
     reload();
+  }
+
+  /// Offline, said once and quietly: what the vault shows is this device's
+  /// copy, from when it was last synced, and changes wait for the server.
+  Widget? get offlineBanner {
+    final age = offline;
+    if (age == null || signedOut) return null;
+    final when = age > 0
+        ? ago(DateTime.now().subtract(Duration(seconds: age)).toIso8601String())
+        : null;
+    return MaterialBanner(
+      key: const ValueKey('offline'),
+      content: Text(
+        'Can\'t reach your server. You\'re seeing the copy on this device'
+        '${when == null ? '' : ', synced $when'}. Saving changes needs the server.',
+      ),
+      leading: const Icon(Icons.cloud_off_outlined),
+      actions: [TextButton(onPressed: sync, child: const Text('Try again'))],
+    );
   }
 
   List<Map<String, dynamic>> get shown => [
@@ -452,8 +480,15 @@ class VaultScreenState extends State<VaultScreen> {
     );
     if (saved == null || !mounted) return;
     reload();
-    setState(() => selected = saved.isEmpty ? selected : saved);
-    showMessage(context, id == null ? 'Saved' : 'Saved the changes');
+    setState(() => selected = saved.id.isEmpty ? selected : saved.id);
+    // Saved either way; without the sync after it, the rest of the vault
+    // catches up next time (the item shows already).
+    showMessage(
+      context,
+      saved.synced
+          ? (id == null ? 'Saved' : 'Saved the changes')
+          : '${id == null ? 'Saved' : 'Saved the changes'}. PassBundle couldn\'t sync the rest just now, and will next time.',
+    );
   }
 
   /// The generator on its own, in a dialog (a computer's Tools).
@@ -654,7 +689,7 @@ class VaultScreenState extends State<VaultScreen> {
                 Expanded(
                   child: ItemList(
                     title: placeName ?? 'All items',
-                    banner: signedOutBanner,
+                    banner: signedOutBanner ?? offlineBanner,
                     items: shown,
                     badges: !const {
                       Filter.folder,
@@ -724,6 +759,7 @@ class VaultScreenState extends State<VaultScreen> {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               ?signedOutBanner,
+              ?offlineBanner,
               Expanded(
                 child: IndexedStack(
                   index: tab,
@@ -2085,7 +2121,13 @@ class _ItemPaneState extends State<ItemPane> {
     final answer = await whileBusy(() => Core.setFavorite(widget.id, on));
     if (!mounted) return;
     if (!answer.ok) {
-      showMessage(context, answer.error ?? 'Couldn\'t change that.');
+      showMessage(
+        context,
+        answer.error ??
+            (on
+                ? 'Couldn\'t add it to Favorites.'
+                : 'Couldn\'t take it out of Favorites.'),
+      );
       return;
     }
     setState(() => item = widget.core.item(widget.id));

@@ -119,7 +119,9 @@ impl Biometrics for WindowsHello {
             &sealed::seal(user_id, &challenge, &signature, user_key),
         ) {
             Ok(()) => Answer::Approved(()),
-            Err(e) => Answer::Failed(format!("couldn't store the key: {e}")),
+            Err(_) => {
+                Answer::Failed("Windows couldn't keep the key for unlocking; try again".into())
+            }
         }
     }
 
@@ -150,13 +152,52 @@ impl Biometrics for WindowsHello {
         {
             Ok(UserConsentVerificationResult::Verified) => Answer::Approved(()),
             Ok(UserConsentVerificationResult::Canceled) => Answer::Canceled,
-            Ok(other) => Answer::Failed(format!("Windows Hello said {other:?}")),
-            Err(e) => Answer::Failed(e.to_string()),
+            Ok(other) => Answer::Failed(consent_failure(other).into()),
+            Err(_) => Answer::Failed(key_failure(KeyCredentialStatus::UnknownError).into()),
         }
     }
 
     fn remove(&self, user_id: &str) {
         let _ = fs::remove_file(self.path(user_id));
+    }
+}
+
+/// What Windows Hello's answer to a prompt means, in words: never its
+/// enum's name ("DeviceBusy").
+fn consent_failure(result: UserConsentVerificationResult) -> &'static str {
+    match result {
+        UserConsentVerificationResult::DeviceNotPresent => {
+            "Windows Hello has no camera, fingerprint reader, or PIN to use here"
+        }
+        UserConsentVerificationResult::NotConfiguredForUser => {
+            "Windows Hello isn't set up for this Windows account; set it up in Settings, Accounts, Sign-in options"
+        }
+        UserConsentVerificationResult::DisabledByPolicy => {
+            "Windows Hello is turned off on this computer by its organization"
+        }
+        UserConsentVerificationResult::DeviceBusy => {
+            "Windows Hello is busy; try again in a moment"
+        }
+        UserConsentVerificationResult::RetriesExhausted => {
+            "Windows Hello didn't recognize you; try again, or use your master password"
+        }
+        _ => "Windows Hello didn't finish; try again",
+    }
+}
+
+/// What Windows Hello's answer about its key means, in words.
+fn key_failure(status: KeyCredentialStatus) -> &'static str {
+    match status {
+        KeyCredentialStatus::NotFound => {
+            "Windows Hello's key for unlocking is gone; turn unlocking with Windows Hello off and on again"
+        }
+        KeyCredentialStatus::UserPrefersPassword => {
+            "Windows Hello wasn't used; use your master password"
+        }
+        KeyCredentialStatus::SecurityDeviceLocked => {
+            "Windows Hello is locked after too many tries; sign in to Windows with your PIN, then try again"
+        }
+        _ => "Windows Hello had a problem; try again",
     }
 }
 
@@ -177,11 +218,7 @@ fn sign(challenge: &[u8]) -> Answer<Vec<u8>> {
                 .join()?
                 .Credential()?,
             KeyCredentialStatus::UserCanceled => return Ok(Answer::Canceled),
-            other => {
-                return Ok(Answer::Failed(format!(
-                    "couldn't make the Windows Hello key: {other:?}"
-                )))
-            }
+            other => return Ok(Answer::Failed(key_failure(other).into())),
         };
         let signed = credential
             .RequestSignAsync(&CryptographicBuffer::CreateFromByteArray(challenge)?)?
@@ -193,12 +230,10 @@ fn sign(challenge: &[u8]) -> Answer<Vec<u8>> {
                 Ok(Answer::Approved(bytes.to_vec()))
             }
             KeyCredentialStatus::UserCanceled => Ok(Answer::Canceled),
-            other => Ok(Answer::Failed(format!(
-                "Windows Hello didn't sign: {other:?}"
-            ))),
+            other => Ok(Answer::Failed(key_failure(other).into())),
         }
     })();
-    result.unwrap_or_else(|e| Answer::Failed(e.to_string()))
+    result.unwrap_or_else(|_| Answer::Failed(key_failure(KeyCredentialStatus::UnknownError).into()))
 }
 
 /// While a prompt is up, keeps bringing it to the front: Windows Hello opens
