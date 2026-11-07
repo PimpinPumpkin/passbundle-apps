@@ -71,7 +71,7 @@ class _SignInScreenState extends State<SignInScreen> {
   String? serverError;
 
   /// The server field: leaving it checks the server.
-  late final serverFocus = FocusNode()
+  late final FocusNode serverFocus = FocusNode()
     ..addListener(() {
       if (!serverFocus.hasFocus && mounted) checkServer();
     });
