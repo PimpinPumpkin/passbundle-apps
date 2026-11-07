@@ -751,7 +751,9 @@ class Core {
 
   /// Locks each account whose time is up (the core decides, from what the
   /// OS says, by each account's choices and policy): `locked` says whether
-  /// one locked just now, and `unlocked` whether any still is.
+  /// one locked just now, and `unlocked` whether any still is; with the
+  /// accounts as they are now, as [accounts] (`busy` while a slow call has
+  /// the core).
   Map<String, dynamic> tick() => _answer(_tick()) as Map<String, dynamic>;
 
   /// The app left the screen: each account locks if its person chose

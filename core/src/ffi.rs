@@ -1108,22 +1108,23 @@ fn any_unlocked(accounts: &Accounts) -> bool {
 /// Locks each account whose time is up, by its own choices and policy
 /// (docs/core.md, "Locking by itself"). The app asks every two seconds while
 /// any account is unlocked: `locked` says whether one locked (or signed out)
-/// just now, `accounts` which, `reason` why the first did ("idle",
-/// "screenLocked", "slept"), and `unlocked` whether any still is. While a
-/// slow call has the app, `busy` is true, and the next tick decides.
+/// just now, `reason` why the first did ("idle", "screenLocked", "slept"),
+/// and `unlocked` whether any still is; with the accounts as they are now
+/// (`active`, `accounts`, as `pb_accounts`), so the screens see one that
+/// locked or unlocked some other way (autofill, say). While a slow call has
+/// the app, `busy` is true, and the next tick decides.
 #[no_mangle]
 pub extern "C" fn pb_tick() -> *mut c_char {
     // Asked outside the app's lock: on Linux it's a D-Bus call.
     let readings = autolock::readings();
     with_accounts_now(|accounts| {
         let locked = accounts.tick(&readings);
-        json!({
-            "busy": false,
-            "locked": !locked.is_empty(),
-            "accounts": locked.iter().map(|(id, _)| id).collect::<Vec<_>>(),
-            "reason": locked.first().map(|(_, r)| r.name()),
-            "unlocked": any_unlocked(accounts),
-        })
+        let mut answer = accounts_json(accounts);
+        answer["busy"] = json!(false);
+        answer["locked"] = json!(!locked.is_empty());
+        answer["reason"] = json!(locked.first().map(|(_, r)| r.name()));
+        answer["unlocked"] = json!(any_unlocked(accounts));
+        answer
     })
     .unwrap_or_else(|| out(json!({ "busy": true, "locked": false, "unlocked": true })))
 }

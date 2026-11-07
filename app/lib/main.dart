@@ -239,8 +239,13 @@ class _PassBundleAppState extends State<PassBundleApp> {
     }
   }
 
+  /// Asks the core whether to lock: any account that locked just now, or
+  /// that locked or unlocked some other way (Android's autofill, say),
+  /// shows as it is.
   void tick() {
-    if (core.tick()['locked'] == true) refresh();
+    final ticked = core.tick();
+    if (ticked['busy'] == true) return;
+    if (ticked['locked'] == true || seen(ticked) != seen(accounts)) refresh();
   }
 
   Future<void> fromComputer(MethodCall call) async {
