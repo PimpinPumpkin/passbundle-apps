@@ -258,3 +258,126 @@ fn the_app_turns_it_on_unlocks_with_it_and_signing_out_turns_it_off() {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// Two accounts on one computer (DESIGN.md in the meta repo, "Several
+/// accounts in the apps"): the agent keeps each one's key by its id on the
+/// server, so each turns it on, unlocks with its own, and signing out of one
+/// turns off only its own.
+#[test]
+fn each_account_has_its_own_and_signing_out_of_one_leaves_the_other() {
+    use passbundle_core::accounts::Accounts;
+    use passbundle_core::app::State;
+    use passbundle_core::crypto::PrivateKey;
+    use passbundle_core::kdf::{Kdf, MasterKey};
+    use passbundle_core::secrets::MemorySecretStore;
+    use passbundle_core::store::{Settings, Store};
+
+    let Some(agent) = TestAgent::start() else {
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!(
+        "pb-core-accounts-agent-{}",
+        uuid::Uuid::new_v4().simple()
+    ));
+    // The vectors' sample vault, and a second account's of its own.
+    let v: serde_json::Value = serde_json::from_str(include_str!("vectors/core-v1.json")).unwrap();
+    let pre = &v["account"]["pbkdf2"]["prelogin"];
+    let keep = |id: &str, email: &str, iterations: u32, sync: &str| {
+        let store = Store::new(dir.join("accounts").join(id));
+        store
+            .save_settings(&Settings {
+                server: "https://vault.example.test".into(),
+                email: email.into(),
+                kdf: 0,
+                kdf_iterations: iterations,
+                kdf_memory: None,
+                kdf_parallelism: None,
+                device_identifier: "d".into(),
+            })
+            .unwrap();
+        store.save_sync(sync).unwrap();
+    };
+    let a = "a".repeat(32);
+    let b = "b".repeat(32);
+    keep(
+        &a,
+        v["account"]["salt"].as_str().unwrap(),
+        pre["kdfIterations"].as_u64().unwrap() as u32,
+        &v["sync"].to_string(),
+    );
+    let (email, password) = ("ben@home.example.test", "ben's own password 1");
+    let master = MasterKey::derive(
+        password,
+        email,
+        &Kdf::Pbkdf2 {
+            iterations: 600_000,
+        },
+    )
+    .unwrap();
+    let user = SymmetricKey::generate();
+    let private = PrivateKey::generate().unwrap();
+    let ben = serde_json::json!({
+        "profile": {
+            "id": uuid::Uuid::new_v4().to_string(),
+            "email": email,
+            "key": master.stretch().encrypt(&user.to_bytes()).to_string(),
+            "privateKey": user.encrypt(&private.to_pkcs8_der()).to_string(),
+        },
+        "ciphers": [],
+    });
+    keep(&b, email, 600_000, &ben.to_string());
+
+    let mut accounts = Accounts::open(&dir, std::sync::Arc::new(MemorySecretStore::default()));
+    accounts.use_agent_at(agent.address.clone(), agent.program.clone());
+    accounts
+        .app(&a)
+        .unwrap()
+        .unlock(v["account"]["password"].as_str().unwrap())
+        .unwrap();
+    accounts.app(&b).unwrap().unlock(password).unwrap();
+    // Each turns it on for itself.
+    assert_eq!(
+        accounts.app(&a).unwrap().biometric_status().unwrap(),
+        Status::NotSetUp
+    );
+    agent.answers(&[true, true]);
+    assert!(accounts.app(&a).unwrap().enroll_biometric().unwrap());
+    assert_eq!(
+        accounts.app(&b).unwrap().biometric_status().unwrap(),
+        Status::NotSetUp
+    );
+    assert!(accounts.app(&b).unwrap().enroll_biometric().unwrap());
+    accounts.lock(&a);
+    accounts.lock(&b);
+
+    // Each unlocks with its own key: the other's stays locked.
+    agent.answers(&[true]);
+    assert!(accounts.app(&b).unwrap().unlock_with_biometric().unwrap());
+    assert!(matches!(accounts.state(&b), State::Unlocked { .. }));
+    assert!(matches!(accounts.state(&a), State::Locked { .. }));
+    agent.answers(&[true]);
+    assert!(accounts.app(&a).unwrap().unlock_with_biometric().unwrap());
+    assert!(matches!(accounts.state(&a), State::Unlocked { .. }));
+
+    // Signing out of one turns off its own only.
+    accounts.sign_out(&a);
+    let status = |user_id: &str| {
+        Agent::connect(&agent.address, &agent.program, user_id)
+            .unwrap()
+            .status()
+            .unwrap()
+    };
+    assert_eq!(
+        status(v["sync"]["profile"]["id"].as_str().unwrap()),
+        Status::NotSetUp
+    );
+    assert_eq!(
+        status(ben["profile"]["id"].as_str().unwrap()),
+        Status::SetUp
+    );
+    assert_eq!(
+        accounts.app(&b).unwrap().biometric_status().unwrap(),
+        Status::SetUp
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}

@@ -3,7 +3,9 @@
 //! person's choices for locking, and the last sync as the server sent it (its
 //! secrets still encrypted). The
 //! refresh token goes to the OS's secret store instead (`secrets`). Nothing
-//! decrypted is ever written.
+//! decrypted is ever written. With several accounts (accounts.rs), each has
+//! a store of its own, in its own folder, and the app's folder keeps what's
+//! the device's: how the app looks, and whether screenshots are allowed.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -39,8 +41,10 @@ impl Settings {
     }
 }
 
+#[derive(Clone, Debug)]
 pub struct Store {
-    dir: PathBuf,
+    /// None: a store that keeps nothing and has nothing (`Store::none`).
+    dir: Option<PathBuf>,
 }
 
 /// How the app looks, kept on this device: whether logins show their
@@ -99,28 +103,45 @@ impl Store {
     }
 
     pub fn new(dir: impl Into<PathBuf>) -> Store {
-        Store { dir: dir.into() }
+        Store {
+            dir: Some(dir.into()),
+        }
     }
 
-    fn path(&self, name: &str) -> PathBuf {
-        self.dir.join(name)
+    /// A store with nothing in it that keeps nothing: what a call for an
+    /// account that isn't on this device (any more) sees, so it can't read or
+    /// write another's (accounts.rs). Writing to it is refused.
+    pub fn none() -> Store {
+        Store { dir: None }
+    }
+
+    fn path(&self, name: &str) -> Option<PathBuf> {
+        self.dir.as_ref().map(|dir| dir.join(name))
     }
 
     /// Writes a file whole or not at all, readable only by this user from the
     /// moment it's made, in a folder only they can open.
-    fn write(&self, name: &str, text: &str) -> Result<()> {
-        private_dir(&self.dir)
-            .map_err(|e| Error::Malformed(format!("can't make {}: {e}", self.dir.display())))?;
-        let target = self.path(name);
-        let partial = self.path(&format!("{name}.partial"));
+    pub(crate) fn write(&self, name: &str, text: &str) -> Result<()> {
+        let Some(dir) = &self.dir else {
+            return Err(Error::SignedOut);
+        };
+        private_dir(dir)
+            .map_err(|e| Error::Malformed(format!("can't make {}: {e}", dir.display())))?;
+        let target = dir.join(name);
+        let partial = dir.join(format!("{name}.partial"));
         write_new(&partial, text.as_bytes())
             .map_err(|e| Error::Malformed(format!("can't write {}: {e}", partial.display())))?;
         fs::rename(&partial, &target)
             .map_err(|e| Error::Malformed(format!("can't write {}: {e}", target.display())))
     }
 
-    fn read(&self, name: &str) -> Option<String> {
-        fs::read_to_string(self.path(name)).ok()
+    pub(crate) fn read(&self, name: &str) -> Option<String> {
+        fs::read_to_string(self.path(name)?).ok()
+    }
+
+    /// Whether a sync is kept, without reading it.
+    pub fn has_sync(&self) -> bool {
+        self.path("sync.json").is_some_and(|p| p.is_file())
     }
 
     pub fn settings(&self) -> Option<Settings> {
@@ -186,7 +207,9 @@ impl Store {
 
     /// Signing out forgets the vault; the server and email stay, to sign in again.
     pub fn forget_vault(&self) {
-        let _ = fs::remove_file(self.path("sync.json"));
+        if let Some(path) = self.path("sync.json") {
+            let _ = fs::remove_file(path);
+        }
     }
 
     /// How the app looks on this device (`Appearance`); the defaults until
@@ -234,8 +257,9 @@ impl Store {
         )
     }
 
-    pub fn dir(&self) -> &Path {
-        &self.dir
+    /// Its folder; None for `Store::none`.
+    pub fn dir(&self) -> Option<&Path> {
+        self.dir.as_deref()
     }
 }
 
@@ -246,7 +270,7 @@ impl Store {
 /// to them too. On Windows the person's own AppData folder is already private
 /// to them.
 #[cfg(unix)]
-fn private_dir(dir: &Path) -> std::io::Result<()> {
+pub(crate) fn private_dir(dir: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
     if let Some(parent) = dir.parent().filter(|p| !p.as_os_str().is_empty()) {
         fs::create_dir_all(parent)?;
@@ -268,7 +292,7 @@ fn private_dir(dir: &Path) -> std::io::Result<()> {
 }
 
 #[cfg(not(unix))]
-fn private_dir(dir: &Path) -> std::io::Result<()> {
+pub(crate) fn private_dir(dir: &Path) -> std::io::Result<()> {
     fs::create_dir_all(dir)
 }
 

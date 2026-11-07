@@ -49,6 +49,12 @@ pub enum Error {
     /// signing in to it didn't work, and why: sign in, rather than make it
     /// again.
     AccountMade { sure: bool, why: Box<Error> },
+    /// Adding an account to a device that has the most it keeps
+    /// (accounts.rs, `MOST`).
+    TooManyAccounts,
+    /// Adding an account that's on this device already under another
+    /// email or server: the server says it's the same account (its id).
+    AlreadyHere,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -89,6 +95,8 @@ impl fmt::Display for Error {
             Error::ConfirmFirst => write!(f, "Confirm it's you first."),
             Error::AccountMade { sure: true, why } => write!(f, "Your account was made, but signing in to it didn't work ({why}) Sign in with it."),
             Error::AccountMade { sure: false, why } => write!(f, "The server may have made your account before the connection dropped ({why}) Try signing in with it."),
+            Error::TooManyAccounts => write!(f, "PassBundle keeps up to {} accounts on this device. Sign out of one to add another.", crate::accounts::MOST),
+            Error::AlreadyHere => write!(f, "That account is in PassBundle on this device already, under another email or server. Sign out of it there first."),
         }
     }
 }

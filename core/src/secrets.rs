@@ -13,11 +13,29 @@ use std::sync::Mutex;
 
 use zeroize::Zeroizing;
 
-pub trait SecretStore: Send {
+/// Each account's refresh token is its own entry, named by the account's
+/// server and email, so several accounts on one device never share one
+/// (DESIGN.md in the meta repo, "Several accounts in the apps").
+pub trait SecretStore: Send + Sync {
     /// Keeps the refresh token; returns whether it was kept.
     fn keep(&self, server: &str, email: &str, refresh_token: &str) -> bool;
     fn get(&self, server: &str, email: &str) -> Option<Zeroizing<String>>;
     fn forget(&self, server: &str, email: &str);
+}
+
+/// One store shared by every account's `App` (accounts.rs).
+impl<T: SecretStore + ?Sized> SecretStore for std::sync::Arc<T> {
+    fn keep(&self, server: &str, email: &str, refresh_token: &str) -> bool {
+        (**self).keep(server, email, refresh_token)
+    }
+
+    fn get(&self, server: &str, email: &str) -> Option<Zeroizing<String>> {
+        (**self).get(server, email)
+    }
+
+    fn forget(&self, server: &str, email: &str) {
+        (**self).forget(server, email)
+    }
 }
 
 #[cfg(not(target_os = "android"))]

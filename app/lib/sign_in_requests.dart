@@ -162,6 +162,10 @@ class SignInRequests extends ChangeNotifier {
   /// A check skipped beside a slow call, made as soon as it's done.
   bool _skipped = false;
 
+  /// Counts each stop: a listing asked for before one (for the account the
+  /// vault showed then: the screens may show another now) is dropped.
+  int _session = 0;
+
   static const every = Duration(seconds: 10);
 
   /// The vault opened: asks now, then every 10 seconds.
@@ -191,10 +195,12 @@ class SignInRequests extends ChangeNotifier {
     check();
   }
 
-  /// The vault closed: forgets every request.
+  /// The vault closed (it locked, or the screens show another account):
+  /// forgets every request.
   void stop() {
     if (_running) busy.removeListener(_busyChanged);
     _running = false;
+    _session++;
     _skipped = false;
     pause();
     requests = const [];
@@ -211,9 +217,10 @@ class SignInRequests extends ChangeNotifier {
       return;
     }
     _asking = true;
+    final session = _session;
     try {
       final answer = await source.list();
-      if (!_running || !answer.ok) return;
+      if (!_running || session != _session || !answer.ok) return;
       requests = [
         for (final r
             in ((answer.body['requests'] as List?) ?? const [])

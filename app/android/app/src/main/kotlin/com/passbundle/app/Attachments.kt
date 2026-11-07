@@ -14,6 +14,7 @@ import org.json.JSONObject
 object Attachments {
     fun saveToDownloads(
         activity: Activity,
+        account: String,
         id: String,
         attachmentId: String,
         name: String,
@@ -21,7 +22,7 @@ object Attachments {
     ) {
         Thread {
             val answer = try {
-                write(activity, id, attachmentId, name)
+                write(activity, account, id, attachmentId, name)
             } catch (_: Exception) {
                 mapOf("ok" to false, "error" to "Couldn't save that.")
             }
@@ -29,7 +30,7 @@ object Attachments {
         }.start()
     }
 
-    private fun write(activity: Activity, id: String, attachmentId: String, name: String): Map<String, Any?> {
+    private fun write(activity: Activity, account: String, id: String, attachmentId: String, name: String): Map<String, Any?> {
         val resolver = activity.contentResolver
         val values = ContentValues().apply {
             put(MediaStore.Downloads.DISPLAY_NAME, name)
@@ -40,7 +41,7 @@ object Attachments {
         // Anything short of a whole file, however it fails, leaves nothing in Downloads.
         val answer = try {
             resolver.openFileDescriptor(uri, "w")?.use { file ->
-                JSONObject(Core.writeAttachmentTo(id, attachmentId, file.fd) ?: "{}")
+                JSONObject(Core.writeAttachmentTo(account, id, attachmentId, file.fd) ?: "{}")
             } ?: JSONObject()
         } catch (e: Exception) {
             resolver.delete(uri, null, null)

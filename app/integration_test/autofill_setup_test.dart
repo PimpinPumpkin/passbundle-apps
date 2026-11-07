@@ -104,7 +104,8 @@ void main() {
     await tester.pump(const Duration(milliseconds: 400));
     await tester.tap(find.byTooltip('Lock'));
     await pumpUntil(tester, find.text(unlockWith));
-    expect(File('$dir/biometric.sealed').existsSync(), isTrue);
+    // Sealed for the account signed in to: its own key, by its id here.
+    expect(File('$dir/biometric-${Core.account}.sealed').existsSync(), isTrue);
 
     // The script fills the other app now. Then it signs in there with
     // something new and accepts Android's offer to save it: this app opens

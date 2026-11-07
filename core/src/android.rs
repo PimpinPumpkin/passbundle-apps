@@ -47,8 +47,9 @@ pub fn init<'caller>(
 }
 
 /// An item's value for autofill to fill ("username", "password", "totp",
-/// or "field:<index>"), as UTF-8 bytes Kotlin zeroes after use; null while
-/// locked or busy, or if there's nothing to fill. It goes from here into
+/// or "field:<index>"), from the account it's in (by its id on this
+/// device), as UTF-8 bytes Kotlin zeroes after use; null while that account
+/// is locked or busy, or if there's nothing to fill. It goes from here into
 /// the other app's field without passing through Dart. A secret the
 /// person's shared folder hides still fills, as upstream's apps fill it.
 #[cfg(feature = "ffi")]
@@ -56,14 +57,16 @@ pub fn init<'caller>(
 pub fn value<'caller>(
     mut unowned_env: EnvUnowned<'caller>,
     _class: JClass<'caller>,
+    account: JString<'caller>,
     id: JString<'caller>,
     what: JString<'caller>,
 ) -> JByteArray<'caller> {
     unowned_env
         .with_env(|env| -> JniResult<JByteArray<'caller>> {
+            let account = account.try_to_string(env)?;
             let id = id.try_to_string(env)?;
             let what = what.try_to_string(env)?;
-            match crate::ffi::value_for_fill(&id, &what) {
+            match crate::ffi::value_for_fill(&account, &id, &what) {
                 Some(value) => env.byte_array_from_slice(value.as_bytes()),
                 None => Ok(JByteArray::default()),
             }
@@ -80,14 +83,16 @@ pub fn value<'caller>(
 pub fn copy_value<'caller>(
     mut unowned_env: EnvUnowned<'caller>,
     _class: JClass<'caller>,
+    account: JString<'caller>,
     id: JString<'caller>,
     what: JString<'caller>,
 ) -> JByteArray<'caller> {
     unowned_env
         .with_env(|env| -> JniResult<JByteArray<'caller>> {
+            let account = account.try_to_string(env)?;
             let id = id.try_to_string(env)?;
             let what = what.try_to_string(env)?;
-            match crate::ffi::value_for_copy(&id, &what) {
+            match crate::ffi::value_for_copy(&account, &id, &what) {
                 Some(value) => env.byte_array_from_slice(value.as_bytes()),
                 None => Ok(JByteArray::default()),
             }
@@ -95,19 +100,21 @@ pub fn copy_value<'caller>(
         .resolve::<ThrowRuntimeExAndDefault>()
 }
 
-/// The unlocked vault's user key, for Kotlin to seal with the Keystore key
-/// that needs biometrics (docs/phones.md, "Unlocking with biometrics"), as
-/// bytes it zeroes after use; null while locked or busy. It goes from here to
-/// the Keystore without passing through Dart.
+/// An unlocked account's user key, for Kotlin to seal with that account's
+/// Keystore key that needs biometrics (docs/phones.md, "Unlocking with
+/// biometrics"), as bytes it zeroes after use; null while it's locked or
+/// busy. It goes from here to the Keystore without passing through Dart.
 #[cfg(feature = "ffi")]
 #[jni_mangle("com.passbundle.app.Core")]
 pub fn user_key<'caller>(
     mut unowned_env: EnvUnowned<'caller>,
     _class: JClass<'caller>,
+    account: JString<'caller>,
 ) -> JByteArray<'caller> {
     unowned_env
         .with_env(|env| -> JniResult<JByteArray<'caller>> {
-            match crate::ffi::user_key_for_biometric() {
+            let account = account.try_to_string(env)?;
+            match crate::ffi::user_key_for_biometric(&account) {
                 Some(key) => env.byte_array_from_slice(&key),
                 None => Ok(JByteArray::default()),
             }
@@ -115,21 +122,24 @@ pub fn user_key<'caller>(
         .resolve::<ThrowRuntimeExAndDefault>()
 }
 
-/// Opens the kept vault with the user key Kotlin opened after the person's
-/// biometrics: "" if it opened, else the words to show (null only if JNI
-/// itself failed, which Kotlin takes as not opened). A key that no longer
-/// opens it means biometric unlock is out of date, and is turned off.
+/// Opens an account's kept vault with the user key Kotlin opened with that
+/// account's Keystore key after the person's biometrics: "" if it opened,
+/// else the words to show (null only if JNI itself failed, which Kotlin
+/// takes as not opened). A key that no longer opens it means biometric
+/// unlock is out of date, and is turned off.
 #[cfg(feature = "ffi")]
 #[jni_mangle("com.passbundle.app.Core")]
 pub fn unlock_with_key<'caller>(
     mut unowned_env: EnvUnowned<'caller>,
     _class: JClass<'caller>,
+    account: JString<'caller>,
     key: JByteArray<'caller>,
 ) -> jstring {
     unowned_env
         .with_env(|env| -> JniResult<jstring> {
+            let account = account.try_to_string(env)?;
             let key = Zeroizing::new(env.convert_byte_array(&key)?);
-            match crate::ffi::unlock_with_key_for_biometric(&key) {
+            match crate::ffi::unlock_with_key_for_biometric(&account, &key) {
                 Ok(()) => Ok(env.new_string("")?.into_raw()),
                 Err(why) => Ok(env.new_string(why)?.into_raw()),
             }
@@ -137,20 +147,23 @@ pub fn unlock_with_key<'caller>(
         .resolve::<ThrowRuntimeExAndDefault>()
 }
 
-/// The user key Kotlin opened after the person's biometrics, given back to
-/// confirm it's them approving a sign-in, never to unlock: "" if it's the
-/// open vault's, else the words to show (null only if JNI itself failed).
+/// The user key Kotlin opened with an account's Keystore key after the
+/// person's biometrics, given back to confirm it's them approving a sign-in
+/// to that account, never to unlock: "" if it's that account's open vault's,
+/// else the words to show (null only if JNI itself failed).
 #[cfg(feature = "ffi")]
 #[jni_mangle("com.passbundle.app.Core")]
 pub fn confirm_approval_with_key<'caller>(
     mut unowned_env: EnvUnowned<'caller>,
     _class: JClass<'caller>,
+    account: JString<'caller>,
     key: JByteArray<'caller>,
 ) -> jstring {
     unowned_env
         .with_env(|env| -> JniResult<jstring> {
+            let account = account.try_to_string(env)?;
             let key = Zeroizing::new(env.convert_byte_array(&key)?);
-            match crate::ffi::confirm_approval_with_key_for_biometric(&key) {
+            match crate::ffi::confirm_approval_with_key_for_biometric(&account, &key) {
                 Ok(()) => Ok(env.new_string("")?.into_raw()),
                 Err(why) => Ok(env.new_string(why)?.into_raw()),
             }
@@ -219,8 +232,8 @@ pub fn open_if_closed<'caller>(
 }
 
 /// The logins for an app (its package name) or a page (its domain, when a
-/// browser gives one), as JSON: names and usernames only, never a password
-/// (docs/phones.md, "Autofill").
+/// browser gives one), as JSON: names and usernames only, never a password,
+/// each with its account (docs/phones.md, "Autofill").
 #[cfg(feature = "ffi")]
 #[jni_mangle("com.passbundle.app.Core")]
 pub fn fillable<'caller>(
@@ -246,6 +259,7 @@ pub fn fillable<'caller>(
 pub fn writeAttachmentTo<'caller>(
     mut unowned_env: EnvUnowned<'caller>,
     _class: JClass<'caller>,
+    account: JString<'caller>,
     id: JString<'caller>,
     attachment_id: JString<'caller>,
     fd: jni::sys::jint,
@@ -253,6 +267,7 @@ pub fn writeAttachmentTo<'caller>(
     unowned_env
         .with_env(|env| -> JniResult<jstring> {
             let answer = crate::ffi::write_attachment_to(
+                &account.try_to_string(env)?,
                 &id.try_to_string(env)?,
                 &attachment_id.try_to_string(env)?,
                 fd,
@@ -270,20 +285,25 @@ pub fn writeAttachmentTo<'caller>(
 pub fn confirmMasterPassword<'caller>(
     mut unowned_env: EnvUnowned<'caller>,
     _class: JClass<'caller>,
+    account: JString<'caller>,
     id: JString<'caller>,
     password: JString<'caller>,
 ) -> jstring {
     unowned_env
         .with_env(|env| -> JniResult<jstring> {
             let password = zeroize::Zeroizing::new(password.try_to_string(env)?);
-            let answer = crate::ffi::confirm_master_password(&id.try_to_string(env)?, &password);
+            let answer = crate::ffi::confirm_master_password(
+                &account.try_to_string(env)?,
+                &id.try_to_string(env)?,
+                &password,
+            );
             Ok(env.new_string(answer.to_string())?.into_raw())
         })
         .resolve::<ThrowRuntimeExAndDefault>()
 }
 
 /// The logins with a passkey for a site (its ID), as JSON: names and IDs,
-/// never a key (docs/phones.md, "Passkeys").
+/// each with its account, never a key (docs/phones.md, "Passkeys").
 #[cfg(feature = "ffi")]
 #[jni_mangle("com.passbundle.app.Core")]
 pub fn passkeys<'caller>(
@@ -299,14 +319,15 @@ pub fn passkeys<'caller>(
         .resolve::<ThrowRuntimeExAndDefault>()
 }
 
-/// Signs in to a site with a login's passkey (docs/core.md, "Passkeys"), as
-/// JSON; the client data hash in base64url. Slow when the passkey counts its
+/// Signs in to a site with a login's passkey (docs/core.md, "Passkeys"), from
+/// the account it's in, as JSON; the client data hash in base64url. Slow when the passkey counts its
 /// uses (it's saved first): off the main thread.
 #[cfg(feature = "ffi")]
 #[jni_mangle("com.passbundle.app.Core")]
 pub fn passkey_assert<'caller>(
     mut unowned_env: EnvUnowned<'caller>,
     _class: JClass<'caller>,
+    account: JString<'caller>,
     id: JString<'caller>,
     rp_id: JString<'caller>,
     client_data_hash: JString<'caller>,
@@ -315,6 +336,7 @@ pub fn passkey_assert<'caller>(
     unowned_env
         .with_env(|env| -> JniResult<jstring> {
             let answer = crate::ffi::passkey_assert(
+                &account.try_to_string(env)?,
                 &id.try_to_string(env)?,
                 &rp_id.try_to_string(env)?,
                 &client_data_hash.try_to_string(env)?,
@@ -326,7 +348,7 @@ pub fn passkey_assert<'caller>(
 }
 
 /// Makes a passkey for a site (docs/core.md, "Passkeys", "Making one"), from
-/// the request as JSON, answering JSON. Slow (it's saved first): off the main
+/// the request as JSON (which names the account it goes in), answering JSON. Slow (it's saved first): off the main
 /// thread.
 #[cfg(feature = "ffi")]
 #[jni_mangle("com.passbundle.app.Core")]
@@ -351,12 +373,13 @@ pub fn passkey_create<'caller>(
 pub fn check_master_password<'caller>(
     mut unowned_env: EnvUnowned<'caller>,
     _class: JClass<'caller>,
+    account: JString<'caller>,
     password: JString<'caller>,
 ) -> jstring {
     unowned_env
         .with_env(|env| -> JniResult<jstring> {
             let password = Zeroizing::new(password.try_to_string(env)?);
-            let answer = crate::ffi::check_master_password(&password);
+            let answer = crate::ffi::check_master_password(&account.try_to_string(env)?, &password);
             Ok(env.new_string(answer.to_string())?.into_raw())
         })
         .resolve::<ThrowRuntimeExAndDefault>()
@@ -437,9 +460,10 @@ pub fn app_linked_to_site<'caller>(
         .resolve::<ThrowRuntimeExAndDefault>()
 }
 
-/// Turns biometric unlock off: Kotlin deletes its Keystore key and the user
-/// key it sealed (signing out, or a key that's out of date).
-pub(crate) fn remove_biometric() {
+/// Turns an account's biometric unlock off: Kotlin deletes that account's
+/// Keystore key and the user key it sealed (signing out, or a key that's out
+/// of date). The others' stay.
+pub(crate) fn remove_biometric(account: &str) {
     let Some((vm, loader)) = JVM.get() else {
         return;
     };
@@ -447,8 +471,14 @@ pub(crate) fn remove_biometric() {
         let result = (|| -> JniResult<()> {
             let name = env.new_string("com.passbundle.app.Biometric")?;
             let class = loader.load_class(env, name)?;
-            env.call_static_method(&class, jni_str!("remove"), jni_sig!(() -> void), &[])?
-                .v()
+            let account = env.new_string(account)?;
+            env.call_static_method(
+                &class,
+                jni_str!("remove"),
+                jni_sig!((account: JString) -> void),
+                &[JValue::from(&JObject::from(account))],
+            )?
+            .v()
         })();
         if result.is_err() {
             env.exception_clear();

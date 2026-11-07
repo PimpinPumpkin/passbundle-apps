@@ -30,13 +30,18 @@ object Responses {
             setTextViewText(R.id.subtitle, subtitle ?: "")
         }
 
-    /** FillActivity, to unlock or to fill one login, for these fields. */
-    fun pending(context: Context, fields: Fields, mode: String, item: String? = null, asks: Boolean = false) =
+    /**
+     * FillActivity, to unlock an account or to fill one login from its
+     * account, for these fields: the account by its id on this device, as
+     * the core named it.
+     */
+    fun pending(context: Context, fields: Fields, mode: String, account: String, item: String? = null, asks: Boolean = false) =
         PendingIntent.getActivity(
             context,
             requests.incrementAndGet(),
             fields.into(Intent(context, FillActivity::class.java))
                 .putExtra(FillActivity.MODE, mode)
+                .putExtra(FillActivity.ACCOUNT, account)
                 .putExtra(FillActivity.ITEM, item)
                 .putExtra(FillActivity.ASKS, asks),
             // Mutable: Android adds the screen's structure when it starts it.
@@ -68,15 +73,17 @@ object Responses {
     fun logins(context: Context, fields: Fields, domain: String?, waitMs: Long): List<JSONObject>? {
         val answer = JSONObject(Core.fillable(fields.packageName, domain ?: "") ?: return null)
         val items = answer.optJSONArray("items") ?: return null
+        // By account and id: each account's items are its own.
         val found = LinkedHashMap<String, JSONObject>()
-        for (i in 0 until items.length()) items.getJSONObject(i).let { found[it.getString("id")] = it }
+        fun key(item: JSONObject) = item.optString("account") + "/" + item.getString("id")
+        for (i in 0 until items.length()) items.getJSONObject(i).let { found[key(it)] = it }
         if (domain == null) {
             val page = Browsers.domain(fields.webDomain)
             for (site in AppSites.linked(context, fields.packageName, waitMs)) {
                 if (page != null && page != site && !page.endsWith(".$site")) continue
                 val more = runCatching { JSONObject(Core.fillable(fields.packageName, site) ?: "{}") }.getOrNull()
                 val siteItems = more?.optJSONArray("items") ?: continue
-                for (i in 0 until siteItems.length()) siteItems.getJSONObject(i).let { found.putIfAbsent(it.getString("id"), it.put("from", site)) }
+                for (i in 0 until siteItems.length()) siteItems.getJSONObject(i).let { found.putIfAbsent(key(it), it.put("from", site)) }
             }
         }
         return found.values.toList()
@@ -103,7 +110,7 @@ object Responses {
             return FillResponse.Builder()
                 .setAuthentication(
                     ids,
-                    pending(context, fields, FillActivity.UNLOCK),
+                    pending(context, fields, FillActivity.UNLOCK, answer.optString("account")),
                     presentation(context, "Unlock PassBundle", "to fill this in"),
                 )
                 .apply { save?.let { setSaveInfo(it) } }
@@ -131,7 +138,7 @@ object Responses {
                 @Suppress("DEPRECATION")
                 dataset.setValue(field, null)
             }
-            dataset.setAuthentication(pending(context, fields, FillActivity.FILL, id, item.optBoolean("reprompt")))
+            dataset.setAuthentication(pending(context, fields, FillActivity.FILL, item.optString("account"), id, item.optBoolean("reprompt")))
             response.addDataset(dataset.build())
         }
         if (offerTrust) {
@@ -142,16 +149,16 @@ object Responses {
                 @Suppress("DEPRECATION")
                 dataset.setValue(field, null)
             }
-            dataset.setAuthentication(pending(context, fields, FillActivity.TRUST))
+            dataset.setAuthentication(pending(context, fields, FillActivity.TRUST, answer.optString("account")))
             response.addDataset(dataset.build())
         }
         return response.build()
     }
 
-    /** One login's values for the fields, taken from the core only now that it was picked. */
-    fun filled(context: Context, fields: Fields, item: String): Dataset? {
+    /** One login's values for the fields, from its account, taken from the core only now that it was picked. */
+    fun filled(context: Context, fields: Fields, account: String, item: String): Dataset? {
         fun text(what: String): String? {
-            val bytes = Core.value(item, what) ?: return null
+            val bytes = Core.value(account, item, what) ?: return null
             return try {
                 String(bytes, Charsets.UTF_8)
             } finally {

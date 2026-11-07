@@ -1,6 +1,8 @@
 // PassBundle: sign in to a PassBundle server, unlock the vault kept on this
 // device, and use it, with the look every platform shares. It locks by itself
-// as chosen in Settings (docs/core.md, "Locking by itself"). In a build with
+// as chosen in Settings (docs/core.md, "Locking by itself"). Several accounts
+// can be signed in side by side (accounts.dart), each locking on its own; the
+// screens show one at a time. In a build with
 // test hooks (core.dart, testHooks; never a release), PB_MEASURE=1 unlocks by
 // itself (with PB_MEASURE_PASSWORD) and reports timings (tools/measure.sh).
 import 'dart:async';
@@ -10,6 +12,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 
+import 'accounts.dart';
 import 'core.dart';
 import 'sign_in.dart';
 import 'theme.dart';
@@ -89,10 +92,18 @@ class _PassBundleAppState extends State<PassBundleApp> {
         _ => ThemeMode.system,
       };
   final core = Core();
-  late Map<String, dynamic> state = core.state();
+
+  /// The accounts signed in here, and the one shown (`Core.accounts`).
+  late Map<String, dynamic> accounts;
+
+  /// The shown account's state (or, with none, the sign-in screen's).
+  late Map<String, dynamic> state;
 
   /// Signing in again while a vault is kept here (the server signed this device out).
   bool signingInAgain = false;
+
+  /// Adding another account: the sign-in screen, and back to the one shown.
+  bool adding = false;
 
   /// Unlocked just now with the master password (signing in, or the lock
   /// screen's field), not biometrics: a phone may offer biometrics for next
@@ -113,30 +124,51 @@ class _PassBundleAppState extends State<PassBundleApp> {
   /// state has a MaterialApp, and so a Navigator, of its own.
   final pages = <Object?, WindowPages>{};
 
+  /// The screen shown: its account, and its state.
+  String screen = '';
+
+  /// Where asking before signing out opens: over the screen shown, by its
+  /// Navigator (each screen's own, so nothing open over one moves to the
+  /// next).
+  BuildContext? get shownContext => pages[screen]?.navigator?.overlay?.context;
+
   @override
   void initState() {
     super.initState();
+    // The account shown last, as the core opened them.
+    accounts = core.accounts();
+    Core.account = accounts['active'] as String? ?? '';
+    state = core.state();
     computer.setMethodCallHandler(fromComputer);
     HardwareKeyboard.instance.addHandler(keyPressed);
     lifecycle = AppLifecycleListener(
-      // "Immediately" locks as the app leaves the screen.
+      // "Immediately" locks as the app leaves the screen: each account whose
+      // choice, or policy, that is.
       onHide: () {
-        if (state['state'] == 'unlocked' && core.left()['locked'] == true) {
-          refresh();
-        }
+        if (anyUnlocked && core.left()['locked'] == true) refresh();
       },
       // Back: check at once, before the vault is in front of anyone. Android's
-      // autofill may have unlocked the core meanwhile (it runs in this
+      // autofill may have unlocked an account meanwhile (it runs in this
       // process), and then the vault shows, if its time isn't up.
       onShow: () {
-        if (state['state'] == 'locked' && core.state()['state'] == 'unlocked') {
-          refresh();
-        }
-        if (state['state'] == 'unlocked') tick();
+        if (seen(core.accounts()) != seen(accounts)) refresh();
+        if (anyUnlocked) tick();
       },
     );
     watch();
   }
+
+  /// Whether any account is unlocked: then the core is asked whether to lock.
+  bool get anyUnlocked => (accounts['accounts'] as List? ?? const []).any(
+    (a) => (a as Map)['state'] == 'unlocked',
+  );
+
+  /// The accounts and their states, to tell whether anything changed.
+  static String seen(Map<String, dynamic> accounts) => [
+    accounts['active'],
+    for (final a in (accounts['accounts'] as List? ?? const []))
+      '${(a as Map)['id']} ${a['state']}',
+  ].join(',');
 
   @override
   void dispose() {
@@ -149,6 +181,9 @@ class _PassBundleAppState extends State<PassBundleApp> {
 
   void refresh({bool withPassword = false}) {
     setState(() {
+      accounts = core.accounts();
+      // The one the core shows, unless another is being added.
+      if (!adding) Core.account = accounts['active'] as String? ?? '';
       state = core.state();
       signingInAgain = false;
       this.withPassword = withPassword;
@@ -156,8 +191,46 @@ class _PassBundleAppState extends State<PassBundleApp> {
     watch();
   }
 
+  /// Shows another account, unlocked or not; the one shown stays as it is.
+  void switchTo(String id) {
+    core.switchTo(id);
+    refresh();
+  }
+
+  /// Adding another account: the sign-in screen, with the way back.
+  void add() {
+    setState(() {
+      adding = true;
+      Core.account = '';
+      state = core.state();
+    });
+  }
+
+  /// Back from adding an account (or signing in again) to the one shown.
+  void cancelSigningIn() {
+    core.cancelSignIn();
+    adding = false;
+    refresh();
+  }
+
+  /// Signs out of the account shown, once the person says so; the next one
+  /// shows, or the sign-in screen.
+  Future<void> signOut(BuildContext context) async {
+    final status = await Core.biometricStatus();
+    if (!context.mounted) return;
+    final several = (accounts['accounts'] as List? ?? const []).length > 1;
+    final sure = await askToSignOut(
+      context,
+      method: status['status'] == 'setUp' ? status['method'] as String? : null,
+      email: several ? state['email'] as String? : null,
+    );
+    if (!sure) return;
+    core.signOut();
+    refresh();
+  }
+
   void watch() {
-    final unlocked = state['state'] == 'unlocked';
+    final unlocked = anyUnlocked;
     if (unlocked) {
       ticker ??= Timer.periodic(const Duration(seconds: 2), (_) => tick());
     } else {
@@ -172,7 +245,7 @@ class _PassBundleAppState extends State<PassBundleApp> {
 
   Future<void> fromComputer(MethodCall call) async {
     if (call.method == 'sleeping' &&
-        state['state'] == 'unlocked' &&
+        anyUnlocked &&
         core.sleeping()['locked'] == true) {
       refresh();
     }
@@ -198,21 +271,38 @@ class _PassBundleAppState extends State<PassBundleApp> {
   Widget build(BuildContext context) {
     final server = state['server'] as String?;
     final email = state['email'] as String?;
+    final menu = AccountsMenu.from(
+      accounts,
+      onSwitch: switchTo,
+      onAdd: add,
+      onSignOut: () {
+        final context = shownContext;
+        if (context != null) signOut(context);
+      },
+    );
     final Widget home;
     var vault = false;
-    if (state['state'] == 'signedOut' || signingInAgain) {
+    if (adding) {
+      home = SignInScreen(
+        adding: true,
+        onSignedIn: () {
+          adding = false;
+          refresh(withPassword: true);
+        },
+        onCancel: cancelSigningIn,
+      );
+    } else if (state['state'] == 'signedOut' || signingInAgain) {
       home = SignInScreen(
         server: server,
         email: email,
         onSignedIn: () => refresh(withPassword: true),
-        onCancel: signingInAgain
-            ? () => setState(() => signingInAgain = false)
-            : null,
+        onCancel: signingInAgain ? cancelSigningIn : null,
       );
     } else if (state['state'] == 'locked') {
       home = UnlockScreen(
         email: email!,
         server: server!,
+        menu: menu,
         onUnlocked: (ms) {
           if (measuring) {
             report('unlocked ${ms ?? 0} ms, ${core.list('').length} items');
@@ -227,10 +317,11 @@ class _PassBundleAppState extends State<PassBundleApp> {
     } else {
       vault = true;
       home = VaultScreen(
-        key: const ValueKey('vault'),
+        key: ValueKey('vault ${Core.account}'),
         core: core,
         email: email!,
         server: server,
+        menu: menu,
         mode: mode,
         onMode: (m) => setState(() => mode = m),
         onLock: () {
@@ -257,16 +348,20 @@ class _PassBundleAppState extends State<PassBundleApp> {
         );
       }
     }
-    final shown = pages.putIfAbsent(state['state'], WindowPages.new);
+    // Each account's each state has its own: switching accounts closes
+    // whatever was open over the one shown, as locking does.
+    screen = '${adding ? 'adding' : Core.account} ${state['state']}';
+    final shown = pages.putIfAbsent(screen, WindowPages.new);
     return Listener(
       onPointerDown: (_) => used(),
       onPointerMove: (_) => used(),
       onPointerHover: (_) => used(),
       onPointerSignal: (_) => used(),
       child: MaterialApp(
-        // A new one for each state: locking closes whatever was open over
-        // the vault (an item's editor, a menu) at once, with no fade.
-        key: ValueKey(state['state']),
+        // A new one for each account's each state: locking, or showing
+        // another account, closes whatever was open over the vault (an
+        // item's editor, a menu) at once, with no fade.
+        key: ValueKey(screen),
         title: 'PassBundle',
         navigatorObservers: [shown],
         debugShowCheckedModeBanner: false,

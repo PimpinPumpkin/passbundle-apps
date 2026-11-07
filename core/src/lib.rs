@@ -2,6 +2,7 @@
 //! design is docs/core.md in the meta repo (PimpinPumpkin/Passbundle), with
 //! test vectors in docs/vectors/core-v1.json (a copy is in tests/vectors).
 
+pub mod accounts;
 pub mod agent;
 pub mod app;
 pub mod asset_links;

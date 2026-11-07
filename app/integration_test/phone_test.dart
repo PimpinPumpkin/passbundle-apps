@@ -269,6 +269,10 @@ void main() {
       File('$dir/sync.json').writeAsStringSync(sampleSync);
       await Core.removeBiometric();
       await Core.openOnThisDevice();
+      // The sample, carried over as the one account: biometric unlock is
+      // each account's own, kept under its id on this device.
+      final account = Core.account;
+      expect(account, hasLength(32));
       // Not about autofill (the next test is).
       putOffAutofill();
       await tester.pumpWidget(PassBundleApp(key: UniqueKey()));
@@ -285,9 +289,10 @@ void main() {
       // Once the sheet has slid up.
       await tapWhenStill(tester, find.text('Turn on'));
       await pumpUntil(tester, find.text('Unlocking with $method is on.'));
-      // Sealed by the Keystore in the app's folder, or in the Keychain.
+      // Sealed by the Keystore in the app's folder, or in the Keychain:
+      // this account's own.
       if (Platform.isAndroid) {
-        expect(File('$dir/biometric.sealed').existsSync(), isTrue);
+        expect(File('$dir/biometric-$account.sealed').existsSync(), isTrue);
       }
       expect((await Core.biometricStatus())['status'], 'setUp');
 
@@ -321,9 +326,9 @@ void main() {
       await tester.tap(find.widgetWithText(FilledButton, 'Sign out'));
       await pumpUntil(tester, find.text('Sign in to PassBundle'));
       if (Platform.isAndroid) {
-        expect(File('$dir/biometric.sealed').existsSync(), isFalse);
+        expect(File('$dir/biometric-$account.sealed').existsSync(), isFalse);
       }
-      expect((await Core.biometricStatus())['status'], 'notSetUp');
+      expect((await Core.biometricStatus(account))['status'], 'notSetUp');
     },
   );
 

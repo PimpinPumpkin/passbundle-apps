@@ -6,6 +6,7 @@
 // behind "Self-hosted?".
 import 'package:flutter/material.dart';
 
+import 'accounts.dart';
 import 'core.dart';
 import 'theme.dart';
 import 'widgets.dart';
@@ -31,6 +32,7 @@ class SignInScreen extends StatefulWidget {
     this.email,
     required this.onSignedIn,
     this.onCancel,
+    this.adding = false,
   });
 
   final String? server;
@@ -39,6 +41,9 @@ class SignInScreen extends StatefulWidget {
 
   /// Back to the vault kept on this device, when there is one.
   final VoidCallback? onCancel;
+
+  /// Adding another account beside the ones signed in (accounts.dart).
+  final bool adding;
 
   @override
   State<SignInScreen> createState() => _SignInScreenState();
@@ -205,7 +210,7 @@ class _SignInScreenState extends State<SignInScreen> {
       children: [
         heading(
           context,
-          'Sign in to PassBundle',
+          widget.adding ? 'Add an account' : 'Sign in to PassBundle',
           managed == null
               ? null
               : 'Your organization\'s server: ${Uri.tryParse(managed!)?.host ?? managed}',
@@ -283,7 +288,7 @@ class _SignInScreenState extends State<SignInScreen> {
           const SizedBox(height: 8),
           TextButton(
             onPressed: working ? null : widget.onCancel,
-            child: const Text('Back to my vault'),
+            child: Text(widget.adding ? 'Cancel' : 'Back to my vault'),
           ),
         ],
       ],
@@ -497,10 +502,15 @@ class UnlockScreen extends StatefulWidget {
     required this.server,
     required this.onUnlocked,
     required this.onSignOut,
+    this.menu,
   });
 
   final String email;
   final String server;
+
+  /// The accounts signed in here: with more than one, switching to another
+  /// (it stays as it is; this one stays locked).
+  final AccountsMenu? menu;
 
   /// How long the master password took to unlock, in milliseconds, or null
   /// when biometrics unlocked it.
@@ -617,34 +627,34 @@ class _UnlockScreenState extends State<UnlockScreen> {
         textAlign: TextAlign.center,
         style: TextStyle(color: context.colors.muted, fontSize: 12),
       ),
+      if (widget.menu case final menu? when menu.several)
+        Center(
+          child: AccountMenuButton(
+            menu: menu,
+            // The lock screen's own Sign out is below.
+            signOut: false,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              child: Text(
+                'Switch account',
+                style: TextStyle(
+                  color: Theme.of(context).colorScheme.primary,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+          ),
+        ),
       TextButton(
         onPressed: working
             ? null
             : () async {
-                final sure = await showDialog<bool>(
-                  context: context,
-                  builder: (context) => AlertDialog(
-                    title: const Text('Sign out?'),
-                    content: Text(
-                      method == null
-                          ? 'This removes the vault from this device. Signing in again brings it back from the server.'
-                          : isPhone
-                          ? 'This removes the vault from this phone and turns off unlocking with $method. Signing in again brings the vault back from the server.'
-                          : 'This removes the vault from this device and turns off unlocking with $method, in your browser extension too. Signing in again brings the vault back from the server.',
-                    ),
-                    actions: [
-                      TextButton(
-                        onPressed: () => Navigator.pop(context, false),
-                        child: const Text('Cancel'),
-                      ),
-                      FilledButton(
-                        onPressed: () => Navigator.pop(context, true),
-                        child: const Text('Sign out'),
-                      ),
-                    ],
-                  ),
+                final sure = await askToSignOut(
+                  context,
+                  method: method,
+                  email: (widget.menu?.several ?? false) ? widget.email : null,
                 );
-                if (sure == true) widget.onSignOut();
+                if (sure) widget.onSignOut();
               },
         child: const Text('Sign out'),
       ),

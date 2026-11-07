@@ -16,8 +16,16 @@ import UniformTypeIdentifiers
 
   func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {
     GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)
-    // The core turns biometric unlock off when signing out: Swift deletes the Keychain item.
-    pb_set_remove_biometric { Biometric.remove() }
+    // The core turns an account's biometric unlock off when signing out of
+    // it: Swift deletes that account's Keychain item.
+    pb_set_remove_biometric { account in
+      guard let account else { return }
+      Biometric.remove(account: String(cString: account))
+    }
+    // The one item a build from before several accounts kept, for its one
+    // account (now carried over as an account of its own): it goes, and the
+    // app offers Face ID again after the next unlock with the master password.
+    Biometric.forgetEarlier()
     guard let registrar = engineBridge.pluginRegistry.registrar(forPlugin: "PassBundlePlatform") else { return }
     // What only the phone's own code does (docs/phones.md, "Talking to the OS").
     let channel = FlutterMethodChannel(name: "passbundle/platform", binaryMessenger: registrar.messenger())
@@ -33,13 +41,14 @@ import UniformTypeIdentifiers
         let server = (managed?["server_url"] as? String)?.trimmingCharacters(in: .whitespaces)
         result(server?.isEmpty == false ? server : nil)
       // Copying straight from the core to the pasteboard: the value never passes through Dart.
+      // Each call about an account names it (core.dart, Core.account).
       case "copy":
         let arguments = call.arguments as? [String: Any]
         guard let id = arguments?["id"] as? String, let what = arguments?["what"] as? String else {
           result(false)
           return
         }
-        result(Platform.copy(id: id, what: what))
+        result(Platform.copy(account: arguments?["account"] as? String ?? "", id: id, what: what))
       // A login's website, in the browser: only http and https.
       case "openUrl":
         guard let text = (call.arguments as? [String: Any])?["url"] as? String, let url = URL(string: text),
@@ -49,20 +58,21 @@ import UniformTypeIdentifiers
           return
         }
         UIApplication.shared.open(url) { opened in result(opened) }
-      // Unlocking with Face ID or Touch ID (Biometric, below).
+      // Unlocking with Face ID or Touch ID (Biometric, below), each account its own.
       case "biometricStatus":
-        result(["status": Biometric.status(), "method": Biometric.method()])
+        result(["status": Biometric.status(account: Platform.account(call)), "method": Biometric.method()])
       case "biometricEnroll":
-        Biometric.enroll { on, error in
+        Biometric.enroll(account: Platform.account(call)) { on, error in
           result(["ok": error == nil, "on": on, "error": error as Any])
         }
       case "biometricUnlock":
-        Biometric.unlock { unlocked, error in
+        Biometric.unlock(account: Platform.account(call)) { unlocked, error in
           result(["ok": error == nil, "unlocked": unlocked, "error": error as Any])
         }
       // Confirming it's the person, to approve a sign-in from another device.
       case "biometricConfirmApproval":
-        Biometric.unlock(reason: "Approve sign-in", forApproval: true) { confirmed, error in
+        Biometric.unlock(account: Platform.account(call), reason: "Approve sign-in", forApproval: true) {
+          confirmed, error in
           result(["ok": error == nil, "confirmed": confirmed, "error": error as Any])
         }
       // Tests only: debug builds' stand-in for the Face ID prompt (false in a release build).
@@ -70,7 +80,7 @@ import UniformTypeIdentifiers
         let on = (call.arguments as? [String: Any])?["on"] as? Bool ?? false
         result(Biometric.useStandIn(on))
       case "biometricRemove":
-        Biometric.remove()
+        Biometric.remove(account: Platform.account(call))
         result(["ok": true])
       // An attachment, into the app's Documents folder, which Files shows
       // (On My iPhone, PassBundle). The core writes it there itself.
@@ -82,9 +92,10 @@ import UniformTypeIdentifiers
           result(["ok": false, "error": "Couldn't save that."])
           return
         }
+        let account = Platform.account(call)
         DispatchQueue.global(qos: .userInitiated).async {
           var answer: [String: Any] = ["ok": false, "error": "Couldn't save that."]
-          if let text = pb_save_attachment_in(id, attachment, documents.path) {
+          if let text = pb_save_attachment_in(account, id, attachment, documents.path) {
             defer { pb_free(text) }
             if let parsed = try? JSONSerialization.jsonObject(with: Data(bytes: text, count: strlen(text)))
               as? [String: Any]
@@ -125,12 +136,17 @@ enum Platform {
     return dir.path
   }
 
+  /// The account a call is about: its id on this device (core.dart, Core.account).
+  static func account(_ call: FlutterMethodCall) -> String {
+    (call.arguments as? [String: Any])?["account"] as? String ?? ""
+  }
+
   /// Puts an item's value on the pasteboard for this device only (not
   /// Universal Clipboard). Secrets expire after 30 seconds, which iOS
   /// enforces even if the app is suspended; a username stays.
-  static func copy(id: String, what: String) -> Bool {
+  static func copy(account: String, id: String, what: String) -> Bool {
     var length = 0
-    guard let bytes = pb_secret(id, what, &length) else { return false }
+    guard let bytes = pb_secret(account, id, what, &length) else { return false }
     defer { pb_free_secret(bytes, length) }
     guard let value = String(bytes: UnsafeBufferPointer(start: bytes, count: length), encoding: .utf8) else {
       return false
@@ -150,12 +166,17 @@ enum Platform {
 /// face or a finger voids it. It goes between the core and the Keychain here,
 /// never through Dart.
 ///
+/// Each account on the phone has its own Keychain item, named by the
+/// account's id on this device (DESIGN.md in the meta repo, "Several accounts
+/// in the apps"): turning one off, or iOS voiding it, leaves the others'.
+///
 /// For tests, debug builds have a stand-in for the prompt that says yes,
 /// keeping the key without biometrics, as on Android; release builds refuse
 /// it. Real prompts are checked by hand on real phones.
 enum Biometric {
   private static let service = "com.passbundle.app.biometric"
-  private static let account = "user-key"
+  /// The one item a build from before several accounts kept.
+  private static let earlier = "user-key"
 
   /// Kept in the app's own defaults, not the vault's folder, so a test that
   /// clears the folder keeps it.
@@ -172,7 +193,7 @@ enum Biometric {
   /// Tests only: the stand-in, kept across the app's launches. False in a release build.
   static func useStandIn(_ on: Bool) -> Bool {
     #if DEBUG
-      remove()
+      removeAll()
       UserDefaults.standard.set(on, forKey: standInKey)
       return true
     #else
@@ -191,47 +212,73 @@ enum Biometric {
     }
   }
 
-  private static var item: [String: Any] {
+  /// An account's id on this device, as the core makes them (accounts.rs).
+  private static func isAccount(_ account: String) -> Bool {
+    account.count == 32 && account.allSatisfy { $0.isASCII && $0.isHexDigit && !$0.isUppercase }
+  }
+
+  /// An account's own Keychain item.
+  private static func item(_ account: String) -> [String: Any] {
     [
       kSecClass as String: kSecClassGenericPassword,
       kSecAttrService as String: service,
-      kSecAttrAccount as String: account,
+      kSecAttrAccount as String: "user-key-" + account,
     ]
   }
 
-  /// Whether the key is kept, without asking for Face ID.
-  private static func kept() -> Bool {
+  /// Whether the account's key is kept, without asking for Face ID.
+  private static func kept(_ account: String) -> Bool {
+    guard isAccount(account) else { return false }
     let context = LAContext()
     context.interactionNotAllowed = true
-    var query = item
+    var query = item(account)
     query[kSecUseAuthenticationContext as String] = context
     query[kSecReturnAttributes as String] = true
     let status = SecItemCopyMatching(query as CFDictionary, nil)
     return status == errSecSuccess || status == errSecInteractionNotAllowed
   }
 
-  /// "setUp", "notSetUp", or "unavailable" (no Face ID or Touch ID set up on this phone).
-  static func status() -> String {
+  /// For an account: "setUp", "notSetUp", or "unavailable" (no Face ID or Touch ID set up on this phone).
+  static func status(account: String) -> String {
     if !standIn && !LAContext().canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: nil) {
       return "unavailable"
     }
-    return kept() ? "setUp" : "notSetUp"
+    return kept(account) ? "setUp" : "notSetUp"
   }
 
-  /// Turns it off: the Keychain item goes. The core calls this when signing out.
-  static func remove() {
-    SecItemDelete(item as CFDictionary)
+  /// Turns it off for one account: its Keychain item goes, and the others'
+  /// stay. The core calls this when signing out of it.
+  static func remove(account: String) {
+    guard isAccount(account) else { return }
+    SecItemDelete(item(account) as CFDictionary)
   }
 
-  /// Turns it on, while unlocked: asks for Face ID or Touch ID, then keeps
-  /// the user key. `done(on, error)`: on is false if the person cancelled.
-  static func enroll(_ done: @escaping (Bool, String?) -> Void) {
-    remove()
+  /// Every account's, for the tests' stand-in.
+  private static func removeAll() {
+    SecItemDelete([kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service] as CFDictionary)
+  }
+
+  /// The item a build from before several accounts kept goes (at start).
+  static func forgetEarlier() {
+    SecItemDelete(
+      [
+        kSecClass as String: kSecClassGenericPassword,
+        kSecAttrService as String: service,
+        kSecAttrAccount as String: earlier,
+      ] as CFDictionary)
+  }
+
+  /// Turns it on for an account, while it's unlocked: asks for Face ID or
+  /// Touch ID, then keeps its user key in its own item. `done(on, error)`:
+  /// on is false if the person cancelled.
+  static func enroll(account: String, _ done: @escaping (Bool, String?) -> Void) {
+    guard isAccount(account) else { return done(false, "Couldn't set up unlocking with \(method()).") }
+    remove(account: account)
     let keep = {
       var length = 0
-      guard let bytes = pb_user_key(&length) else { return done(false, "Unlock PassBundle first.") }
+      guard let bytes = pb_user_key(account, &length) else { return done(false, "Unlock PassBundle first.") }
       defer { pb_free_secret(bytes, length) }
-      var query = item
+      var query = item(account)
       // Not copied: the Keychain takes it from the core's buffer, which is wiped after.
       query[kSecValueData as String] = Data(bytesNoCopy: bytes, count: length, deallocator: .none)
       if standIn {
@@ -261,19 +308,22 @@ enum Biometric {
     }
   }
 
-  /// Unlocks: reading the key asks for Face ID or Touch ID, then the core
-  /// opens the kept vault with it. `done(unlocked, error)`: unlocked is false
-  /// if the person cancelled. With `forApproval`, it's the person confirming
-  /// it's them to approve a sign-in from another device, and nothing else:
-  /// the core only compares the key with the open vault's
-  /// (`pb_confirm_approval_with_key`), and the prompt says `reason`.
+  /// Unlocks an account: reading its key asks for Face ID or Touch ID, then
+  /// the core opens that account's kept vault with it. `done(unlocked,
+  /// error)`: unlocked is false if the person cancelled. With `forApproval`,
+  /// it's the person confirming it's them to approve a sign-in from another
+  /// device, and nothing else: the core only compares the key with that
+  /// account's open vault's (`pb_confirm_approval_with_key`), and the prompt
+  /// says `reason`.
   static func unlock(
-    reason: String = "Unlock PassBundle", forApproval: Bool = false, _ done: @escaping (Bool, String?) -> Void
+    account: String, reason: String = "Unlock PassBundle", forApproval: Bool = false,
+    _ done: @escaping (Bool, String?) -> Void
   ) {
+    guard isAccount(account) else { return done(false, "Unlocking with \(method()) is off. Use your master password.") }
     DispatchQueue.global(qos: .userInitiated).async {
       let context = LAContext()
       context.localizedReason = reason
-      var query = item
+      var query = item(account)
       query[kSecUseAuthenticationContext as String] = context
       query[kSecReturnData as String] = true
       var found: CFTypeRef?
@@ -284,7 +334,9 @@ enum Biometric {
           guard var key = found as? Data else { return done(false, "Couldn't unlock with \(method()).") }
           let why = key.withUnsafeBytes { raw -> String in
             let bytes = raw.bindMemory(to: UInt8.self).baseAddress
-            let given = forApproval ? pb_confirm_approval_with_key(bytes, raw.count) : pb_unlock_with_key(bytes, raw.count)
+            let given =
+              forApproval
+              ? pb_confirm_approval_with_key(account, bytes, raw.count) : pb_unlock_with_key(account, bytes, raw.count)
             guard let answer = given else {
               return "Couldn't unlock with \(method())."
             }
@@ -297,7 +349,7 @@ enum Biometric {
           done(false, nil)
         case errSecItemNotFound:
           // Off, or voided by a face or finger added since.
-          remove()
+          remove(account: account)
           done(false, "Unlocking with \(method()) is off. Use your master password.")
         default:
           done(false, "Couldn't unlock with \(method()).")
