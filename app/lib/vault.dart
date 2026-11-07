@@ -736,10 +736,10 @@ class VaultScreenState extends State<VaultScreen> {
   /// The banners under the list's search: signed out or offline, and what's
   /// expiring.
   Widget? get banners {
-    final shown = [?signedOutBanner, ?offlineBanner, ?reminderBanner];
-    if (shown.isEmpty) return null;
-    if (shown.length == 1) return shown.single;
-    return Column(mainAxisSize: MainAxisSize.min, children: shown);
+    final showing = [?signedOutBanner, ?offlineBanner, ?reminderBanner];
+    if (showing.isEmpty) return null;
+    if (showing.length == 1) return showing.single;
+    return Column(mainAxisSize: MainAxisSize.min, children: showing);
   }
 
   Widget? get signedOutBanner => signedOut

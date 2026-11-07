@@ -770,7 +770,19 @@ void main() {
     (tester) async {
       await unlockOnComputer(tester);
       Future<List<String>> choices() async {
-        await tester.ensureVisible(find.byKey(const ValueKey('folder-picker')));
+        // Far down a login's editor, past what the list has built yet.
+        final picker = find.byKey(const ValueKey('folder-picker'));
+        await tester.scrollUntilVisible(
+          picker,
+          200,
+          scrollable: find
+              .descendant(
+                of: find.byType(ItemEditor),
+                matching: find.byType(Scrollable),
+              )
+              .first,
+        );
+        await tester.ensureVisible(picker);
         await tester.pumpAndSettle();
         await tester.tap(find.byKey(const ValueKey('folder-picker')));
         await tester.pumpAndSettle();
