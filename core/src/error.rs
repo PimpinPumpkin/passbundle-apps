@@ -106,6 +106,11 @@ pub enum Error {
     /// Adding an account that's on this device already under another
     /// email or server: the server says it's the same account (its id).
     AlreadyHere,
+    /// Two-step login's second step couldn't go on, in a sentence the app
+    /// shows as it is: a security key that wasn't touched or holds none of
+    /// the account's credentials, a Duo answer for another sign-in, a code
+    /// that isn't a YubiKey's (two_step.rs, security_key).
+    TwoStep(&'static str),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -289,6 +294,7 @@ impl fmt::Display for Error {
             Error::AccountMade { sure: false, why } => write!(f, "The server may have made your account before the connection dropped: {why} Try signing in with it."),
             Error::TooManyAccounts => write!(f, "PassBundle keeps up to {} accounts on this device. Sign out of one to add another.", crate::accounts::MOST),
             Error::AlreadyHere => write!(f, "That account is in PassBundle on this device already, under another email or server. Sign out of it there first."),
+            Error::TwoStep(sentence) => write!(f, "{sentence}"),
         }
     }
 }

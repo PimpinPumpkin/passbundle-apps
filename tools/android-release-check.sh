@@ -37,6 +37,13 @@ com.passbundle.app.Keystore seal
 com.passbundle.app.Keystore open
 com.passbundle.app.Biometric remove
 com.passbundle.app.Core init
+com.passbundle.app.SecurityKeys start
+com.passbundle.app.SecurityKeys waitForKey
+com.passbundle.app.SecurityKeys nfcTransceive
+com.passbundle.app.SecurityKeys usbWrite
+com.passbundle.app.SecurityKeys usbRead
+com.passbundle.app.SecurityKeys release
+com.passbundle.app.SecurityKeys stop
 LIST
 [ "$missing" = 0 ] || exit 1
 echo "The release APK keeps what the core calls through JNI."

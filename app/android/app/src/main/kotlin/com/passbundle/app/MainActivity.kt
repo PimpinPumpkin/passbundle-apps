@@ -16,7 +16,7 @@ import io.flutter.plugin.common.MethodChannel
  * The app's one screen, which Flutter draws. What's here is what only Android
  * does (docs/phones.md, "Talking to the OS"): the app's own folder,
  * copying straight from the core to the clipboard, turning on autofill and
- * passkeys, and updates from GitHub.
+ * passkeys, security keys and Duo for two-step login, and updates from GitHub.
  */
 class MainActivity : FlutterActivity() {
     private var screenOff: BroadcastReceiver? = null
@@ -48,6 +48,12 @@ class MainActivity : FlutterActivity() {
             }
         Core.start(applicationContext)
         Biometric.init(applicationContext)
+        // Two-step login (two_step.dart): security keys and YubiKey codes
+        // held to the phone or plugged in (SecurityKeys.kt), and Duo's way
+        // back from the browser (LinkActivity.kt).
+        SecurityKeys.activity = this
+        val links = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "passbundle/links")
+        Links.listener = { link -> runOnUiThread { links.invokeMethod("link", link) } }
         // How an update's download goes, and what Android's installer said (update/Updater.kt).
         val updates = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "passbundle/updates")
         Updater.listener = { what, details -> updates.invokeMethod(what, details) }
@@ -129,6 +135,13 @@ class MainActivity : FlutterActivity() {
                                 },
                         )
                     }
+                    // A YubiKey's code held to the phone, while two-step login shows YubiKey.
+                    "yubikeyNfc" -> {
+                        val onCode: ((String) -> Unit)? =
+                            if (call.argument<Boolean>("on") == true) ({ code: String -> links.invokeMethod("yubikeyOtp", code) }) else null
+                        SecurityKeys.readCodes(this, onCode)
+                        result.success(true)
+                    }
                     // Browsers the person trusted for autofill (Browsers.kt), and stopping.
                     "trustedBrowsers" -> result.success(Browsers.trusted(this))
                     "untrustBrowser" -> {
@@ -167,6 +180,8 @@ class MainActivity : FlutterActivity() {
         screenOff?.let { unregisterReceiver(it) }
         screenOff = null
         Updater.listener = null
+        Links.listener = null
+        if (SecurityKeys.activity === this) SecurityKeys.activity = null
         super.cleanUpFlutterEngine(flutterEngine)
     }
 }

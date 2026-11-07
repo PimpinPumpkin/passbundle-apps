@@ -397,8 +397,9 @@ jobs:
 
   core-server:
     # Real keys against a real PassBundle server (core/tests/server.rs):
-    # signing up, signing in, two-step login, sync, saving, organizations,
-    # and approving a sign-in from another device. On a pull request, the
+    # signing up, signing in, two-step login (an authenticator app, a
+    # recovery code, and a security key in software), sync, saving,
+    # organizations, and approving a sign-in from another device. On a pull request, the
     # server's branch of the same name if it has one (a change that spans
     # the two), else its keykeeper branch.
     name: Core against a real server
@@ -442,14 +443,18 @@ jobs:
       - name: Build the server
         working-directory: server
         run: cargo build --features sqlite
-      - name: Start it
-        run: echo "PB_TEST_SERVER=$(tools/test-server.sh server/target/debug/vaultwarden 8591 "$RUNNER_TEMP/server")" >> "$GITHUB_ENV"
-      - name: The core against it
+      - name: Start it, and another named localhost for security keys (WebAuthn takes only a domain)
+        run: |
+          echo "PB_TEST_SERVER=$(tools/test-server.sh server/target/debug/vaultwarden 8591 "$RUNNER_TEMP/server")" >> "$GITHUB_ENV"
+          echo "PB_TEST_SERVER_LOCALHOST=$(tools/test-server.sh server/target/debug/vaultwarden 8593 "$RUNNER_TEMP/server-localhost" localhost)" >> "$GITHUB_ENV"
+      - name: The core against it (test-hooks for the software security key, core/src/security_key/soft.rs)
         working-directory: core
-        run: cargo test --locked --test server
+        run: cargo test --locked --features test-hooks --test server
       - name: The server's log
         if: failure()
-        run: cat "$RUNNER_TEMP/server/server.log" || true
+        run: |
+          cat "$RUNNER_TEMP/server/server.log" || true
+          cat "$RUNNER_TEMP/server-localhost/server.log" || true
 
   app:
     name: App (${{ matrix.platform }})

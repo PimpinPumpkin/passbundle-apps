@@ -558,3 +558,148 @@ pub(crate) fn seal(plain: &[u8]) -> Option<Vec<u8>> {
 pub(crate) fn open(sealed: &[u8]) -> Option<Zeroizing<Vec<u8>>> {
     keystore(jni_str!("open"), sealed).map(Zeroizing::new)
 }
+
+/// A security key for two-step login (security_key), through the app's
+/// Kotlin (`com.passbundle.app.SecurityKeys`): it looks for a key held to
+/// the phone (NFC) or plugged in (USB, asking Android's permission for it),
+/// and passes the core's APDUs or HID reports to it; the CTAP itself is the
+/// core's (security_key/ctap.rs), as on computers.
+pub(crate) fn ask_security_key(
+    request: &crate::security_key::KeyRequest,
+    wait: &crate::security_key::Wait,
+) -> crate::Result<crate::security_key::KeyAnswer> {
+    use crate::error::Error;
+    use crate::security_key::ctap;
+
+    let Some((vm, loader)) = JVM.get() else {
+        return Err(Error::TwoStep(crate::security_key::NOT_HERE));
+    };
+    let asked = vm.attach_current_thread_for_scope(|env| -> JniResult<crate::Result<_>> {
+        let name = env.new_string("com.passbundle.app.SecurityKeys")?;
+        let class = loader.load_class(env, name)?;
+        let started = env
+            .call_static_method(&class, jni_str!("start"), jni_sig!(() -> jboolean), &[])?
+            .z()?;
+        if !started {
+            return Ok(Err(Error::TwoStep(
+                "This phone has no NFC or USB for a security key. Use another way to sign in, or the web vault.",
+            )));
+        }
+        let asked = loop {
+            if let Some(stop) = wait.over() {
+                break Err(stop);
+            }
+            let found = env
+                .call_static_method(
+                    &class,
+                    jni_str!("waitForKey"),
+                    jni_sig!((timeout: jint) -> jint),
+                    &[JValue::Int(250)],
+                )?
+                .i()?;
+            let asked = match found {
+                1 => ctap::ask_nfc(&mut KeyOnPhone { env, class: &class }, request, wait),
+                2 => ctap::ask_hid(&mut KeyOnPhone { env, class: &class }, request, wait),
+                _ => continue,
+            };
+            env.call_static_method(&class, jni_str!("release"), jni_sig!(() -> void), &[])?
+                .v()?;
+            break asked;
+        };
+        env.call_static_method(&class, jni_str!("stop"), jni_sig!(() -> void), &[])?
+            .v()?;
+        Ok(asked)
+    });
+    asked.unwrap_or(Err(Error::TwoStep(
+        "PassBundle couldn't reach the security key. Try again, or use another way to sign in.",
+    )))
+}
+
+/// The key Kotlin found: NFC's APDUs and USB's HID reports pass through it.
+struct KeyOnPhone<'a, 'local> {
+    env: &'a mut Env<'local>,
+    class: &'a JClass<'local>,
+}
+
+impl KeyOnPhone<'_, '_> {
+    /// `SecurityKeys.<method>(byte[]): byte[]`, null when the key's gone.
+    fn bytes(&mut self, method: &'static JNIStr, input: &[u8]) -> Option<Vec<u8>> {
+        let class = self.class;
+        let answer = self
+            .env
+            .with_local_frame(8, |env| -> JniResult<Option<Vec<u8>>> {
+                let input = env.byte_array_from_slice(input)?;
+                let output = env
+                    .call_static_method(
+                        class,
+                        method,
+                        jni_sig!((input: jbyte[]) -> jbyte[]),
+                        &[JValue::from(&JObject::from(input))],
+                    )?
+                    .l()?;
+                if output.is_null() {
+                    return Ok(None);
+                }
+                let output = env.cast_local::<JByteArray>(output)?;
+                Ok(Some(env.convert_byte_array(&output)?))
+            });
+        answer.unwrap_or_else(|_| {
+            self.env.exception_clear();
+            None
+        })
+    }
+}
+
+fn key_gone() -> crate::Error {
+    crate::Error::TwoStep(
+        "The security key went away before PassBundle was done. Hold it to the phone, or plug it in, until it's done.",
+    )
+}
+
+impl crate::security_key::ctap::Nfc for KeyOnPhone<'_, '_> {
+    fn transceive(&mut self, apdu: &[u8]) -> crate::Result<Vec<u8>> {
+        self.bytes(jni_str!("nfcTransceive"), apdu)
+            .ok_or_else(key_gone)
+    }
+}
+
+impl crate::security_key::ctap::Hid for KeyOnPhone<'_, '_> {
+    fn write(&mut self, report: &[u8; 64]) -> crate::Result<()> {
+        match self.bytes(jni_str!("usbWrite"), report) {
+            Some(written) if written.len() == 64 => Ok(()),
+            _ => Err(key_gone()),
+        }
+    }
+
+    fn read(&mut self, timeout: std::time::Duration) -> crate::Result<Option<[u8; 64]>> {
+        let class = self.class;
+        let ms = timeout.as_millis().min(i32::MAX as u128) as i32;
+        let answer = self
+            .env
+            .with_local_frame(8, |env| -> JniResult<Option<Vec<u8>>> {
+                let output = env
+                    .call_static_method(
+                        class,
+                        jni_str!("usbRead"),
+                        jni_sig!((timeout: jint) -> jbyte[]),
+                        &[JValue::Int(ms)],
+                    )?
+                    .l()?;
+                if output.is_null() {
+                    return Ok(None);
+                }
+                let output = env.cast_local::<JByteArray>(output)?;
+                Ok(Some(env.convert_byte_array(&output)?))
+            });
+        match answer {
+            // Nothing came in time.
+            Ok(Some(report)) if report.is_empty() => Ok(None),
+            Ok(Some(report)) => report.try_into().map(Some).map_err(|_| key_gone()),
+            Ok(None) => Err(key_gone()),
+            Err(_) => {
+                self.env.exception_clear();
+                Err(key_gone())
+            }
+        }
+    }
+}
