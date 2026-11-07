@@ -11,6 +11,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:passbundle/folder_looks.dart';
 import 'package:passbundle/glyphs.dart';
 import 'package:passbundle/main.dart';
 import 'package:passbundle/theme.dart';
@@ -131,6 +132,12 @@ void main() {
     'Health': Jewel.health,
     for (final kind in ItemKind.all) kind.kind: kind,
     ...Categories.all,
+    // A shared folder's own colors (folder_looks.dart).
+    for (final tone in FolderLooks.tones.keys)
+      'shared folder in $tone': FolderLooks.jewel({
+        'icon': 'folder',
+        'tone': tone,
+      })!,
   };
   for (final (name, c) in [
     ('light', PassBundleColors.light),
@@ -182,6 +189,28 @@ void main() {
       expect(failures, isEmpty, reason: failures.join('\n'));
     });
   }
+
+  test('a shared folder\'s look is a jewel of our glyphs and tones, as the web vault names them', () {
+    expect(FolderLooks.icons, hasLength(24));
+    expect(FolderLooks.tones, hasLength(10));
+    final bank = FolderLooks.jewel({'icon': 'bank', 'tone': 'emerald'})!;
+    expect(bank.glyph, Glyphs.bank);
+    expect(bank.light, const Color(0xFF0E7A47));
+    expect(bank.dark, const Color(0xFF6FDBA0));
+    // The tones are the categories' own.
+    expect(
+      FolderLooks.jewel({'icon': 'key', 'tone': 'sapphire'})!.light,
+      ItemKind.login.light,
+    );
+    // Names this app doesn't know still show: the folder glyph, gray.
+    final newer = FolderLooks.jewel({'icon': 'rocket', 'tone': 'coral'})!;
+    expect(newer.glyph, Glyphs.folder);
+    expect(newer.light, ItemKind.sshKey.light);
+    // And anything that isn't a look is the plain folder.
+    for (final none in [null, 'bank', {}, {'icon': 'bank'}, {'icon': 1, 'tone': 'gold'}]) {
+      expect(FolderLooks.jewel(none), isNull, reason: '$none');
+    }
+  });
 
   test('a tile\'s tint is its tone at 11% in the light, 14% in the dark', () {
     expect(ItemKind.login.tint(Brightness.light).toARGB32(), 0x1C2448B8);

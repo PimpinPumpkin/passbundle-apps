@@ -3,7 +3,9 @@
 // organization with its shared folders, nested by name (core/src/places.rs).
 // The word "vault" is kept for the whole encrypted store (locking and
 // unlocking it); every place an item lives is a folder.
+import 'folder_looks.dart';
 import 'glyphs.dart';
+import 'theme.dart';
 
 /// What the vault's list shows: everything, favorites, the logins with
 /// something to fix (Health), a kind, Personal, Personal's items in no
@@ -39,7 +41,8 @@ class Places {
   final List<Map<String, dynamic>> folders;
 
   /// Each organization, `{id, name, collections}`, its shared folders
-  /// nested as folders are, with the person's `grid` and `canCreate`.
+  /// nested as folders are, with the person's `grid` and `canCreate`, and
+  /// each one's `look` (its icon and color, or null; folder_looks.dart).
   final List<Map<String, dynamic>> organizations;
 
   List<Map<String, dynamic>> collectionsOf(String? organizationId) =>
@@ -84,10 +87,15 @@ class PlaceEntry {
     this.id,
     this.owner = false,
     this.ownFolder = false,
+    this.look,
   });
 
   final String label;
   final String glyph;
+
+  /// A shared folder's own icon and color, as a jewel for its tile; null
+  /// keeps the plain glyph.
+  final Jewel? look;
   final int depth;
   final Filter filter;
   final String? id;
@@ -141,6 +149,7 @@ class PlaceEntry {
           depth: 1 + (c['depth'] as int),
           filter: Filter.collection,
           id: c['id'] as String,
+          look: FolderLooks.jewel(c['look']),
         ),
     ],
   ];
