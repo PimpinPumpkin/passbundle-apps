@@ -768,6 +768,13 @@ class Jewel {
     Color(0xFF0E7A47),
     Color(0xFF6FDBA0),
   );
+
+  /// Onyx, and a clock: Expiring soon, as the web vault's Expiring items.
+  static const expiring = Jewel(
+    Glyphs.clock,
+    Color(0xFF353B4A),
+    Color(0xFFC3C9D6),
+  );
 }
 
 /// The kinds of item, each with its jewel, and what the screens call one and

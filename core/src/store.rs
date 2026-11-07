@@ -211,11 +211,29 @@ impl Store {
         std::time::SystemTime::now().duration_since(modified).ok()
     }
 
-    /// Signing out forgets the vault; the server and email stay, to sign in again.
+    /// Signing out forgets the vault, and the reminders shown for its items;
+    /// the server and email stay, to sign in again.
     pub fn forget_vault(&self) {
-        if let Some(path) = self.path("sync.json") {
-            let _ = fs::remove_file(path);
+        for name in ["sync.json", "reminders.json"] {
+            if let Some(path) = self.path(name) {
+                let _ = fs::remove_file(path);
+            }
         }
+    }
+
+    /// The expiration reminders already shown for this account's items
+    /// (expiration.rs): ids, dates, and steps, never a name.
+    pub fn shown_reminders(&self) -> crate::expiration::ShownReminders {
+        self.read("reminders.json")
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn save_shown_reminders(&self, shown: &crate::expiration::ShownReminders) -> Result<()> {
+        self.write(
+            "reminders.json",
+            &serde_json::to_string_pretty(shown).expect("reminders always serialize"),
+        )
     }
 
     /// How the app looks on this device (`Appearance`); the defaults until

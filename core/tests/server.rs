@@ -1666,3 +1666,136 @@ fn a_sign_in_from_another_device_is_approved_in_the_app_and_the_key_reaches_only
     assert!(app.kept_sign_in_requests().is_empty());
     assert_eq!(app.sign_in_requests().err(), Some(Error::SignedOut));
 }
+
+/// The person's own logins' numbers (DESIGN.md in the meta repo, "Members'
+/// own passwords"): a member of an organization's app tells the server how
+/// many of their own logins have weak or reused passwords, after each sync,
+/// and their organization's owners see those numbers, never which logins.
+/// An organization's items don't count.
+#[test]
+fn an_apps_own_logins_numbers_reach_the_organizations_owners() {
+    let Some(server) = server() else { return };
+    let url = std::env::var("PB_TEST_SERVER").unwrap();
+    let email = new_email("own-health");
+    sign_up(&server, &email);
+    let mut session = sign_in(&server, &email);
+    let (org_id, _) = new_organization(&server, &mut session, &email);
+
+    let mut app = signed_in_app(&url, &email);
+    for (name, password) in [
+        ("Old forum", "password1"),
+        ("Bank", "Vq7#mZ2!pL9@xR4&tW8"),
+        ("Bank, again", "Vq7#mZ2!pL9@xR4&tW8"),
+    ] {
+        let draft = ItemDraft {
+            name: name.into(),
+            username: Some("ana".into()),
+            password: secret(password),
+            ..ItemDraft::default()
+        };
+        app.save(None, &draft, &[]).unwrap();
+    }
+    let vault = app.vault().unwrap();
+    let it = vault.collections.keys().next().unwrap().clone();
+    let shared = ItemDraft {
+        name: "Office Wi-Fi".into(),
+        password: secret("password1"),
+        organization_id: Some(org_id.clone()),
+        ..ItemDraft::default()
+    };
+    app.save(None, &shared, &[it]).unwrap();
+    app.sync().unwrap();
+    let reported = app.own_health_reported().expect("the numbers were sent");
+    assert_eq!((reported.logins, reported.weak, reported.reused), (3, 1, 2));
+
+    let seen = server
+        .raw(
+            &mut session,
+            "GET",
+            &format!("/api/keykeeper/organizations/{org_id}/member-health"),
+            None,
+        )
+        .unwrap();
+    let rows = seen["data"].as_array().unwrap();
+    assert_eq!(rows.len(), 1, "{seen}");
+    assert_eq!(rows[0]["logins"], 3);
+    assert_eq!(rows[0]["weak"], 1);
+    assert_eq!(rows[0]["reused"], 2);
+    // The apps don't check breaches, so they never say how many are exposed.
+    assert!(rows[0]["exposed"].is_null(), "{seen}");
+    assert!(rows[0]["reportedAt"].is_string(), "{seen}");
+    // Numbers, and nothing that names an item.
+    let text = seen.to_string();
+    assert!(!text.contains("Old forum") && !text.contains("Bank"));
+}
+
+/// An expiration date and reminder days the app's editor sets go to the
+/// server as the web vault keeps them (text fields named `keykeeper.expires`
+/// and `keykeeper.remind`), come back with the next sync, stay through an
+/// edit that doesn't touch them, and go when the date is cleared.
+#[test]
+fn an_expiration_date_and_reminder_days_saved_in_the_app_come_back() {
+    use passbundle_core::expiration::{Date, Remind, REMIND_FIELD};
+    use passbundle_core::vault::{Expiration, EXPIRES_FIELD};
+
+    let Some(server) = server() else { return };
+    let url = std::env::var("PB_TEST_SERVER").unwrap();
+    let email = new_email("expires");
+    sign_up(&server, &email);
+    let mut app = signed_in_app(&url, &email);
+    let draft = ItemDraft {
+        name: "Domain renewal".into(),
+        note: true,
+        expiration: Some(Expiration {
+            date: Date::parse_iso("2027-03-31"),
+            remind: Remind::parse("90,30,7,1").unwrap(),
+        }),
+        ..ItemDraft::default()
+    };
+    app.save(None, &draft, &[]).unwrap();
+    let fields = |app: &App| -> Vec<(String, String)> {
+        let item = app
+            .vault()
+            .unwrap()
+            .items
+            .iter()
+            .find(|i| i.name == "Domain renewal")
+            .unwrap();
+        item.fields
+            .iter()
+            .map(|f| (f.name.clone(), f.value.as_str().to_owned()))
+            .collect()
+    };
+    let expected = vec![
+        (EXPIRES_FIELD.to_owned(), "2027-03-31".to_owned()),
+        (REMIND_FIELD.to_owned(), "90,30,7,1".to_owned()),
+    ];
+    assert_eq!(fields(&app), expected);
+
+    // Read on another device, then renamed there: the date and days stay.
+    let mut other = signed_in_app(&url, &email);
+    assert_eq!(fields(&other), expected);
+    let (id, mut renamed) = {
+        let item = other
+            .vault()
+            .unwrap()
+            .items
+            .iter()
+            .find(|i| i.name == "Domain renewal")
+            .unwrap();
+        (item.id.clone(), ItemDraft::of(item))
+    };
+    renamed.notes = secret("Renew at the registrar.");
+    other.save(Some(&id), &renamed, &[]).unwrap();
+    app.sync().unwrap();
+    assert_eq!(fields(&app), expected);
+
+    // Cleared in the editor: both go.
+    let mut cleared = {
+        let item = app.vault().unwrap().item(&id).unwrap();
+        ItemDraft::of(item)
+    };
+    cleared.expiration = Some(Expiration::default());
+    app.save(Some(&id), &cleared, &[]).unwrap();
+    assert_eq!(fields(&app), vec![]);
+}

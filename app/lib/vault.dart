@@ -170,6 +170,21 @@ class VaultScreenState extends State<VaultScreen> {
   /// a time; the next waits for it.
   bool prompting = false;
 
+  /// What's due to be said about items expiring ("2 items expire soon",
+  /// core/src/expiration.rs), at the top of the vault until it's shown or
+  /// dismissed. Asked for after unlocking and every six hours after.
+  String? reminder;
+  Timer? reminding;
+
+  Future<void> remind() async {
+    if (!mounted) return;
+    final answer = await Core.reminders();
+    if (!mounted || !answer.ok) return;
+    if (answer.body['title'] case final String title) {
+      setState(() => reminder = title);
+    }
+  }
+
   Future<void> promptForSignIns() async {
     if (prompting || !mounted) return;
     final request = signInRequests.unprompted();
@@ -193,6 +208,12 @@ class VaultScreenState extends State<VaultScreen> {
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       if (widget.syncOnOpen) sync();
       updateFound();
+      // Expiration reminders, each said once (and on a computer, the
+      // desktop agent's tray told how many).
+      if (mounted) {
+        unawaited(remind());
+        reminding = Timer.periodic(const Duration(hours: 6), (_) => remind());
+      }
       // What it was opened to show, from another account's vault.
       if (widget.start case final start?) {
         if (start.item case final id?) {
@@ -250,6 +271,7 @@ class VaultScreenState extends State<VaultScreen> {
 
   @override
   void dispose() {
+    reminding?.cancel();
     signInRequests.removeListener(promptForSignIns);
     signInRequests.stop();
     updates?.removeListener(updateFound);
@@ -377,6 +399,7 @@ class VaultScreenState extends State<VaultScreen> {
     Filter.all => null,
     Filter.everyAccount => 'All accounts',
     Filter.favorites => 'Favorites',
+    Filter.expiring => 'Expiring soon',
     Filter.health => 'Health',
     Filter.kind => ItemKind.of(filterId ?? '').many,
     Filter.personal => 'Personal',
@@ -684,6 +707,41 @@ class VaultScreenState extends State<VaultScreen> {
     ),
   );
 
+  /// What's due about items expiring, with Show (Expiring soon) and Dismiss.
+  Widget? get reminderBanner => reminder == null
+      ? null
+      : MaterialBanner(
+          key: const ValueKey('expiration-reminder'),
+          content: Text(reminder!),
+          leading: const Glyph(Glyphs.clock, size: 22),
+          actions: [
+            TextButton(
+              onPressed: () => setState(() => reminder = null),
+              child: const Text('Dismiss'),
+            ),
+            TextButton(
+              onPressed: () {
+                // On a phone, from any tab: the items' tab, showing them.
+                setState(() {
+                  reminder = null;
+                  tab = 0;
+                });
+                choose(Filter.expiring);
+              },
+              child: const Text('Show'),
+            ),
+          ],
+        );
+
+  /// The banners under the list's search: signed out or offline, and what's
+  /// expiring.
+  Widget? get banners {
+    final showing = [?signedOutBanner, ?offlineBanner, ?reminderBanner];
+    if (showing.isEmpty) return null;
+    if (showing.length == 1) return showing.single;
+    return Column(mainAxisSize: MainAxisSize.min, children: showing);
+  }
+
   Widget? get signedOutBanner => signedOut
       ? MaterialBanner(
           content: const Text(
@@ -747,7 +805,7 @@ class VaultScreenState extends State<VaultScreen> {
                 Expanded(
                   child: ItemList(
                     title: placeName ?? 'All items',
-                    banner: signedOutBanner ?? offlineBanner,
+                    banner: banners,
                     items: shown,
                     badges: !const {
                       Filter.folder,
@@ -819,6 +877,7 @@ class VaultScreenState extends State<VaultScreen> {
             children: [
               ?signedOutBanner,
               ?offlineBanner,
+              ?reminderBanner,
               Expanded(
                 child: IndexedStack(
                   index: tab,
@@ -1071,6 +1130,11 @@ class VaultScreenState extends State<VaultScreen> {
         const SliverToBoxAdapter(child: SizedBox(height: 12)),
         everyAccountCard(),
       ],
+      // What's expired or expires within 30 days, while there's any.
+      if (count(Filter.expiring) > 0) ...[
+        const SliverToBoxAdapter(child: SizedBox(height: 12)),
+        expiringCard(count(Filter.expiring)),
+      ],
       if (favorites.isNotEmpty) ...[heading('Favorites'), itemCard(favorites)],
       heading(
         'Folders',
@@ -1141,6 +1205,39 @@ class VaultScreenState extends State<VaultScreen> {
           onTap: () => pick(item),
         );
       });
+
+  /// "Expiring soon", on a phone: a card of its own, above the favorites.
+  Widget expiringCard(int count) => card(1, (context, i, radius) {
+    final c = context.colors;
+    return InkWell(
+      key: const ValueKey('expiring-soon'),
+      borderRadius: radius,
+      onTap: () => choose(Filter.expiring),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: 56),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 8, 12, 8),
+          child: Row(
+            children: [
+              const JewelTile(jewel: Jewel.expiring, size: 40),
+              const SizedBox(width: 12),
+              const Expanded(
+                child: Text(
+                  'Expiring soon',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+                ),
+              ),
+              Text('$count', style: TextStyle(color: c.muted, fontSize: 14)),
+              const SizedBox(width: 6),
+              Glyph(Glyphs.chevron, size: 18, color: c.muted, strokeWidth: 2),
+            ],
+          ),
+        ),
+      ),
+    );
+  });
 
   /// "All accounts", on a phone: a card of its own, above the favorites.
   Widget everyAccountCard() => card(1, (context, i, radius) {
@@ -1421,6 +1518,7 @@ class PhoneItemRow extends StatelessWidget {
                   ],
                 ),
               ),
+              ExpiryBadge(item),
               if (item['favorite'] == true)
                 const Padding(
                   padding: EdgeInsets.only(left: 6),
@@ -1551,7 +1649,7 @@ class Sidebar extends StatelessWidget {
   /// Every item, for the counts beside each entry.
   final List<Map<String, dynamic>> items;
 
-  /// How many logins Health has something to fix for.
+  /// How many items Health has something to fix for.
   final int toFix;
 
   /// The Tools: the generator, and import and export (the web vault's,
@@ -1713,7 +1811,17 @@ class Sidebar extends StatelessWidget {
                   tap: () => onChoose(Filter.favorites),
                   count: count(Filter.favorites),
                 ),
-                // Weak, reused, and unsecured passwords, as the web vault's Health.
+                // What's expired or expires within 30 days, while there's any.
+                if (count(Filter.expiring) > 0 || filter == Filter.expiring)
+                  entry(
+                    tile: const JewelTile(jewel: Jewel.expiring, size: 24),
+                    label: 'Expiring soon',
+                    on: filter == Filter.expiring,
+                    tap: () => onChoose(Filter.expiring),
+                    count: count(Filter.expiring),
+                  ),
+                // Weak, reused, and unsecured passwords, and what expires,
+                // as the web vault's Health.
                 entry(
                   tile: const JewelTile(jewel: Jewel.health, size: 24),
                   label: 'Health',
@@ -2063,6 +2171,7 @@ class ItemList extends StatelessWidget {
                                       ],
                                     ),
                                   ),
+                                  ExpiryBadge(item),
                                   if (item['favorite'] == true)
                                     const Padding(
                                       padding: EdgeInsets.only(left: 6),
@@ -2123,6 +2232,56 @@ class WhereBadge extends StatelessWidget {
               overflow: TextOverflow.ellipsis,
               style: TextStyle(
                 color: c.chipText,
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// An item's expiry in a pill beside it in a list, as the web vault's badge:
+/// "Expires in 12 days" in amber, "Expired 5 days ago" in the error color,
+/// for an item expired or expiring within 30 days (cards by their expiry
+/// month); nothing otherwise.
+class ExpiryBadge extends StatelessWidget {
+  const ExpiryBadge(this.item, {super.key});
+
+  final Map<String, dynamic> item;
+
+  @override
+  Widget build(BuildContext context) {
+    final label = expiringLabel(item);
+    if (label == null) return const SizedBox.shrink();
+    final brightness = Theme.of(context).brightness;
+    final tone = hasExpired(item)
+        ? Theme.of(context).colorScheme.error
+        : Jewel.favorites.color(brightness);
+    return Padding(
+      padding: const EdgeInsets.only(left: 8),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 150),
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            color: tone.withValues(
+              alpha: brightness == Brightness.dark
+                  ? Jewel.darkTint
+                  : Jewel.lightTint,
+            ),
+            borderRadius: BorderRadius.circular(7),
+          ),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+            child: Text(
+              label,
+              key: const ValueKey('expiry-badge'),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: tone,
                 fontSize: 12,
                 fontWeight: FontWeight.w600,
               ),
@@ -2829,9 +2988,31 @@ class _ItemPaneState extends State<ItemPane> {
     }
     final expires = item['expires'] as String?;
     if (expires != null && expires.isNotEmpty) {
+      // The date, and when that is from today.
+      final expiry = item['expiry'] as Map?;
+      final when = expiry?['date'] == expires ? expiry!['label'] as String? : null;
       rows.add(
-        row('Expires', Text(expires, style: TextStyle(fontSize: valueSize))),
+        row(
+          'Expires',
+          Text(
+            when == null ? expires : '$expires · $when',
+            style: TextStyle(fontSize: valueSize),
+          ),
+        ),
       );
+      // When it reminds, when that isn't the default (core/src/expiration.rs).
+      final remind = item['remind'] as Map?;
+      if (remind?['value'] != null) {
+        rows.add(
+          row(
+            'Remind me',
+            Text(
+              remind!['words'] as String,
+              style: TextStyle(fontSize: valueSize),
+            ),
+          ),
+        );
+      }
     }
     if (item['hasNotes'] == true) {
       rows.add(secretRow('Notes', 'notes', canCopy: false));

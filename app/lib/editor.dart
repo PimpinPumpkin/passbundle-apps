@@ -121,6 +121,13 @@ class _ItemEditorState extends State<ItemEditor> {
   final uris = <TextEditingController>[];
   final fields = <_Field>[];
 
+  /// When it expires ("YYYY-MM-DD", empty for never), and when it reminds:
+  /// as `keykeeper.remind` holds it, empty for the default
+  /// (core/src/expiration.rs), with the item's own days in words.
+  final expires = TextEditingController();
+  String remind = '';
+  String? remindWords;
+
   /// login, note, card, or identity.
   String kind = 'login';
   bool get note => kind == 'note';
@@ -225,6 +232,10 @@ class _ItemEditorState extends State<ItemEditor> {
         );
       }
       favorite = item['favorite'] == true;
+      expires.text = (item['expires'] ?? '') as String;
+      final itemRemind = item['remind'] as Map?;
+      remind = (itemRemind?['value'] as String?) ?? '';
+      remindWords = itemRemind?['words'] as String?;
       folderId = item['folderId'] as String?;
       organizationId = item['organizationId'] as String?;
       held = (item['collectionIds'] as List?)?.cast<String>() ?? const [];
@@ -415,6 +426,9 @@ class _ItemEditorState extends State<ItemEditor> {
       'organizationId': organizationId,
       'collectionIds': collectionIds,
       'favorite': favorite,
+      // An empty date clears it and its reminder days (core/src/ffi.rs, pb_save).
+      'expires': expires.text.trim(),
+      'remind': remind,
       'grant': ?grant,
       if (template != null)
         'template': {'id': template!['id'], 'name': template!['name']},
@@ -434,6 +448,36 @@ class _ItemEditorState extends State<ItemEditor> {
             : answer.error;
       });
     }
+  }
+
+  /// "Remind me"'s choices: (what the field holds, what it says). The
+  /// item's own days, when they aren't one of these, stay a choice.
+  List<(String, String)> get remindOptions => [
+    ..._remindOptions,
+    if (!_remindOptions.any((o) => o.$1 == remind))
+      (remind, remindWords ?? remind),
+  ];
+
+  /// The calendar, for the expiration date.
+  Future<void> pickExpiry() async {
+    final now = DateTime.now();
+    final first = DateTime(now.year - 20);
+    final last = DateTime(now.year + 50, 12, 31);
+    final shown = DateTime.tryParse(expires.text.trim());
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: shown != null && !shown.isBefore(first) && !shown.isAfter(last)
+          ? shown
+          : now,
+      firstDate: first,
+      lastDate: last,
+    );
+    if (picked == null || !mounted) return;
+    String two(int n) => n.toString().padLeft(2, '0');
+    setState(
+      () => expires.text =
+          '${picked.year}-${two(picked.month)}-${two(picked.day)}',
+    );
   }
 
   /// A text field for a detail; secrets are hidden until shown.
@@ -909,6 +953,48 @@ class _ItemEditorState extends State<ItemEditor> {
             ),
           ),
           gap(),
+          // When it expires, and when to be reminded (as the web vault's
+          // "Expires"): the reminders are the app's and the extension's.
+          TextField(
+            controller: expires,
+            keyboardType: TextInputType.datetime,
+            onChanged: (_) => setState(() {}),
+            decoration: InputDecoration(
+              labelText: 'Expires (optional)',
+              hintText: 'YYYY-MM-DD',
+              suffixIcon: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (expires.text.isNotEmpty)
+                    IconButton(
+                      tooltip: 'No expiration date',
+                      icon: const Icon(Icons.close_rounded),
+                      onPressed: () => setState(expires.clear),
+                    ),
+                  IconButton(
+                    tooltip: 'Pick a date',
+                    icon: const Icon(Icons.event_outlined),
+                    onPressed: pickExpiry,
+                  ),
+                ],
+              ),
+            ),
+          ),
+          if (expires.text.trim().isNotEmpty) ...[
+            gap(),
+            DropdownButtonFormField<String>(
+              key: const ValueKey('remind-me'),
+              initialValue: remind,
+              isExpanded: true,
+              decoration: const InputDecoration(labelText: 'Remind me'),
+              items: [
+                for (final (value, words) in remindOptions)
+                  DropdownMenuItem(value: value, child: Text(words)),
+              ],
+              onChanged: (v) => setState(() => remind = v ?? ''),
+            ),
+          ],
+          gap(),
           TextField(
             controller: notes,
             minLines: 3,
@@ -932,6 +1018,15 @@ class _ItemEditorState extends State<ItemEditor> {
 
 /// The kinds of custom field, as the editor offers them.
 const _fieldKinds = {0: 'Text', 1: 'Hidden', 2: 'Yes or no'};
+
+/// "Remind me": the default (stored as no field), earlier, later, or never,
+/// as `keykeeper.remind` holds them (core/src/expiration.rs).
+const _remindOptions = [
+  ('', '30, 7, and 1 day before'),
+  ('90,30,7,1', '90, 30, 7, and 1 day before'),
+  ('7,1', '7 and 1 day before'),
+  ('none', "Don't remind me"),
+];
 
 /// A field's name, asked for: null when cancelled.
 Future<String?> askFieldName(
