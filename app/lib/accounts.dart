@@ -586,7 +586,6 @@ class _AccountLabelEditorState extends State<AccountLabelEditor> {
             decoration: InputDecoration(
               labelText: 'Name',
               hintText: 'Work, Personal',
-              helperText: widget.entry.email,
               errorText: error,
               counterText: '',
             ),
