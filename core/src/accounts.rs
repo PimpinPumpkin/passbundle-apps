@@ -1515,9 +1515,19 @@ mod tests {
         accounts
             .set_label(&w, Some("  Work "), Some("ruby"))
             .unwrap();
-        let named = accounts.summaries();
-        assert_eq!(named[0].name.as_deref(), Some("Work"));
-        assert_eq!(named[0].tone, "ruby");
+        // Found by id: the folders' order is their ids' (no accounts.json).
+        let of = |accounts: &Accounts, id: &str| {
+            let s = accounts
+                .summaries()
+                .into_iter()
+                .find(|s| s.id == id)
+                .unwrap();
+            (s.name, s.tone)
+        };
+        assert_eq!(
+            of(&accounts, &w),
+            (Some("Work".to_owned()), "ruby".to_owned())
+        );
         assert_eq!(accounts.label(&w), "Work");
         assert_eq!(accounts.label(&p), personal().email);
         // Only a name a person would type, and only the colors there are.
@@ -1540,27 +1550,23 @@ mod tests {
         );
         assert_eq!(accounts.label(&w), "Work");
         accounts.set_label(&p, Some("Personal"), None).unwrap();
+        let personal_tone = of(&accounts, &p).1;
+        assert_ne!(personal_tone, "ruby");
         // Kept on this device, for the next start.
         drop(accounts);
         let mut again = open(&dir);
-        let kept: Vec<(Option<String>, String)> = again
-            .summaries()
-            .into_iter()
-            .map(|s| (s.name, s.tone))
-            .collect();
+        assert_eq!(of(&again, &w), (Some("Work".to_owned()), "ruby".to_owned()));
         assert_eq!(
-            kept,
-            vec![
-                (Some("Work".into()), "ruby".into()),
-                (Some("Personal".into()), "emerald".into())
-            ]
+            of(&again, &p),
+            (Some("Personal".to_owned()), personal_tone.clone())
         );
         // An empty name goes back to the email.
         again.set_label(&p, Some(" "), None).unwrap();
         assert_eq!(again.label(&p), personal().email);
         // Signing out forgets its name; a new account gets a free color.
         again.sign_out(&w);
-        assert_eq!(again.free_tone(), "sapphire");
+        let first_free = TONES.iter().find(|t| **t != personal_tone).unwrap();
+        assert_eq!(again.free_tone(), *first_free);
         let _ = fs::remove_dir_all(dir);
     }
 
