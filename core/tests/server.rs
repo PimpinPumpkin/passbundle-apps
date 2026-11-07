@@ -363,10 +363,10 @@ fn a_recovery_code_signs_in_and_turns_two_step_login_off() {
     };
     // The server doesn't list it; it takes it whatever it offers.
     assert!(!offer.providers.contains(&8), "{:?}", offer.providers);
-    assert_eq!(
-        app.finish_sign_in(8, "notmyrecoverycode", false).err(),
-        Some(Error::WrongCode)
-    );
+    assert!(matches!(
+        app.finish_sign_in(8, "notmyrecoverycode", false),
+        Err(Error::TwoStep(m)) if m.starts_with("That recovery code isn't right.")
+    ));
     // As someone might type it off paper: in capitals, in fours.
     let typed: Vec<String> = code
         .to_uppercase()
