@@ -327,11 +327,12 @@ fn register(program: &Path) -> Result<()> {
     let failed = || Error::TwoStep("PassBundle couldn't set itself up to come back from Duo.");
     let set = |path: &str, values: &[(Option<&str>, &str)]| -> Result<()> {
         let mut key: HKEY = std::ptr::null_mut();
+        let path = wide(path);
         // SAFETY: NUL-terminated wide strings and out-pointers, valid for each call.
         unsafe {
             if RegCreateKeyExW(
                 HKEY_CURRENT_USER,
-                wide(path).as_ptr(),
+                path.as_ptr(),
                 0,
                 std::ptr::null(),
                 REG_OPTION_NON_VOLATILE,
