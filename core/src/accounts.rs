@@ -163,12 +163,27 @@ impl Accounts {
         found.sort();
         ids.extend(found);
         let mut kept = Vec::new();
+        let mut dropped = Vec::new();
         for id in ids {
             let store = Store::new(folders.join(&id));
-            if store.settings().is_some() && store.has_sync() {
-                kept.push(id);
-            } else {
-                remove_folder(&folders, &id);
+            match store.settings() {
+                Some(_) if store.has_sync() => kept.push(id),
+                settings => {
+                    dropped.extend(settings.map(|s| (s.server, s.email)));
+                    remove_folder(&folders, &id);
+                }
+            }
+        }
+        // A refresh token a dropped folder's sign-in kept (its vault never
+        // came down), unless an account that's kept is the same one.
+        for (server, email) in dropped {
+            let same = kept.iter().any(|id| {
+                Store::new(folders.join(id))
+                    .settings()
+                    .is_some_and(|s| s.server == server && s.email == email)
+            });
+            if !same {
+                secrets.forget(&server, &email);
             }
         }
         let install = index
@@ -1148,9 +1163,20 @@ mod tests {
         Store::new(dir.join("accounts").join(&given_up))
             .save_preferences(&Preferences::default())
             .unwrap();
+        // And one whose vault never came down, though its session was kept.
+        let unsynced = new_id();
+        Store::new(dir.join("accounts").join(&unsynced))
+            .save_settings(&settings(personal(), "the-install"))
+            .unwrap();
+        let secrets = Arc::new(MemorySecretStore::default());
+        secrets.keep(personal().server, personal().email, "a refresh token");
+        secrets.keep(work().server, work().email, "work's refresh token");
         // Something that isn't one of ours stays.
         fs::write(dir.join("accounts").join("theirs.txt"), "x").unwrap();
-        let accounts = open(&dir);
+        let accounts = Accounts::open(&dir, secrets.clone());
+        assert!(!dir.join("accounts").join(&unsynced).exists());
+        assert!(secrets.get(personal().server, personal().email).is_none());
+        assert!(secrets.get(work().server, work().email).is_some());
         // Not in accounts.json (there's none), but signed in: kept.
         assert_eq!(
             accounts
