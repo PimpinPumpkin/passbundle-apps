@@ -142,7 +142,7 @@ void main() {
       await tester.tap(find.text('Save'));
       await pumpUntil(
         tester,
-        find.textContaining('write the expiration date as year, month, and day'),
+        find.textContaining('Write the expiration date as year, month, and day'),
       );
       await tester.tap(find.byTooltip('Cancel'));
       await tester.pumpAndSettle();
