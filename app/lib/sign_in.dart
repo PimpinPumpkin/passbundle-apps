@@ -1,5 +1,6 @@
-// Signing in (with two-step login), making an account, and unlocking the
-// vault kept on this device. The master password goes to the core and the
+// Signing in (with two-step login, and the new-device check on a device the
+// account has never used), making an account, and unlocking the vault kept
+// on this device. The master password goes to the core and the
 // field is cleared at once (docs/core.md, "Memory"). People sign in to
 // PassBundle's own server without being asked; a server an organization set
 // by policy is used and shown; and someone hosting their own types it in,
@@ -10,6 +11,7 @@ import 'package:flutter/material.dart';
 
 import 'accounts.dart';
 import 'core.dart';
+import 'new_device.dart';
 import 'theme.dart';
 import 'two_step.dart';
 import 'widgets.dart';
@@ -123,6 +125,10 @@ class _SignInScreenState extends State<SignInScreen> {
   /// The second step, once the server asks for one: what it offers (two_step.dart).
   Map<String, dynamic>? twoStep;
 
+  /// This device is new to the account: the check holding the sign-in
+  /// (new_device.dart).
+  Map<String, dynamic>? newDevice;
+
   Future<void> signIn() async {
     final typed = password.text;
     // The core has it now; the field doesn't keep it.
@@ -139,12 +145,21 @@ class _SignInScreenState extends State<SignInScreen> {
     signedIn(answer);
   }
 
-  /// Where signing in got to: the vault, two-step login, or why not.
+  /// Where signing in got to: the vault, two-step login, the new-device
+  /// check, or why not.
   void signedIn(Answer answer) {
     if (answer.ok && answer.body['step'] == 'twoFactor') {
       setState(() {
         working = false;
         twoStep = answer.body;
+        newDevice = null;
+        error = null;
+      });
+    } else if (answer.ok && answer.body['step'] == 'newDevice') {
+      setState(() {
+        working = false;
+        newDevice = answer.body;
+        twoStep = null;
         error = null;
       });
     } else if (answer.ok) {
@@ -208,15 +223,24 @@ class _SignInScreenState extends State<SignInScreen> {
     signedIn(answer);
   }
 
-  /// Android's Back goes back a step: from two-step login or making an
-  /// account to signing in, and from adding an account to the one shown,
-  /// before it leaves the app. Not while a call is out.
+  /// Android's Back goes back a step: from two-step login, the new-device
+  /// check, or making an account to signing in, and from adding an account
+  /// to the one shown, before it leaves the app. Not while a call is out.
   @override
   Widget build(BuildContext context) => PopScope(
-    canPop: twoStep == null && !creating && widget.onCancel == null,
+    canPop:
+        twoStep == null &&
+        newDevice == null &&
+        !creating &&
+        widget.onCancel == null,
     onPopInvokedWithResult: (popped, _) {
       if (popped || working) return;
-      if (twoStep != null) {
+      if (newDevice != null) {
+        setState(() {
+          newDevice = null;
+          error = null;
+        });
+      } else if (twoStep != null) {
         // The two-step screen stops a security key or Duo it was waiting on.
         setState(() {
           twoStep = null;
@@ -237,6 +261,20 @@ class _SignInScreenState extends State<SignInScreen> {
   );
 
   Widget _screen(BuildContext context) {
+    final held = newDevice;
+    if (held != null) {
+      return NewDeviceScreen(
+        // Each sign-in's check starts afresh.
+        key: ObjectKey(held),
+        answer: held,
+        onSignedIn: widget.onSignedIn,
+        onTwoStep: (offer) => setState(() {
+          newDevice = null;
+          twoStep = offer;
+        }),
+        onStartOver: () => setState(() => newDevice = null),
+      );
+    }
     final step = twoStep;
     if (step != null) {
       return TwoStepScreen(
@@ -244,6 +282,10 @@ class _SignInScreenState extends State<SignInScreen> {
         key: ObjectKey(step),
         offer: step,
         onSignedIn: widget.onSignedIn,
+        onNewDevice: (held) => setState(() {
+          twoStep = null;
+          newDevice = held;
+        }),
         onStartOver: () => setState(() => twoStep = null),
       );
     }

@@ -21,6 +21,7 @@ pub mod kdf;
 pub mod lock_policy;
 pub mod managed;
 pub mod matching;
+pub mod new_device;
 pub mod passkey;
 pub mod places;
 pub mod secrets;

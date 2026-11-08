@@ -2,8 +2,8 @@
 //! unlocked, and everything they ask for. One per account signed in on this
 //! device (accounts.rs, which the bridge, ffi.rs, holds), each with its own
 //! folder, keys, choices, and lock. See docs/core.md: signing in, two-step
-//! login, unlocking from the kept sync, and syncing with the kept refresh
-//! token.
+//! login, the new-device check, unlocking from the kept sync, and syncing
+//! with the kept refresh token.
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime};
@@ -20,9 +20,10 @@ use crate::generator;
 use crate::generator_policy::GeneratorPolicy;
 use crate::kdf::{normalize_email, Prelogin};
 use crate::lock_policy::LockPolicy;
-use crate::secrets::SecretStore;
+use crate::new_device;
+use crate::secrets::{Secret, SecretStore};
 use crate::security_key::{KeyAnswer, SecurityKeyRequest};
-use crate::server::{Device, Download, PendingSignIn, Server, Session, SignIn, TwoFactor};
+use crate::server::{Device, Download, Next, PendingSignIn, Server, Session, SignIn, TwoFactor};
 use crate::store::{Settings, Store};
 use crate::synced_settings::{self, Known};
 use crate::two_step::{self, Offer};
@@ -69,6 +70,10 @@ pub enum Step {
     Done,
     /// The second step, with what the server offers (two_step.rs).
     TwoFactor(Offer),
+    /// The new-device check holds it (new_device.rs): the number to type on
+    /// another of the account's devices, and how it stands. Ask how it
+    /// stands every few seconds (`new_device_status`).
+    NewDevice(new_device::Check),
 }
 
 pub struct App {
@@ -244,7 +249,8 @@ impl App {
         self.install_identifier = Some(identifier.to_owned());
     }
 
-    /// Whether a sign-in waits for its second step (`finish_sign_in`).
+    /// Whether a sign-in waits for its second step (`finish_sign_in`), or
+    /// for the new-device check (`new_device_status`).
     pub fn signing_in(&self) -> bool {
         self.pending.is_some()
     }
@@ -372,10 +378,20 @@ impl App {
         password: &str,
     ) -> Result<Step> {
         self.lock();
-        let signed_in = server.sign_in_with(prelogin, email, password)?;
+        let (kept_server, kept_email) = (
+            server_url.trim().trim_end_matches('/').to_owned(),
+            normalize_email(email),
+        );
+        // What this device was given when it last signed in to the account,
+        // kept by its server and email whether or not the account is on
+        // this device now: so it isn't new to the account again.
+        let remembered = self
+            .secrets
+            .get_secret(Secret::DeviceToken, &kept_server, &kept_email);
+        let signed_in = server.sign_in_remembered(prelogin, email, password, remembered)?;
         self.settings = Some(Settings {
-            server: server_url.trim().trim_end_matches('/').to_owned(),
-            email: normalize_email(email),
+            server: kept_server,
+            email: kept_email,
             kdf: prelogin.kdf,
             kdf_iterations: prelogin.kdf_iterations,
             kdf_memory: prelogin.kdf_memory,
@@ -385,12 +401,87 @@ impl App {
         self.server = Some(server);
         match signed_in {
             SignIn::Done(session) => self.signed_in(session),
-            SignIn::NeedsTwoFactor(pending) => {
-                let offer = pending.offer.clone();
+            SignIn::NeedsTwoFactor(pending) | SignIn::NeedsApproval(pending) => {
                 self.pending = Some(pending);
-                Ok(Step::TwoFactor(offer))
+                self.waiting_step()
             }
         }
+    }
+
+    /// What a sign-in waits for now, as the server last said: two-step
+    /// login or the new-device check. A device token the server answered
+    /// with two-step login instead is forgotten, as upstream's apps do.
+    fn waiting_step(&mut self) -> Result<Step> {
+        let pending = self.pending.as_mut().ok_or(Error::SignedOut)?;
+        if std::mem::take(&mut pending.forget_remembered) {
+            if let Some(s) = &self.settings {
+                self.secrets
+                    .forget_secret(Secret::DeviceToken, &s.server, &s.email);
+            }
+        }
+        Ok(match pending.check() {
+            Some(check) => Step::NewDevice(check.clone()),
+            None => Step::TwoFactor(pending.offer.clone()),
+        })
+    }
+
+    /// Where a waiting sign-in got to after the server's answer.
+    fn next_step(&mut self, next: Result<Next>) -> Result<Step> {
+        match next? {
+            Next::Done(session) => {
+                self.pending = None;
+                self.signed_in(session)
+            }
+            Next::TwoFactor | Next::NewDevice => self.waiting_step(),
+        }
+    }
+
+    /// How the new-device check holding this sign-in stands now (asked
+    /// every 3 seconds while it waits): waiting, denied, or ended, with what
+    /// a code by email can do. Once it's approved, the sign-in finishes with
+    /// the check's token, and this is `Done`.
+    pub fn new_device_status(&mut self) -> Result<Step> {
+        let (Some(server), Some(pending)) = (&self.server, &mut self.pending) else {
+            return Err(Error::SignedOut);
+        };
+        server.new_device_status(pending)?;
+        match pending.check().map(|c| c.status) {
+            Some(new_device::Status::Approved) => {
+                let token = pending
+                    .check
+                    .as_ref()
+                    .map(|held| held.token.clone())
+                    .ok_or(Error::SignedOut)?;
+                let next = server.send_sign_in(pending, None, Some(token.as_str()));
+                self.next_step(next)
+            }
+            Some(_) => self.waiting_step(),
+            None => Err(Error::SignedOut),
+        }
+    }
+
+    /// "Email me a code" (or, with devices that can approve, "Can't use
+    /// your other devices?"), for the sign-in the new-device check holds.
+    pub fn new_device_email(&mut self) -> Result<Step> {
+        let (Some(server), Some(pending)) = (&self.server, &mut self.pending) else {
+            return Err(Error::SignedOut);
+        };
+        server.new_device_email(pending)?;
+        self.waiting_step()
+    }
+
+    /// Finishes the sign-in the new-device check holds with the code sent
+    /// by email (8 digits, checked first). A wrong one can be tried again.
+    pub fn finish_new_device_with_code(&mut self, code: &str) -> Result<Step> {
+        let code = new_device::email_code(code)?;
+        let (Some(server), Some(pending)) = (&self.server, &mut self.pending) else {
+            return Err(Error::SignedOut);
+        };
+        if pending.check.is_none() {
+            return Err(Error::SignedOut);
+        }
+        let next = server.send_sign_in(pending, None, Some(&code));
+        self.next_step(next)
     }
 
     /// Two-step login's second step with a code: an authenticator app's, an
@@ -424,16 +515,20 @@ impl App {
         let (Some(server), Some(pending)) = (&self.server, &mut self.pending) else {
             return Err(Error::SignedOut);
         };
-        let session = server.finish_sign_in(
+        let next = server.send_sign_in(
             pending,
-            &TwoFactor {
+            Some(&TwoFactor {
                 provider,
                 code,
                 remember,
-            },
+            }),
+            None,
         )?;
-        self.pending = None;
-        self.signed_in(session)
+        match next {
+            // Two-step login again: the code wasn't right.
+            Next::TwoFactor => Err(Error::WrongCode),
+            next => self.next_step(Ok(next)),
+        }
     }
 
     /// The master password hint, for the lock screen (`Server::password_hint`):
@@ -535,8 +630,18 @@ impl App {
         server.send_email_code(pending)
     }
 
-    fn signed_in(&mut self, session: Session) -> Result<Step> {
+    fn signed_in(&mut self, mut session: Session) -> Result<Step> {
         let settings = self.settings.as_ref().expect("set before signing in");
+        // What the server gave this device to show next time: kept before
+        // anything else, so a sign-in that stops part way still has it.
+        if let Some(token) = session.device_token.take() {
+            self.secrets.keep_secret(
+                Secret::DeviceToken,
+                &settings.server,
+                &settings.email,
+                &token,
+            );
+        }
         self.store.save_settings(settings)?;
         self.secrets
             .keep(&settings.server, &settings.email, &session.refresh_token);
@@ -566,6 +671,7 @@ impl App {
                 refresh_token,
                 expires_at: 0,
                 user_key: vault.user_key().clone(),
+                device_token: None,
             });
         self.vault = Some(vault);
         let kept = self.store.sync();
@@ -1188,6 +1294,59 @@ impl App {
         };
         let elapsed = listed.elapsed().as_secs();
         requests.iter().filter_map(|r| r.after(elapsed)).collect()
+    }
+
+    /// Sign-ins on new devices waiting for this account's approval
+    /// (new_device.rs), from the server, newest first, while unlocked, and
+    /// who the locations are from. Listed beside the sign-in requests
+    /// (`sign_in_requests`); never their numbers.
+    pub fn new_device_checks(
+        &mut self,
+    ) -> Result<(Vec<new_device::Waiting>, Option<new_device::LocationSource>)> {
+        let call = self.sign_in_requests_call()?;
+        let fetched = call.fetch_new_devices();
+        self.keep_new_device_checks(&call, fetched)
+    }
+
+    /// What `SignInRequestsCall::fetch_new_devices` listed, for the account
+    /// it was asked for, if its vault is still the one open.
+    pub fn keep_new_device_checks(
+        &self,
+        call: &SignInRequestsCall,
+        fetched: Result<serde_json::Value>,
+    ) -> Result<(Vec<new_device::Waiting>, Option<new_device::LocationSource>)> {
+        let vault = self.vault.as_ref().ok_or(Error::SignedOut)?;
+        if vault.email != call.email {
+            return Err(Error::SignedOut);
+        }
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        Ok(new_device::parse_waiting(&fetched?, now))
+    }
+
+    /// Approves another device's sign-in with the number the person typed,
+    /// the one that device shows (two digits, checked before anything is
+    /// sent), or denies it (`number` None). Approving sends no key, so it
+    /// asks for no confirmation first: the number, shown only on the new
+    /// device, is the proof that the person is at both. A wrong number
+    /// denies it (`WrongNumber`): each takes one try.
+    pub fn answer_new_device_check(
+        &mut self,
+        id: &str,
+        number: Option<&str>,
+    ) -> Result<new_device::Answered> {
+        if let Some(typed) = number {
+            new_device::typed_number(typed)?;
+        }
+        if self.vault.is_none() {
+            return Err(Error::SignedOut);
+        }
+        let (Some(server), Some(session)) = (&self.server, self.session.as_mut()) else {
+            return Err(Error::SignedOut);
+        };
+        server.answer_new_device(session, id, number)
     }
 
     /// Approves or denies a listed sign-in request. Approving sends the user
@@ -2020,6 +2179,12 @@ impl SignInRequestsCall {
     pub fn fetch(&self) -> Result<(serde_json::Value, Option<u64>)> {
         self.server.pending_sign_in_requests(&self.access_token)
     }
+
+    /// The server's list of sign-ins on new devices waiting for approval
+    /// (new_device.rs), with its clock in it (`serverDate`).
+    pub fn fetch_new_devices(&self) -> Result<serde_json::Value> {
+        self.server.waiting_new_devices(&self.access_token)
+    }
 }
 
 /// A sync is for the account whose vault is kept here, by its id on the
@@ -2390,5 +2555,110 @@ mod attachment_tests {
         let short = safe_name(&long);
         assert!(short.len() <= 200 && short.ends_with(".pdf"), "{short}");
         assert!(short.starts_with('\u{e9}'));
+    }
+}
+
+#[cfg(test)]
+mod device_token_tests {
+    use std::sync::{Arc, Mutex};
+
+    use super::*;
+    use crate::secrets::MemorySecretStore;
+
+    /// A stand-in server: prelogin, then each sign-in answered with the
+    /// next of `answers` (status, JSON). Each sign-in's form, as sent.
+    fn stand_in(answers: Vec<(u16, &'static str)>) -> (String, Arc<Mutex<Vec<String>>>) {
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", server.server_addr().to_ip().unwrap());
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let log = sent.clone();
+        std::thread::spawn(move || {
+            let mut answers = answers.into_iter();
+            for mut request in server.incoming_requests() {
+                let json = |status: u16, body: &str| {
+                    tiny_http::Response::from_string(body)
+                        .with_status_code(status)
+                        .with_header(
+                            tiny_http::Header::from_bytes("Content-Type", "application/json")
+                                .unwrap(),
+                        )
+                };
+                if request.url() == "/identity/accounts/prelogin" {
+                    let prelogin = r#"{"kdf":0,"kdfIterations":600000}"#;
+                    let _ = request.respond(json(200, prelogin));
+                    continue;
+                }
+                let mut body = String::new();
+                let _ = request.as_reader().read_to_string(&mut body);
+                log.lock().unwrap().push(body);
+                let (status, answer) = answers.next().unwrap_or((500, "{}"));
+                let _ = request.respond(json(status, answer));
+            }
+        });
+        (url, sent)
+    }
+
+    const TWO_STEP: &str =
+        r#"{"error":"invalid_grant","TwoFactorProviders":["0"],"TwoFactorProviders2":{"0":null}}"#;
+    const HELD: &str = r#"{"error":"invalid_grant","error_description":"new device verification required","KeykeeperNewDeviceCheck":{"id":"5f0c6f1e-6f3b-4a43-9a52-0d3f1c2b7e11","token":"AbCdEfGhIjKlMnOpQrStUvWxYz0123456789-_abcde","number":"47","status":"waiting","deniedWhy":null,"expiresAt":"2026-11-08T12:10:00.000000Z","approvers":true,"email":"later","emailAfter":null,"codeSent":false,"object":"keykeeperNewDeviceCheck"}}"#;
+
+    #[test]
+    fn the_kept_device_token_is_sent_and_forgotten_only_when_two_step_login_is_asked_for() {
+        let (url, sent) = stand_in(vec![(400, HELD), (400, TWO_STEP)]);
+        let email = "ana@example.test";
+        let secrets = Arc::new(MemorySecretStore::default());
+        // Kept from a sign-in before, by the server and email as typed:
+        // the account isn't on this device now.
+        assert!(secrets.keep_secret(Secret::DeviceToken, &url, email, "device-token-1"));
+        let dir = std::env::temp_dir().join(format!("pb-device-token-{}", uuid::Uuid::new_v4()));
+        let mut app = App::open(Store::new(&dir), Box::new(secrets.clone()));
+
+        // Sent, and the server holds it anyway (a new device to it): the
+        // number to show, and the token stays.
+        let Step::NewDevice(check) = app
+            .sign_in(
+                &format!("{url}/"),
+                " Ana@Example.test ",
+                "correct horse battery",
+            )
+            .unwrap()
+        else {
+            panic!("the new-device check should hold it");
+        };
+        assert_eq!(check.number, "47");
+        assert!(app.signing_in());
+        assert!(secrets
+            .get_secret(Secret::DeviceToken, &url, email)
+            .is_some());
+
+        // Two-step login instead: the token is no good, and goes.
+        let step = app.sign_in(&url, email, "correct horse battery").unwrap();
+        assert!(matches!(step, Step::TwoFactor(_)));
+        assert!(secrets
+            .get_secret(Secret::DeviceToken, &url, email)
+            .is_none());
+
+        let sent = sent.lock().unwrap();
+        for form in sent.iter() {
+            assert!(form.contains("twoFactorProvider=5"), "{form}");
+            assert!(form.contains("twoFactorToken=device-token-1"), "{form}");
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_number_that_isnt_two_digits_is_refused_before_anything_is_sent() {
+        let mut app = App::nobody();
+        assert_eq!(
+            app.answer_new_device_check("check-1", Some("4")),
+            Err(Error::TwoStep(
+                "Type the two-digit number shown on the new device."
+            ))
+        );
+        // Two digits, but no vault open here: nothing to approve from.
+        assert_eq!(
+            app.answer_new_device_check("check-1", Some("47")),
+            Err(Error::SignedOut)
+        );
     }
 }

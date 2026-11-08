@@ -159,6 +159,13 @@ class _SignInRequests implements SignInRequestSource {
 
   @override
   Answer setConfirmApprovals(bool on) => Answer({'ok': true});
+
+  @override
+  Future<Answer> answerCheck(
+    String id,
+    String? number, [
+    String? account,
+  ]) async => Answer({'ok': true, 'answered': 'approved'});
 }
 
 /// Android's updates, as Settings shows them there: this version, checked.

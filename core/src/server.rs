@@ -1,6 +1,7 @@
-//! The person's PassBundle server: prelogin, signing in (with two-step login),
-//! refreshing the session, sync, and saving items (docs/core.md, "Signing
-//! in" and "Network"). HTTPS only, except to this computer.
+//! The person's PassBundle server: prelogin, signing in (with two-step login
+//! and the new-device check), refreshing the session, sync, and saving items
+//! (docs/core.md, "Signing in" and "Network"). HTTPS only, except to this
+//! computer.
 
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -13,6 +14,7 @@ use zeroize::Zeroizing;
 use crate::crypto::{EncString, SymmetricKey};
 use crate::error::{BadAddress, Error, Result};
 use crate::kdf::{normalize_email, Kdf, MasterKey, Prelogin};
+use crate::new_device::{self, Held};
 use crate::two_step::Offer;
 use crate::vault::Sync;
 
@@ -69,11 +71,20 @@ pub struct Session {
     /// Seconds since 1970 when the access token stops working.
     pub expires_at: u64,
     pub(crate) user_key: SymmetricKey,
+    /// What the sign-in gave this device to send back next time (upstream's
+    /// `TwoFactorToken`): the new-device check's token, or two-step login's
+    /// "Don't ask again". The app keeps it in the OS's secret store.
+    pub(crate) device_token: Option<Zeroizing<String>>,
 }
 
 impl Session {
     pub fn user_key(&self) -> &SymmetricKey {
         &self.user_key
+    }
+
+    /// The device token this sign-in gave, if any (`device_token`).
+    pub fn device_token(&self) -> Option<&str> {
+        self.device_token.as_deref().map(String::as_str)
     }
 }
 
@@ -87,12 +98,24 @@ pub struct TwoFactor {
     pub remember: bool,
 }
 
-/// A sign-in waiting for its second step. It keeps what the KDF made, so
-/// finishing doesn't derive the master key again.
+/// A sign-in waiting for its second step, or for the new-device check. It
+/// keeps what the KDF made, so finishing doesn't derive the master key
+/// again.
 pub struct PendingSignIn {
     email: String,
     login_hash: Zeroizing<String>,
     stretched: SymmetricKey,
+    /// The device token this device was given last time (secrets.rs), sent
+    /// as two-step login's "remember" token (provider 5) until the server
+    /// answers with two-step login instead.
+    remembered: Option<Zeroizing<String>>,
+    /// The server answered the device token with two-step login: the token
+    /// is no good, and the app forgets it, as upstream's apps do.
+    pub(crate) forget_remembered: bool,
+    /// The new-device check holding this sign-in, from the server's latest
+    /// answer, with this device's token for it; None while two-step login
+    /// is what it waits for.
+    pub(crate) check: Option<Held>,
     /// What the server offers, from its latest answer.
     pub offer: Offer,
     /// When the server made `offer`: Duo's address and a security key's
@@ -109,16 +132,34 @@ impl PendingSignIn {
         self.offered_at = Instant::now();
         self.spent = false;
     }
+
+    /// The new-device check holding it, as the screens show it.
+    pub fn check(&self) -> Option<&new_device::Check> {
+        self.check.as_ref().map(|held| &held.check)
+    }
 }
 
 enum Token {
     Done(Session),
     TwoFactor(Offer),
+    NewDevice(Held),
 }
 
 pub enum SignIn {
     Done(Session),
     NeedsTwoFactor(PendingSignIn),
+    /// The new-device check holds it (`PendingSignIn::check`): another of
+    /// the account's devices approves it, or a code by email.
+    NeedsApproval(PendingSignIn),
+}
+
+/// Where a waiting sign-in got to after another answer from the server.
+pub enum Next {
+    Done(Session),
+    /// Two-step login: what's offered is in the sign-in's `offer`.
+    TwoFactor,
+    /// The new-device check: it's in the sign-in's `check`.
+    NewDevice,
 }
 
 #[derive(Deserialize)]
@@ -128,6 +169,8 @@ struct TokenResponse {
     expires_in: u64,
     #[serde(rename = "Key")]
     key: Option<String>,
+    #[serde(rename = "TwoFactorToken")]
+    two_factor_token: Option<String>,
 }
 
 /// The largest attachment file upstream's servers take: 500 MB before
@@ -445,23 +488,36 @@ impl Server {
 
     /// Signs in with a prelogin answer the app already asked for (and keeps).
     pub fn sign_in_with(&self, prelogin: &Prelogin, email: &str, password: &str) -> Result<SignIn> {
+        self.sign_in_remembered(prelogin, email, password, None)
+    }
+
+    /// Signs in as `sign_in_with`, sending the device token this device was
+    /// given last time (`remembered`), so it isn't new to the account.
+    pub fn sign_in_remembered(
+        &self,
+        prelogin: &Prelogin,
+        email: &str,
+        password: &str,
+        remembered: Option<Zeroizing<String>>,
+    ) -> Result<SignIn> {
         let kdf = Kdf::from_prelogin(prelogin)?;
         let master = MasterKey::derive(password, email, &kdf)?;
         let mut pending = PendingSignIn {
             email: normalize_email(email),
             login_hash: Zeroizing::new(master.login_hash(password)),
             stretched: master.stretch(),
+            remembered: remembered.filter(|t| !t.trim().is_empty()),
+            forget_remembered: false,
+            check: None,
             offer: Offer::default(),
             offered_at: Instant::now(),
             spent: false,
         };
-        match self.token(&pending, None)? {
-            Token::Done(session) => Ok(SignIn::Done(session)),
-            Token::TwoFactor(offer) => {
-                pending.offer = offer;
-                Ok(SignIn::NeedsTwoFactor(pending))
-            }
-        }
+        Ok(match self.send_sign_in(&mut pending, None, None)? {
+            Next::Done(session) => SignIn::Done(session),
+            Next::TwoFactor => SignIn::NeedsTwoFactor(pending),
+            Next::NewDevice => SignIn::NeedsApproval(pending),
+        })
     }
 
     /// Finishes a sign-in with its second step. A wrong code leaves `pending`
@@ -472,19 +528,89 @@ impl Server {
         pending: &mut PendingSignIn,
         second: &TwoFactor,
     ) -> Result<Session> {
-        if matches!(
-            second.provider,
-            crate::two_step::DUO | crate::two_step::SECURITY_KEY
-        ) {
+        match self.send_sign_in(pending, Some(second), None)? {
+            Next::Done(session) => Ok(session),
+            Next::TwoFactor => Err(Error::WrongCode),
+            // An account with two-step login isn't asked; one that turned it
+            // off meanwhile starts over.
+            Next::NewDevice => Err(Error::TwoStep(
+                "This sign-in waits for approval from another of your devices now. Start over to see its number.",
+            )),
+        }
+    }
+
+    /// Sends a waiting sign-in again (the same request as signing in), with
+    /// its second step, or the new-device check's token or emailed code
+    /// (`new_device`, upstream's `newDeviceOtp`), and keeps what the server
+    /// answers in `pending`: what two-step login offers now, or the check.
+    pub fn send_sign_in(
+        &self,
+        pending: &mut PendingSignIn,
+        second: Option<&TwoFactor>,
+        new_device: Option<&str>,
+    ) -> Result<Next> {
+        if second.is_some_and(|s| {
+            matches!(
+                s.provider,
+                crate::two_step::DUO | crate::two_step::SECURITY_KEY
+            )
+        }) {
             pending.spent = true;
         }
-        match self.token(pending, Some(second))? {
-            Token::Done(session) => Ok(session),
+        match self.token(pending, second, new_device)? {
+            Token::Done(session) => {
+                pending.check = None;
+                Ok(Next::Done(session))
+            }
             Token::TwoFactor(offer) => {
                 pending.renew(offer);
-                Err(Error::WrongCode)
+                pending.check = None;
+                Ok(Next::TwoFactor)
+            }
+            Token::NewDevice(held) => {
+                pending.check = Some(held);
+                Ok(Next::NewDevice)
             }
         }
+    }
+
+    /// How the new-device check holding `pending` stands now (`POST
+    /// /api/keykeeper/new-device-check/status`, with its id and this
+    /// device's token, never in the address): kept in `pending`. One that's
+    /// gone (its time is up) is `Ended`.
+    pub fn new_device_status(&self, pending: &mut PendingSignIn) -> Result<()> {
+        self.new_device_call(pending, "/api/keykeeper/new-device-check/status")
+    }
+
+    /// "Email me a code" for the new-device check holding `pending`: the
+    /// server sends one now, or, when the account has devices that can
+    /// approve, starts the day's wait ("Can't use your other devices?").
+    pub fn new_device_email(&self, pending: &mut PendingSignIn) -> Result<()> {
+        self.new_device_call(pending, "/api/keykeeper/new-device-check/email")
+    }
+
+    fn new_device_call(&self, pending: &mut PendingSignIn, path: &str) -> Result<()> {
+        let held = pending.check.as_mut().ok_or(Error::SignedOut)?;
+        let (status, body) = self.answer(
+            self.agent
+                .post(self.url(path))
+                .config()
+                .timeout_global(Some(Duration::from_secs(15)))
+                .build()
+                .send_json(json!({ "id": held.check.id, "token": held.token.as_str() })),
+        )?;
+        if status == 404 {
+            held.check.status = new_device::Status::Ended;
+            return Ok(());
+        }
+        // The server's own words for a code it won't send (three sent
+        // already, say), rather than "too many tries".
+        if status == 429 {
+            if let Some(m) = message_of(&body) {
+                return Err(Error::Server(m));
+            }
+        }
+        held.check.update(&Self::checked(status, body)?)
     }
 
     /// Asks for the account's master password hint (upstream's "Get master
@@ -513,12 +639,9 @@ impl Server {
     /// second step. If two-step login went off meanwhile, that's the
     /// session.
     pub fn renew_offer(&self, pending: &mut PendingSignIn) -> Result<Option<Session>> {
-        match self.token(pending, None)? {
-            Token::Done(session) => Ok(Some(session)),
-            Token::TwoFactor(offer) => {
-                pending.renew(offer);
-                Ok(None)
-            }
+        match self.send_sign_in(pending, None, None)? {
+            Next::Done(session) => Ok(Some(session)),
+            Next::TwoFactor | Next::NewDevice => Ok(None),
         }
     }
 
@@ -540,7 +663,12 @@ impl Server {
         Self::checked(status, body).map(|_| ())
     }
 
-    fn token(&self, pending: &PendingSignIn, second: Option<&TwoFactor>) -> Result<Token> {
+    fn token(
+        &self,
+        pending: &mut PendingSignIn,
+        second: Option<&TwoFactor>,
+        new_device: Option<&str>,
+    ) -> Result<Token> {
         let kind = self.device.kind.to_string();
         let mut form: Vec<(&str, &str)> = vec![
             ("grant_type", "password"),
@@ -553,11 +681,23 @@ impl Server {
             ("deviceName", self.device.name.as_str()),
         ];
         let provider;
+        // The device token, as two-step login's "remember" token, where
+        // upstream's apps send it: so this device isn't new to the account
+        // (the new-device check), and two-step login's "Don't ask again"
+        // holds.
+        let remembered = second.is_none() && pending.remembered.is_some();
         if let Some(second) = second {
             provider = second.provider.to_string();
             form.push(("twoFactorProvider", provider.as_str()));
             form.push(("twoFactorToken", second.code.trim()));
             form.push(("twoFactorRemember", if second.remember { "1" } else { "0" }));
+        } else if let Some(token) = &pending.remembered {
+            form.push(("twoFactorProvider", "5"));
+            form.push(("twoFactorToken", token.as_str()));
+            form.push(("twoFactorRemember", "0"));
+        }
+        if let Some(otp) = new_device {
+            form.push(("newDeviceOtp", otp));
         }
         let (status, body) = self.answer(
             self.agent
@@ -565,6 +705,13 @@ impl Server {
                 .send_form(form),
         )?;
         if status == 400 {
+            // The password checked out, but this device is new to the
+            // account: the new-device check holds the sign-in until it's
+            // approved. Before two-step login's offer and the code check
+            // below, which would call it a wrong code.
+            if let Some(held) = new_device::held(&body) {
+                return Ok(Token::NewDevice(held));
+            }
             // The password (and any email code) checked out, but the role
             // requires two-step login, which isn't set up: a setup session
             // for the web vault, not a sign-in. Before the code check below,
@@ -576,6 +723,12 @@ impl Server {
                 });
             }
             if let Some(offer) = Offer::read(&body, &self.base) {
+                // The device token was sent, and the server asks for two-step
+                // login instead: it's no good anymore.
+                if remembered {
+                    pending.remembered = None;
+                    pending.forget_remembered = true;
+                }
                 return Ok(Token::TwoFactor(offer));
             }
             // The server's words for a wrong email or password, or code,
@@ -586,7 +739,7 @@ impl Server {
             return Err(match message_of(&body) {
                 Some(m) if m.to_lowercase().contains("password is incorrect") => Error::WrongSignIn,
                 _ if second.is_some() => Error::WrongCode,
-                Some(m) => Error::Server(m),
+                Some(m) => new_device::refusal(&m).unwrap_or(Error::Server(m)),
                 None => Error::WrongSignIn,
             });
         }
@@ -608,6 +761,10 @@ impl Server {
             refresh_token: Zeroizing::new(token.refresh_token.unwrap_or_default()),
             expires_at: now() + token.expires_in,
             user_key,
+            device_token: token
+                .two_factor_token
+                .filter(|t| !t.trim().is_empty())
+                .map(Zeroizing::new),
         }))
     }
 
@@ -984,6 +1141,57 @@ impl Server {
         )
     }
 
+    /// Sign-ins on new devices waiting for this account's approval
+    /// (new_device.rs, `GET /api/keykeeper/new-device-checks`), as the
+    /// server lists them, never with their numbers. With a session's access
+    /// token, as `pending_sign_in_requests`, and at most 10 seconds. A server
+    /// without the new-device check (an older one) has none.
+    pub fn waiting_new_devices(&self, access_token: &str) -> Result<Value> {
+        let response = self
+            .agent
+            .get(self.url("/api/keykeeper/new-device-checks"))
+            .header("Authorization", &format!("Bearer {access_token}"))
+            .config()
+            .timeout_global(Some(Duration::from_secs(10)))
+            .build()
+            .call();
+        let (status, body) = self.answer(response)?;
+        if matches!(status, 404 | 405) {
+            return Ok(json!({ "data": [] }));
+        }
+        Self::checked(status, body)
+    }
+
+    /// Approves another device's sign-in with the number typed (`number`,
+    /// two digits, checked first), or denies it (None). No key goes with
+    /// either: the number, shown only on the new device, is the proof that
+    /// the person is at both. A wrong number denies it, at once.
+    pub fn answer_new_device(
+        &self,
+        session: &mut Session,
+        id: &str,
+        number: Option<&str>,
+    ) -> Result<new_device::Answered> {
+        let id = path_id(id)?;
+        let (path, body) = match number {
+            Some(typed) => (
+                format!("/api/keykeeper/new-device-checks/{id}/approve"),
+                json!({ "number": new_device::typed_number(typed)? }),
+            ),
+            None => (
+                format!("/api/keykeeper/new-device-checks/{id}/deny"),
+                json!({}),
+            ),
+        };
+        let (status, body) = self.call_answered(session, "POST", &path, Some(body))?;
+        if status == 404 {
+            return Err(Error::Refused(
+                "that sign-in has ended, or was answered on another device",
+            ));
+        }
+        Self::checked(status, body).map(|body| new_device::Answered::read(&body))
+    }
+
     /// For tests and setup: any call, signed in.
     #[doc(hidden)]
     pub fn raw(
@@ -1060,6 +1268,22 @@ mod tests {
     /// A server on this computer that answers each request with the next
     /// of `answers`, and says which paths were asked for.
     fn answering(answers: Vec<Vec<u8>>) -> (String, std::thread::JoinHandle<Vec<String>>) {
+        let (url, served) = answering_with_bodies(answers);
+        let paths = std::thread::spawn(move || {
+            served
+                .join()
+                .unwrap()
+                .into_iter()
+                .map(|(path, _)| path)
+                .collect()
+        });
+        (url, paths)
+    }
+
+    /// `answering`, saying what each request sent too (its body).
+    fn answering_with_bodies(
+        answers: Vec<Vec<u8>>,
+    ) -> (String, std::thread::JoinHandle<Vec<(String, String)>>) {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
@@ -1075,7 +1299,7 @@ mod tests {
                     request.push(byte[0]);
                 }
                 let line = String::from_utf8_lossy(&request);
-                asked.push(line.split(' ').nth(1).unwrap_or_default().to_owned());
+                let path = line.split(' ').nth(1).unwrap_or_default().to_owned();
                 // A request's body (a sign-in's form) is read before the
                 // answer, so the connection never closes while it's sent.
                 let length = line
@@ -1088,6 +1312,7 @@ mod tests {
                     .unwrap_or(0);
                 let mut body = vec![0u8; length];
                 let _ = stream.read_exact(&mut body);
+                asked.push((path, String::from_utf8_lossy(&body).into_owned()));
                 let _ = stream.write_all(&answer);
             }
             asked
@@ -1376,6 +1601,353 @@ mod tests {
             ))
         );
         assert_eq!(served.join().unwrap(), ["/api/accounts/password-hint"; 3]);
+    }
+
+    const PASSWORD: &str = "correct horse battery";
+    const CHECK_TOKEN: &str = "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789-_abcde";
+    const JSON: &str = "Content-Type: application/json\r\n";
+
+    /// The server holding a sign-in for the new-device check, with how it
+    /// stands (`status`, `email`), as passbundle-server answers.
+    fn held_answer(status: &str, email: &str) -> Vec<u8> {
+        let body = json!({
+            "error": "invalid_grant",
+            "error_description": "new device verification required",
+            "ErrorModel": { "Message": "new device verification required", "Object": "error" },
+            "KeykeeperNewDeviceCheck": {
+                "id": "5f0c6f1e-6f3b-4a43-9a52-0d3f1c2b7e11",
+                "token": CHECK_TOKEN,
+                "number": "47",
+                "status": status,
+                "deniedWhy": null,
+                "expiresAt": "2026-11-08T12:10:00.000000Z",
+                "approvers": email != "now",
+                "email": email,
+                "emailAfter": null,
+                "codeSent": false,
+                "object": "keykeeperNewDeviceCheck",
+            },
+        });
+        answer("400 Bad Request", JSON, body.to_string().as_bytes())
+    }
+
+    /// How a check stands, as the status and email calls answer.
+    fn state_answer(status: &str, email: &str, code_sent: bool) -> Vec<u8> {
+        let body = json!({
+            "id": "5f0c6f1e-6f3b-4a43-9a52-0d3f1c2b7e11",
+            "number": "47",
+            "status": status,
+            "deniedWhy": if status == "denied" { json!("number") } else { Value::Null },
+            "expiresAt": "2026-11-08T12:10:00.000000Z",
+            "approvers": email != "now",
+            "email": email,
+            "emailAfter": null,
+            "codeSent": code_sent,
+            "emailTo": if code_sent { json!("a***@example.test") } else { Value::Null },
+            "object": "keykeeperNewDeviceCheck",
+        });
+        answer("200 OK", JSON, body.to_string().as_bytes())
+    }
+
+    /// A sign-in that went through for `email` with `PASSWORD`: its user key
+    /// sealed with the stretched master key, as the server keeps it, and
+    /// the device token the server gives with it, if any.
+    fn signed_in_answer(email: &str, device_token: Option<&str>) -> Vec<u8> {
+        let kdf = Kdf::from_prelogin(&test_prelogin()).unwrap();
+        let master = MasterKey::derive(PASSWORD, email, &kdf).unwrap();
+        let key = master
+            .stretch()
+            .encrypt(&SymmetricKey::generate().to_bytes())
+            .to_string();
+        let mut body = json!({
+            "access_token": "access",
+            "refresh_token": "refresh",
+            "expires_in": 3600,
+            "Key": key,
+        });
+        if let Some(token) = device_token {
+            body["TwoFactorToken"] = json!(token);
+        }
+        answer("200 OK", JSON, body.to_string().as_bytes())
+    }
+
+    /// A sign-in's form, field by field.
+    fn form(body: &str) -> std::collections::HashMap<String, String> {
+        let decode = |text: &str| {
+            let bytes = text.replace('+', " ").into_bytes();
+            let mut out = Vec::new();
+            let mut i = 0;
+            while i < bytes.len() {
+                if bytes[i] == b'%' && i + 2 < bytes.len() {
+                    let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap();
+                    out.push(u8::from_str_radix(hex, 16).unwrap());
+                    i += 3;
+                } else {
+                    out.push(bytes[i]);
+                    i += 1;
+                }
+            }
+            String::from_utf8(out).unwrap()
+        };
+        body.split('&')
+            .filter_map(|pair| pair.split_once('='))
+            .map(|(k, v)| (decode(k), decode(v)))
+            .collect()
+    }
+
+    #[test]
+    fn a_new_device_waits_then_finishes_with_its_token_and_gets_a_device_token() {
+        let email = "ana@example.test";
+        let (url, served) = answering_with_bodies(vec![
+            held_answer("waiting", "later"),
+            state_answer("waiting", "later", false),
+            state_answer("approved", "later", false),
+            signed_in_answer(email, Some("device-token-1")),
+        ]);
+        let server = Server::new(&url, Device::this_one("this-device")).unwrap();
+        let SignIn::NeedsApproval(mut pending) = server
+            .sign_in_with(&test_prelogin(), email, PASSWORD)
+            .unwrap()
+        else {
+            panic!("the new-device check should hold it");
+        };
+        let check = pending.check().unwrap().clone();
+        assert_eq!(check.number, "47");
+        assert_eq!(check.status, new_device::Status::Waiting);
+        assert_eq!(check.email, new_device::Email::Later);
+
+        server.new_device_status(&mut pending).unwrap();
+        assert_eq!(pending.check().unwrap().status, new_device::Status::Waiting);
+        server.new_device_status(&mut pending).unwrap();
+        assert_eq!(
+            pending.check().unwrap().status,
+            new_device::Status::Approved
+        );
+        let token = pending.check.as_ref().unwrap().token.clone();
+        let Next::Done(session) = server
+            .send_sign_in(&mut pending, None, Some(token.as_str()))
+            .unwrap()
+        else {
+            panic!("an approved check should finish the sign-in");
+        };
+        assert_eq!(session.device_token(), Some("device-token-1"));
+        assert!(pending.check().is_none());
+
+        let asked = served.join().unwrap();
+        let paths: Vec<&str> = asked.iter().map(|(p, _)| p.as_str()).collect();
+        assert_eq!(
+            paths,
+            [
+                "/identity/connect/token",
+                "/api/keykeeper/new-device-check/status",
+                "/api/keykeeper/new-device-check/status",
+                "/identity/connect/token",
+            ]
+        );
+        // The first sign-in had no device token to send, and no check.
+        let first = form(&asked[0].1);
+        assert!(!first.contains_key("twoFactorProvider"));
+        assert!(!first.contains_key("newDeviceOtp"));
+        assert_eq!(first["deviceIdentifier"], "this-device");
+        // Asking how it stands sends the id and this device's token, in the
+        // body, never the address.
+        let status: Value = serde_json::from_str(&asked[1].1).unwrap();
+        assert_eq!(
+            status,
+            json!({ "id": "5f0c6f1e-6f3b-4a43-9a52-0d3f1c2b7e11", "token": CHECK_TOKEN })
+        );
+        // Finishing is the same sign-in again, with the check's token.
+        let last = form(&asked[3].1);
+        assert_eq!(last["newDeviceOtp"], CHECK_TOKEN);
+        assert_eq!(last["password"], first["password"]);
+        assert_eq!(last["deviceIdentifier"], "this-device");
+        assert_eq!(last["deviceType"], first["deviceType"]);
+    }
+
+    #[test]
+    fn a_device_token_is_sent_as_two_step_logins_remember_token_and_dropped_when_refused() {
+        let email = "ana@example.test";
+        let two_step = br#"{"error":"invalid_grant","TwoFactorProviders":["0"],"TwoFactorProviders2":{"0":null}}"#;
+        let (url, served) = answering_with_bodies(vec![
+            signed_in_answer(email, None),
+            answer("400 Bad Request", JSON, two_step),
+            answer("400 Bad Request", JSON, two_step),
+        ]);
+        let server = Server::new(&url, Device::this_one("this-device")).unwrap();
+        let kept = || Some(Zeroizing::new("device-token-1".to_owned()));
+        // Known: straight in, and nothing new to keep.
+        let SignIn::Done(session) = server
+            .sign_in_remembered(&test_prelogin(), email, PASSWORD, kept())
+            .unwrap()
+        else {
+            panic!("a known device should sign in");
+        };
+        assert_eq!(session.device_token(), None);
+        // The account has two-step login now: the token is no good, and is
+        // dropped, so asking for a new offer doesn't send it again.
+        let SignIn::NeedsTwoFactor(mut pending) = server
+            .sign_in_remembered(&test_prelogin(), email, PASSWORD, kept())
+            .unwrap()
+        else {
+            panic!("two-step login should be asked for");
+        };
+        assert!(pending.forget_remembered);
+        assert!(server.renew_offer(&mut pending).unwrap().is_none());
+
+        let asked = served.join().unwrap();
+        for (_, body) in &asked[..2] {
+            let sent = form(body);
+            assert_eq!(sent["twoFactorProvider"], "5");
+            assert_eq!(sent["twoFactorToken"], "device-token-1");
+            assert_eq!(sent["twoFactorRemember"], "0");
+        }
+        assert!(!form(&asked[2].1).contains_key("twoFactorProvider"));
+    }
+
+    #[test]
+    fn an_email_code_is_sent_or_waited_for_and_a_wrong_one_is_said_plainly() {
+        let email = "ana@example.test";
+        let wrong = br#"{"error":"invalid_grant","error_description":"That code didn't work. Check the email and try again.","ErrorModel":{"Message":"That code didn't work. Check the email and try again.","Object":"error"}}"#;
+        let three = br#"{"message":"A code was sent three times already. Check your email, or sign in again later.","object":"error"}"#;
+        let (url, served) = answering_with_bodies(vec![
+            held_answer("waiting", "now"),
+            state_answer("waiting", "now", true),
+            answer("429 Too Many Requests", JSON, three),
+            answer("400 Bad Request", JSON, wrong),
+            signed_in_answer(email, Some("device-token-2")),
+            answer(
+                "404 Not Found",
+                JSON,
+                br#"{"message":"This sign-in has ended. Sign in again."}"#,
+            ),
+        ]);
+        let server = Server::new(&url, Device::this_one("this-device")).unwrap();
+        let SignIn::NeedsApproval(mut pending) = server
+            .sign_in_with(&test_prelogin(), email, PASSWORD)
+            .unwrap()
+        else {
+            panic!("the new-device check should hold it");
+        };
+        assert_eq!(pending.check().unwrap().email, new_device::Email::Now);
+        server.new_device_email(&mut pending).unwrap();
+        assert!(pending.check().unwrap().code_sent);
+        assert_eq!(
+            pending.check().unwrap().email_to.as_deref(),
+            Some("a***@example.test")
+        );
+        // The server's own words for a code it won't send again.
+        assert_eq!(
+            server.new_device_email(&mut pending),
+            Err(Error::Server(
+                "A code was sent three times already. Check your email, or sign in again later."
+                    .into()
+            ))
+        );
+        assert_eq!(
+            server
+                .send_sign_in(&mut pending, None, Some("12345678"))
+                .err(),
+            Some(Error::TwoStep(
+                "That code didn't work. Check the email and try again."
+            ))
+        );
+        // A wrong code leaves it waiting for another try.
+        assert!(pending.check().is_some());
+        assert!(matches!(
+            server.send_sign_in(&mut pending, None, Some("87654321")),
+            Ok(Next::Done(_))
+        ));
+        // A check that's gone, ended.
+        let SignIn::NeedsApproval(mut again) = ({
+            let (url, _) = answering(vec![held_answer("waiting", "now")]);
+            Server::new(&url, Device::this_one("this-device"))
+                .unwrap()
+                .sign_in_with(&test_prelogin(), email, PASSWORD)
+                .unwrap()
+        }) else {
+            panic!("the new-device check should hold it");
+        };
+        server.new_device_status(&mut again).unwrap();
+        assert_eq!(again.check().unwrap().status, new_device::Status::Ended);
+
+        let asked = served.join().unwrap();
+        assert_eq!(asked[1].0, "/api/keykeeper/new-device-check/email");
+        assert_eq!(form(&asked[3].1)["newDeviceOtp"], "12345678");
+        assert_eq!(form(&asked[4].1)["newDeviceOtp"], "87654321");
+    }
+
+    #[test]
+    fn approving_sends_only_a_two_digit_number_and_says_what_happened() {
+        let (url, served) = answering_with_bodies(vec![
+            answer("200 OK", JSON, br#"{"approved":true,"denied":false}"#),
+            answer(
+                "200 OK",
+                JSON,
+                br#"{"approved":false,"denied":true,"deniedWhy":"number"}"#,
+            ),
+            answer(
+                "200 OK",
+                JSON,
+                br#"{"approved":false,"denied":true,"deniedWhy":"denied"}"#,
+            ),
+            answer(
+                "404 Not Found",
+                JSON,
+                br#"{"message":"This sign-in has ended or was answered"}"#,
+            ),
+        ]);
+        let server = Server::new(&url, Device::this_one("approving")).unwrap();
+        let mut session = Session {
+            access_token: Zeroizing::new("access".into()),
+            refresh_token: Zeroizing::new("refresh".into()),
+            expires_at: now() + 3600,
+            user_key: SymmetricKey::generate(),
+            device_token: None,
+        };
+        // Nothing is sent for anything but two digits.
+        for typed in ["", "4", "470", "ab"] {
+            assert_eq!(
+                server.answer_new_device(&mut session, "check-1", Some(typed)),
+                Err(Error::TwoStep(
+                    "Type the two-digit number shown on the new device."
+                ))
+            );
+        }
+        assert_eq!(
+            server.answer_new_device(&mut session, "check-1", Some(" 47 ")),
+            Ok(new_device::Answered::Approved)
+        );
+        assert_eq!(
+            server.answer_new_device(&mut session, "check-2", Some("12")),
+            Ok(new_device::Answered::WrongNumber)
+        );
+        assert_eq!(
+            server.answer_new_device(&mut session, "check-3", None),
+            Ok(new_device::Answered::Denied)
+        );
+        assert!(matches!(
+            server.answer_new_device(&mut session, "check-4", None),
+            Err(Error::Refused(_))
+        ));
+        let asked = served.join().unwrap();
+        assert_eq!(
+            asked
+                .iter()
+                .map(|(p, b)| (p.as_str(), serde_json::from_str::<Value>(b).unwrap()))
+                .collect::<Vec<_>>(),
+            [
+                (
+                    "/api/keykeeper/new-device-checks/check-1/approve",
+                    json!({ "number": "47" })
+                ),
+                (
+                    "/api/keykeeper/new-device-checks/check-2/approve",
+                    json!({ "number": "12" })
+                ),
+                ("/api/keykeeper/new-device-checks/check-3/deny", json!({})),
+                ("/api/keykeeper/new-device-checks/check-4/deny", json!({})),
+            ]
+        );
     }
 
     #[test]

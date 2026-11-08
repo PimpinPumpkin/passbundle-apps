@@ -589,6 +589,38 @@ impl Accounts {
         self.after(&id, finished)
     }
 
+    /// How the new-device check holding the sign-in stands now
+    /// (`App::new_device_status`); `Done` once it's approved and finished.
+    pub fn new_device_status(&mut self) -> Result<Step> {
+        let id = self.signing_in.clone().ok_or(Error::SignedOut)?;
+        let asked = self
+            .app_kept(&id)
+            .ok_or(Error::SignedOut)?
+            .new_device_status();
+        self.after(&id, asked)
+    }
+
+    /// "Email me a code", for the sign-in the new-device check holds.
+    pub fn new_device_email(&mut self) -> Result<Step> {
+        let id = self.signing_in.clone().ok_or(Error::SignedOut)?;
+        let asked = self
+            .app_kept(&id)
+            .ok_or(Error::SignedOut)?
+            .new_device_email();
+        self.after(&id, asked)
+    }
+
+    /// Finishes the sign-in the new-device check holds with the code sent
+    /// by email.
+    pub fn finish_new_device_with_code(&mut self, code: &str) -> Result<Step> {
+        let id = self.signing_in.clone().ok_or(Error::SignedOut)?;
+        let finished = self
+            .app_kept(&id)
+            .ok_or(Error::SignedOut)?
+            .finish_new_device_with_code(code);
+        self.after(&id, finished)
+    }
+
     /// Asks the server to email the code, for the sign-in waiting for one.
     pub fn send_email_code(&mut self) -> Result<()> {
         let id = self.signing_in.clone().ok_or(Error::SignedOut)?;

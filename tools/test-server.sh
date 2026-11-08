@@ -6,7 +6,14 @@
 # server is named that instead of its address: WebAuthn takes only a
 # domain, so security key tests need one.
 #
-#   tools/test-server.sh <passbundle-server binary> <port> <data folder> [host name]
+# The new-device check (DESIGN.md in the meta repo, "New-device check") is
+# off, since nearly every test signs in on a device the account has never
+# used; NEW_DEVICE_CHECK=true turns it on, for the tests of it. An
+# IP-to-location database (IP_LOCATION_DATABASE, a MaxMind DB file, passed
+# on to the server as it is) is optional: without one, no location is shown.
+#
+#   [NEW_DEVICE_CHECK=true] [IP_LOCATION_DATABASE=<file>] \
+#     tools/test-server.sh <passbundle-server binary> <port> <data folder> [host name]
 set -euo pipefail
 
 bin=$1
@@ -15,7 +22,8 @@ data=$3
 host=${4:-127.0.0.1}
 mkdir -p "$data"
 
-DATA_FOLDER="$data" \
+NEW_DEVICE_CHECK="${NEW_DEVICE_CHECK:-false}" \
+  DATA_FOLDER="$data" \
   ROCKET_ADDRESS=127.0.0.1 \
   ROCKET_PORT="$port" \
   DOMAIN="http://$host:$port" \

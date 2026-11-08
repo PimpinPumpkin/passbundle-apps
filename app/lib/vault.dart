@@ -185,12 +185,20 @@ class VaultScreenState extends State<VaultScreen> {
     }
   }
 
+  /// A sign-in waiting for this account's answer prompts over the vault:
+  /// a new device's check first (it waits on its number), then a request to
+  /// sign in with a device.
   Future<void> promptForSignIns() async {
     if (prompting || !mounted) return;
-    final request = signInRequests.unprompted();
-    if (request == null) return;
+    final check = signInRequests.unpromptedCheck();
+    final request = check == null ? signInRequests.unprompted() : null;
+    if (check == null && request == null) return;
     prompting = true;
-    await reviewSignInRequest(context, request, email: widget.email);
+    if (check != null) {
+      await reviewNewDeviceCheck(context, check, email: widget.email);
+    } else if (request != null) {
+      await reviewSignInRequest(context, request, email: widget.email);
+    }
     prompting = false;
     if (mounted) unawaited(promptForSignIns());
   }
