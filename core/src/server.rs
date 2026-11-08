@@ -687,23 +687,49 @@ impl Server {
         self.answer(response)
     }
 
+    /// The organizations whose owners and admins see how many of the
+    /// person's own passwords are weak, reused, or exposed, by name: those
+    /// they've joined that have "Members' own passwords" on (DESIGN.md in the
+    /// meta repo). None when the server doesn't have it (an older or other
+    /// server).
+    pub fn own_health_seen_by(&self, session: &mut Session) -> Result<Option<Vec<String>>> {
+        let (status, body) =
+            self.call_answered(session, "GET", "/api/keykeeper/own-health/seen-by", None)?;
+        if matches!(status, 404 | 405) {
+            return Ok(None);
+        }
+        let body = Self::checked(status, body)?;
+        Ok(Some(
+            body["data"]
+                .as_array()
+                .map(|orgs| {
+                    orgs.iter()
+                        .filter_map(|o| o["name"].as_str().map(str::to_owned))
+                        .collect()
+                })
+                .unwrap_or_default(),
+        ))
+    }
+
     /// Tells the server how many of the person's own logins have weak or
     /// reused passwords (health.rs, `OwnCounts`): numbers only, which their
     /// organizations' owners and admins see (DESIGN.md in the meta repo,
-    /// "Members' own passwords"). False when the server doesn't take them
-    /// (an older or other server).
+    /// "Members' own passwords"). Whether the server kept them (it doesn't
+    /// once no organization of theirs has the setting on), or None when the
+    /// server doesn't take them (an older or other server).
     pub fn report_own_health(
         &self,
         session: &mut Session,
         counts: &crate::health::OwnCounts,
-    ) -> Result<bool> {
+    ) -> Result<Option<bool>> {
         let body = serde_json::to_value(counts).expect("counts always serialize");
         let (status, body) =
             self.call_answered(session, "PUT", "/api/keykeeper/own-health", Some(body))?;
         if matches!(status, 404 | 405) {
-            return Ok(false);
+            return Ok(None);
         }
-        Self::checked(status, body).map(|_| true)
+        let body = Self::checked(status, body)?;
+        Ok(Some(body["kept"].as_bool() != Some(false)))
     }
 
     /// The whole vault, as the server sends it, and its text to keep (still encrypted).
