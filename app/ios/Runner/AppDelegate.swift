@@ -1,3 +1,4 @@
+import AuthenticationServices
 import Flutter
 import LocalAuthentication
 import Security
@@ -58,6 +59,15 @@ import UniformTypeIdentifiers
           return
         }
         UIApplication.shared.open(url) { opened in result(opened) }
+      // Duo's Universal Prompt at sign-in (app/lib/two_step.dart): the link
+      // it comes back with, or nil if the person gave up.
+      case "duoSignIn":
+        DuoSession.shared.start((call.arguments as? [String: Any])?["url"] as? String ?? "") { link in
+          result(link)
+        }
+      case "duoCancel":
+        DuoSession.shared.cancel()
+        result(nil)
       // Unlocking with Face ID or Touch ID (Biometric, below), each account its own.
       case "biometricStatus":
         result(["status": Biometric.status(account: Platform.account(call)), "method": Biometric.method()])
@@ -123,6 +133,49 @@ import UniformTypeIdentifiers
   }
 
   private var phoneLocks: NSObjectProtocol?
+}
+
+/// Duo's Universal Prompt at sign-in (app/lib/two_step.dart), in the
+/// system's sign-in sheet (ASWebAuthenticationSession), which hands back the
+/// link the server's Duo page opens, `passbundle://duo-callback?...`. So the
+/// app needn't take passbundle:// links from anywhere else, and the core
+/// checks the link belongs to the sign-in waiting (core/src/two_step.rs).
+final class DuoSession: NSObject, ASWebAuthenticationPresentationContextProviding {
+  static let shared = DuoSession()
+  private var session: ASWebAuthenticationSession?
+
+  func start(_ text: String, done: @escaping (String?) -> Void) {
+    guard let url = URL(string: text), url.scheme == "https" else {
+      done(nil)
+      return
+    }
+    session?.cancel()
+    let session = ASWebAuthenticationSession(url: url, callbackURLScheme: "passbundle") { [weak self] link, _ in
+      DispatchQueue.main.async {
+        self?.session = nil
+        done(link?.absoluteString)
+      }
+    }
+    session.presentationContextProvider = self
+    // Nothing kept from Safari, nor shared with it, and no "wants to use" alert.
+    session.prefersEphemeralWebBrowserSession = true
+    self.session = session
+    if !session.start() {
+      self.session = nil
+      done(nil)
+    }
+  }
+
+  func cancel() {
+    session?.cancel()
+  }
+
+  func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
+    let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+    if let key = scenes.flatMap(\.windows).first(where: \.isKeyWindow) { return key }
+    if let scene = scenes.first { return UIWindow(windowScene: scene) }
+    return ASPresentationAnchor()
+  }
 }
 
 /// The iOS app's own piece (docs/phones.md): the data folder and the pasteboard.

@@ -11,3 +11,4 @@
 -keep class com.passbundle.app.Core { *; }
 -keep class com.passbundle.app.Keystore { *; }
 -keep class com.passbundle.app.Biometric { *; }
+-keep class com.passbundle.app.SecurityKeys { *; }

@@ -1,3 +1,4 @@
+import AuthenticationServices
 import Cocoa
 import FlutterMacOS
 
@@ -10,6 +11,8 @@ class MainFlutterWindow: NSWindow {
   /// (app/lib/updates.dart): calls on passbundle/platform, and how a
   /// download goes on passbundle/updates.
   private let updater = Updater.forThisApp()
+  /// Duo at sign-in (DuoSession, below).
+  private let duo = DuoSession()
   private var platform: FlutterMethodChannel?
   private var updates: FlutterMethodChannel?
   /// The window, and the app's top edge in it (app/lib/window_chrome.dart):
@@ -351,6 +354,14 @@ class MainFlutterWindow: NSWindow {
         return
       }
       result(NSWorkspace.shared.open(url))
+    // Duo's Universal Prompt at sign-in (app/lib/two_step.dart): the link
+    // it comes back with, or nil if the person gave up.
+    case "duoSignIn":
+      duo.window = self
+      duo.start(arguments?["url"] as? String ?? "") { link in result(link) }
+    case "duoCancel":
+      duo.cancel()
+      result(nil)
     case "updateStatus":
       result(updater.status())
     case "updateCheck":
@@ -391,5 +402,45 @@ class MainFlutterWindow: NSWindow {
     }
     // A moment for Settings to say so.
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { NSApp.terminate(nil) }
+  }
+}
+
+/// Duo's Universal Prompt at sign-in (app/lib/two_step.dart), in the
+/// system's sign-in window (ASWebAuthenticationSession), which hands back the
+/// link the server's Duo page opens, `passbundle://duo-callback?...`. So the
+/// app needn't take passbundle:// links from anywhere else, and the core
+/// checks the link belongs to the sign-in waiting (core/src/two_step.rs).
+final class DuoSession: NSObject, ASWebAuthenticationPresentationContextProviding {
+  weak var window: NSWindow?
+  private var session: ASWebAuthenticationSession?
+
+  func start(_ text: String, done: @escaping (String?) -> Void) {
+    guard let url = URL(string: text), url.scheme == "https" else {
+      done(nil)
+      return
+    }
+    session?.cancel()
+    let session = ASWebAuthenticationSession(url: url, callbackURLScheme: "passbundle") { [weak self] link, _ in
+      DispatchQueue.main.async {
+        self?.session = nil
+        done(link?.absoluteString)
+      }
+    }
+    session.presentationContextProvider = self
+    // Nothing kept from the browser, nor shared with it.
+    session.prefersEphemeralWebBrowserSession = true
+    self.session = session
+    if !session.start() {
+      self.session = nil
+      done(nil)
+    }
+  }
+
+  func cancel() {
+    session?.cancel()
+  }
+
+  func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
+    window ?? NSApp.keyWindow ?? ASPresentationAnchor()
   }
 }

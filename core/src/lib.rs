@@ -24,12 +24,14 @@ pub mod matching;
 pub mod passkey;
 pub mod places;
 pub mod secrets;
+pub mod security_key;
 pub mod server;
 pub mod signup;
 pub mod store;
 pub mod synced_settings;
 pub mod templates;
 pub mod totp;
+pub mod two_step;
 #[cfg(not(phone))]
 pub mod updates;
 pub mod vault;
