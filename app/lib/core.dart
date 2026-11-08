@@ -192,6 +192,10 @@ class Core {
     'pb_set_screenshots',
   );
   late final _health = _lib.lookupFunction<_Str1, _Str1>('pb_health');
+  late final _reminders = _lib.lookupFunction<_Str1, _Str1>('pb_reminders');
+  late final _testExpiration = _lib.lookupFunction<_Str1, _Str1>(
+    'pb_test_expiration',
+  );
   late final _history = _lib.lookupFunction<_Str2, _Str2>('pb_history');
   late final _itemVersion = _lib.lookupFunction<_Str4, _Str4>('pb_item_version');
   late final _restoreVersion = _lib.lookupFunction<_Str3, _Str3>('pb_restore_version');
@@ -853,6 +857,14 @@ class Core {
     jsonEncode({for (final e in icons.entries) e.key: base64Encode(e.value)}),
   ], (p) => _answer(_testIcons(p[0])));
 
+  /// Items given an expiration date (`expires`, "YYYY-MM-DD") and reminder
+  /// days (`remind`, as `keykeeper.remind` holds them), by id, whenever a
+  /// vault opens: for tests, with a core built with its test hooks, since
+  /// the sample vault is encrypted. Unlock after giving them.
+  @visibleForTesting
+  void testExpiration(Map<String, Map<String, String>> items) =>
+      _with([jsonEncode(items)], (p) => _answer(_testExpiration(p[0])));
+
   /// Copies what the generator shows: the core takes it as the generator's
   /// last value, then copies that as it copies any secret, which clears in
   /// 30 seconds (on a phone, through the phone's own code).
@@ -891,6 +903,14 @@ class Core {
   /// `{id, weak, reused, unsecured}`. Judged on a background isolate.
   static Future<Answer> health() =>
       _background((c, a) => c._with([a], (p) => c._answer(c._health(p[0]))));
+
+  /// The expiration reminders due now (core/src/expiration.rs), each said
+  /// once: `title` ("2 items expire soon", or null when nothing is due),
+  /// `due` and `standing` (`{soon, expired}`). On a computer the core also
+  /// tells the desktop agent's tray `standing`: how many items, never which.
+  static Future<Answer> reminders() => _background(
+    (c, a) => c._with([a], (p) => c._answer(c._reminders(p[0]))),
+  );
 
   /// An item's past versions (core/src/history.rs), from the server:
   /// `{hidePasswords, canRestore, canClear, unreadable, versions: [{id,

@@ -931,6 +931,32 @@ pub struct ItemDraft {
     /// with the item as the web vault records them. An edit keeps whatever
     /// template the item came from.
     pub template: Option<(String, String)>,
+    /// The editor's "Expires" and "Remind me" (expiration.rs), replacing
+    /// the item's; None keeps the item's as they are.
+    pub expiration: Option<Expiration>,
+}
+
+/// An item's expiration date and when it reminds, as the editor sets them:
+/// no date clears both, and the default reminder days aren't stored.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Expiration {
+    pub date: Option<crate::expiration::Date>,
+    pub remind: crate::expiration::Remind,
+}
+
+impl Expiration {
+    /// The fields they're kept in, as (name, value): the date, then the
+    /// reminder days unless they're the default.
+    pub fn fields(&self) -> Vec<(&'static str, String)> {
+        let Some(date) = self.date else {
+            return Vec::new();
+        };
+        let mut fields = vec![(EXPIRES_FIELD, date.iso())];
+        if let Some(remind) = self.remind.stored() {
+            fields.push((crate::expiration::REMIND_FIELD, remind));
+        }
+        fields
+    }
 }
 
 impl ItemDraft {
@@ -980,6 +1006,54 @@ impl ItemDraft {
             organization_id: item.organization_id.clone(),
             favorite: item.favorite,
             template: None,
+            expiration: None,
+        }
+    }
+}
+
+/// For the app's tests (the test-hooks feature, never in a release): items
+/// given expiration dates and reminder days as if the web vault had set
+/// them, whenever a vault opens, since a test's sample vault is encrypted.
+#[cfg(feature = "test-hooks")]
+pub mod test_hooks {
+    use std::collections::BTreeMap;
+    use std::sync::Mutex;
+
+    use zeroize::Zeroizing;
+
+    use super::{Field, Item, EXPIRES_FIELD};
+    use crate::expiration::REMIND_FIELD;
+
+    /// By item id: the date ("YYYY-MM-DD"), and the reminder days, if any.
+    pub static EXPIRING: Mutex<BTreeMap<String, (String, Option<String>)>> =
+        Mutex::new(BTreeMap::new());
+
+    pub(super) fn expire(items: &mut [Item]) {
+        let given = EXPIRING.lock().unwrap_or_else(|p| p.into_inner());
+        for item in items.iter_mut() {
+            let Some((date, remind)) = given.get(&item.id) else {
+                continue;
+            };
+            let mut at = 0;
+            while at < item.fields.len() {
+                if item.fields[at].name == EXPIRES_FIELD || item.fields[at].name == REMIND_FIELD {
+                    item.fields.remove(at);
+                    item.kept.field_kinds.remove(at);
+                } else {
+                    at += 1;
+                }
+            }
+            for (name, value) in [(EXPIRES_FIELD, Some(date)), (REMIND_FIELD, remind.as_ref())] {
+                if let Some(value) = value {
+                    item.fields.push(Field {
+                        name: name.to_owned(),
+                        value: Zeroizing::new(value.clone()),
+                        hidden: false,
+                        boolean: false,
+                    });
+                    item.kept.field_kinds.push((0, None));
+                }
+            }
         }
     }
 }
@@ -1138,6 +1212,8 @@ impl Vault {
             }
         }
         items.sort_by_key(|i| i.name.to_lowercase());
+        #[cfg(feature = "test-hooks")]
+        test_hooks::expire(&mut items);
 
         Ok(Vault {
             user_id: sync.profile.id.clone(),
@@ -1160,6 +1236,12 @@ impl Vault {
     /// held to what the server says of the item itself. An organization's
     /// item in none of the person's shared folders (an admin's view of one
     /// with no folder) goes by the item's own fields.
+    /// Whether the person is a confirmed member of an organization: one
+    /// whose key they have.
+    pub fn in_an_organization(&self) -> bool {
+        !self.keys.organizations.is_empty()
+    }
+
     pub fn grid(&self, item: &Item) -> Grid {
         if item.organization_id.is_none() {
             return Grid::ALL;
@@ -1471,11 +1553,15 @@ impl Vault {
         // restoring one). Our own data (`keykeeper.*`: fill rules, template
         // markers, expiration dates) is the item's as it is now: restoring a
         // version never brings back a rule or a marker taken off since.
+        let replaced = |field: &Field| {
+            draft.expiration.is_some()
+                && (field.name == EXPIRES_FIELD || field.name == crate::expiration::REMIND_FIELD)
+        };
         for (item, ours) in [(source, false), (editing.or(source), true)] {
             let Some(item) = item else { continue };
             let kinds = &item.kept.field_kinds;
             for (at, (field, (kind, linked))) in item.fields.iter().zip(kinds).enumerate() {
-                if !field.edited_by_the_app(*kind) && field.reserved() == ours {
+                if !field.edited_by_the_app(*kind) && field.reserved() == ours && !replaced(field) {
                     fields.insert(
                         at.min(fields.len()),
                         json!({
@@ -1487,6 +1573,17 @@ impl Vault {
                     );
                 }
             }
+        }
+
+        // The editor's expiration date and reminder days, after the rest,
+        // as the web vault adds them.
+        for (name, value) in draft.expiration.iter().flat_map(Expiration::fields) {
+            fields.push(json!({
+                "name": enc(name),
+                "value": enc(&value),
+                "type": 0,
+                "linkedId": null,
+            }));
         }
 
         let mut body = json!({

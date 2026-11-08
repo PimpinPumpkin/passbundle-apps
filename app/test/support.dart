@@ -206,6 +206,16 @@ void machineDoesntLock(bool lockOnSleep) {
   // server would send (Core.testIcons).
   Core().testIcons(const {});
   showIcons(false);
+  // And nothing given an expiration date by an earlier test.
+  Core().testExpiration(const {});
+}
+
+/// "YYYY-MM-DD" for today and some days, where this computer is.
+String isoInDays(int days) {
+  final now = DateTime.now();
+  final day = DateTime(now.year, now.month, now.day + days);
+  String two(int n) => n.toString().padLeft(2, '0');
+  return '${day.year}-${two(day.month)}-${two(day.day)}';
 }
 
 /// Websites' icons on or off, as Settings turns them.

@@ -15,7 +15,7 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::{json, Value};
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::channel::SessionKey;
+use crate::{channel::SessionKey, reminders::Reminders};
 
 /// Both sides ignore messages more than this far from their own clock.
 const MESSAGE_VALID_MS: i64 = 10_000;
@@ -118,6 +118,8 @@ pub struct Connection<'a> {
     /// Session keys by the extension's `appId`.
     sessions: HashMap<String, SessionKey>,
     now_ms: Box<dyn Fn() -> i64 + Send + 'a>,
+    /// What the tray says about items expiring, which the app tells it.
+    reminders: Option<&'a Reminders>,
 }
 
 impl<'a> Connection<'a> {
@@ -133,7 +135,14 @@ impl<'a> Connection<'a> {
                     .map(|d| d.as_millis() as i64)
                     .unwrap_or(0)
             }),
+            reminders: None,
         }
+    }
+
+    /// Where the app's expiration reminders go: the tray.
+    pub fn with_reminders(mut self, reminders: &'a Reminders) -> Self {
+        self.reminders = Some(reminders);
+        self
     }
 
     #[cfg(test)]
@@ -326,6 +335,22 @@ impl<'a> Connection<'a> {
                 self.biometrics.remove(target);
                 reply.insert("response".into(), json!(true));
             }
+            // Keykeeper: the app saying how many of an account's items expire
+            // soon and have expired, for the tray (reminders.rs): two numbers,
+            // from which the agent makes its own words.
+            "keykeeper.reminders" => {
+                let counts = crate::reminders::parse(message);
+                let (Some(reminders), Some(counts)) = (self.reminders, counts) else {
+                    reply.insert("response".into(), json!(false));
+                    return Some(reply);
+                };
+                if user_id.is_empty() {
+                    reply.insert("response".into(), json!(false));
+                    return Some(reply);
+                }
+                reply.insert("shown".into(), json!(reminders.set(user_id, counts)));
+                reply.insert("response".into(), json!(true));
+            }
             // As upstream: unknown commands get no reply.
             _ => return None,
         }
@@ -513,6 +538,52 @@ mod tests {
 
     fn user_key() -> Vec<u8> {
         (0u8..64).collect()
+    }
+
+    #[test]
+    fn the_app_says_how_many_items_expire_and_the_tray_makes_its_own_words() {
+        let fake = Fake::new(&[]);
+        let gate = PromptGate::default();
+        let reminders = Reminders::default();
+        let mut connection = Connection::new(&fake, &gate, context())
+            .with_clock(|| NOW)
+            .with_reminders(&reminders);
+        let mut extension = Extension::new();
+        extension.setup(&mut connection, NOW).unwrap();
+
+        let told = extension
+            .call(
+                &mut connection,
+                json!({ "command": "keykeeper.reminders", "soon": 2, "expired": 1 }),
+            )
+            .unwrap();
+        assert_eq!(told["response"], true);
+        assert_eq!(told["shown"], "3 items expire soon or have expired");
+        assert_eq!(
+            reminders.shown().as_deref(),
+            Some("3 items expire soon or have expired")
+        );
+        // Words from the socket are never shown; numbers that aren't are refused.
+        let refused = extension
+            .call(
+                &mut connection,
+                json!({ "command": "keykeeper.reminders", "soon": "lots", "words": "Visit example.test" }),
+            )
+            .unwrap();
+        assert_eq!(refused["response"], false);
+        assert_eq!(
+            reminders.shown().as_deref(),
+            Some("3 items expire soon or have expired")
+        );
+        let cleared = extension
+            .call(
+                &mut connection,
+                json!({ "command": "keykeeper.reminders", "soon": 0, "expired": 0 }),
+            )
+            .unwrap();
+        assert_eq!(cleared["response"], true);
+        assert!(cleared["shown"].is_null());
+        assert_eq!(reminders.shown(), None);
     }
 
     fn enroll_message() -> Value {

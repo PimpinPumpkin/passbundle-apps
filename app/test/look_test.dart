@@ -130,6 +130,7 @@ void main() {
     'All items': Jewel.allItems,
     'Favorites': Jewel.favorites,
     'Health': Jewel.health,
+    'Expiring soon': Jewel.expiring,
     for (final kind in ItemKind.all) kind.kind: kind,
     ...Categories.all,
     // A shared folder's own colors (folder_looks.dart).

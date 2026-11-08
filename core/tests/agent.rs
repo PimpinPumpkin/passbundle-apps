@@ -141,6 +141,44 @@ fn turns_on_unlocks_keeps_accounts_apart_cancels_and_turns_off() {
     assert_eq!(later.status().unwrap(), Status::NotSetUp);
 }
 
+/// Expiration reminders (src/expiration.rs): each account tells the agent
+/// how many of its items expire soon and have expired; the agent adds them
+/// up in its own words, and zeros take an account's away.
+#[test]
+fn tells_the_agent_how_many_items_expire_and_zeros_clear_them() {
+    use passbundle_core::expiration::Counts;
+    let Some(agent) = TestAgent::start() else {
+        return;
+    };
+    let mut ana = agent.connect("ana-user-id");
+    assert_eq!(
+        ana.reminders(Counts {
+            soon: 2,
+            expired: 0
+        })
+        .unwrap()
+        .as_deref(),
+        Some("2 items expire soon")
+    );
+    let mut ben = agent.connect("ben-user-id");
+    assert_eq!(
+        ben.reminders(Counts {
+            soon: 0,
+            expired: 1
+        })
+        .unwrap()
+        .as_deref(),
+        Some("3 items expire soon or have expired")
+    );
+    assert_eq!(
+        ana.reminders(Counts::default()).unwrap().as_deref(),
+        Some("1 item has expired")
+    );
+    assert_eq!(ben.reminders(Counts::default()).unwrap(), None);
+    // Nobody was asked for Windows Hello or Touch ID.
+    assert_eq!(agent.prompts(), "");
+}
+
 #[test]
 fn refuses_a_program_pretending_to_be_the_agent() {
     if std::env::var_os("PB_TEST_AGENT").is_none() {

@@ -10,6 +10,7 @@ use crate::{
     biometrics,
     ipc::{self, read_frame, write_frame},
     protocol::{Biometrics, Connection, Context, PromptGate},
+    reminders::Reminders,
 };
 
 /// The first frame a host sends: who started it, for prompt text.
@@ -18,13 +19,16 @@ pub const HELLO: &str = "keykeeper.host";
 pub struct Server {
     biometrics: Box<dyn Biometrics>,
     gate: PromptGate,
+    /// What the tray says about items expiring (reminders.rs).
+    reminders: Arc<Reminders>,
 }
 
 impl Server {
-    pub fn new(biometrics: Box<dyn Biometrics>) -> Arc<Self> {
+    pub fn new(biometrics: Box<dyn Biometrics>, reminders: Arc<Reminders>) -> Arc<Self> {
         Arc::new(Self {
             biometrics,
             gate: PromptGate::default(),
+            reminders,
         })
     }
 
@@ -53,14 +57,17 @@ impl Server {
                     browser = name;
                     continue;
                 }
-                connection = Some(Connection::new(
-                    self.biometrics.as_ref(),
-                    &self.gate,
-                    Context {
-                        browser: browser.clone(),
-                        method: biometrics::METHOD,
-                    },
-                ));
+                connection = Some(
+                    Connection::new(
+                        self.biometrics.as_ref(),
+                        &self.gate,
+                        Context {
+                            browser: browser.clone(),
+                            method: biometrics::METHOD,
+                        },
+                    )
+                    .with_reminders(&self.reminders),
+                );
             }
             if let Some(reply) = connection.as_mut().unwrap().handle(text) {
                 write_frame(&mut stream, reply.as_bytes())?;

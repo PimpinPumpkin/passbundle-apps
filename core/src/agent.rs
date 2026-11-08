@@ -235,6 +235,24 @@ impl Agent {
         Ok(key)
     }
 
+    /// How many of this account's items expire soon and how many have
+    /// expired (expiration.rs), for the agent's tray: two numbers, never
+    /// which items; the agent makes its own words from them. Zeros clear it.
+    /// Answers the words the tray now shows, if any.
+    pub fn reminders(&mut self, counts: crate::expiration::Counts) -> Result<Option<String>> {
+        // An older agent doesn't know the command and never answers: don't
+        // wait on it for long (where the socket can say so).
+        #[cfg(unix)]
+        let _ = self
+            .stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(10)));
+        let reply = self.call(
+            "keykeeper.reminders",
+            json!({ "soon": counts.soon, "expired": counts.expired }),
+        )?;
+        Ok(reply["shown"].as_str().map(str::to_owned))
+    }
+
     /// Turns it off for this account (for the extension too: it's one enrollment).
     pub fn remove(&mut self) -> Result<()> {
         self.call("keykeeper.biometric.remove", json!({}))

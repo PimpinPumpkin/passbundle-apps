@@ -601,6 +601,18 @@ impl Server {
         path: &str,
         body: Option<Value>,
     ) -> Result<Value> {
+        let (status, body) = self.call_answered(session, method, path, body)?;
+        Self::checked(status, body)
+    }
+
+    /// `call`, with the server's status as it answered.
+    fn call_answered(
+        &self,
+        session: &mut Session,
+        method: &str,
+        path: &str,
+        body: Option<Value>,
+    ) -> Result<(u16, Value)> {
         if session.expires_at <= now() + 60 {
             self.refresh(session)?;
         }
@@ -630,8 +642,26 @@ impl Server {
                 .call(),
             _ => unreachable!("only the methods above are used"),
         };
-        let (status, body) = self.answer(response)?;
-        Self::checked(status, body)
+        self.answer(response)
+    }
+
+    /// Tells the server how many of the person's own logins have weak or
+    /// reused passwords (health.rs, `OwnCounts`): numbers only, which their
+    /// organizations' owners and admins see (DESIGN.md in the meta repo,
+    /// "Members' own passwords"). False when the server doesn't take them
+    /// (an older or other server).
+    pub fn report_own_health(
+        &self,
+        session: &mut Session,
+        counts: &crate::health::OwnCounts,
+    ) -> Result<bool> {
+        let body = serde_json::to_value(counts).expect("counts always serialize");
+        let (status, body) =
+            self.call_answered(session, "PUT", "/api/keykeeper/own-health", Some(body))?;
+        if matches!(status, 404 | 405) {
+            return Ok(false);
+        }
+        Self::checked(status, body).map(|_| true)
     }
 
     /// The whole vault, as the server sends it, and its text to keep (still encrypted).
