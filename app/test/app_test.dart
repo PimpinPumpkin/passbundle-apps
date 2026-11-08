@@ -9,10 +9,12 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:passbundle/core.dart';
 import 'package:passbundle/editor.dart';
+import 'package:passbundle/glyphs.dart';
 import 'package:passbundle/icons.dart';
 import 'package:passbundle/main.dart';
 import 'package:passbundle/new_item.dart';
 import 'package:passbundle/vault.dart';
+import 'package:passbundle/widgets.dart';
 import 'package:passbundle/window_chrome.dart';
 
 import 'support.dart';
@@ -682,6 +684,77 @@ void main() {
     },
   );
 
+  /// IT's icon and color as the web vault writes them, encrypted with the
+  /// sample's organization key (`{"icon":"bank","tone":"emerald"}`; the
+  /// core's vectors.rs opens the same string).
+  const bankLook =
+      '2.8PHy8/T19vf4+fr7/P3+/w==|7B2Xuy93y0k1VHyOmkaIZFJ1l+9fFGvVYvutgOtS52GmO5NUPQdukvfgtk97QTqs|+kucnDW/LO2A98uZpe97d1zs6+5fwou5+ex2ANjDLmo=';
+
+  /// The menu's tiles in a bank's glyph, and the plain shared folder glyphs.
+  Finder bankTiles(Finder within) => find.descendant(
+    of: within,
+    matching: find.byWidgetPredicate(
+      (w) => w is JewelTile && w.jewel.glyph == Glyphs.bank,
+    ),
+  );
+  Finder plainSharedFolders(Finder within) => find.descendant(
+    of: within,
+    matching: find.byWidgetPredicate(
+      (w) => w is Glyph && w.data == Glyphs.sharedFolder,
+    ),
+  );
+
+  testWidgets(
+    'a shared folder with its own icon and color shows them as its tile in the menu',
+    (tester) async {
+      await unlockOnComputer(
+        tester,
+        size: const Size(1280, 1100),
+        changed: {
+          it: {'keykeeperLook': bankLook},
+        },
+      );
+      final menu = find.byType(Sidebar);
+      final tile = bankTiles(menu);
+      expect(tile, findsOneWidget);
+      final jewel = tester.widget<JewelTile>(tile).jewel;
+      expect(jewel.light, const Color(0xFF0E7A47));
+      expect(jewel.dark, const Color(0xFF6FDBA0));
+      expect(plainSharedFolders(menu), findsNothing);
+      // On IT's entry, which still shows IT's items.
+      final row = find.ancestor(of: tile, matching: find.byType(InkWell)).first;
+      expect(find.descendant(of: row, matching: find.text('IT')), findsOneWidget);
+      await tester.tap(row);
+      await tester.pump();
+      expect(find.text('Office Wi-Fi'), findsOneWidget);
+      expect(find.text('Example Mail'), findsNothing);
+    },
+  );
+
+  testWidgets(
+    'a shared folder keeps its plain glyph until it has a look that opens',
+    (tester) async {
+      // One that doesn't open with the organization's key.
+      await unlockOnComputer(
+        tester,
+        size: const Size(1280, 1100),
+        changed: {
+          it: {
+            'keykeeperLook':
+                '2.AAAAAAAAAAAAAAAAAAAAAA==|AAAAAAAAAAAAAAAAAAAAAA==|AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',
+          },
+        },
+      );
+      final menu = find.byType(Sidebar);
+      expect(bankTiles(menu), findsNothing);
+      expect(plainSharedFolders(menu), findsOneWidget);
+      final row = find
+          .ancestor(of: plainSharedFolders(menu), matching: find.byType(InkWell))
+          .first;
+      expect(find.descendant(of: row, matching: find.text('IT')), findsOneWidget);
+    },
+  );
+
   testWidgets(
     'an item whose shared folder hides passwords shows none of its secrets, and offers no edit or trash',
     (tester) async {
@@ -1048,9 +1121,13 @@ void main() {
     },
   );
 
-  Future<void> unlockOnPhone(WidgetTester tester, Size size) async {
+  Future<void> unlockOnPhone(
+    WidgetTester tester,
+    Size size, {
+    Map<String, Map<String, dynamic>> changed = const {},
+  }) async {
     setSize(tester, size);
-    openSample();
+    openSample(changed: changed);
     await tester.pumpWidget(const PassBundleApp());
     await tester.enterText(find.byType(TextField), samplePassword);
     await tester.tap(find.text('Unlock'));
@@ -1168,6 +1245,30 @@ void main() {
       expect(find.text('New folder'), findsOneWidget);
       await tester.tap(find.text('Cancel'));
       await tester.pumpAndSettle();
+    },
+  );
+
+  testWidgets(
+    'on a phone, a shared folder with its own icon and color shows them in the menu',
+    (tester) async {
+      await unlockOnPhone(
+        tester,
+        const Size(390, 844),
+        changed: {
+          it: {'keykeeperLook': bankLook},
+        },
+      );
+      await tester.scrollUntilVisible(
+        find.text('All items'),
+        100,
+        scrollable: find.byType(Scrollable).last,
+      );
+      final tile = bankTiles(find.byType(MaterialApp));
+      expect(tile, findsOneWidget);
+      expect(tester.widget<JewelTile>(tile).size, 40);
+      final row = find.ancestor(of: tile, matching: find.byType(InkWell)).first;
+      expect(find.descendant(of: row, matching: find.text('IT')), findsOneWidget);
+      expect(plainSharedFolders(find.byType(MaterialApp)), findsNothing);
     },
   );
 

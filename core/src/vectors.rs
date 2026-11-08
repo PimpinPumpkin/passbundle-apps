@@ -364,6 +364,52 @@ fn a_wrong_password_is_wrong_and_weak_settings_are_refused_before_deriving() {
 }
 
 #[test]
+fn opens_a_shared_folders_icon_with_its_organizations_key_and_leaves_the_rest_plain() {
+    let v = vectors();
+    let org_key = key(&v["keys"]["organizationKey"]);
+    let user_key = key(&v["keys"]["userKey"]);
+    let collection = v["ids"]["collection"].as_str().unwrap();
+    let open = |look: Option<String>| {
+        let mut sync_json = v["sync"].clone();
+        sync_json["collections"][0]["keykeeperLook"] = look.map_or(Value::Null, Value::String);
+        let sync = Sync::from_json(&sync_json.to_string()).unwrap();
+        let vault = Vault::unlock(
+            &sync,
+            &prelogin(&v["account"]["pbkdf2"]["prelogin"]),
+            v["account"]["password"].as_str().unwrap(),
+        )
+        .unwrap();
+        assert_opens_as_the_vectors_say(&vault, &v);
+        vault.collection_looks.get(collection).cloned()
+    };
+    let bank = org_key
+        .encrypt_str(r#"{"icon":"bank","tone":"emerald"}"#)
+        .to_string();
+    assert_eq!(
+        open(Some(bank)),
+        Some(crate::places::Look {
+            icon: "bank".into(),
+            tone: "emerald".into()
+        })
+    );
+    // As the web vault writes it (app/test: a fixed IV, made with Node).
+    let web = "2.8PHy8/T19vf4+fr7/P3+/w==|7B2Xuy93y0k1VHyOmkaIZFJ1l+9fFGvVYvutgOtS52GmO5NUPQdukvfgtk97QTqs|+kucnDW/LO2A98uZpe97d1zs6+5fwou5+ex2ANjDLmo=";
+    assert_eq!(open(Some(web.into())).map(|l| l.icon), Some("bank".into()));
+    // None, one under another key, one that isn't a look, and one that isn't
+    // encrypted are each the plain folder, and the vault still opens.
+    assert_eq!(open(None), None);
+    let wrong_key = user_key
+        .encrypt_str(r#"{"icon":"bank","tone":"emerald"}"#)
+        .to_string();
+    assert_eq!(open(Some(wrong_key)), None);
+    assert_eq!(open(Some(org_key.encrypt_str("bank").to_string())), None);
+    assert_eq!(
+        open(Some(r#"{"icon":"bank","tone":"emerald"}"#.into())),
+        None
+    );
+}
+
+#[test]
 fn an_item_that_doesnt_open_is_damaged_and_the_rest_still_open() {
     let v = vectors();
     let mut sync_json = v["sync"].clone();

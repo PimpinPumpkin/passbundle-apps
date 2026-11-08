@@ -1297,16 +1297,19 @@ class VaultScreenState extends State<VaultScreen> {
           ),
           child: Row(
             children: [
-              Container(
-                width: 40,
-                height: 40,
-                decoration: BoxDecoration(
-                  color: c.tint,
-                  borderRadius: BorderRadius.circular(11),
+              if (entry.look != null)
+                JewelTile(jewel: entry.look!, size: 40)
+              else
+                Container(
+                  width: 40,
+                  height: 40,
+                  decoration: BoxDecoration(
+                    color: c.tint,
+                    borderRadius: BorderRadius.circular(11),
+                  ),
+                  alignment: Alignment.center,
+                  child: Glyph(entry.glyph, size: 21, color: primary),
                 ),
-                alignment: Alignment.center,
-                child: Glyph(entry.glyph, size: 21, color: primary),
-              ),
               const SizedBox(width: 12),
               Expanded(
                 child: Text(
@@ -1851,7 +1854,11 @@ class Sidebar extends StatelessWidget {
                 ),
                 for (final e in PlaceEntry.all(places))
                   entry(
-                    tile: outline(e.glyph, strong: e.owner),
+                    // A shared folder with its own icon and color shows
+                    // them as its tile (folder_looks.dart).
+                    tile: e.look != null
+                        ? JewelTile(jewel: e.look!, size: 24)
+                        : outline(e.glyph, strong: e.owner),
                     label: e.label,
                     depth: e.depth,
                     strong: e.owner,
