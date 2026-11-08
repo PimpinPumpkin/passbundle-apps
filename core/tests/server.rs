@@ -250,30 +250,13 @@ fn two_step_login_with_an_authenticator_app() {
     let email = new_email("two-step");
     sign_up(&server, &email);
     let mut session = sign_in(&server, &email);
-    let secret = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP";
-    let totp = Totp::parse(secret).unwrap();
+    let totp = turn_on_authenticator(&server, &mut session, &email);
     let now = || {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs()
     };
-    let master = MasterKey::derive(
-        PASSWORD,
-        &email,
-        &Kdf::Pbkdf2 {
-            iterations: 600_000,
-        },
-    )
-    .unwrap();
-    server
-        .raw(
-            &mut session,
-            "POST",
-            "/api/two-factor/authenticator",
-            Some(json!({ "key": secret, "token": totp.code_at(now()), "masterPasswordHash": master.login_hash(PASSWORD) })),
-        )
-        .unwrap();
 
     let SignIn::NeedsTwoFactor(mut pending) = server.sign_in(&email, PASSWORD).unwrap() else {
         panic!("two-step login should be asked for");
@@ -316,9 +299,22 @@ fn master_hash(email: &str) -> String {
     .login_hash(PASSWORD)
 }
 
-/// Turns on an authenticator app for the account, as the web vault does.
-fn turn_on_authenticator(server: &Server, session: &mut Session, email: &str) {
-    let secret = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP";
+/// Turns on an authenticator app for the account, as the web vault does:
+/// the server makes the secret and a user verification token for it with the
+/// master password, then takes a code from it with the token (Vaultwarden
+/// 1.37.5's flow). The secret, for its codes.
+fn turn_on_authenticator(server: &Server, session: &mut Session, email: &str) -> Totp {
+    let made = server
+        .raw(
+            session,
+            "POST",
+            "/api/two-factor/get-authenticator",
+            Some(json!({ "masterPasswordHash": master_hash(email) })),
+        )
+        .unwrap();
+    let key = made["authenticator"]["key"].as_str().unwrap().to_owned();
+    let token = made["userVerificationToken"].as_str().unwrap().to_owned();
+    let totp = Totp::parse(&key).unwrap();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -328,9 +324,10 @@ fn turn_on_authenticator(server: &Server, session: &mut Session, email: &str) {
             session,
             "POST",
             "/api/two-factor/authenticator",
-            Some(json!({ "key": secret, "token": Totp::parse(secret).unwrap().code_at(now), "masterPasswordHash": master_hash(email) })),
+            Some(json!({ "key": key, "token": totp.code_at(now), "userVerificationToken": token })),
         )
         .unwrap();
+    totp
 }
 
 /// An app of its own on a folder of its own, not signed in.
@@ -437,15 +434,29 @@ fn two_step_login_with_a_security_key() {
     let mut session = sign_in(&server, &email);
     let hash = master_hash(&email);
 
-    // The key is added as the web vault adds one.
-    let options = server
+    // The key is added as the web vault adds one: the master password gets a
+    // user verification token, which gets the challenge and adds the key.
+    let verified = server
+        .raw(
+            &mut session,
+            "POST",
+            "/api/two-factor/get-webauthn",
+            Some(json!({ "masterPasswordHash": hash })),
+        )
+        .unwrap();
+    let token = verified["userVerificationToken"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let challenge = server
         .raw(
             &mut session,
             "POST",
             "/api/two-factor/get-webauthn-challenge",
-            Some(json!({ "masterPasswordHash": hash })),
+            Some(json!({ "userVerificationToken": token })),
         )
         .unwrap();
+    let options = &challenge["options"];
     let rp_id = options["rp"]["id"].as_str().unwrap().to_owned();
     assert_eq!(rp_id, "localhost");
     let mut key = SoftKey::new(&rp_id);
@@ -471,7 +482,7 @@ fn two_step_login_with_a_security_key() {
             Some(json!({
                 "id": 1,
                 "name": "Software key",
-                "masterPasswordHash": hash,
+                "userVerificationToken": token,
                 "deviceResponse": {
                     "id": id,
                     "rawId": id,
