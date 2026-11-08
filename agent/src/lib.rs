@@ -11,6 +11,7 @@ pub mod config;
 pub mod instance;
 pub mod ipc;
 pub mod protocol;
+pub mod reminders;
 #[cfg_attr(not(windows), allow(dead_code))] // Used by Windows Hello.
 pub mod sealed;
 pub mod server;

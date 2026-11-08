@@ -11,6 +11,7 @@ pub mod clipboard;
 pub mod crypto;
 pub mod device_approval;
 pub mod error;
+pub mod expiration;
 pub mod generator;
 pub mod generator_policy;
 pub mod health;
