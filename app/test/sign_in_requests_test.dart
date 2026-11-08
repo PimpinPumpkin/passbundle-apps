@@ -273,6 +273,8 @@ void main() {
       find.byKey(const ValueKey('new-device-check-number')),
       '12',
     );
+    // Approve comes on once two digits are in.
+    await tester.pump();
     await tester.tap(find.text('Approve'));
     await tester.pumpAndSettle();
     expect(source.checksAnswered, [('c1', '12', null)]);
@@ -335,6 +337,7 @@ void main() {
         find.byKey(const ValueKey('new-device-check-number')),
         '47',
       );
+      await tester.pump();
       await tester.tap(find.text('Approve'));
       await tester.pumpAndSettle();
       expect(source.checksAnswered, [('c1', '47', home)]);

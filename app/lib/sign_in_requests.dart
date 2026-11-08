@@ -1129,31 +1129,30 @@ class _SignInRequestsSettingsState extends State<SignInRequestsSettings> {
               child: const Text('Review'),
             ),
           ),
-        if (waiting.isNotEmpty)
-          for (final r in waiting)
-            ListTile(
-              key: ValueKey('sign-in-request-${r.id}'),
-              title: Text(r.device),
-              subtitle: Text(
-                [
-                  // Another account's: which one.
-                  if (r.email case final email? when email != widget.email)
-                    email,
-                  if (r.ip.isNotEmpty) r.ip,
-                  askedAgo(r.age),
-                  'expires in ${timeLeft(r.left).toLowerCase()}',
-                ].join(' · '),
-              ),
-              trailing: TextButton(
-                onPressed: () => reviewSignInRequest(
-                  context,
-                  r,
-                  email: widget.email,
-                  requests: requests,
-                ),
-                child: const Text('Review'),
-              ),
+        for (final r in waiting)
+          ListTile(
+            key: ValueKey('sign-in-request-${r.id}'),
+            title: Text(r.device),
+            subtitle: Text(
+              [
+                // Another account's: which one.
+                if (r.email case final email? when email != widget.email)
+                  email,
+                if (r.ip.isNotEmpty) r.ip,
+                askedAgo(r.age),
+                'expires in ${timeLeft(r.left).toLowerCase()}',
+              ].join(' · '),
             ),
+            trailing: TextButton(
+              onPressed: () => reviewSignInRequest(
+                context,
+                r,
+                email: widget.email,
+                requests: requests,
+              ),
+              child: const Text('Review'),
+            ),
+          ),
         SwitchListTile(
           key: const ValueKey('confirm-approvals'),
           value: confirm,
