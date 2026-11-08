@@ -1341,7 +1341,8 @@ pub unsafe extern "C" fn pb_sign_out(account: *const c_char) -> *mut c_char {
 /// folders, by name, each nested inside the one its name starts with, with
 /// what the person can do there (`grid`; `canCreate` means new items may go
 /// in it). Each has `id`, `name` (the whole name), `label` (what it's called
-/// where it sits), `depth`, and `parentId`.
+/// where it sits), `depth`, and `parentId`; a shared folder has its `look`
+/// (`{icon, tone}`, or null for the plain folder; places.rs).
 ///
 /// # Safety
 /// `account` is null or a NUL-terminated UTF-8 string, valid for the call.
@@ -1382,6 +1383,7 @@ pub unsafe extern "C" fn pb_places(account: *const c_char) -> *mut c_char {
                     json!({
                         "id": n.id, "name": n.name, "label": n.label, "depth": n.depth, "parentId": n.parent,
                         "grid": grid, "canCreate": grid.create,
+                        "look": vault.collection_looks.get(&n.id),
                     })
                 })
                 .collect();

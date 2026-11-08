@@ -6,6 +6,39 @@
 //! "Work/Clients" sits inside "Work" when there's a "Work", and is a folder
 //! of its own at the top otherwise.
 
+/// A shared folder's icon and color (docs/core.md, "Folder icons"; passbundle-
+/// clients, libs/common/src/vault/keykeeper/folder-looks.ts): the names of one
+/// of our flat glyphs and one of the tiles' tones, which the web vault encrypts
+/// with the organization's key as `{"icon":"bank","tone":"emerald"}`. The app
+/// draws them (app/lib/folder_looks.dart); a name it doesn't know still shows.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct Look {
+    pub icon: String,
+    pub tone: String,
+}
+
+/// Short, plain names only: what the apps store, and nothing else.
+fn plain_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    name.len() <= 32
+        && chars.next().is_some_and(|c| c.is_ascii_lowercase())
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+/// A look, opened, or none for anything that isn't one (the plain folder).
+pub fn parse_look(text: &str) -> Option<Look> {
+    #[derive(serde::Deserialize)]
+    struct Stored {
+        icon: String,
+        tone: String,
+    }
+    let stored: Stored = serde_json::from_str(text).ok()?;
+    (plain_name(&stored.icon) && plain_name(&stored.tone)).then_some(Look {
+        icon: stored.icon,
+        tone: stored.tone,
+    })
+}
+
 /// One folder or shared folder, in the order the menu lists them (each
 /// before what's inside it), with how deep it is and what it's called there.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -147,6 +180,39 @@ mod tests {
         let clients = nested.iter().find(|n| n.label == "Clients").unwrap();
         assert_eq!(clients.name, "Work/Clients");
         assert_eq!(clients.parent.as_deref(), Some("id3"));
+    }
+
+    #[test]
+    fn a_look_is_two_plain_names_and_anything_else_is_the_plain_folder() {
+        assert_eq!(
+            parse_look(r#"{"icon":"bank","tone":"emerald"}"#),
+            Some(Look {
+                icon: "bank".into(),
+                tone: "emerald".into()
+            })
+        );
+        // A newer app's names still come through, and more fields are fine.
+        assert_eq!(
+            parse_look(r#"{"tone":"coral","icon":"rocket-2","more":1}"#),
+            Some(Look {
+                icon: "rocket-2".into(),
+                tone: "coral".into()
+            })
+        );
+        for text in [
+            "",
+            "bank",
+            "[]",
+            r#"{"icon":"bank"}"#,
+            r#"{"icon":7,"tone":"emerald"}"#,
+            r#"{"icon":"Bank","tone":"emerald"}"#,
+            r#"{"icon":"<b>","tone":"emerald"}"#,
+            r#"{"icon":"","tone":"emerald"}"#,
+        ] {
+            assert_eq!(parse_look(text), None, "{text}");
+        }
+        let long = format!(r#"{{"icon":"{}","tone":"emerald"}}"#, "a".repeat(33));
+        assert_eq!(parse_look(&long), None);
     }
 
     #[test]

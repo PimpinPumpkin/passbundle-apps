@@ -82,8 +82,14 @@ const gateCode = '60718293-a4b5-4c63-def4-05162738495a';
 /// vault.home.example.test, with only "Gate code"; and [more] others, like
 /// the work one, as more1@example.test and on. Each opens with the sample's
 /// master password, and none locks when the computer sleeps. The work
-/// account is shown. Their ids on this device, in that order.
-List<String> openAccounts({int more = 0}) {
+/// account is shown. Their ids on this device, in that order. The work
+/// account's and the personal one's shared folders (by id) have the fields
+/// in [work] and [personal] set as given, such as a `keykeeperLook`.
+List<String> openAccounts({
+  int more = 0,
+  Map<String, Map<String, dynamic>> work = const {},
+  Map<String, Map<String, dynamic>> personal = const {},
+}) {
   final dir = Directory.systemTemp.createTempSync('pb-app-test-').path;
   final settings =
       jsonDecode(File('test/sample/settings.json').readAsStringSync())
@@ -92,8 +98,15 @@ List<String> openAccounts({int more = 0}) {
       jsonDecode(File('test/sample/sync.json').readAsStringSync())
           as Map<String, dynamic>;
   final ciphers = (sync['ciphers'] as List).cast<Map<String, dynamic>>();
+  final collections = (sync['collections'] as List)
+      .cast<Map<String, dynamic>>();
   final ids = <String>[];
-  void keep(String email, String server, {required bool gate}) {
+  void keep(
+    String email,
+    String server, {
+    required bool gate,
+    Map<String, Map<String, dynamic>> changed = const {},
+  }) {
     final id = '${ids.length}'.padLeft(32, 'a');
     ids.add(id);
     final folder = Directory('$dir/accounts/$id')..createSync(recursive: true);
@@ -107,6 +120,9 @@ List<String> openAccounts({int more = 0}) {
           for (final c in ciphers)
             if ((c['id'] == gateCode) == gate) c,
         ],
+        'collections': [
+          for (final c in collections) {...c, ...?changed[c['id']]},
+        ],
       }),
     );
     File('${folder.path}/preferences.json').writeAsStringSync(
@@ -114,8 +130,18 @@ List<String> openAccounts({int more = 0}) {
     );
   }
 
-  keep('ana.lopez@example.test', 'https://vault.example.test', gate: false);
-  keep('ana@home.example.test', 'https://vault.home.example.test', gate: true);
+  keep(
+    'ana.lopez@example.test',
+    'https://vault.example.test',
+    gate: false,
+    changed: work,
+  );
+  keep(
+    'ana@home.example.test',
+    'https://vault.home.example.test',
+    gate: true,
+    changed: personal,
+  );
   for (var i = 1; i <= more; i++) {
     keep('more$i@example.test', 'https://vault.example.test', gate: false);
   }
