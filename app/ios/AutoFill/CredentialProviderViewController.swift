@@ -320,8 +320,8 @@ final class Provider: ObservableObject {
   /// The accounts still locked here, to unlock for their logins too.
   var locked: [Account] { accounts.filter { !$0.unlocked } }
 
-  /// Back to the logins, from unlocking another account or a login's
-  /// master password, once an account is unlocked here.
+  /// Back to the logins (or to saving a new passkey), from unlocking another
+  /// account or a login's master password, once an account is unlocked here.
   func backToLogins() {
     guard accounts.contains(where: \.unlocked) else { return }
     show()
@@ -668,10 +668,11 @@ struct ProviderView: View {
           Button("Unlock with \(method)") { provider.unlockWithBiometric() }
         }
       }
-      // Back to the logins of the accounts unlocked already.
+      // Back to the logins of the accounts unlocked already (or to saving
+      // the passkey).
       if provider.accounts.contains(where: \.unlocked) {
         Section {
-          Button("Back to the logins") {
+          Button(provider.making == nil ? "Back to the logins" : "Back to saving the passkey") {
             password = ""
             provider.backToLogins()
           }
