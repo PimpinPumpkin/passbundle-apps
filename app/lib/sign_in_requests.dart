@@ -1177,15 +1177,17 @@ class _SignInRequestsSettingsState extends State<SignInRequestsSettings> {
             });
           },
           title: const Text('Confirm before approving'),
-          // How it asks here: the phone's biometrics, Windows Hello, the
-          // Mac's Touch ID once it's on, or the master password.
+          // How it asks here: the phone's biometrics, the Mac's Touch ID
+          // once it's on, Windows Hello, or the master password. Whether
+          // it's the Mac's way is asked before what this computer is: the
+          // Mac's tests run on Windows too.
           subtitle: Text(
             isPhone
                 ? 'With your fingerprint or face, or your master password'
-                : Platform.isWindows
-                ? 'With Windows Hello or your master password'
                 : isMac && widget.touchIdOn
                 ? 'With Touch ID or your master password'
+                : !isMac && Platform.isWindows
+                ? 'With Windows Hello or your master password'
                 : 'With your master password',
           ),
         ),
