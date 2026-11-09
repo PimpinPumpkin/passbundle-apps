@@ -134,6 +134,28 @@ impl Home {
             .collect()
     }
 
+    /// Whether a folder is the person's own: inside their home folder once
+    /// links and ".." are resolved, and (on macOS and Linux) owned by them.
+    /// A profile anywhere else, another person's above all, is never read.
+    pub(crate) fn owns(&self, dir: &Path) -> bool {
+        let (Ok(real), Ok(home)) = (dir.canonicalize(), self.home.canonicalize()) else {
+            return false;
+        };
+        if !real.starts_with(&home) {
+            return false;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            // SAFETY: geteuid has no preconditions.
+            let me = unsafe { libc::geteuid() };
+            if std::fs::metadata(&real).map_or(true, |m| m.uid() != me) {
+                return false;
+            }
+        }
+        true
+    }
+
     /// `path` as a profile's id names it: from the home folder, with `/`.
     pub(crate) fn id_path(&self, path: &Path) -> String {
         let relative = path.strip_prefix(&self.home).unwrap_or(path);

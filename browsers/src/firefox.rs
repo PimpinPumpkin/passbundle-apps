@@ -58,8 +58,9 @@ pub(crate) fn profiles(root: &Path, home: &Home) -> Vec<Profile> {
         let Some(dir) = path_of(section) else {
             continue;
         };
-        // Only profiles in the person's own folders.
-        if !dir.starts_with(&home.home) || !dir.is_dir() {
+        // Only profiles in the person's own folders, as they really are
+        // (no "..", no link to anywhere else).
+        if !dir.is_dir() || !home.owns(&dir) {
             continue;
         }
         let default = if installs.is_empty() {

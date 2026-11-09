@@ -558,3 +558,49 @@ fn safari_is_the_guided_import_on_a_mac() {
     );
     assert!(crate::guided_only(&Fixture::new(Platform::Windows).home).is_empty());
 }
+
+#[test]
+fn a_list_that_points_outside_the_persons_own_folders_is_never_followed() {
+    let fixture = Fixture::new(Platform::Linux);
+    fixture.chromium(ChromiumProfile {
+        logins: work_logins(),
+        ..ChromiumProfile::new(Browser::Chrome, "Default", "Person 1")
+    });
+    // Someone else's profile, outside this home folder.
+    let elsewhere = Fixture::new(Platform::Linux);
+    let theirs = elsewhere.firefox(FirefoxProfile {
+        default: true,
+        logins: vec![Fake::new(
+            "https://theirs.example.test",
+            "bo",
+            "not-yours-1",
+        )],
+        ..FirefoxProfile::new("theirs.default-release", "default-release")
+    });
+    // Local State naming a folder above the browser's, and profiles.ini
+    // pointing at the other folder, plainly and through "..".
+    let chrome = fixture.chromium_dir(Browser::Chrome);
+    let state_path = chrome.join("Local State");
+    let mut state: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&state_path).unwrap()).unwrap();
+    state["profile"]["info_cache"][".."] = serde_json::json!({ "name": "Up" });
+    std::fs::write(&state_path, state.to_string()).unwrap();
+    std::fs::write(chrome.parent().unwrap().join("Preferences"), "{}").unwrap();
+    let firefox_root = fixture.home.home.join(".mozilla").join("firefox");
+    std::fs::create_dir_all(&firefox_root).unwrap();
+    let up = std::iter::repeat_n("..", 8).collect::<Vec<_>>().join("/");
+    std::fs::write(
+        firefox_root.join("profiles.ini"),
+        format!(
+            "[Profile0]\nName=absolute\nIsRelative=0\nPath={}\n\n[Profile1]\nName=relative\nIsRelative=1\nPath={up}{}\n",
+            theirs.display(),
+            theirs.display()
+        ),
+    )
+    .unwrap();
+    let names: Vec<String> = find_profiles(&fixture.home)
+        .into_iter()
+        .map(|p| p.name)
+        .collect();
+    assert_eq!(names, ["Person 1"]);
+}

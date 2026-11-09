@@ -48,11 +48,17 @@ pub(crate) fn profiles(browser: Browser, dir: &Path, home: &Home) -> Vec<Profile
     match info {
         Some(info) => {
             for (folder, entry) in info {
-                if NOT_PROFILES.contains(&folder.as_str()) || folder.contains(['/', '\\']) {
+                // A folder's own name, never a path ("..", "a/b"), so a list
+                // can't point anywhere but inside the browser's folder.
+                let plain = !folder.is_empty()
+                    && folder != "."
+                    && folder != ".."
+                    && !folder.contains(['/', '\\', ':']);
+                if NOT_PROFILES.contains(&folder.as_str()) || !plain {
                     continue;
                 }
                 let profile_dir = dir.join(folder);
-                if !is_profile(&profile_dir) {
+                if !is_profile(&profile_dir) || !home.owns(&profile_dir) {
                     continue;
                 }
                 if entry["is_ephemeral"] == true {
