@@ -1,10 +1,11 @@
 import XCTest
 
 /// PassBundle in iOS's AutoFill, the way someone uses it (docs/phones.md,
-/// "Autofill"), driven by tools/ios-autofill-test.sh while the app's half of
-/// the test waits signed in: turning PassBundle on in Settings, then filling
-/// a website's sign-in form in Safari from what iOS suggests above the
-/// keyboard. These drive Settings and Safari, not PassBundle's own app.
+/// "Autofill" and "Passkeys"), driven by tools/ios-autofill-test.sh while the
+/// app's half of the test waits signed in: turning PassBundle on in Settings,
+/// filling a website's sign-in form in Safari from what iOS suggests above
+/// the keyboard, then making a passkey on a website and signing in with it.
+/// These drive Settings and Safari, not PassBundle's own app.
 final class AutoFillUITests: XCTestCase {
   override func setUp() {
     continueAfterFailure = false
@@ -45,6 +46,17 @@ final class AutoFillUITests: XCTestCase {
       passBundle.tap()
     }
     XCTAssertEqual(passBundle.value as? String, "1")
+    // Apple's own Passwords off for AutoFill, where this iOS has it, so a new
+    // passkey goes to PassBundle rather than iOS asking where, or saving it
+    // there itself.
+    let apple = settings.switches["Passwords"]
+    if apple.waitForExistence(timeout: 3), apple.value as? String == "1" {
+      apple.tap()
+      let turnOff = settings.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Turn Off'")).firstMatch
+      if turnOff.waitForExistence(timeout: 3) {
+        turnOff.tap()
+      }
+    }
   }
 
   /// Safari, already on the sign-in page: the email field offers
@@ -76,5 +88,64 @@ final class AutoFillUITests: XCTestCase {
     signIn.tap()
     let result = safari.webViews.staticTexts["Signed in as phone@example.test, password 25 characters"]
     XCTAssertTrue(result.waitForExistence(timeout: 20), "Signing in didn't show the filled login")
+  }
+
+  /// Safari, already on the passkeys page: making a passkey goes through
+  /// iOS's sheet to PassBundle, which unlocks (debug builds' stand-in for
+  /// Face ID says yes) and saves it once told to; signing in with it goes
+  /// through iOS's sheet again, as a site that names no credential and then
+  /// as one that names this one, and the page checks each answer as a site
+  /// would, the signature with the passkey's public key.
+  func testPasskeysInSafari() throws {
+    let safari = XCUIApplication(bundleIdentifier: "com.apple.mobilesafari")
+    let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+    safari.activate()
+    let make = safari.webViews.buttons["Make a passkey"]
+    XCTAssertTrue(make.waitForExistence(timeout: 30), "The passkeys page isn't open")
+    make.tap()
+    through(
+      until: "Made a passkey for phone-passkey@example.test", in: safari, also: springboard,
+      tapping: ["Save passkey", "Continue", "Save", "PassBundle"])
+    safari.webViews.buttons["Sign in with a passkey"].tap()
+    through(
+      until: "Signed in with the passkey for phone-passkey@example.test", in: safari, also: springboard,
+      tapping: ["Continue", "Sign In", "phone-passkey@example.test"])
+    safari.webViews.buttons["Sign in naming the passkey"].tap()
+    through(
+      until: "Signed in again, naming the passkey, for phone-passkey@example.test", in: safari, also: springboard,
+      tapping: ["Continue", "Sign In", "phone-passkey@example.test"])
+  }
+
+  /// Taps through iOS's sheets and PassBundle's screens until the page says
+  /// `words`, whatever this iOS calls their buttons (the first of `labels`
+  /// showing, outside the page). Fails with what the page said, or what was
+  /// on screen.
+  private func through(
+    until words: String, in safari: XCUIApplication, also other: XCUIApplication, tapping labels: [String]
+  ) {
+    let done = safari.webViews.staticTexts[words]
+    let failed = safari.webViews.staticTexts.matching(NSPredicate(format: "label BEGINSWITH \"Couldn't\"")).firstMatch
+    let end = Date().addingTimeInterval(120)
+    while Date() < end {
+      if done.exists { return }
+      if failed.exists { return XCTFail("The page said: \(failed.label)") }
+      tapFirst(of: labels, in: [safari, other])
+      Thread.sleep(forTimeInterval: 2)
+    }
+    XCTFail(
+      "The page never said \"\(words)\".\nSafari:\n\(safari.debugDescription)\nSpringBoard:\n\(other.debugDescription)")
+  }
+
+  /// Taps the first button showing with one of the labels, never one of the page's own.
+  private func tapFirst(of labels: [String], in apps: [XCUIApplication]) {
+    for label in labels {
+      for app in apps {
+        let found = app.buttons.matching(NSPredicate(format: "label == %@", label)).allElementsBoundByIndex
+        for button in found where button.isHittable && !app.webViews.buttons[label].exists {
+          button.tap()
+          return
+        }
+      }
+    }
   }
 }

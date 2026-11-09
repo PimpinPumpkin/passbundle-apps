@@ -327,7 +327,14 @@ impl Accounts {
             labels: HashMap::new(),
             beside: true,
         };
-        accounts.list = kept.iter().map(|id| accounts.app_for(id)).collect();
+        accounts.list = kept
+            .iter()
+            .map(|id| {
+                let mut app = accounts.app_for(id);
+                app.read_beside();
+                app
+            })
+            .collect();
         for id in &kept {
             let entry = index.accounts.iter().find(|e| &e.id == id);
             let name = entry
@@ -1262,12 +1269,20 @@ mod tests {
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].0, w);
         let _ = beside.tick(&Readings::default());
+        // It never syncs, which would write the app's kept vault: a passkey
+        // it saves reaches the app through the app's own next sync.
+        assert!(matches!(
+            beside.app(&w).unwrap().sync(),
+            Err(Error::Refused(_))
+        ));
         beside.lock(&w);
         beside.switch(&w).unwrap();
         drop(beside);
 
-        // Nothing of the app's changed: its index, the sign-in part way, and
-        // the install from before.
+        // Nothing of the app's changed: its index, its kept vaults, the
+        // sign-in part way, and the install from before.
+        let kept = Store::new(dir.join("accounts").join(&w));
+        assert_eq!(kept.sync().as_deref(), Some(work().sync.as_str()));
         assert_eq!(
             fs::read_to_string(dir.join("accounts.json")).unwrap(),
             index

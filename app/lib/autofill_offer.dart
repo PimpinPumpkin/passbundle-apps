@@ -229,7 +229,7 @@ class _AutofillCardState extends State<AutofillCard> {
     final (title, subtitle) = switch (row) {
       SetupRow.autofill when status?.ios == true => (
         'Use PassBundle for AutoFill',
-        'Fill logins in apps and Safari',
+        'Fill logins and sign in with passkeys in apps and Safari',
       ),
       SetupRow.autofill => (
         'Use PassBundle for autofill',

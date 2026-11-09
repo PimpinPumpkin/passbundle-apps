@@ -11,7 +11,8 @@ import XCTest
 /// kept as the app keeps them: each unlocks on its own, the website's logins
 /// are labeled with their account, a login fills only from its own account,
 /// nothing in the app's folder changes, and every account locks as the
-/// request ends. The screens are drawn in the host app's window, attached to
+/// request ends; and a passkey signs from its own account, its answer the
+/// core's test vectors' byte for byte. The screens are drawn in the host app's window, attached to
 /// the results, and saved where PB_SHOTS says (tools/ios-autofill-screens.sh).
 final class AutoFillTests: XCTestCase {
   /// The sample vault's master password, and its Backup service login
@@ -118,8 +119,8 @@ final class AutoFillTests: XCTestCase {
     let provider = Provider()
     var filled: ASPasswordCredential?
     var ended = false
-    provider.onFinish = { credential in
-      filled = credential
+    provider.onFinish = { answer in
+      if case .password(let credential) = answer { filled = credential }
       ended = true
     }
     try show(provider)
@@ -211,7 +212,9 @@ final class AutoFillTests: XCTestCase {
 
     let provider = Provider()
     var filled: ASPasswordCredential?
-    provider.onFinish = { filled = $0 }
+    provider.onFinish = { answer in
+      if case .password(let credential) = answer { filled = credential }
+    }
     try show(provider)
     provider.start(domains: ["backup.example.test"], picked: "\(Self.personal)/\(Self.backup)")
     wait("filled the picked login") { filled != nil }
@@ -219,6 +222,72 @@ final class AutoFillTests: XCTestCase {
     XCTAssertEqual(filled?.password, "not-a-real-password-3")
     // Only the picked suggestion's account was unlocked.
     XCTAssertEqual(provider.accounts.filter(\.unlocked).map(\.id), [Self.personal])
+  }
+
+  /// A site asking for a passkey (as iOS's passkey sheet hands it over):
+  /// the site's passkeys from each account unlocked here, and picking one
+  /// signs the site's hash with it, from its own account. The sample's
+  /// passkey and its answer are the core's vectors (core/tests/vectors,
+  /// "passkeyAssertions"); unlocking here is the proof the site asked for.
+  func testAPasskeySignsFromItsOwnAccountAsTheVectorsSay() throws {
+    let provider = Provider()
+    var signed: ASPasskeyAssertionCredential?
+    provider.onFinish = { answer in
+      if case .signedIn(let credential) = answer { signed = credential }
+    }
+    try show(provider)
+    let hash = try XCTUnwrap(Data(base64Encoded: "XKejityl+6pXSQZTJkFlB9itgiV5zYYy9GZ/SvZZWsw="))
+    provider.signIn = Provider.PasskeySignIn(rpId: "backup.example.test", clientDataHash: hash, allowed: [])
+    provider.start(domains: ["backup.example.test"], picked: nil)
+    wait("asked to unlock") { isLocked(provider) }
+    provider.unlock(password: Self.password)
+    wait("listed the site's passkey") { isLogins(provider) && !provider.passkeys.isEmpty }
+    XCTAssertEqual(provider.passkeys.map(\.name), ["Backup service"])
+    XCTAssertEqual(provider.passkeys.map(\.account), [Self.work])
+    XCTAssertEqual(provider.passkeys.map(\.username), ["backup@example.test"])
+    snapshot("4-passkey")
+
+    provider.pickPasskey(provider.passkeys[0])
+    wait("signed") { signed != nil }
+    XCTAssertEqual(signed?.relyingParty, "backup.example.test")
+    XCTAssertEqual(signed?.clientDataHash, hash)
+    XCTAssertEqual(signed?.credentialID.base64EncodedString(), "DC9qjk0bTzqefFuNKh9uQA==")
+    XCTAssertEqual(signed?.userHandle.base64EncodedString(), "oKGio6SlpqeoqaqrrK2urw==")
+    XCTAssertEqual(
+      signed?.authenticatorData.base64EncodedString(), "nh7vJ4KxrtUibcKd8eJn5gsIbkWJD4xOEHkA/LT0nzkdAAAAAA==")
+    XCTAssertEqual(
+      signed?.signature.base64EncodedString(),
+      "MEYCIQDlKsQiHkf2H+IojpwLSgfI1KvTjEW6TN/cQqv9gJz83gIhAOxmswPGHHoBLgawOa7+hzh2ieh91G1wdcE/C5jEcbR+")
+  }
+
+  /// A site making a passkey, with two accounts unlocked: it names the site
+  /// and the account on it, and asks which PassBundle account it goes in.
+  /// (Saving it goes to the server, which this test has none of.)
+  func testMakingAPasskeyAsksWhichAccountItGoesIn() throws {
+    let provider = Provider()
+    try show(provider)
+    provider.making = Provider.PasskeyMaking(
+      rpId: "new.example.test", userName: "ana@new.example.test", userHandle: Data([1, 2, 3, 4]),
+      clientDataHash: Data(repeating: 7, count: 32), excluded: [])
+    provider.start(domains: [], picked: nil)
+    wait("asked to unlock") { isLocked(provider) }
+    provider.unlock(password: Self.password)
+    wait("asked to save it") {
+      if case .saving = provider.screen { return true }
+      return false
+    }
+    XCTAssertEqual(provider.saveIn, Self.work)
+    provider.askToUnlock(provider.locked[0])
+    wait("asked to unlock the personal account") { isLocked(provider) }
+    provider.unlock(password: Self.password)
+    wait("asked to save it again") {
+      if case .saving = provider.screen { return true }
+      return false
+    }
+    // Still where it was going, with the other account to choose now.
+    XCTAssertEqual(provider.saveIn, Self.work)
+    XCTAssertTrue(provider.locked.isEmpty)
+    snapshot("5-save-passkey")
   }
 
   /// With no account signed in to in the app, it says where to start.

@@ -1333,6 +1333,34 @@ pub extern "C" fn pb_suggestions() -> *mut c_char {
     })
 }
 
+/// The passkeys iOS may list in its passkey sheet, for the app to give iOS
+/// after each sync (docs/phones.md, "Passkeys"): from every unlocked account,
+/// `[{account, id, rpId, userName, credentialId, userHandle}]`, the IDs in
+/// base64url, never a key. Free it with `pb_free`.
+#[cfg(target_os = "ios")]
+#[no_mangle]
+pub extern "C" fn pb_passkey_suggestions() -> *mut c_char {
+    with_accounts(|accounts| {
+        Value::Array(
+            accounts
+                .unlocked()
+                .flat_map(|(account, vault)| {
+                    vault.passkey_suggestions().into_iter().map(move |s| {
+                        json!({
+                            "account": account,
+                            "id": s.id,
+                            "rpId": s.rp_id,
+                            "userName": s.user_name,
+                            "credentialId": base64url(&s.credential_id),
+                            "userHandle": base64url(&s.user_handle),
+                        })
+                    })
+                })
+                .collect(),
+        )
+    })
+}
+
 /// Opens the core on the Android app's folder, unless it's open already: the
 /// autofill service can start the app's process without its screens.
 #[cfg(target_os = "android")]
