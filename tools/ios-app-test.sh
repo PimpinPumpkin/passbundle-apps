@@ -22,6 +22,9 @@ if [ -n "${PB_TEST_SERVER:-}" ]; then
   (cd core && cargo run --locked --quiet --example test_account -- "$PB_TEST_SERVER" "$email" "$password") > /dev/null
   defines=(--dart-define="PB_TEST_SERVER=$PB_TEST_SERVER" --dart-define="PB_TEST_EMAIL=$email" --dart-define="PB_TEST_PASSWORD=$password")
 fi
+# Where the test saves the screens it draws, for looking at (CI's artifacts).
+mkdir -p app/build/ios-screens
+defines+=(--dart-define="PB_SHOTS=$PWD/app/build/ios-screens")
 
 cd app
 # The simulator sometimes never finishes installing or launching the app

@@ -108,6 +108,25 @@ void declinedTheOffer() {
   putOffAutofill();
 }
 
+/// Where an iPhone's test saves the screens it draws (tools/ios-app-test.sh),
+/// for looking at: CI's artifacts.
+const shots = String.fromEnvironment('PB_SHOTS');
+
+/// The screen as it is, saved where [shots] says, on an iPhone. Never fails
+/// a test: a screen that can't be saved is only said.
+Future<void> shot(WidgetTester tester, String name) async {
+  if (!Platform.isIOS || shots.isEmpty) return;
+  try {
+    await tester.pump(const Duration(milliseconds: 600));
+    final bytes = await IntegrationTestWidgetsFlutterBinding.instance
+        .takeScreenshot(name);
+    Directory(shots).createSync(recursive: true);
+    File('$shots/app-$name.png').writeAsBytesSync(bytes);
+  } catch (e) {
+    debugPrint('Couldn\'t save the screen $name: $e');
+  }
+}
+
 // A real server the phone reaches (tools/android-app-test.sh, with
 // PB_TEST_SERVER), and an account on it with one login.
 const server = String.fromEnvironment('PB_TEST_SERVER');
@@ -237,6 +256,7 @@ void main() {
         // test account's other tests add more).
         expect(dir, contains('/Shared/AppGroup/'));
         expect((await Core.suggest())['count'], greaterThanOrEqualTo(1));
+        await shot(tester, '1-vault');
       }
 
       if (Platform.isAndroid) {
@@ -343,6 +363,7 @@ void main() {
       // Unlocking with it: no master password, and nothing offered.
       await tester.tap(find.byTooltip('Lock'));
       await pumpUntil(tester, find.text(unlockWith));
+      await shot(tester, '2-lock-screen');
       await tester.tap(find.text(unlockWith));
       await pumpUntil(tester, find.text('Logins'));
       await tester.pump(const Duration(seconds: 1));
@@ -481,6 +502,7 @@ void main() {
       await pumpUntil(tester, find.text('Logins'));
       await pumpUntil(tester, find.text('Turn on AutoFill'));
       expect(find.text('Use PassBundle for AutoFill'), findsOneWidget);
+      await shot(tester, '3-turn-on-autofill');
       expect(find.text('Use PassBundle for passkeys'), findsNothing);
 
       await tapWhenStill(
@@ -505,6 +527,7 @@ void main() {
       await tester.tap(find.byTooltip('Settings'));
       await pumpUntil(tester, find.byKey(const ValueKey('setup-autofill')));
       expect(find.text('AutoFill'), findsOneWidget);
+      await shot(tester, '4-settings');
       await tester.tap(find.byTooltip('Items'));
       await tester.pump(const Duration(milliseconds: 400));
     },
@@ -533,10 +556,12 @@ void main() {
       await unlockWhenStill(tester);
       await pumpUntil(tester, find.text('Logins'));
       await tester.pump(const Duration(seconds: 1));
+      await shot(tester, '5-dark-vault');
 
       await openItem(tester, 'Backup service');
       await pumpUntil(tester, find.byTooltip('Copy password'));
       await tester.pump(const Duration(seconds: 1));
+      await shot(tester, '6-dark-item');
       await tester.pageBack();
       await pumpUntil(tester, find.byTooltip('New item').hitTestable());
 

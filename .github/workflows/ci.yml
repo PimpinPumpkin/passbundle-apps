@@ -303,6 +303,9 @@ jobs:
       - name: The app's tests, on an iPhone simulator (unlock, copying through Swift, locking, iOS's certificate checks, signing in with the Keychain keeping the session, and Face ID unlock)
         timeout-minutes: 40
         run: tools/ios-app-test.sh
+      - name: The AutoFill extension's screens and the core under them, on an iPhone simulator (two accounts, each unlocked on its own, and Face ID with debug builds' stand-in)
+        timeout-minutes: 20
+        run: tools/ios-autofill-screens.sh
       - name: Filling a website's sign-in form in Safari through iOS's AutoFill
         timeout-minutes: 40
         run: tools/ios-autofill-test.sh
@@ -320,6 +323,14 @@ jobs:
         with:
           name: core-ios
           path: app/ios/PassBundleCore.xcframework
+      # The screens the iPhone tests drew (the app's, and the AutoFill
+      # extension's), for looking at.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: ios-screens
+          path: app/build/ios-screens
+          if-no-files-found: ignore
 
   agent:
     if: ${{ !inputs.ios_only }}
