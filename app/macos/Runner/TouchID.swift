@@ -7,7 +7,9 @@
 // current fingerprints match: adding or removing one voids it. The seal, the
 // enclave's wrapped key, and nothing else are kept in a file of the
 // account's, readable only by the person. The user key goes between the core
-// and the enclave here, never through Dart.
+// and the enclave here, never through Dart, and never as a Data: sealing
+// reads it from the core's own buffer, and opening puts it in one buffer of
+// its own (`TouchIDSecret`), zeroed once the core has it.
 //
 // Not the weaker "ask for Touch ID, then read a normal keychain item" that
 // DESIGN.md rules out: without the enclave's agreement, which Touch ID
@@ -22,13 +24,49 @@ import Foundation
 import LocalAuthentication
 import Security
 
+/// A secret's bytes in one buffer of its own, zeroed when it's wiped and
+/// when it's let go of. A class, so handing it on never copies them. Never a
+/// Data: copies of a Data share their bytes until one is changed, so zeroing
+/// one zeroes a new copy and leaves the bytes where they were.
+final class TouchIDSecret {
+  private let bytes: UnsafeMutableRawBufferPointer
+
+  /// Takes `data`'s bytes and zeroes them where they were. `data` must be
+  /// the only one with them, as what CryptoKit hands back is.
+  init(taking data: inout Data) {
+    let bytes = UnsafeMutableRawBufferPointer.allocate(byteCount: data.count, alignment: 1)
+    data.withUnsafeMutableBytes { raw in
+      bytes.copyMemory(from: UnsafeRawBufferPointer(raw))
+      if let base = raw.baseAddress { memset_s(base, raw.count, 0, raw.count) }
+    }
+    self.bytes = bytes
+  }
+
+  var count: Int { bytes.count }
+
+  func withBytes<T>(_ body: (UnsafeRawBufferPointer) throws -> T) rethrows -> T {
+    try body(UnsafeRawBufferPointer(bytes))
+  }
+
+  func wipe() {
+    if let base = bytes.baseAddress { memset_s(base, bytes.count, 0, bytes.count) }
+  }
+
+  deinit {
+    wipe()
+    bytes.deallocate()
+  }
+}
+
 /// Sealing a user key to a Secure Enclave key (docs/vectors/mac-local-v1.json
 /// in the meta repo, "touchId"): an ephemeral P-256 key agrees with the
 /// enclave's public key; HKDF-SHA256 of the shared secret, salted with both
 /// public keys (X9.63, the ephemeral's first), with `info`, gives an
 /// AES-256-GCM key; the user key is sealed with it, authenticating `info`, a
 /// zero byte, and the account's id, so one account's seal never opens as
-/// another's. Opening needs the enclave's half of the agreement.
+/// another's. Opening needs the enclave's half of the agreement. The shared
+/// secret and the AES key stay CryptoKit's own (SharedSecret, SymmetricKey),
+/// which zero themselves when let go of.
 enum TouchIDSeal {
   static let info = Data("keykeeper Touch ID v1".utf8)
 
@@ -43,9 +81,10 @@ enum TouchIDSeal {
 
   /// The user key sealed to the enclave's public key: the ephemeral public
   /// key (X9.63) and the sealed box (nonce, ciphertext, tag). Only the
-  /// enclave's public key is used, so sealing asks for nothing.
+  /// enclave's public key is used, so sealing asks for nothing. The user
+  /// key is read where it is, not copied.
   static func seal(
-    _ userKey: Data, to enclave: P256.KeyAgreement.PublicKey, account: String,
+    _ userKey: UnsafeRawBufferPointer, to enclave: P256.KeyAgreement.PublicKey, account: String,
     ephemeral: P256.KeyAgreement.PrivateKey = P256.KeyAgreement.PrivateKey(),
     nonce: AES.GCM.Nonce = AES.GCM.Nonce()
   ) throws -> (ephemeral: Data, sealed: Data) {
@@ -63,12 +102,14 @@ enum TouchIDSeal {
   static func open(
     _ sealed: Data, ephemeral: Data, enclave: P256.KeyAgreement.PublicKey, account: String,
     agree: (P256.KeyAgreement.PublicKey) throws -> SharedSecret
-  ) throws -> Data {
+  ) throws -> TouchIDSecret {
     let shared = try agree(P256.KeyAgreement.PublicKey(x963Representation: ephemeral))
-    return try AES.GCM.open(
+    // CryptoKit opens into a Data, held only here: taken and zeroed at once.
+    var opened = try AES.GCM.open(
       AES.GCM.SealedBox(combined: sealed),
       using: key(shared, ephemeral: ephemeral, enclave: enclave.x963Representation),
       authenticating: authenticated(account))
+    return TouchIDSecret(taking: &opened)
   }
 }
 
@@ -145,11 +186,12 @@ struct TouchIDFiles {
 /// account's user key to seal, and take one back to unlock with or to
 /// confirm an approval with.
 protocol TouchIDCore {
-  /// `body` with the account's user key, wiped after; nil while the account
-  /// is locked or the core is busy.
-  func withUserKey<T>(_ account: String, _ body: (Data) throws -> T) rethrows -> T?
-  /// The user key given back: "" if the core took it, else the words to show.
-  func give(_ account: String, key: Data, forApproval: Bool) -> String
+  /// `body` with the account's user key where the core has it for the call,
+  /// wiped after; nil while the account is locked or the core is busy.
+  func withUserKey<T>(_ account: String, _ body: (UnsafeRawBufferPointer) throws -> T) rethrows -> T?
+  /// The user key given back: "" if the core took it, else the words to
+  /// show. The core reads it where it is; the caller wipes it after.
+  func give(_ account: String, key: TouchIDSecret, forApproval: Bool) -> String
 }
 
 /// The core the app loaded (Dart opens it: app/lib/core.dart), found by its
@@ -206,17 +248,17 @@ final class LoadedCore: TouchIDCore {
     setRemove(remove)
   }
 
-  func withUserKey<T>(_ account: String, _ body: (Data) throws -> T) rethrows -> T? {
+  func withUserKey<T>(_ account: String, _ body: (UnsafeRawBufferPointer) throws -> T) rethrows -> T? {
     var length = 0
     guard let bytes = account.withCString({ userKey($0, &length) }) else { return nil }
     defer { freeSecret(bytes, length) }
     // Not copied: the core's buffer, which it wipes as it frees it.
-    return try body(Data(bytesNoCopy: bytes, count: length, deallocator: .none))
+    return try body(UnsafeRawBufferPointer(start: bytes, count: length))
   }
 
-  func give(_ account: String, key: Data, forApproval: Bool) -> String {
+  func give(_ account: String, key: TouchIDSecret, forApproval: Bool) -> String {
     let call = forApproval ? confirmWithKey : unlockWithKey
-    let answer = key.withUnsafeBytes { raw in
+    let answer = key.withBytes { raw in
       account.withCString { call($0, raw.bindMemory(to: UInt8.self).baseAddress, raw.count) }
     }
     guard let answer else { return "Couldn't unlock with Touch ID." }
@@ -329,32 +371,39 @@ enum TouchID {
     DispatchQueue.global(qos: .userInitiated).async {
       let context = LAContext()
       context.localizedReason = reason
-      var key: Data?
-      var failure: Error?
-      do {
+      let opened = Result<TouchIDSecret, Error> {
         let enclave = try SecureEnclave.P256.KeyAgreement.PrivateKey(
           dataRepresentation: record.enclaveKey, authenticationContext: context)
-        key = try TouchIDSeal.open(
+        return try TouchIDSeal.open(
           record.sealed, ephemeral: record.ephemeralPublicKey, enclave: enclave.publicKey, account: account
         ) { try enclave.sharedSecretFromKeyAgreement(with: $0) }
-      } catch {
-        failure = error
       }
       DispatchQueue.main.async {
-        guard var key else {
-          if let failure, cancelled(failure) { return done(false, nil) }
-          // Touch ID said no for now (too many tries, say): kept, for later.
-          if let failure, (failure as NSError).domain == LAErrorDomain {
-            return done(false, "Couldn't unlock with Touch ID. Use your master password.")
-          }
-          // The enclave's key or the seal no longer opens: off.
-          files.remove(account)
-          return done(false, off)
-        }
-        let why = core.give(account, key: key, forApproval: forApproval)
-        key.resetBytes(in: 0..<key.count)
-        done(why.isEmpty, why.isEmpty ? nil : why)
+        finish(opened, account: account, core: core, forApproval: forApproval, files: files, done)
       }
+    }
+  }
+
+  /// What `unlock` does with what the enclave opened: gives the core the
+  /// user key and zeroes it, or says why not.
+  static func finish(
+    _ opened: Result<TouchIDSecret, Error>, account: String, core: TouchIDCore, forApproval: Bool,
+    files: TouchIDFiles, _ done: (Bool, String?) -> Void
+  ) {
+    switch opened {
+    case .success(let key):
+      let why = core.give(account, key: key, forApproval: forApproval)
+      key.wipe()
+      done(why.isEmpty, why.isEmpty ? nil : why)
+    case .failure(let failure):
+      if cancelled(failure) { return done(false, nil) }
+      // Touch ID said no for now (too many tries, say): kept, for later.
+      if (failure as NSError).domain == LAErrorDomain {
+        return done(false, "Couldn't unlock with Touch ID. Use your master password.")
+      }
+      // The enclave's key or the seal no longer opens: off.
+      files.remove(account)
+      done(false, off)
     }
   }
 
