@@ -59,11 +59,20 @@ final class AutoFillTests: XCTestCase {
     }
   }
 
+  /// The host app's window. Tests run on the main thread, so on the main
+  /// actor, where UIKit is.
+  private func window() -> UIWindow? {
+    MainActor.assumeIsolated {
+      UIApplication.shared.connectedScenes.compactMap { ($0 as? UIWindowScene)?.keyWindow }.first
+    }
+  }
+
   /// The extension's screens, in the host app's window, as iOS shows them.
   private func show(_ provider: Provider) throws {
-    let window = try XCTUnwrap(
-      UIApplication.shared.connectedScenes.compactMap { ($0 as? UIWindowScene)?.keyWindow }.first)
-    window.rootViewController = UIHostingController(rootView: ProviderView(provider: provider))
+    let window = try XCTUnwrap(window(), "The host app has no window")
+    MainActor.assumeIsolated {
+      window.rootViewController = UIHostingController(rootView: ProviderView(provider: provider))
+    }
   }
 
   /// Waits for the screens and the core's answers (they come on the main queue).
@@ -89,11 +98,11 @@ final class AutoFillTests: XCTestCase {
   /// artifacts where PB_SHOTS says.
   private func snapshot(_ name: String) {
     RunLoop.main.run(until: Date().addingTimeInterval(0.8))
-    guard
-      let window = UIApplication.shared.connectedScenes.compactMap({ ($0 as? UIWindowScene)?.keyWindow }).first
-    else { return }
-    let image = UIGraphicsImageRenderer(bounds: window.bounds).image { _ in
-      window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
+    guard let window = window() else { return }
+    let image = MainActor.assumeIsolated {
+      UIGraphicsImageRenderer(bounds: window.bounds).image { _ in
+        window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
+      }
     }
     let attachment = XCTAttachment(image: image)
     attachment.name = name
