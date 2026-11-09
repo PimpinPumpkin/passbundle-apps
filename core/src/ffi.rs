@@ -3117,6 +3117,57 @@ pub unsafe extern "C" fn pb_trash(account: *const c_char, id: *const c_char) -> 
     with_app_waiting(&account, |app| done(app.trash(&id)))
 }
 
+/// What `pb_bulk` would do with several items (docs/core.md, "Selecting
+/// several items"), from the vault kept here, with nothing sent. `ids` is a
+/// JSON list; `action` is what to do (`Bulk::from_json`). `{ok, go,
+/// skipped}`: the ids it would be done for, and `{id, why}` for each it
+/// would leave as it is.
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_bulk_plan(
+    account: *const c_char,
+    ids: *const c_char,
+    action: *const c_char,
+) -> *mut c_char {
+    let account = text(account);
+    let ids: Vec<String> = serde_json::from_str(&text(ids)).unwrap_or_default();
+    let action = text(action);
+    with_app(&account, |app| {
+        let plan = crate::app::Bulk::from_json(&action).and_then(|a| app.bulk_plan(&ids, &a));
+        plan.map_or_else(failed, |plan| plan.json())
+    })
+}
+
+/// Does one thing to several items, then syncs once (`App::bulk`).
+/// `password` is the master password, for the items that ask for it, or
+/// empty to leave those as they are; a wrong one does nothing. `{ok, done,
+/// skipped, failed, error, offline, signedOut, synced}`: the ids it's done
+/// for, `{id, why}` for each left as it is, and the ids it failed for with
+/// the words to show.
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_bulk(
+    account: *const c_char,
+    ids: *const c_char,
+    action: *const c_char,
+    password: *const c_char,
+) -> *mut c_char {
+    let account = text(account);
+    let ids: Vec<String> = serde_json::from_str(&text(ids)).unwrap_or_default();
+    let action = text(action);
+    let password = Zeroizing::new(text(password));
+    with_app_waiting(&account, |app| {
+        let password = Some(password.as_str()).filter(|p| !p.is_empty());
+        let outcome =
+            crate::app::Bulk::from_json(&action).and_then(|a| app.bulk(&ids, &a, password));
+        outcome.map_or_else(failed, |outcome| outcome.json())
+    })
+}
+
 /// A new password or passphrase (`generator::Options`, as JSON; missing
 /// choices take the defaults, and null takes the last choices), held to the
 /// organizations' policy. The choices become the next ones on this device.

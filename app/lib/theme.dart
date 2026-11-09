@@ -19,6 +19,10 @@ import 'glyphs.dart';
 
 const brandGreen = Color(0xFF1F6F5C);
 
+/// A favorite's star, and its edge.
+const favoriteColor = Color(0xFFE8B23A);
+const favoriteEdge = Color(0xFFC9921B);
+
 /// The typeface, everywhere: one variable font, whose weight axis follows
 /// each style's FontWeight (pubspec.yaml).
 const passBundleFontFamily = 'Google Sans Flex';
