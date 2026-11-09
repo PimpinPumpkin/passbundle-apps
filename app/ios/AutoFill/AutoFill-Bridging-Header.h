@@ -23,6 +23,11 @@ char *pb_fillable(const char *domain);
 // Every unlocked account's items whose name, username, or website has
 // `query`: [{id, account, kind, name, subtitle, reprompt, ...}].
 char *pb_list_all(const char *query);
+// One of an account's items, as its screen shows it before anything is
+// revealed: {name, website, uris: [its websites], ...}, never a secret. The
+// extension reads a login's websites from it, to ask before filling a login
+// on a site that isn't one of them.
+char *pb_item(const char *account, const char *id);
 // A login's "username" or "password" to fill, as UTF-8; null if there's none.
 // Free it with pb_free_secret, which wipes it.
 uint8_t *pb_fill_secret(const char *account, const char *id, const char *what, size_t *len);
