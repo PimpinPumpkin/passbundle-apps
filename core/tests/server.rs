@@ -2069,7 +2069,7 @@ fn an_expiration_date_and_reminder_days_saved_in_the_app_come_back() {
 /// finishes and keeps the device token it's given, so signing in on it
 /// again isn't asked, while the same device without its token is new
 /// again; a wrong number denies it at once, and so does Deny; and signing in
-/// again while it waits finds the same check.
+/// again while it waits, without the check's token, starts a new one.
 #[test]
 fn a_new_device_waits_for_its_number_from_another_and_is_known_after() {
     use passbundle_core::new_device::{Answered, Email, Status};
@@ -2164,11 +2164,18 @@ fn a_new_device_waits_for_its_number_from_another_and_is_known_after() {
         panic!("a device without its token should wait for approval");
     };
     assert_ne!(second.id, check.id);
-    // Signing in again while it waits finds the same check, and number.
+    // A check has one holder: signing in again without its token (a new
+    // sign-in, as after the app started again) ends it and starts another,
+    // whose number the old one's approval can't answer.
     let Step::NewDevice(again) = new.sign_in(&url, &email, PASSWORD).unwrap() else {
         panic!("still waiting");
     };
-    assert_eq!((&again.id, &again.number), (&second.id, &second.number));
+    assert_ne!(again.id, second.id);
+    assert!(matches!(
+        approving.answer_new_device_check(&second.id, Some(&second.number)),
+        Err(Error::Refused(_))
+    ));
+    let second = again;
 
     // A wrong number denies it at once: one try.
     let wrong = if second.number == "10" { "11" } else { "10" };
