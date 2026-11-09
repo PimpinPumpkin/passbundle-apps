@@ -1275,3 +1275,134 @@ class SettingsGroup extends StatelessWidget {
     ],
   );
 }
+
+/// A form field's edge, with the field's label inside it, over the value,
+/// as an item's page shows a detail. Material's outlined field cuts its
+/// label into the top edge instead, where it sits on the line and touches
+/// whatever is above it; to the decorator this one isn't an outline, so the
+/// label stays inside.
+class LabeledFieldBorder extends OutlineInputBorder {
+  const LabeledFieldBorder({super.borderSide, super.borderRadius});
+
+  @override
+  bool get isOutline => false;
+
+  @override
+  LabeledFieldBorder copyWith({
+    BorderSide? borderSide,
+    BorderRadius? borderRadius,
+    double? gapPadding,
+  }) => LabeledFieldBorder(
+    borderSide: borderSide ?? this.borderSide,
+    borderRadius: borderRadius ?? this.borderRadius,
+  );
+
+  @override
+  LabeledFieldBorder scale(double t) => LabeledFieldBorder(
+    borderSide: borderSide.scale(t),
+    borderRadius: borderRadius * t,
+  );
+
+  @override
+  ShapeBorder? lerpFrom(ShapeBorder? a, double t) => a is LabeledFieldBorder
+      ? LabeledFieldBorder(
+          borderSide: BorderSide.lerp(a.borderSide, borderSide, t),
+          borderRadius: BorderRadius.lerp(a.borderRadius, borderRadius, t)!,
+        )
+      : super.lerpFrom(a, t);
+
+  @override
+  ShapeBorder? lerpTo(ShapeBorder? b, double t) => b is LabeledFieldBorder
+      ? LabeledFieldBorder(
+          borderSide: BorderSide.lerp(borderSide, b.borderSide, t),
+          borderRadius: BorderRadius.lerp(borderRadius, b.borderRadius, t)!,
+        )
+      : super.lerpTo(b, t);
+
+  /// The whole edge: there's no gap for a label to sit in.
+  @override
+  void paint(
+    Canvas canvas,
+    Rect rect, {
+    double? gapStart,
+    double gapExtent = 0.0,
+    double gapPercentage = 0.0,
+    TextDirection? textDirection,
+  }) => super.paint(canvas, rect, textDirection: textDirection);
+}
+
+/// A form's field (the item editor's): a box the shape of the app's other
+/// fields, with its label always inside, over the value, in the style an
+/// item's page labels a detail with (13, semibold, muted; the accent while
+/// it's typed in). Text sits 16 in from the box's edge, as a card's rows
+/// do, so labels, values, and switch rows share one left edge.
+InputDecoration labeledField(
+  BuildContext context,
+  String label, {
+  String? hint,
+  Widget? suffix,
+}) {
+  final c = context.colors;
+  final scheme = Theme.of(context).colorScheme;
+  LabeledFieldBorder edge(Color color, [double width = 1]) =>
+      LabeledFieldBorder(
+        borderRadius: BorderRadius.circular(fieldRadius),
+        borderSide: BorderSide(color: color, width: width),
+      );
+  // Drawn at three quarters of its size once it's over the value.
+  TextStyle labelStyle(Color color) =>
+      TextStyle(color: color, fontSize: 13 / 0.75, fontWeight: FontWeight.w600);
+  return InputDecoration(
+    labelText: label,
+    hintText: hint,
+    suffixIcon: suffix,
+    floatingLabelBehavior: FloatingLabelBehavior.always,
+    labelStyle: labelStyle(c.muted),
+    floatingLabelStyle: WidgetStateTextStyle.resolveWith(
+      (states) => labelStyle(
+        states.contains(WidgetState.focused) ? scheme.primary : c.muted,
+      ),
+    ),
+    hintStyle: TextStyle(color: c.muted.withValues(alpha: 0.7)),
+    // The decorator sets what's typed 4 further in than this: 16 in all, as
+    // a row's text is on an item's page.
+    contentPadding: const EdgeInsets.fromLTRB(12, 10, 12, 9),
+    border: edge(c.fieldEdge),
+    enabledBorder: edge(c.fieldEdge),
+    disabledBorder: edge(c.fieldEdge),
+    focusedBorder: edge(scheme.primary, 1.6),
+  );
+}
+
+/// The corners of a field, and of a [FieldBox].
+const fieldRadius = 12.0;
+
+/// A row in a form that isn't typed in (a switch), in a box the shape and
+/// color of the fields around it, and at least as tall as they are.
+class FieldBox extends StatelessWidget {
+  const FieldBox({super.key, required this.child});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.colors;
+    return Material(
+      color: c.field,
+      clipBehavior: Clip.antiAlias,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(fieldRadius),
+        side: BorderSide(color: c.fieldEdge),
+      ),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: 60),
+        child: Align(
+          alignment: Alignment.centerLeft,
+          widthFactor: 1,
+          heightFactor: 1,
+          child: child,
+        ),
+      ),
+    );
+  }
+}
