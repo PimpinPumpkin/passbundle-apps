@@ -1,31 +1,34 @@
 import AuthenticationServices
 import SwiftUI
 
-/// PassBundle in iOS's AutoFill (docs/phones.md, "Autofill" and "Passkeys"):
-/// a separate process with a tight memory limit, so no Flutter. Its few
-/// screens are our own, in SwiftUI, around the same core, linked in. It reads
-/// the vault the app keeps in the App Group, and unlocks on its own (Face ID
-/// or Touch ID, or the master password), since it can't share the app's
-/// memory. A password is taken from the core only once someone picks its
-/// login, and a passkey signs only once someone picks it.
+/// PassBundle in iOS's AutoFill (docs/phones.md, "Autofill"): a separate
+/// process with a tight memory limit, so no Flutter. Its few screens are our
+/// own, in SwiftUI, around the same core, linked in. It reads the vault the
+/// app keeps in the App Group, beside the app and without changing anything
+/// there, and unlocks on its own (Face ID or Touch ID, or the master
+/// password), since it can't share the app's memory. With several accounts,
+/// it lists the logins of each account unlocked here, labeled, and fills a
+/// login only from its own account. A password is taken from the core only
+/// once someone picks its login, and every account locks as the request
+/// ends, however it ends.
 class CredentialProviderViewController: ASCredentialProviderViewController {
   private let provider = Provider()
 
   override func viewDidLoad() {
     super.viewDidLoad()
-    provider.onFinish = { [weak self] answer in
-      // Nothing decrypted stays behind in this process.
-      _ = Shared.answer(pb_lock())
+    // A kept key that no longer opens its account's vault: the core turns
+    // that account's Face ID off, as the app does.
+    pb_set_remove_biometric { account in
+      guard let account else { return }
+      Shared.removeBiometric(String(cString: account))
+    }
+    provider.onFinish = { [weak self] credential in
       guard let context = self?.extensionContext else { return }
-      switch answer {
-      case .password(let credential):
+      if let credential {
         context.completeRequest(withSelectedCredential: credential, completionHandler: nil)
-      case .signedIn(let credential):
-        context.completeAssertionRequest(using: credential, completionHandler: nil)
-      case .made(let credential):
-        context.completeRegistrationRequest(using: credential, completionHandler: nil)
-      case .refused(let code):
-        context.cancelRequest(withError: NSError(domain: ASExtensionErrorDomain, code: code.rawValue))
+      } else {
+        context.cancelRequest(
+          withError: NSError(domain: ASExtensionErrorDomain, code: ASExtensionError.userCanceled.rawValue))
       }
     }
     let screens = UIHostingController(rootView: ProviderView(provider: provider))
@@ -36,71 +39,32 @@ class CredentialProviderViewController: ASCredentialProviderViewController {
     screens.didMove(toParent: self)
   }
 
+  /// However the sheet goes away (Cancel, a fill, or swiped down), nothing
+  /// decrypted stays in this process, which iOS may keep for the next request.
+  override func viewDidDisappear(_ animated: Bool) {
+    super.viewDidDisappear(animated)
+    provider.close()
+  }
+
   /// The logins for the website someone is signing in to.
   override func prepareCredentialList(for serviceIdentifiers: [ASCredentialServiceIdentifier]) {
     provider.start(domains: serviceIdentifiers.compactMap(Provider.domain), picked: nil)
   }
 
-  /// A site asking for a passkey (and maybe a password): its passkeys, then
-  /// its logins. iOS has checked the site's ID against the page or the app.
-  override func prepareCredentialList(
-    for serviceIdentifiers: [ASCredentialServiceIdentifier],
-    requestParameters: ASPasskeyCredentialRequestParameters
-  ) {
-    provider.signIn = Provider.PasskeySignIn(
-      rpId: requestParameters.relyingPartyIdentifier,
-      clientDataHash: requestParameters.clientDataHash,
-      allowed: requestParameters.allowedCredentials)
-    provider.start(domains: serviceIdentifiers.compactMap(Provider.domain), picked: nil)
-  }
-
-  /// A suggestion picked from iOS's own list: never filled or signed without
-  /// the person, since the vault opens locked in this process.
+  /// A suggestion picked above the keyboard: never filled without the
+  /// person, since every account is locked in this process.
   override func provideCredentialWithoutUserInteraction(for credentialRequest: ASCredentialRequest) {
     extensionContext.cancelRequest(
       withError: NSError(domain: ASExtensionErrorDomain, code: ASExtensionError.userInteractionRequired.rawValue))
   }
 
-  /// A suggestion picked from iOS's own list, once unlocked: that login, or
-  /// that passkey.
+  /// A suggestion picked above the keyboard, once its account is unlocked:
+  /// that login.
   override func prepareInterfaceToProvideCredential(for credentialRequest: ASCredentialRequest) {
-    if let request = credentialRequest as? ASPasskeyCredentialRequest,
-      let identity = request.credentialIdentity as? ASPasskeyCredentialIdentity
-    {
-      provider.signIn = Provider.PasskeySignIn(
-        rpId: identity.relyingPartyIdentifier, clientDataHash: request.clientDataHash,
-        allowed: [identity.credentialID])
-      provider.start(domains: [], picked: identity.recordIdentifier)
-      return
-    }
     let identity = credentialRequest.credentialIdentity
     provider.start(
       domains: [Provider.domain(identity.serviceIdentifier)].compactMap { $0 },
       picked: identity.recordIdentifier)
-  }
-
-  /// A site making a passkey: saved in a new login for the site, once the
-  /// person unlocks and says so.
-  override func prepareInterface(forPasskeyRegistration registrationRequest: ASCredentialRequest) {
-    guard let request = registrationRequest as? ASPasskeyCredentialRequest,
-      let identity = request.credentialIdentity as? ASPasskeyCredentialIdentity
-    else {
-      return provider.finish(.refused(.failed))
-    }
-    // ES256 is the only kind the core makes: a site that doesn't take it is
-    // told so before anyone unlocks.
-    guard request.supportedAlgorithms.contains(ASCOSEAlgorithmIdentifier.ES256) else {
-      return provider.finish(.refused(.failed))
-    }
-    // iOS 17 doesn't give the site's own list of the credentials it has.
-    var excluded: [Data] = []
-    if #available(iOS 18.0, *) {
-      excluded = request.excludedCredentials?.map(\.credentialID) ?? []
-    }
-    provider.making = Provider.PasskeyMaking(
-      rpId: identity.relyingPartyIdentifier, userName: identity.userName, userHandle: identity.userHandle,
-      clientDataHash: request.clientDataHash, excluded: excluded)
-    provider.start(domains: [], picked: nil)
   }
 }
 
@@ -108,88 +72,60 @@ class CredentialProviderViewController: ASCredentialProviderViewController {
 final class Provider: ObservableObject {
   enum Screen {
     case opening
-    /// The core saving a passkey or signing, over the network maybe.
+    /// The core unlocking or checking a master password (the KDF).
     case working
+    /// An account to unlock (`unlocking`).
     case locked
     case logins
-    /// A login that asks for the master password again, before it fills or
-    /// signs (docs/core.md, "Asking for the master password again").
-    case reprompt(String)
-    /// Saving a new passkey, once the person says so.
-    case saving
+    /// A login that asks for the master password again, before it fills
+    /// (docs/core.md, "Asking for the master password again").
+    case reprompt(Login)
     case unavailable(String)
   }
 
-  /// How the extension ends: with what iOS asked for, or not.
-  enum Answer {
-    case password(ASPasswordCredential)
-    case signedIn(ASPasskeyAssertionCredential)
-    case made(ASPasskeyRegistrationCredential)
-    case refused(ASExtensionError.Code)
+  /// An account signed in to in the app.
+  struct Account: Identifiable, Equatable {
+    let id: String
+    /// Its name here, or its email.
+    let label: String
+    /// Its color's name (core/src/accounts.rs, `TONES`).
+    let tone: String
+    var unlocked = false
   }
 
-  struct Login: Identifiable {
-    let id: String
+  struct Login: Identifiable, Equatable {
+    /// The account's id and the item's, together: two accounts can hold the
+    /// same item (an organization's) under one id.
+    var id: String { "\(account)/\(item)" }
+    let account: String
+    let item: String
     let name: String
     let username: String
     /// Asks for the master password again before it fills.
     var asks = false
   }
 
-  /// A site's passkey sign-in: its ID, the hash of what it signs, and the
-  /// credentials it names (none: any it can find by itself).
-  struct PasskeySignIn {
-    let rpId: String
-    let clientDataHash: Data
-    let allowed: [Data]
-  }
-
-  /// A site making a passkey: its ID, the account, and the credentials the
-  /// vault mustn't already have (iOS 18 and later give them).
-  struct PasskeyMaking {
-    let rpId: String
-    let userName: String
-    let userHandle: Data
-    let clientDataHash: Data
-    let excluded: [Data]
-  }
-
   @Published var screen = Screen.opening
+  @Published var accounts: [Account] = []
+  /// The account the lock screen unlocks.
+  @Published var unlocking: Account?
   @Published var logins: [Login] = []
-  /// The site's passkeys, when it asks for one.
-  @Published var passkeys: [Login] = []
   /// What the person searches for, among all their logins, when the
   /// website's aren't what they want.
   @Published var query = ""
   @Published var note: String?
-  /// "Face ID" or "Touch ID", when the user key is kept for it.
+  /// "Face ID" or "Touch ID", when the account being unlocked has it on.
   @Published var biometric: String?
   /// What ends the extension (the view controller's).
-  var onFinish: (Answer) -> Void = { _ in }
+  var onFinish: (ASPasswordCredential?) -> Void = { _ in }
   /// Ended: nothing answers iOS twice, or after Cancel.
   private(set) var finished = false
-  var signIn: PasskeySignIn?
-  var making: PasskeyMaking?
 
   private var domains: [String] = []
-  private var picked: String?
-  /// Whether the person proved who they are in this request: unlocking, or
-  /// the master password for a login that asks for it.
-  private var verified = false
-
-  /// Whether the core is saving or signing: Cancel waits for it.
-  var working: Bool {
-    if case .working = screen { return true }
-    return false
-  }
-
-  /// Ends the extension with the answer, once: a core call that comes back
-  /// after Cancel, or after another answer, does nothing more.
-  func finish(_ answer: Answer) {
-    guard !finished else { return }
-    finished = true
-    onFinish(answer)
-  }
+  /// A suggestion picked above the keyboard: `<account>/<item>`.
+  private var picked: (account: String, item: String)?
+  private var matching: [Login] = []
+  private var confirmed: Set<String> = []
 
   /// The domain a service identifier names (a website's, or its address's host).
   static func domain(_ service: ASCredentialServiceIdentifier) -> String? {
@@ -200,265 +136,235 @@ final class Provider: ObservableObject {
     }
   }
 
-  /// Opens the kept vault: the logins at once if it's unlocked, else the
-  /// unlock screen, which asks for Face ID or Touch ID first where it's on.
-  /// A passkey always has the person unlock, which is its proof of them.
+  /// With more than one account: what an account's logins are labeled with.
+  func label(_ account: String) -> String? {
+    guard accounts.count > 1 else { return nil }
+    return accounts.first { $0.id == account }?.label
+  }
+
+  func tone(_ account: String) -> String {
+    accounts.first { $0.id == account }?.tone ?? "sapphire"
+  }
+
+  /// Opens the kept accounts, all locked, and asks to unlock the one the
+  /// app shows (or a picked suggestion's): Face ID or Touch ID at once where
+  /// it's on, else its master password.
   func start(domains: [String], picked: String?) {
+    finished = false
     self.domains = domains
-    self.picked = picked
+    self.picked = picked.flatMap { record in
+      let parts = record.split(separator: "/", maxSplits: 1).map(String.init)
+      return parts.count == 2 ? (parts[0], parts[1]) : nil
+    }
     guard let dir = Shared.filesDir() else {
       screen = .unavailable("PassBundle's folder isn't there.")
       return
     }
-    var state = (Shared.answer(pb_open(dir, false)) as? [String: Any])?["state"] as? String
-    // pb_open starts every request with the vault locked; were it ever open
-    // here, a passkey would still have the person unlock first.
-    if state == "unlocked" && (signIn != nil || making != nil) {
-      _ = Shared.answer(pb_lock())
-      state = "locked"
+    let opened = Shared.answer(pb_autofill_open(dir)) as? [String: Any]
+    accounts = ((opened?["accounts"] as? [[String: Any]]) ?? []).compactMap { a in
+      guard let id = a["id"] as? String else { return nil }
+      let name = (a["name"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+      return Account(
+        id: id, label: name ?? a["email"] as? String ?? "", tone: a["tone"] as? String ?? "sapphire")
     }
-    switch state {
-    case "unlocked":
-      show()
-    case "locked":
-      screen = .locked
-      if Shared.biometricKept() {
-        biometric = Shared.biometricMethod()
-        unlockWithBiometric()
-      }
-    default:
+    guard !accounts.isEmpty else {
       screen = .unavailable("Sign in to PassBundle in its app first.")
+      return
     }
+    let shown = opened?["active"] as? String
+    let first =
+      accounts.first { $0.id == self.picked?.account } ?? accounts.first { $0.id == shown } ?? accounts[0]
+    askToUnlock(first, automatically: true)
+  }
+
+  /// The lock screen for an account; Face ID or Touch ID at once, where it's
+  /// on and `automatically`.
+  func askToUnlock(_ account: Account, automatically: Bool = false) {
+    unlocking = account
+    note = nil
+    biometric = Shared.biometricKept(account.id) ? Shared.biometricMethod() : nil
+    screen = .locked
+    if automatically && biometric != nil { unlockWithBiometric() }
   }
 
   func unlockWithBiometric() {
-    Shared.unlockWithBiometric { [weak self] unlocked, error in
-      guard let self else { return }
-      if unlocked {
-        self.verified = true
-        return self.show()
-      }
+    guard let account = unlocking?.id else { return }
+    Shared.unlockWithBiometric(account: account) { [weak self] unlocked, error in
+      guard let self, !self.finished else { return }
+      if unlocked { return self.unlocked(account) }
       self.note = error
+      if !Shared.biometricKept(account) { self.biometric = nil }
     }
   }
 
   func unlock(password: String) {
-    let answer = Shared.answer(pb_unlock(password)) as? [String: Any]
-    if answer?["ok"] as? Bool == true {
-      verified = true
-      return show()
+    guard let account = unlocking?.id else { return }
+    screen = .working
+    DispatchQueue.global(qos: .userInitiated).async {
+      let answer = Shared.answer(pb_unlock(account, password)) as? [String: Any]
+      DispatchQueue.main.async {
+        guard !self.finished else { return }
+        if answer?["ok"] as? Bool == true { return self.unlocked(account) }
+        self.screen = .locked
+        self.note = answer?["error"] as? String ?? "That's not the master password."
+      }
     }
-    note = answer?["error"] as? String ?? "That's not the master password."
   }
 
-  /// The logins for the website, by name, and its passkeys when it asks for
-  /// one; a suggestion picked fills or signs at once. Making a passkey asks
-  /// to save it.
+  private func unlocked(_ account: String) {
+    if let at = accounts.firstIndex(where: { $0.id == account }) {
+      accounts[at].unlocked = true
+    }
+    show()
+  }
+
+  /// The accounts still locked here, to unlock for their logins too.
+  var locked: [Account] { accounts.filter { !$0.unlocked } }
+
+  /// The website's logins from each unlocked account, the one the app shows
+  /// first, by name; a suggestion picked fills at once.
   private func show() {
     note = nil
-    if making != nil {
-      screen = .saving
-      return
-    }
     var found: [Login] = []
-    defer { matching = found }
     for domain in domains {
       let answer = Shared.answer(pb_fillable(domain)) as? [String: Any]
       for item in (answer?["items"] as? [[String: Any]]) ?? [] {
-        guard let id = item["id"] as? String, !found.contains(where: { $0.id == id }) else { continue }
-        found.append(
-          Login(
-            id: id, name: item["name"] as? String ?? "", username: item["username"] as? String ?? "",
-            asks: item["reprompt"] as? Bool ?? false))
+        guard let login = Self.login(item, username: "username"), !found.contains(login) else { continue }
+        found.append(login)
       }
     }
-    logins = found
-    passkeys = signIn.map(passkeysFor) ?? []
+    matching = found
     if let picked {
-      if passkeys.contains(where: { $0.id == picked }) { return pickPasskey(picked) }
-      if found.contains(where: { $0.id == picked }) { return pick(picked) }
+      self.picked = nil
+      if let login = found.first(where: { $0.account == picked.account && $0.item == picked.item }) {
+        return pick(login)
+      }
+    }
+    if query.isEmpty {
+      logins = found
+    } else {
+      search()
     }
     screen = .logins
   }
 
-  /// The site's passkeys: the ones it names, or, naming none, the ones it
-  /// can find by itself (discoverable), as WebAuthn has it.
-  private func passkeysFor(_ signIn: PasskeySignIn) -> [Login] {
-    let answer = Shared.answer(pb_passkeys(signIn.rpId)) as? [String: Any]
-    let allowed = Set(signIn.allowed.map(Shared.base64url))
-    return ((answer?["items"] as? [[String: Any]]) ?? []).compactMap { item in
-      guard let id = item["id"] as? String, let credential = item["credentialId"] as? String else { return nil }
-      if allowed.isEmpty ? item["discoverable"] as? Bool == false : !allowed.contains(credential) { return nil }
-      let name = item["name"] as? String ?? ""
-      let user = item["userName"] as? String ?? ""
-      return Login(
-        id: id, name: name, username: user.isEmpty ? name : user, asks: item["reprompt"] as? Bool ?? false)
-    }
+  private static func login(_ item: [String: Any], username: String) -> Login? {
+    guard let account = item["account"] as? String, let id = item["id"] as? String else { return nil }
+    return Login(
+      account: account, item: id, name: item["name"] as? String ?? "",
+      username: item[username] as? String ?? "", asks: item["reprompt"] as? Bool ?? false)
   }
 
-  private var matching: [Login] = []
-  private var confirmed: Set<String> = []
-  /// What the master password asked for, once given: a passkey's sign-in,
-  /// or a login's fill.
-  private var confirmingPasskey = false
-
-  private func asks(_ id: String, passkey: Bool) -> Bool {
-    (passkey ? passkeys : logins + matching).first { $0.id == id }?.asks ?? false
-  }
-
-  /// The master password, for a login that asks for it again; then it fills,
-  /// or signs.
-  func confirm(_ id: String, password: String) {
-    let answer = Shared.answer(pb_confirm_master_password(id, password)) as? [String: Any]
-    guard answer?["ok"] as? Bool == true else {
-      note = answer?["error"] as? String ?? "That master password isn't right."
-      return
-    }
-    confirmed.insert(id)
-    verified = true
-    if confirmingPasskey {
-      pickPasskey(id)
-    } else {
-      pick(id)
-    }
-  }
-
-  /// The website's logins, or, while searching, every login that has it.
+  /// The website's logins, or, while searching, every unlocked account's
+  /// logins that have it.
   func search() {
     guard !query.isEmpty else {
       logins = matching
       return
     }
-    let items = (Shared.answer(pb_list(query)) as? [[String: Any]]) ?? []
+    let items = (Shared.answer(pb_list_all(query)) as? [[String: Any]]) ?? []
     logins = items.compactMap { item in
-      guard item["kind"] as? String == "login", let id = item["id"] as? String else { return nil }
-      return Login(
-        id: id, name: item["name"] as? String ?? "", username: item["subtitle"] as? String ?? "",
-        asks: item["reprompt"] as? Bool ?? false)
+      guard item["kind"] as? String == "login" else { return nil }
+      return Self.login(item, username: "subtitle")
     }
   }
 
-  /// Fills a login: its username and password, from the core only now. One
-  /// that asks for the master password again asks first.
-  func pick(_ id: String) {
-    if asks(id, passkey: false) && !confirmed.contains(id) {
-      note = nil
-      confirmingPasskey = false
-      screen = .reprompt(id)
-      return
-    }
-    guard let password = Shared.secret(id, "password") else {
-      note = "That login has no password."
-      return
-    }
-    finish(.password(ASPasswordCredential(user: Shared.secret(id, "username") ?? "", password: password)))
-  }
-
-  /// Signs in to the site with a login's passkey: the core signs the site's
-  /// hash only now. One that asks for the master password again asks first.
-  func pickPasskey(_ id: String) {
-    guard let signIn else { return }
-    if asks(id, passkey: true) && !confirmed.contains(id) {
-      note = nil
-      confirmingPasskey = true
-      screen = .reprompt(id)
-      return
-    }
+  /// The master password, for a login that asks for it again; then it fills.
+  func confirm(_ login: Login, password: String) {
     screen = .working
-    let hash = Shared.base64url(signIn.clientDataHash)
-    let verified = self.verified ? "true" : "false"
-    // The core may save the passkey's raised counter first: off the main
-    // thread, with Cancel hidden until it's back.
     DispatchQueue.global(qos: .userInitiated).async {
-      let answer = Shared.answer(pb_passkey_assert(id, signIn.rpId, hash, verified)) as? [String: Any]
-      DispatchQueue.main.async { self.signedIn(answer, signIn) }
+      let answer =
+        Shared.answer(pb_confirm_master_password(login.account, login.item, password)) as? [String: Any]
+      DispatchQueue.main.async {
+        guard !self.finished else { return }
+        guard answer?["ok"] as? Bool == true else {
+          self.screen = .reprompt(login)
+          self.note = answer?["error"] as? String ?? "That master password isn't right."
+          return
+        }
+        self.confirmed.insert(login.id)
+        self.pick(login)
+      }
     }
   }
 
-  private func signedIn(_ answer: [String: Any]?, _ signIn: PasskeySignIn) {
-    guard !finished else { return }
-    guard answer?["ok"] as? Bool == true,
-      let data = (answer?["authenticatorData"] as? String).flatMap(Shared.fromBase64url),
-      let signature = (answer?["signature"] as? String).flatMap(Shared.fromBase64url),
-      let credential = (answer?["credentialId"] as? String).flatMap(Shared.fromBase64url)
-    else {
-      note = answer?["error"] as? String ?? "Couldn't sign in with that passkey."
+  /// Fills a login: its username and password, from its own account's core
+  /// only now. One that asks for the master password again asks first.
+  func pick(_ login: Login) {
+    if login.asks && !confirmed.contains(login.id) {
+      note = nil
+      screen = .reprompt(login)
+      return
+    }
+    guard let password = value(login, "password") else {
+      note = "That login has no password."
       screen = .logins
       return
     }
-    let handle = (answer?["userHandle"] as? String).flatMap(Shared.fromBase64url) ?? Data()
-    finish(
-      .signedIn(
-        ASPasskeyAssertionCredential(
-          userHandle: handle, relyingParty: signIn.rpId, signature: signature,
-          clientDataHash: signIn.clientDataHash, authenticatorData: data, credentialID: credential)))
+    finish(ASPasswordCredential(user: value(login, "username") ?? "", password: password))
   }
 
-  /// Saves the new passkey, in a new login for the site: the core makes it
-  /// and saves it before iOS hears of it.
-  func save() {
-    guard let making, !finished else { return }
-    let request: [String: Any] = [
-      "rpId": making.rpId,
-      "userHandle": Shared.base64url(making.userHandle),
-      "userName": making.userName,
-      "userVerified": verified,
-      "discoverable": true,
-      "exclude": making.excluded.map(Shared.base64url),
-    ]
-    guard let body = try? JSONSerialization.data(withJSONObject: request),
-      let json = String(data: body, encoding: .utf8)
-    else { return }
-    // Saved over the network: off the main thread, with Cancel hidden
-    // until it's back, so the site never misses a passkey the vault kept.
-    screen = .working
-    DispatchQueue.global(qos: .userInitiated).async {
-      let answer = Shared.answer(pb_passkey_create(json)) as? [String: Any]
-      DispatchQueue.main.async { self.made(answer, making) }
-    }
+  private func value(_ login: Login, _ what: String) -> String? {
+    var length = 0
+    let bytes = pb_fill_secret(login.account, login.item, what, &length)
+    return Shared.string(bytes, length)
   }
 
-  private func made(_ answer: [String: Any]?, _ making: PasskeyMaking) {
+  /// Ends the extension with the login, or without one (Cancel), once:
+  /// every account locks first.
+  func finish(_ credential: ASPasswordCredential?) {
     guard !finished else { return }
-    guard answer?["ok"] as? Bool == true,
-      let item = answer?["itemId"] as? String,
-      let credential = (answer?["credentialId"] as? String).flatMap(Shared.fromBase64url),
-      let attestation = (answer?["attestationObject"] as? String).flatMap(Shared.fromBase64url)
-    else {
-      // The vault has one of the site's own: it says so, as WebAuthn has it.
-      if answer?["excluded"] as? Bool == true {
-        if #available(iOS 18.0, *) { return finish(.refused(.matchedExcludedCredential)) }
-      }
-      note = answer?["error"] as? String ?? "Couldn't save the passkey."
-      screen = .saving
-      return
-    }
-    let made = Answer.made(
-      ASPasskeyRegistrationCredential(
-        relyingParty: making.rpId, clientDataHash: making.clientDataHash, credentialID: credential,
-        attestationObject: attestation))
-    // iOS suggests it from now on, as it would after the app's next sync:
-    // answered once iOS has it, before the extension goes away.
-    let identity = ASPasskeyCredentialIdentity(
-      relyingPartyIdentifier: making.rpId, userName: making.userName, credentialID: credential,
-      userHandle: making.userHandle, recordIdentifier: item)
-    let store = ASCredentialIdentityStore.shared
-    let answer = { DispatchQueue.main.async { self.finish(made) } }
-    store.getState { state in
-      guard state.isEnabled, state.supportsIncrementalUpdates else { return answer() }
-      let identities: [any ASCredentialIdentity] = [identity]
-      store.saveCredentialIdentities(identities) { _, _ in answer() }
-    }
+    close()
+    onFinish(credential)
+  }
+
+  /// Every account locks, and the core lets them go.
+  func close() {
+    finished = true
+    _ = Shared.answer(pb_autofill_close())
   }
 }
 
-/// The extension's screens, in PassBundle's look: the brand color, the
-/// mark's name, and the same words as the app.
+/// PassBundle's look in the extension: the brand's emerald where the app
+/// has it, and the account tones the app labels accounts with
+/// (app/lib/theme.dart, app/lib/accounts.dart).
+enum Look {
+  static let accent = Color(
+    UIColor { traits in
+      traits.userInterfaceStyle == .dark ? UIColor(hex: 0x6FD4B4) : UIColor(hex: 0x1F6F5C)
+    })
+
+  static func tone(_ name: String) -> Color {
+    let (light, dark): (UInt32, UInt32) =
+      switch name {
+      case "emerald": (0x0E7A5A, 0x5FD6AE)
+      case "amethyst": (0x6B30B8, 0xC6A3FF)
+      case "topaz": (0xA9600C, 0xF2B766)
+      case "ruby": (0xB01E54, 0xFF92B8)
+      case "turquoise": (0x08788A, 0x62D3E3)
+      case "garnet": (0xA8291F, 0xFF9D92)
+      case "aquamarine": (0x1C7FB8, 0x7CC4EF)
+      case "onyx": (0x353B4A, 0xC3C9D6)
+      case "gold": (0x946A0C, 0xECC25E)
+      default: (0x2448B8, 0x93ADFF)
+      }
+    return Color(
+      UIColor { traits in UIColor(hex: traits.userInterfaceStyle == .dark ? dark : light) })
+  }
+}
+
+extension UIColor {
+  convenience init(hex: UInt32) {
+    self.init(
+      red: CGFloat((hex >> 16) & 0xFF) / 255, green: CGFloat((hex >> 8) & 0xFF) / 255,
+      blue: CGFloat(hex & 0xFF) / 255, alpha: 1)
+  }
+}
+
+/// The extension's screens, in PassBundle's look and with the app's words.
 struct ProviderView: View {
   @ObservedObject var provider: Provider
   @State private var password = ""
-
-  private static let brand = Color(red: 0x1F / 255, green: 0x6F / 255, blue: 0x5C / 255)
 
   var body: some View {
     NavigationStack {
@@ -470,10 +376,8 @@ struct ProviderView: View {
           unlock
         case .logins:
           list
-        case .reprompt(let id):
-          reprompt(id)
-        case .saving:
-          saving
+        case .reprompt(let login):
+          reprompt(login)
         case .unavailable(let words):
           Text(words).multilineTextAlignment(.center).padding()
         }
@@ -482,14 +386,21 @@ struct ProviderView: View {
       .navigationBarTitleDisplayMode(.inline)
       .toolbar {
         ToolbarItem(placement: .cancellationAction) {
-          // Not while the core is saving or signing: it answers first.
-          if !provider.working {
-            Button("Cancel") { provider.finish(.refused(.userCanceled)) }
-          }
+          Button("Cancel") { provider.finish(nil) }
         }
       }
     }
-    .tint(Self.brand)
+    .tint(Look.accent)
+  }
+
+  /// An account's name in its color, as the app labels it.
+  private func pill(_ account: String) -> some View {
+    Text(provider.label(account) ?? "")
+      .font(.caption.weight(.semibold))
+      .foregroundStyle(Look.tone(provider.tone(account)))
+      .padding(.horizontal, 8)
+      .padding(.vertical, 2)
+      .background(Look.tone(provider.tone(account)).opacity(0.14), in: Capsule())
   }
 
   private var unlock: some View {
@@ -502,7 +413,12 @@ struct ProviderView: View {
         Button("Unlock", action: unlockWithPassword)
           .disabled(password.isEmpty)
       } header: {
-        Text("Unlock PassBundle")
+        VStack(alignment: .leading, spacing: 4) {
+          Text("Unlock PassBundle")
+          if let account = provider.unlocking, provider.accounts.count > 1 {
+            Text(account.label).textCase(nil)
+          }
+        }
       } footer: {
         if let note = provider.note {
           Text(note).foregroundStyle(.red)
@@ -513,17 +429,29 @@ struct ProviderView: View {
           Button("Unlock with \(method)") { provider.unlockWithBiometric() }
         }
       }
+      // Another account to unlock instead, with more than one.
+      let others = provider.locked.filter { $0.id != provider.unlocking?.id }
+      if !others.isEmpty {
+        Section("Switch account") {
+          ForEach(others) { account in
+            Button(account.label) {
+              password = ""
+              provider.askToUnlock(account, automatically: true)
+            }
+          }
+        }
+      }
     }
   }
 
-  private func reprompt(_ id: String) -> some View {
+  private func reprompt(_ login: Provider.Login) -> some View {
     Form {
       Section {
         SecureField("Master password", text: $password)
           .textContentType(.password)
           .submitLabel(.go)
-          .onSubmit { confirm(id) }
-        Button("Continue") { confirm(id) }
+          .onSubmit { confirm(login) }
+        Button("Continue") { confirm(login) }
           .disabled(password.isEmpty)
       } header: {
         Text("This login asks for your master password")
@@ -535,31 +463,9 @@ struct ProviderView: View {
     }
   }
 
-  /// Saving a new passkey: the site's ID first, as iOS checked it, and the
-  /// account's name.
-  private var saving: some View {
-    Form {
-      Section {
-        if let making = provider.making {
-          LabeledContent("Website", value: making.rpId)
-          if !making.userName.isEmpty {
-            LabeledContent("Account", value: making.userName)
-          }
-        }
-        Button("Save passkey") { provider.save() }
-      } header: {
-        Text("Save a passkey in PassBundle")
-      } footer: {
-        if let note = provider.note {
-          Text(note).foregroundStyle(.red)
-        }
-      }
-    }
-  }
-
-  private func confirm(_ id: String) {
+  private func confirm(_ login: Provider.Login) {
     guard !password.isEmpty else { return }
-    provider.confirm(id, password: password)
+    provider.confirm(login, password: password)
     password = ""
   }
 
@@ -569,46 +475,43 @@ struct ProviderView: View {
     password = ""
   }
 
-  private func row(_ login: Provider.Login, action: @escaping () -> Void) -> some View {
-    Button(action: action) {
-      VStack(alignment: .leading, spacing: 2) {
-        Text(login.name).font(.headline).foregroundStyle(Self.brand)
-        if !login.username.isEmpty {
-          Text(login.username).font(.subheadline).foregroundStyle(.secondary)
-        }
-      }
-    }
-  }
-
-  private var empty: String {
-    if !provider.query.isEmpty { return "No logins match." }
-    if provider.signIn != nil { return "No passkeys or logins for this website. Search your logins." }
-    return "No logins for this website. Search for one."
-  }
-
   private var list: some View {
     List {
-      let passkeys = provider.query.isEmpty ? provider.passkeys : []
-      if !passkeys.isEmpty {
-        Section("Passkeys") {
-          ForEach(passkeys) { passkey in
-            row(passkey) { provider.pickPasskey(passkey.id) }
-          }
-        }
-      }
       Section {
-        if provider.logins.isEmpty && passkeys.isEmpty {
-          Text(empty).foregroundStyle(.secondary)
+        if provider.logins.isEmpty {
+          Text(provider.query.isEmpty ? "No logins for this website. Search for one." : "No logins match.")
+            .foregroundStyle(.secondary)
         }
         ForEach(provider.logins) { login in
-          row(login) { provider.pick(login.id) }
+          Button {
+            provider.pick(login)
+          } label: {
+            VStack(alignment: .leading, spacing: 2) {
+              Text(login.name).font(.headline).foregroundStyle(Look.accent)
+              HStack(spacing: 6) {
+                if !login.username.isEmpty {
+                  Text(login.username).font(.subheadline).foregroundStyle(.secondary)
+                }
+                if provider.label(login.account) != nil {
+                  pill(login.account)
+                }
+              }
+            }
+          }
         }
         if let note = provider.note {
           Text(note).foregroundStyle(.red)
         }
-      } header: {
-        if !passkeys.isEmpty && !provider.logins.isEmpty {
-          Text("Logins")
+      }
+      // Accounts still locked here: their logins show once unlocked.
+      if !provider.locked.isEmpty {
+        Section("Other accounts") {
+          ForEach(provider.locked) { account in
+            Button("Unlock \(account.label)") {
+              password = ""
+              provider.askToUnlock(account, automatically: true)
+            }
+          }
         }
       }
     }

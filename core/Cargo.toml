@@ -18,12 +18,25 @@ ffi = []
 # Trusting a given certificate instead of the OS's, for tests against a
 # throwaway HTTPS server (examples/interop.rs). Never in the app.
 test-trust = []
+# Settings for test runs from the environment: PB_DATA_DIR (the app's
+# folder) and PB_SECRETS=memory (the session in memory, never the OS's
+# store), for CI's builds that tools/measure.sh, tools/measure.ps1, and
+# tools/mac-update-test.sh --launch open. Never in a release
+# (.github/workflows/macos-release.yml checks): a release reads neither.
+test-hooks = []
 
 # Signs in, prints what it reads, and saves an item: the e2e suite checks the
 # web vault and the core read each other's items.
 [[example]]
 name = "interop"
 required-features = ["test-trust"]
+
+# Finishes a Windows or Linux update once the app has quit: puts the new
+# version in the old one's place, opens it, and puts the old one back if it
+# doesn't start (src/updates/swap.rs).
+[[bin]]
+name = "passbundle-update"
+path = "src/bin/passbundle-update.rs"
 
 # RustCrypto, as the desktop agent uses. Never a Bitwarden crate (docs/core.md).
 [dependencies]
@@ -50,10 +63,19 @@ sha2 = "0.10"
 ureq = { version = "3", default-features = false, features = ["rustls", "platform-verifier", "json"] }
 uuid = { version = "1", features = ["v4"] }
 zeroize = { version = "1", features = ["derive"] }
+# How strong a password is, by the same measure as the web vault's Health
+# reports and the extension (Dropbox's zxcvbn, ported; src/health.rs).
+zxcvbn = "3"
 
 # The clipboard on computers; phones copy through the app (docs/phones.md, "Copying").
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 arboard = { version = "3", default-features = false }
+# Windows and Linux test releases (src/updates): each release's manifest is
+# signed with Ed25519, and names a zip (Windows) or a tarball (Linux).
+ed25519-dalek = "2"
+flate2 = "1"
+tar = { version = "0.4", default-features = false }
+zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
 
 # The OS's secret store: Keychain, Credential Manager, Secret Service. Android
 # keeps the refresh token with the Keystore instead (docs/phones.md).
@@ -84,17 +106,31 @@ dbus = "0.9"
 [target.'cfg(target_os = "macos")'.dependencies]
 plist = "1"
 
+# Windows: also its WebAuthn API, for security keys at sign-in
+# (src/security_key/windows.rs).
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Networking_WindowsWebServices",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_Registry",
     "Win32_System_RemoteDesktop",
     "Win32_System_SystemInformation",
+    "Win32_System_Threading",
     "Win32_System_WindowsProgramming",
     "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
 ] }
 
 [build-dependencies]
 serde_json = "1"
+
+# A stand-in for GitHub's releases, for the updater's tests (src/updates).
+[dev-dependencies]
+tiny_http = "0.12"
 
 # The KDFs at full strength in tests, so they take milliseconds, not minutes.
 [profile.dev.package."*"]

@@ -10,9 +10,11 @@
 // A tray app: no console window on Windows.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::process::ExitCode;
+use std::{process::ExitCode, sync::Arc};
 
-use passbundle_agent::{biometrics, brand, config, instance, ipc, server::Server, update, version};
+use passbundle_agent::{
+    biometrics, brand, config, instance, ipc, reminders::Reminders, server::Server, update, version,
+};
 
 use config::Config;
 use version::Version;
@@ -42,13 +44,14 @@ fn main() -> ExitCode {
     }
 }
 
-/// Starts serving the extension on the agent's socket, on its own thread.
-fn start_serving() -> Result<std::thread::JoinHandle<()>, ExitCode> {
+/// Starts serving the extension (and the app) on the agent's socket, on its
+/// own thread; the app's expiration reminders go to `reminders`.
+fn start_serving(reminders: Arc<Reminders>) -> Result<std::thread::JoinHandle<()>, ExitCode> {
     let listener = ipc::Listener::bind(&ipc::address()).map_err(|e| {
         eprintln!("can't listen for the extension: {e}");
         ExitCode::FAILURE
     })?;
-    let server = Server::new(biometrics::platform());
+    let server = Server::new(biometrics::platform(), reminders);
     Ok(std::thread::spawn(move || {
         if let Err(e) = server.serve(listener) {
             eprintln!("stopped serving the extension: {e}");
@@ -65,10 +68,11 @@ fn run_tray() -> ExitCode {
     if let Ok(exe) = std::env::current_exe() {
         update::clean_up(&exe);
     }
-    if let Err(code) = start_serving() {
+    let reminders = Arc::new(Reminders::default());
+    if let Err(code) = start_serving(Arc::clone(&reminders)) {
         return code;
     }
-    passbundle_agent::tray::run(Config::load())
+    passbundle_agent::tray::run(Config::load(), reminders)
 }
 
 /// No tray on other platforms: only `--serve`, for tests.
@@ -82,7 +86,7 @@ fn run_serve() -> ExitCode {
         eprintln!("{} agent is already running for this user.", brand::NAME);
         return ExitCode::FAILURE;
     };
-    match start_serving() {
+    match start_serving(Arc::new(Reminders::default())) {
         Ok(thread) => {
             let _ = thread.join();
             ExitCode::FAILURE

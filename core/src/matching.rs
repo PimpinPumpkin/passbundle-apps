@@ -249,6 +249,11 @@ mod tests {
             totp: None,
             fields: vec![],
             revision_date: None,
+            creation_date: None,
+            editable: true,
+            view_password: true,
+            deletable: true,
+            details: Vec::new(),
         }
     }
 

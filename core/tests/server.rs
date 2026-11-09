@@ -1,9 +1,15 @@
 //! The core against a real PassBundle server (tools/test-server.sh), with
 //! real keys throughout: signing up an account the way an app would, signing
-//! in (with a wrong password, and with two-step login), sync, saving, editing,
-//! refusing an edit to a stale copy, trash, refreshing the session, and an
+//! in (with a wrong password, and with two-step login: an authenticator app,
+//! a recovery code, and a security key), sync, saving, editing, refusing an
+//! edit to a stale copy, trash, refreshing the session, and an
 //! organization's items. Set PB_TEST_SERVER to the server's URL; without it,
-//! these tests say so and pass.
+//! these tests say so and pass. The security key test (with the test-hooks
+//! feature, for its software key) needs a server named localhost, since
+//! WebAuthn takes only a domain: PB_TEST_SERVER_LOCALHOST. The new-device
+//! check's test needs a server with the check on, which the others have
+//! off (they sign in on new devices throughout): PB_TEST_SERVER_NEW_DEVICE
+//! (`NEW_DEVICE_CHECK=true tools/test-server.sh ...`).
 
 use base64::{engine::general_purpose::STANDARD, Engine};
 use passbundle_core::app::{App, State, Step};
@@ -13,7 +19,7 @@ use passbundle_core::secrets::MemorySecretStore;
 use passbundle_core::server::{Device, Server, Session, SignIn, TwoFactor};
 use passbundle_core::store::Store;
 use passbundle_core::totp::Totp;
-use passbundle_core::vault::{Field, ItemDraft, Vault};
+use passbundle_core::vault::{Field, ItemDraft, ItemKind, Vault};
 use passbundle_core::Error;
 use serde_json::json;
 use zeroize::Zeroizing;
@@ -48,6 +54,7 @@ fn sign_in(server: &Server, email: &str) -> Session {
     match server.sign_in(email, PASSWORD).unwrap() {
         SignIn::Done(session) => session,
         SignIn::NeedsTwoFactor(_) => panic!("unexpected two-step login"),
+        SignIn::NeedsApproval(_) => panic!("unexpected new-device check"),
     }
 }
 
@@ -68,7 +75,14 @@ fn signs_in_syncs_saves_edits_and_trashes() {
 
     assert_eq!(
         server.sign_in(&email, "not the password").err(),
-        Some(Error::WrongPassword)
+        Some(Error::WrongSignIn)
+    );
+    // An email with no account is said the same: never which emails have one.
+    assert_eq!(
+        server
+            .sign_in(&new_email("nobody"), "not the password")
+            .err(),
+        Some(Error::WrongSignIn)
     );
     // The email as typed: the core trims and lowercases it.
     let mut session = match server
@@ -77,6 +91,7 @@ fn signs_in_syncs_saves_edits_and_trashes() {
     {
         SignIn::Done(session) => session,
         SignIn::NeedsTwoFactor(_) => panic!("unexpected two-step login"),
+        SignIn::NeedsApproval(_) => panic!("unexpected new-device check"),
     };
     assert!(open(&server, &mut session).items.is_empty());
 
@@ -92,6 +107,7 @@ fn signs_in_syncs_saves_edits_and_trashes() {
             name: "PIN".into(),
             value: Zeroizing::new("8642".into()),
             hidden: true,
+            boolean: false,
         }],
         favorite: true,
         ..ItemDraft::default()
@@ -239,42 +255,29 @@ fn two_step_login_with_an_authenticator_app() {
     let email = new_email("two-step");
     sign_up(&server, &email);
     let mut session = sign_in(&server, &email);
-    let secret = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP";
-    let totp = Totp::parse(secret).unwrap();
+    let totp = turn_on_authenticator(&server, &mut session, &email);
     let now = || {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs()
     };
-    let master = MasterKey::derive(
-        PASSWORD,
-        &email,
-        &Kdf::Pbkdf2 {
-            iterations: 600_000,
-        },
-    )
-    .unwrap();
-    server
-        .raw(
-            &mut session,
-            "POST",
-            "/api/two-factor/authenticator",
-            Some(json!({ "key": secret, "token": totp.code_at(now()), "masterPasswordHash": master.login_hash(PASSWORD) })),
-        )
-        .unwrap();
 
-    let SignIn::NeedsTwoFactor(pending) = server.sign_in(&email, PASSWORD).unwrap() else {
+    let SignIn::NeedsTwoFactor(mut pending) = server.sign_in(&email, PASSWORD).unwrap() else {
         panic!("two-step login should be asked for");
     };
-    assert!(pending.providers.contains(&0), "{:?}", pending.providers);
+    assert!(
+        pending.offer.providers.contains(&0),
+        "{:?}",
+        pending.offer.providers
+    );
     let wrong = TwoFactor {
         provider: 0,
         code: "000000".into(),
         remember: false,
     };
     assert_eq!(
-        server.finish_sign_in(&pending, &wrong).err(),
+        server.finish_sign_in(&mut pending, &wrong).err(),
         Some(Error::WrongCode)
     );
     // The same waiting sign-in takes the right code: no second KDF. A code from
@@ -285,8 +288,257 @@ fn two_step_login_with_an_authenticator_app() {
         code: totp.code_at(now()),
         remember: false,
     };
-    let mut session = server.finish_sign_in(&pending, &right).unwrap();
+    let mut session = server.finish_sign_in(&mut pending, &right).unwrap();
     assert!(open(&server, &mut session).items.is_empty());
+}
+
+fn master_hash(email: &str) -> String {
+    MasterKey::derive(
+        PASSWORD,
+        email,
+        &Kdf::Pbkdf2 {
+            iterations: 600_000,
+        },
+    )
+    .unwrap()
+    .login_hash(PASSWORD)
+}
+
+/// Turns on an authenticator app for the account, as the web vault does:
+/// the server makes the secret and a user verification token for it with the
+/// master password, then takes a code from it with the token (Vaultwarden
+/// 1.37.5's flow). The secret, for its codes.
+fn turn_on_authenticator(server: &Server, session: &mut Session, email: &str) -> Totp {
+    let made = server
+        .raw(
+            session,
+            "POST",
+            "/api/two-factor/get-authenticator",
+            Some(json!({ "masterPasswordHash": master_hash(email) })),
+        )
+        .unwrap();
+    let key = made["authenticator"]["key"].as_str().unwrap().to_owned();
+    let token = made["userVerificationToken"].as_str().unwrap().to_owned();
+    let totp = Totp::parse(&key).unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    server
+        .raw(
+            session,
+            "POST",
+            "/api/two-factor/authenticator",
+            Some(json!({ "key": key, "token": totp.code_at(now), "userVerificationToken": token })),
+        )
+        .unwrap();
+    totp
+}
+
+/// An app of its own on a folder of its own, not signed in.
+fn new_app() -> App {
+    let dir = std::env::temp_dir().join(format!("pb-core-app-{}", uuid::Uuid::new_v4().simple()));
+    App::open(Store::new(&dir), Box::new(MemorySecretStore::default()))
+}
+
+#[test]
+fn a_recovery_code_signs_in_and_turns_two_step_login_off() {
+    let Some(server) = server() else { return };
+    let url = std::env::var("PB_TEST_SERVER").unwrap();
+    let email = new_email("recovery");
+    sign_up(&server, &email);
+    let mut session = sign_in(&server, &email);
+    turn_on_authenticator(&server, &mut session, &email);
+    let recover = server
+        .raw(
+            &mut session,
+            "POST",
+            "/api/two-factor/get-recover",
+            Some(json!({ "masterPasswordHash": master_hash(&email) })),
+        )
+        .unwrap();
+    let code = recover["code"].as_str().unwrap().to_owned();
+
+    let mut app = new_app();
+    let Step::TwoFactor(offer) = app.sign_in(&url, &email, PASSWORD).unwrap() else {
+        panic!("two-step login should be asked for");
+    };
+    // The server doesn't list it; it takes it whatever it offers.
+    assert!(!offer.providers.contains(&8), "{:?}", offer.providers);
+    assert!(matches!(
+        app.finish_sign_in(8, "notmyrecoverycode", false),
+        Err(Error::TwoStep(m)) if m.starts_with("That recovery code isn't right.")
+    ));
+    // As someone might type it off paper: in capitals, in fours.
+    let typed: Vec<String> = code
+        .to_uppercase()
+        .chars()
+        .collect::<Vec<_>>()
+        .chunks(4)
+        .map(|c| c.iter().collect())
+        .collect();
+    assert_eq!(
+        app.finish_sign_in(8, &typed.join(" "), false).unwrap(),
+        Step::Done
+    );
+    assert!(app.vault().is_some());
+    // Two-step login is off now, as upstream's recovery code does.
+    let _ = sign_in(&server, &email);
+}
+
+#[test]
+fn a_yubikeys_code_and_duo_need_what_the_account_has() {
+    let Some(server) = server() else { return };
+    let url = std::env::var("PB_TEST_SERVER").unwrap();
+    let email = new_email("yubikey");
+    sign_up(&server, &email);
+    let mut session = sign_in(&server, &email);
+    turn_on_authenticator(&server, &mut session, &email);
+    let mut app = new_app();
+    let Step::TwoFactor(offer) = app.sign_in(&url, &email, PASSWORD).unwrap() else {
+        panic!("two-step login should be asked for");
+    };
+    assert_eq!(offer.providers, vec![0]);
+    // Not a YubiKey's code: refused here, before the server.
+    assert!(matches!(
+        app.finish_sign_in(3, "123456", false),
+        Err(Error::TwoStep(_))
+    ));
+    // One in the right shape, for an account without YubiKeys: the server refuses it.
+    assert!(app
+        .finish_sign_in(3, "cccccbhuinjdtrbftdrldjlrgkdeubffnkhjfjifvlbr", false)
+        .is_err());
+    // No Duo here, nor a security key.
+    assert!(matches!(app.duo_address(), Err(Error::TwoStep(_))));
+    assert!(matches!(app.security_key_request(), Err(Error::TwoStep(_))));
+    // The sign-in still waits.
+    assert!(app.signing_in());
+}
+
+/// Signing in with a security key, as a key plugged in would: the core
+/// reads the server's request, makes the client data for the server's
+/// origin, asks a key in software over CTAPHID (core/src/security_key/soft.rs),
+/// and sends its answer, which the server checks with webauthn-rs.
+#[cfg(feature = "test-hooks")]
+#[test]
+fn two_step_login_with_a_security_key() {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use passbundle_core::app::Prepared;
+    use passbundle_core::passkey::{attestation_object, authenticator_data, flags, Attested};
+    use passbundle_core::security_key::ctap::{ask_hid, Wait};
+    use passbundle_core::security_key::soft::SoftKey;
+    use std::sync::atomic::AtomicBool;
+
+    let Ok(url) = std::env::var("PB_TEST_SERVER_LOCALHOST") else {
+        eprintln!("PB_TEST_SERVER_LOCALHOST isn't set; skipping the security key test (tools/test-server.sh <bin> <port> <dir> localhost starts one).");
+        return;
+    };
+    let server = Server::new(&url, Device::this_one(&Device::new_identifier())).unwrap();
+    let email = new_email("security-key");
+    sign_up(&server, &email);
+    let mut session = sign_in(&server, &email);
+    let hash = master_hash(&email);
+
+    // The key is added as the web vault adds one: the master password gets a
+    // user verification token, which gets the challenge and adds the key.
+    let verified = server
+        .raw(
+            &mut session,
+            "POST",
+            "/api/two-factor/get-webauthn",
+            Some(json!({ "masterPasswordHash": hash })),
+        )
+        .unwrap();
+    let token = verified["userVerificationToken"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let challenge = server
+        .raw(
+            &mut session,
+            "POST",
+            "/api/two-factor/get-webauthn-challenge",
+            Some(json!({ "userVerificationToken": token })),
+        )
+        .unwrap();
+    let options = &challenge["options"];
+    let rp_id = options["rp"]["id"].as_str().unwrap().to_owned();
+    assert_eq!(rp_id, "localhost");
+    let mut key = SoftKey::new(&rp_id);
+    let client_data = format!(
+        r#"{{"type":"webauthn.create","challenge":"{}","origin":"{url}","crossOrigin":false}}"#,
+        options["challenge"].as_str().unwrap()
+    );
+    let made = authenticator_data(
+        &rp_id,
+        flags::USER_PRESENT,
+        0,
+        Some(&Attested {
+            credential_id: &key.credential_id,
+            public: key.public(),
+        }),
+    );
+    let id = URL_SAFE_NO_PAD.encode(&key.credential_id);
+    server
+        .raw(
+            &mut session,
+            "POST",
+            "/api/two-factor/webauthn",
+            Some(json!({
+                "id": 1,
+                "name": "Software key",
+                "userVerificationToken": token,
+                "deviceResponse": {
+                    "id": id,
+                    "rawId": id,
+                    "type": "public-key",
+                    "response": {
+                        "attestationObject": URL_SAFE_NO_PAD.encode(attestation_object(&made)),
+                        "clientDataJson": URL_SAFE_NO_PAD.encode(client_data),
+                    },
+                },
+            })),
+        )
+        .unwrap();
+
+    let mut app = new_app();
+    let Step::TwoFactor(offer) = app.sign_in(&url, &email, PASSWORD).unwrap() else {
+        panic!("two-step login should be asked for");
+    };
+    assert!(offer.providers.contains(&7), "{:?}", offer.providers);
+    let Prepared::Ready(request) = app.security_key_request().unwrap() else {
+        panic!("a security key request");
+    };
+    assert_eq!(request.origin, url);
+    assert_eq!(request.allow, vec![key.credential_id.clone()]);
+    let canceled = AtomicBool::new(false);
+    let wait = || Wait {
+        until: std::time::Instant::now() + std::time::Duration::from_secs(10),
+        canceled: &canceled,
+    };
+
+    // An answer made for another origin, as on a phishing page, is refused
+    // by the server, and that challenge is spent.
+    let mut elsewhere = request.clone();
+    elsewhere.client_data_json = String::from_utf8(request.client_data_json.clone())
+        .unwrap()
+        .replace(&url, "http://localhost:1")
+        .into_bytes();
+    let answer = ask_hid(&mut key, &elsewhere.key_request(), &wait()).unwrap();
+    assert!(app.finish_with_key(&elsewhere, &answer, false).is_err());
+    assert!(app.signing_in());
+
+    // The next try asks the server for a new challenge, and signs in.
+    let Prepared::Ready(again) = app.security_key_request().unwrap() else {
+        panic!("a security key request");
+    };
+    assert_ne!(again.client_data_json, request.client_data_json);
+    let answer = ask_hid(&mut key, &again.key_request(), &wait()).unwrap();
+    assert_eq!(
+        app.finish_with_key(&again, &answer, false).unwrap(),
+        Step::Done
+    );
+    assert!(app.vault().is_some());
 }
 
 #[test]
@@ -307,7 +559,7 @@ fn the_app_keeps_the_vault_locks_unlocks_offline_and_signs_out() {
     );
     assert_eq!(
         app.sign_in(&url, &email, "not the password").err(),
-        Some(Error::WrongPassword)
+        Some(Error::WrongSignIn)
     );
     assert_eq!(app.sign_in(&url, &email, PASSWORD).unwrap(), Step::Done);
     assert_eq!(
@@ -368,6 +620,107 @@ fn the_app_keeps_the_vault_locks_unlocks_offline_and_signs_out() {
             email: Some(email)
         }
     );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Several accounts side by side (DESIGN.md in the meta repo, "Several
+/// accounts in the apps"): a work account and a personal one signed in on
+/// one device, each with its own vault, session, and lock; signing in to one
+/// again keeps its place, and signing out of one leaves the other.
+#[test]
+fn two_accounts_sign_in_side_by_side_and_one_signs_out() {
+    use passbundle_core::accounts::Accounts;
+    use passbundle_core::secrets::SecretStore;
+    use std::sync::Arc;
+    let Some(server) = server() else { return };
+    let url = std::env::var("PB_TEST_SERVER").unwrap();
+    let (work, personal) = (new_email("work"), new_email("personal"));
+    sign_up(&server, &work);
+    sign_up(&server, &personal);
+    let dir = std::env::temp_dir().join(format!("pb-accounts-{}", uuid::Uuid::new_v4().simple()));
+    let secrets = Arc::new(MemorySecretStore::default());
+    let mut accounts = Accounts::open(&dir, secrets.clone());
+    assert!(accounts.summaries().is_empty());
+
+    // A wrong password adds nothing.
+    assert_eq!(
+        accounts.sign_in(&url, &work, "not the password").err(),
+        Some(Error::WrongSignIn)
+    );
+    assert!(accounts.summaries().is_empty());
+    assert_eq!(accounts.sign_in(&url, &work, PASSWORD).unwrap(), Step::Done);
+    let w = accounts.active().unwrap().to_owned();
+    let draft = ItemDraft {
+        name: "Payroll".into(),
+        password: secret("not-a-real-password-work"),
+        ..ItemDraft::default()
+    };
+    accounts.app(&w).unwrap().save(None, &draft, &[]).unwrap();
+
+    // The second account joins the first, and the screens show it.
+    assert_eq!(
+        accounts.sign_in(&url, &personal, PASSWORD).unwrap(),
+        Step::Done
+    );
+    let p = accounts.active().unwrap().to_owned();
+    assert_ne!(w, p);
+    assert_eq!(accounts.summaries().len(), 2);
+    assert!(accounts.summaries().iter().all(|a| a.unlocked));
+    let names = |accounts: &mut Accounts, id: &str| -> Vec<String> {
+        accounts
+            .app(id)
+            .and_then(|a| a.vault())
+            .map(|v| v.items.iter().map(|i| i.name.clone()).collect())
+            .unwrap_or_default()
+    };
+    assert_eq!(names(&mut accounts, &w), vec!["Payroll".to_owned()]);
+    assert!(names(&mut accounts, &p).is_empty());
+    // Each its own session, and one install's device.
+    assert!(secrets.get(&url, &work).is_some());
+    assert!(secrets.get(&url, &personal).is_some());
+    let device = |id: &str| {
+        Store::new(dir.join("accounts").join(id))
+            .settings()
+            .unwrap()
+            .device_identifier
+    };
+    assert_eq!(device(&w), device(&p));
+
+    // Locking one leaves the other open and syncing.
+    accounts.lock(&w);
+    assert!(names(&mut accounts, &w).is_empty());
+    accounts.app(&p).unwrap().sync().unwrap();
+    assert!(matches!(accounts.state(&p), State::Unlocked { .. }));
+
+    // Signing in to the first again keeps its place: still two.
+    assert_eq!(accounts.sign_in(&url, &work, PASSWORD).unwrap(), Step::Done);
+    assert_eq!(accounts.active(), Some(w.as_str()));
+    assert_eq!(accounts.summaries().len(), 2);
+    assert_eq!(names(&mut accounts, &w), vec!["Payroll".to_owned()]);
+
+    // Signing out of the personal account leaves the work one as it was.
+    accounts.sign_out(&p);
+    assert!(secrets.get(&url, &personal).is_none());
+    assert!(secrets.get(&url, &work).is_some());
+    assert_eq!(
+        accounts
+            .summaries()
+            .into_iter()
+            .map(|a| a.id)
+            .collect::<Vec<_>>(),
+        vec![w.clone()]
+    );
+    accounts.app(&w).unwrap().sync().unwrap();
+    assert_eq!(names(&mut accounts, &w), vec!["Payroll".to_owned()]);
+
+    // A restart opens the one account, locked, from what's kept.
+    drop(accounts);
+    let mut accounts = Accounts::open(&dir, secrets.clone());
+    assert_eq!(accounts.active(), Some(w.as_str()));
+    assert!(matches!(accounts.state(&w), State::Locked { .. }));
+    accounts.app(&w).unwrap().unlock(PASSWORD).unwrap();
+    accounts.app(&w).unwrap().sync().unwrap();
+    assert_eq!(names(&mut accounts, &w), vec!["Payroll".to_owned()]);
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -633,5 +986,1243 @@ fn passkeys_are_made_and_sign_in() {
         })
         .is_err());
     assert_eq!(app.vault().unwrap().items.len(), count);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// An SSH key on the server comes through the core's sync: the core says
+/// which client version's format it reads (server::CLIENT_VERSION), and a
+/// server holds SSH keys back from a client that doesn't.
+#[test]
+fn an_ssh_key_comes_through_sync() {
+    let Some(server) = server() else { return };
+    let email = new_email("ssh");
+    sign_up(&server, &email);
+    let mut session = sign_in(&server, &email);
+    let key = session.user_key().clone();
+    let enc = |text: &str| json!(key.encrypt_str(text).to_string());
+    let (sync, _) = server.sync(&mut session).unwrap();
+    // As upstream's apps save one (type 5).
+    server
+        .save_item(
+            &mut session,
+            None,
+            json!({
+                "type": 5,
+                "encryptedFor": sync.profile.id,
+                "name": enc("Deploy key"),
+                "notes": null,
+                "favorite": false,
+                "reprompt": 0,
+                "folderId": null,
+                "organizationId": null,
+                "fields": [],
+                "sshKey": {
+                    "privateKey": enc("-----BEGIN OPENSSH PRIVATE KEY-----\nnot-a-real-key\n-----END OPENSSH PRIVATE KEY-----\n"),
+                    "publicKey": enc("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINotARealKeyNotARealKeyNotARealKey0000 deploy"),
+                    "keyFingerprint": enc("SHA256:not-a-real-fingerprint"),
+                },
+            }),
+            &[],
+        )
+        .unwrap();
+
+    let vault = open(&server, &mut session);
+    let item = vault
+        .items
+        .iter()
+        .find(|i| i.name == "Deploy key")
+        .expect("the SSH key came through sync");
+    assert_eq!(item.kind, ItemKind::SshKey);
+    let ssh = item.ssh_key.as_ref().unwrap();
+    assert_eq!(
+        ssh.fingerprint.as_deref(),
+        Some("SHA256:not-a-real-fingerprint")
+    );
+    assert!(ssh
+        .public_key
+        .as_deref()
+        .is_some_and(|k| k.starts_with("ssh-ed25519 ")));
+}
+
+/// Making an account in the app (docs/core.md, "Making an account"): it signs
+/// in at once, the email as typed counts as the email, another device signs
+/// in with the master password and opens the (empty) vault, and the server
+/// refuses a second account for the same email. A short master password is
+/// refused before anything is sent.
+#[test]
+fn an_account_is_made_in_the_app_and_opens_elsewhere() {
+    let Some(server) = server() else { return };
+    let url = std::env::var("PB_TEST_SERVER").unwrap();
+    let email = new_email("made");
+    let dir = std::env::temp_dir().join(format!("pb-core-made-{}", uuid::Uuid::new_v4().simple()));
+    let mut app = App::open(Store::new(&dir), Box::new(MemorySecretStore::default()));
+
+    assert_eq!(
+        app.sign_up(&url, &email, None, "too short", None).err(),
+        Some(Error::Refused(
+            "a master password needs at least 12 characters"
+        ))
+    );
+    let step = app
+        .sign_up(
+            &url,
+            &format!("  {} ", email.to_uppercase()),
+            Some("Made in the app"),
+            PASSWORD,
+            Some("the usual"),
+        )
+        .unwrap();
+    assert!(matches!(step, Step::Done));
+    assert!(app.vault().unwrap().items.is_empty());
+
+    // Another device: the master password opens the same account.
+    let mut session = sign_in(&server, &email);
+    assert!(open(&server, &mut session).items.is_empty());
+
+    // The same email again.
+    let other_dir =
+        std::env::temp_dir().join(format!("pb-core-made-{}", uuid::Uuid::new_v4().simple()));
+    let mut other = App::open(
+        Store::new(&other_dir),
+        Box::new(MemorySecretStore::default()),
+    );
+    assert!(other.sign_up(&url, &email, None, PASSWORD, None).is_err());
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(other_dir);
+}
+
+/// The generator's settings follow the account (core/src/synced_settings.rs):
+/// chosen on one device, they're the choices on another once it signs in;
+/// the server has them only encrypted; and a change on the second comes back
+/// to the first at its next sync.
+#[test]
+fn the_generators_settings_follow_the_account_to_another_device() {
+    use passbundle_core::generator::{Kind, Options};
+
+    let Some(server) = server() else { return };
+    let url = std::env::var("PB_TEST_SERVER").unwrap();
+    let email = new_email("generator");
+    sign_up(&server, &email);
+    let device = || {
+        let dir = std::env::temp_dir().join(format!(
+            "pb-core-generator-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        App::open(Store::new(&dir), Box::new(MemorySecretStore::default()))
+    };
+
+    let mut first = device();
+    first.sign_in(&url, &email, PASSWORD).unwrap();
+    let chosen = Options {
+        kind: Kind::Passphrase,
+        length: 33,
+        symbols: false,
+        words: 9,
+        separator: ".".into(),
+        ..Options::default()
+    };
+    first.generate(&chosen).unwrap();
+    first.sync_settings().unwrap();
+
+    let mut session = sign_in(&server, &email);
+    let saved = server
+        .raw(&mut session, "GET", "/api/keykeeper/settings", None)
+        .unwrap();
+    let data = saved["data"].as_str().unwrap();
+    assert!(data.starts_with("2."), "{data}");
+    assert!(!data.contains("passphrase"));
+
+    let mut second = device();
+    second.sign_in(&url, &email, PASSWORD).unwrap();
+    second.sync().unwrap();
+    let there = second.generator_options();
+    assert_eq!(there.kind, Kind::Passphrase);
+    assert_eq!(there.length, 33);
+    assert!(!there.symbols);
+    assert_eq!(there.words, 9);
+    assert_eq!(there.separator, ".");
+
+    second
+        .generate(&Options {
+            length: 50,
+            ..there
+        })
+        .unwrap();
+    second.sync_settings().unwrap();
+    first.sync().unwrap();
+    assert_eq!(first.generator_options().length, 50);
+    assert_eq!(first.generator_options().words, 9);
+}
+
+/// A device of the app's own, on a folder of its own, signed in.
+fn signed_in_app(url: &str, email: &str) -> App {
+    let dir = std::env::temp_dir().join(format!("pb-core-app-{}", uuid::Uuid::new_v4().simple()));
+    let mut app = App::open(Store::new(&dir), Box::new(MemorySecretStore::default()));
+    assert_eq!(app.sign_in(url, email, PASSWORD).unwrap(), Step::Done);
+    app
+}
+
+/// A new organization, as an app makes one (its key sealed to the owner's
+/// public key, its own key pair, and a first shared folder, "IT"): its id
+/// and key.
+fn new_organization(server: &Server, session: &mut Session, email: &str) -> (String, SymmetricKey) {
+    let vault = open(server, session);
+    let org_key = SymmetricKey::generate();
+    let org_private = PrivateKey::generate().unwrap();
+    let created = server
+        .raw(
+            session,
+            "POST",
+            "/api/organizations",
+            Some(json!({
+                "name": "Contoso",
+                "billingEmail": email,
+                "collectionName": org_key.encrypt_str("IT").to_string(),
+                "key": encrypt_for(&vault.public_key_der(), &org_key.to_bytes()).unwrap().to_string(),
+                "keys": {
+                    "publicKey": STANDARD.encode(org_private.public_key_der()),
+                    "encryptedPrivateKey": org_key.encrypt(&org_private.to_pkcs8_der()).to_string(),
+                },
+                "planType": 0,
+            })),
+        )
+        .unwrap();
+    (created["id"].as_str().unwrap().to_owned(), org_key)
+}
+
+/// Templates (src/templates.rs): an item the web vault made from one (its
+/// fields, then the field that records the template) keeps the template
+/// and every field, in order, when the app edits it, a yes-or-no field
+/// included; and one the app makes from a template is recorded as the web
+/// vault records it.
+#[test]
+fn templated_items_keep_their_template_and_fields_through_the_apps_edits() {
+    use passbundle_core::templates::{self, TEMPLATE_FIELD};
+
+    let Some(server) = server() else { return };
+    let url = std::env::var("PB_TEST_SERVER").unwrap();
+    let email = new_email("templates");
+    sign_up(&server, &email);
+    let mut session = sign_in(&server, &email);
+    let user_key = session.user_key().clone();
+    let user_id = open(&server, &mut session).user_id;
+    let enc = |text: &str| json!(user_key.encrypt_str(text).to_string());
+
+    // As the web vault saves a Wi-Fi network (a note) and a domain (a login).
+    let marker = |id: &str, name: &str| format!(r#"{{"id":"{id}","name":"{name}","v":1}}"#);
+    let wifi = server
+        .raw(
+            &mut session,
+            "POST",
+            "/api/ciphers",
+            Some(json!({
+                "type": 2,
+                "name": enc("Office Wi-Fi"),
+                "notes": enc("The guest network is separate."),
+                "secureNote": { "type": 0 },
+                "fields": [
+                    { "name": enc("Network name"), "value": enc("Contoso"), "type": 0, "linkedId": null },
+                    { "name": enc("Password"), "value": enc("not-a-real-password-wifi"), "type": 1, "linkedId": null },
+                    { "name": enc("Security type"), "value": enc("WPA2"), "type": 0, "linkedId": null },
+                    { "name": enc(TEMPLATE_FIELD), "value": enc(&marker("wifi", "Wi-Fi network")), "type": 0, "linkedId": null },
+                ],
+                "favorite": false,
+                "reprompt": 0,
+                "encryptedFor": user_id,
+            })),
+        )
+        .unwrap();
+    let wifi_id = wifi["id"].as_str().unwrap().to_owned();
+    let domain = server
+        .raw(
+            &mut session,
+            "POST",
+            "/api/ciphers",
+            Some(json!({
+                "type": 1,
+                "name": enc("contoso.example"),
+                "login": { "username": enc("hostmaster"), "password": enc("not-a-real-password-dns"), "uris": [] },
+                "fields": [
+                    { "name": enc("Domain name"), "value": enc("contoso.example"), "type": 0, "linkedId": null },
+                    { "name": enc("Registrar"), "value": enc("Example Registrar"), "type": 0, "linkedId": null },
+                    { "name": enc("Auto-renew"), "value": enc("true"), "type": 2, "linkedId": null },
+                    { "name": enc(TEMPLATE_FIELD), "value": enc(&marker("domain", "Domain")), "type": 0, "linkedId": null },
+                ],
+                "favorite": false,
+                "reprompt": 0,
+                "encryptedFor": user_id,
+            })),
+        )
+        .unwrap();
+    let domain_id = domain["id"].as_str().unwrap().to_owned();
+
+    let mut app = signed_in_app(&url, &email);
+    let vault = app.vault().unwrap();
+    let item = vault.item(&wifi_id).unwrap();
+    assert_eq!(templates::category(item), "wifi");
+    assert_eq!(
+        templates::template_of(item).map(|(id, name, _)| (id, name)),
+        Some(("wifi".to_owned(), "Wi-Fi network".to_owned()))
+    );
+    // The editor gets the template's fields, not the record of the template.
+    let mut draft = ItemDraft::of(item);
+    let names: Vec<&str> = draft.fields.iter().map(|f| f.name.as_str()).collect();
+    assert_eq!(names, ["Network name", "Password", "Security type"]);
+    draft.fields[2].value = Zeroizing::new("WPA3".into());
+    draft.name = "Office Wi-Fi (5 GHz)".into();
+    app.save(Some(&wifi_id), &draft, &[]).unwrap();
+
+    let item = app.vault().unwrap().item(&domain_id).unwrap();
+    assert_eq!(templates::category(item), "domain");
+    let mut draft = ItemDraft::of(item);
+    assert!(draft.fields[2].boolean);
+    draft.fields[2].value = Zeroizing::new("false".into());
+    app.save(Some(&domain_id), &draft, &[]).unwrap();
+
+    // As the server keeps them: every field, in order, of the same kinds,
+    // the template still recorded, last, as it was.
+    let (sync, _) = server.sync(&mut session).unwrap();
+    let saved = |id: &str| -> Vec<(String, String, u8)> {
+        let cipher = sync.ciphers.iter().find(|c| c.id == id).unwrap();
+        cipher
+            .fields
+            .iter()
+            .flatten()
+            .map(|f| {
+                let open = |t: &Option<String>| {
+                    t.as_deref()
+                        .map(|t| {
+                            passbundle_core::crypto::EncString::parse(t)
+                                .unwrap()
+                                .decrypt_string(&user_key)
+                                .unwrap()
+                                .to_string()
+                        })
+                        .unwrap_or_default()
+                };
+                (open(&f.name), open(&f.value), f.kind)
+            })
+            .collect()
+    };
+    let field = |n: &str, v: &str, k: u8| (n.to_owned(), v.to_owned(), k);
+    assert_eq!(
+        saved(&wifi_id),
+        [
+            field("Network name", "Contoso", 0),
+            field("Password", "not-a-real-password-wifi", 1),
+            field("Security type", "WPA3", 0),
+            field(TEMPLATE_FIELD, &marker("wifi", "Wi-Fi network"), 0),
+        ]
+    );
+    assert_eq!(
+        saved(&domain_id),
+        [
+            field("Domain name", "contoso.example", 0),
+            field("Registrar", "Example Registrar", 0),
+            field("Auto-renew", "false", 2),
+            field(TEMPLATE_FIELD, &marker("domain", "Domain"), 0),
+        ]
+    );
+    let item = app.vault().unwrap().item(&wifi_id).unwrap();
+    assert_eq!(item.name, "Office Wi-Fi (5 GHz)");
+    assert_eq!(templates::category(item), "wifi");
+
+    // A new server from the app's New item picker: recorded as the web vault records it.
+    let draft = ItemDraft {
+        name: "Build server".into(),
+        username: Some("deploy".into()),
+        password: secret("not-a-real-password-build"),
+        fields: ["Hostname", "Port", "Operating system"]
+            .iter()
+            .zip(["10.0.4.12", "22", "Debian"])
+            .map(|(name, value)| Field {
+                name: (*name).into(),
+                value: Zeroizing::new(value.into()),
+                hidden: false,
+                boolean: false,
+            })
+            .collect(),
+        template: Some(("server".into(), "Server".into())),
+        ..ItemDraft::default()
+    };
+    app.save(None, &draft, &[]).unwrap();
+    let made = app
+        .vault()
+        .unwrap()
+        .items
+        .iter()
+        .find(|i| i.name == "Build server")
+        .unwrap();
+    let id = made.id.clone();
+    assert_eq!(templates::category(made), "server");
+    let fields = {
+        let (sync, _) = server.sync(&mut session).unwrap();
+        let cipher = sync.ciphers.into_iter().find(|c| c.id == id).unwrap();
+        cipher.fields.unwrap()
+    };
+    let last = fields.last().unwrap();
+    let open = |t: &Option<String>| {
+        passbundle_core::crypto::EncString::parse(t.as_deref().unwrap())
+            .unwrap()
+            .decrypt_string(&user_key)
+            .unwrap()
+            .to_string()
+    };
+    assert_eq!(open(&last.name), TEMPLATE_FIELD);
+    assert_eq!(open(&last.value), marker("server", "Server"));
+    assert_eq!(last.kind, 0);
+    assert_eq!(fields.len(), 4);
+}
+
+/// Shared folders' permissions (docs/core.md, "Folders and permissions"):
+/// a member whose shared folder hides passwords gets an organization's item
+/// to see, but not its secrets, nor to edit or delete it; in one where they
+/// can edit, they can; and moving an item into a folder they can't add to
+/// is refused by the server, with the item left where it was.
+#[test]
+fn a_shared_folders_permissions_hold_in_the_app() {
+    let Some(server) = server() else { return };
+    let url = std::env::var("PB_TEST_SERVER").unwrap();
+    let owner = new_email("owner");
+    let member = new_email("member");
+    sign_up(&server, &owner);
+    sign_up(&server, &member);
+    let mut session = sign_in(&server, &owner);
+    let (org_id, org_key) = new_organization(&server, &mut session, &owner);
+    let vault = open(&server, &mut session);
+    let it = vault.collections.keys().next().unwrap().clone();
+    let projects = server
+        .raw(
+            &mut session,
+            "POST",
+            &format!("/api/organizations/{org_id}/collections"),
+            Some(json!({ "name": org_key.encrypt_str("Projects/Web").to_string(), "groups": [], "users": [] })),
+        )
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    // The member: invited with "can view, except passwords" in IT and "can
+    // edit" in Projects/Web (accepted at once, as a server without email
+    // does for an account that exists), then confirmed with the
+    // organization's key sealed to their public key.
+    server
+        .raw(
+            &mut session,
+            "POST",
+            &format!("/api/organizations/{org_id}/users/invite"),
+            Some(json!({
+                "emails": [member],
+                "groups": [],
+                "type": 2,
+                "collections": [
+                    { "id": it, "readOnly": true, "hidePasswords": true, "manage": false },
+                    { "id": projects, "readOnly": false, "hidePasswords": false, "manage": false },
+                ],
+                "permissions": {},
+            })),
+        )
+        .unwrap();
+    let members = server
+        .raw(
+            &mut session,
+            "GET",
+            &format!("/api/organizations/{org_id}/users"),
+            None,
+        )
+        .unwrap();
+    let joined = members["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["email"] == member.as_str())
+        .unwrap();
+    let public = server
+        .raw(
+            &mut session,
+            "GET",
+            &format!(
+                "/api/users/{}/public-key",
+                joined["userId"].as_str().unwrap()
+            ),
+            None,
+        )
+        .unwrap();
+    let public = STANDARD
+        .decode(public["publicKey"].as_str().unwrap())
+        .unwrap();
+    server
+        .raw(
+            &mut session,
+            "POST",
+            &format!(
+                "/api/organizations/{org_id}/users/{}/confirm",
+                joined["id"].as_str().unwrap()
+            ),
+            Some(json!({ "key": encrypt_for(&public, &org_key.to_bytes()).unwrap().to_string() })),
+        )
+        .unwrap();
+
+    // The owner's items, one in each shared folder, and a template in IT
+    // whose hidden field has a default.
+    let vault = open(&server, &mut session);
+    let field = |name: &str, value: &str, hidden: bool| Field {
+        name: name.into(),
+        value: Zeroizing::new(value.into()),
+        hidden,
+        boolean: false,
+    };
+    let template = ItemDraft {
+        note: true,
+        name: "Router".into(),
+        organization_id: Some(org_id.clone()),
+        fields: vec![
+            field("Model", "not-a-real-model", false),
+            field("Admin PIN", "not-a-real-pin", true),
+            field(
+                passbundle_core::templates::DEFINITION_FIELD,
+                r#"{"id":"office-router","base":"note","v":1}"#,
+                false,
+            ),
+        ],
+        ..ItemDraft::default()
+    };
+    server
+        .save_item(
+            &mut session,
+            None,
+            vault.encrypt_item(&template, None).unwrap(),
+            std::slice::from_ref(&it),
+        )
+        .unwrap();
+    for (name, password, folder) in [
+        ("Office Wi-Fi", "not-a-real-password-it", &it),
+        ("Project wiki", "not-a-real-password-wiki", &projects),
+    ] {
+        let draft = ItemDraft {
+            name: name.into(),
+            username: Some("not-a-real-user".into()),
+            password: secret(password),
+            organization_id: Some(org_id.clone()),
+            ..ItemDraft::default()
+        };
+        server
+            .save_item(
+                &mut session,
+                None,
+                vault.encrypt_item(&draft, None).unwrap(),
+                std::slice::from_ref(folder),
+            )
+            .unwrap();
+    }
+
+    let mut app = signed_in_app(&url, &member);
+    let vault = app.vault().unwrap();
+    let find = |name: &str| vault.items.iter().find(|i| i.name == name).unwrap();
+    let wifi = find("Office Wi-Fi");
+    let wiki = find("Project wiki");
+    let (wifi_id, wiki_id) = (wifi.id.clone(), wiki.id.clone());
+    let hidden = vault.grid(wifi);
+    assert!(!hidden.see_passwords && !hidden.edit && !hidden.delete);
+    assert!(hidden.view_history);
+    let editable = vault.grid(wiki);
+    assert!(editable.see_passwords && editable.edit && editable.delete);
+    assert!(!vault.collection_grids[&it].create);
+    assert!(vault.collection_grids[&projects].create);
+    // "Projects/Web" has no "Projects" to sit in: it stays whole, at the top.
+    let collections: Vec<(String, String)> = vault
+        .collections
+        .iter()
+        .map(|(id, name)| (id.clone(), name.clone()))
+        .collect();
+    let nested = passbundle_core::places::nest(&collections);
+    assert!(nested.iter().all(|n| n.depth == 0));
+
+    // Its secrets aren't copied or filled, its plain values are, and it
+    // isn't edited.
+    for what in ["password", "totp"] {
+        assert!(matches!(
+            app.value_to_copy(&wifi_id, what),
+            Err(Error::Refused(_))
+        ));
+    }
+    assert_eq!(
+        app.value_to_copy(&wifi_id, "username").unwrap().as_str(),
+        "not-a-real-user"
+    );
+    // The template's hidden default isn't handed to them; its plain one is.
+    let groups = passbundle_core::templates::groups(app.vault().unwrap(), |item| app.may_use(item));
+    let router = groups
+        .iter()
+        .flat_map(|g| &g.templates)
+        .find(|t| t.id == "office-router")
+        .unwrap();
+    let default = |label: &str| {
+        router
+            .fields
+            .iter()
+            .find(|f| f.label == label)
+            .unwrap()
+            .value
+            .clone()
+    };
+    assert_eq!(default("Model").as_deref(), Some("not-a-real-model"));
+    assert_eq!(default("Admin PIN"), None);
+    let draft = ItemDraft::of(app.vault().unwrap().item(&wifi_id).unwrap());
+    assert!(app
+        .save(Some(&wifi_id), &draft, std::slice::from_ref(&it))
+        .is_err());
+
+    // Moving the wiki into IT, where the member can't add items, is refused
+    // before anything is saved, as the server would refuse it; edited where
+    // it is, it's saved.
+    let mut draft = ItemDraft::of(app.vault().unwrap().item(&wiki_id).unwrap());
+    draft.name = "Project wiki (team)".into();
+    let moved = app.save(Some(&wiki_id), &draft, std::slice::from_ref(&it));
+    assert!(matches!(moved, Err(Error::Refused(_))), "{moved:?}");
+    assert_eq!(
+        app.vault().unwrap().item(&wiki_id).unwrap().name,
+        "Project wiki"
+    );
+    app.save(Some(&wiki_id), &draft, std::slice::from_ref(&projects))
+        .unwrap();
+    let wiki = app.vault().unwrap().item(&wiki_id).unwrap();
+    assert_eq!(wiki.name, "Project wiki (team)");
+    assert_eq!(wiki.collection_ids, std::slice::from_ref(&projects));
+
+    // The owner moves it, and it goes.
+    let mut owner_app = signed_in_app(&url, &owner);
+    let draft = ItemDraft::of(owner_app.vault().unwrap().item(&wiki_id).unwrap());
+    owner_app
+        .save(Some(&wiki_id), &draft, &[it.clone(), projects.clone()])
+        .unwrap();
+    let mut held = owner_app
+        .vault()
+        .unwrap()
+        .item(&wiki_id)
+        .unwrap()
+        .collection_ids
+        .clone();
+    held.sort();
+    let mut both = vec![it.clone(), projects.clone()];
+    both.sort();
+    assert_eq!(held, both);
+
+    // An earlier version of the Wi-Fi: the member, who can't see its
+    // passwords, gets when it was saved and by whom, and no contents; nor
+    // may they clear its history.
+    let mut draft = ItemDraft::of(owner_app.vault().unwrap().item(&wifi_id).unwrap());
+    draft.password = secret("not-a-real-password-it-2");
+    owner_app.save(Some(&wifi_id), &draft, &[]).unwrap();
+    app.sync().unwrap();
+    let history = app.history(&wifi_id).unwrap();
+    assert!(history.hide_passwords);
+    assert!(!history.versions.is_empty());
+    assert!(history.versions.iter().all(|v| v.item.is_none()));
+    assert!(matches!(
+        app.delete_history(&wifi_id, None),
+        Err(Error::Refused(_))
+    ));
+    // The owner sees the version, with the password it had.
+    let history = owner_app.history(&wifi_id).unwrap();
+    assert!(!history.hide_passwords);
+    let old = history.versions[0].item.as_ref().unwrap();
+    assert_eq!(
+        old.password.as_deref().map(String::as_str),
+        Some("not-a-real-password-it")
+    );
+}
+
+/// Item history (history.rs): an item's earlier versions come back opened,
+/// compared field by field with the item now; restoring one is a normal
+/// edit, which keeps its template and puts the replaced password in the
+/// password history; and clearing it leaves none.
+#[test]
+fn an_items_versions_compare_restore_and_clear() {
+    use passbundle_core::history;
+    use passbundle_core::templates::{self, TEMPLATE_FIELD};
+
+    let Some(server) = server() else { return };
+    let url = std::env::var("PB_TEST_SERVER").unwrap();
+    let email = new_email("history");
+    sign_up(&server, &email);
+    let mut app = signed_in_app(&url, &email);
+
+    // A server's login, from the template, then two edits.
+    let field = |name: &str, value: &str| Field {
+        name: name.into(),
+        value: Zeroizing::new(value.into()),
+        hidden: false,
+        boolean: false,
+    };
+    let draft = ItemDraft {
+        name: "Build server".into(),
+        username: Some("deploy".into()),
+        password: secret("not-a-real-password-v1"),
+        fields: vec![field("Hostname", "10.0.4.12"), field("Port", "22")],
+        template: Some(("server".into(), "Server".into())),
+        ..ItemDraft::default()
+    };
+    app.save(None, &draft, &[]).unwrap();
+    let id = app.vault().unwrap().items[0].id.clone();
+    let mut draft = ItemDraft::of(app.vault().unwrap().item(&id).unwrap());
+    draft.password = secret("not-a-real-password-v2");
+    draft.fields[1].value = Zeroizing::new("2222".into());
+    app.save(Some(&id), &draft, &[]).unwrap();
+    let mut draft = ItemDraft::of(app.vault().unwrap().item(&id).unwrap());
+    draft.name = "Build server (new)".into();
+    draft.password = secret("not-a-real-password-v3");
+    app.save(Some(&id), &draft, &[]).unwrap();
+
+    // Newest first: the second, then the first.
+    let versions: Vec<(String, String)> = app
+        .history(&id)
+        .unwrap()
+        .versions
+        .iter()
+        .map(|v| {
+            let item = v.item.as_ref().unwrap();
+            (v.id.clone(), item.password.as_deref().unwrap().to_string())
+        })
+        .collect();
+    assert_eq!(
+        versions.iter().map(|(_, p)| p.as_str()).collect::<Vec<_>>(),
+        ["not-a-real-password-v2", "not-a-real-password-v1"]
+    );
+    let first = versions[1].0.clone();
+    let vault = app.vault().unwrap();
+    let current = vault.item(&id).unwrap();
+    let history = app.kept_history(&id).unwrap();
+    let old = history.versions[1].item.as_ref().unwrap();
+    let rows = history::rows(old, current, false);
+    let changed: Vec<&str> = rows
+        .iter()
+        .filter(|r| r.changed)
+        .map(|r| r.label.as_str())
+        .collect();
+    assert_eq!(changed, ["Name", "Password", "Port"]);
+    // Secrets stay out until asked for.
+    let password = rows.iter().find(|r| r.label == "Password").unwrap();
+    assert!(password.secret && password.version.is_none());
+    let shown = history::rows(old, current, true);
+    let password = shown.iter().find(|r| r.label == "Password").unwrap();
+    assert_eq!(password.version.as_deref(), Some("not-a-real-password-v1"));
+    assert_eq!(password.current.as_deref(), Some("not-a-real-password-v3"));
+    let opened: Vec<_> = history
+        .versions
+        .iter()
+        .map(|v| v.item.as_ref().unwrap())
+        .collect();
+    assert_eq!(history::distinct(&opened, current), [true, true]);
+
+    // Restored: the first version's contents, as a normal edit.
+    app.restore_version(&id, &first).unwrap();
+    let item = app.vault().unwrap().item(&id).unwrap();
+    assert_eq!(item.name, "Build server");
+    assert_eq!(
+        item.password.as_deref().map(String::as_str),
+        Some("not-a-real-password-v1")
+    );
+    assert_eq!(item.fields[1].value.as_str(), "22");
+    assert_eq!(templates::category(item), "server");
+    assert_eq!(item.fields.last().unwrap().name, TEMPLATE_FIELD);
+    // The password it replaced is first in its password history.
+    let session = sign_in(&server, &email);
+    let opened = passbundle_core::crypto::EncString::parse(
+        item.kept.password_history[0]["password"].as_str().unwrap(),
+    )
+    .unwrap()
+    .decrypt_string(session.user_key())
+    .unwrap();
+    assert_eq!(opened.as_str(), "not-a-real-password-v3");
+
+    // Cleared, for everyone: nothing left.
+    app.delete_history(&id, None).unwrap();
+    assert!(app.history(&id).unwrap().versions.is_empty());
+}
+
+/// A device the account knows asking to sign in with a device (docs/core.md,
+/// "Approving a sign-in"), as the web vault and the extension ask: a new
+/// RSA-2048 key pair and an access code. Its id, private key, and code.
+fn ask_to_sign_in(url: &str, email: &str, device: &str) -> (String, PrivateKey, String) {
+    let private = PrivateKey::generate().unwrap();
+    let code = uuid::Uuid::new_v4().simple().to_string()[..25].to_owned();
+    let kind = Device::this_one(device).kind.to_string();
+    let mut response = ureq::post(format!("{url}/api/auth-requests"))
+        .header("Device-Type", &kind)
+        .send_json(json!({
+            "email": email,
+            "deviceIdentifier": device,
+            "publicKey": STANDARD.encode(private.public_key_der()),
+            "accessCode": code,
+            "type": 0,
+        }))
+        .unwrap();
+    let body: serde_json::Value = response.body_mut().read_json().unwrap();
+    (body["id"].as_str().unwrap().to_owned(), private, code)
+}
+
+/// The asking device reading its answer with its access code: the status,
+/// and the wrapped key if there's one.
+fn read_answer(url: &str, device: &str, id: &str, code: &str) -> (u16, Option<String>) {
+    let kind = Device::this_one(device).kind.to_string();
+    let response = ureq::get(format!("{url}/api/auth-requests/{id}/response?code={code}"))
+        .header("Device-Type", &kind)
+        .config()
+        .http_status_as_error(false)
+        .build()
+        .call()
+        .unwrap();
+    let status = response.status().as_u16();
+    let body: serde_json::Value = response.into_body().read_json().unwrap_or_default();
+    (status, body["key"].as_str().map(str::to_owned))
+}
+
+#[test]
+fn a_sign_in_from_another_device_is_approved_in_the_app_and_the_key_reaches_only_it() {
+    let Some(server) = server() else { return };
+    let url = std::env::var("PB_TEST_SERVER").unwrap();
+    let email = new_email("approval");
+    sign_up(&server, &email);
+    // The device that asks signed in before, so the account knows it.
+    let asking = Device::new_identifier();
+    let first = Server::new(&url, Device::this_one(&asking)).unwrap();
+    sign_in(&first, &email);
+    let user_key = sign_in(&server, &email).user_key().to_bytes();
+    let mut app = signed_in_app(&url, &email);
+
+    let (id, private, code) = ask_to_sign_in(&url, &email, &asking);
+    let listed = app.sign_in_requests().unwrap();
+    assert_eq!(listed.len(), 1);
+    let request = &listed[0];
+    assert_eq!(request.id, id);
+    assert_eq!(
+        request.fingerprint,
+        passbundle_core::device_approval::fingerprint_phrase(&email, &private.public_key_der())
+    );
+    assert_eq!(request.ip, "127.0.0.1");
+    assert!(request.device.starts_with("App on "), "{}", request.device);
+    assert!(request.left > 14 * 60 && request.left <= 15 * 60);
+
+    // Approving waits for the person to confirm it's them, and for the
+    // phrase they were shown; nothing is sent until then.
+    assert_eq!(
+        app.answer_sign_in_request(&id, &request.fingerprint, true),
+        Err(Error::ConfirmFirst)
+    );
+    app.confirm_with_master_password(PASSWORD).unwrap();
+    assert!(matches!(
+        app.answer_sign_in_request(&id, "not-the-phrase-shown-here", true),
+        Err(Error::Refused(_))
+    ));
+    assert_eq!(read_answer(&url, &asking, &id, &code), (200, None));
+
+    // The wrong phrase used the confirmation up: once more.
+    app.confirm_with_master_password(PASSWORD).unwrap();
+    app.answer_sign_in_request(&id, &request.fingerprint, true)
+        .unwrap();
+    assert!(app.sign_in_requests().unwrap().is_empty());
+    // Only the asking device's private key opens what the app sent: the
+    // user key.
+    let (status, key) = read_answer(&url, &asking, &id, &code);
+    assert_eq!(status, 200);
+    let key = passbundle_core::crypto::EncString::parse(&key.unwrap()).unwrap();
+    assert!(key.to_string().starts_with("4."));
+    assert_eq!(&*private.decrypt(&key).unwrap(), &*user_key);
+    assert!(PrivateKey::generate().unwrap().decrypt(&key).is_err());
+    // And it signs in with its access code.
+    let mut signed_in = ureq::post(format!("{url}/identity/connect/token"))
+        .send_form([
+            ("grant_type", "password"),
+            ("username", email.as_str()),
+            ("password", code.as_str()),
+            ("authRequest", id.as_str()),
+            ("scope", "api offline_access"),
+            ("client_id", "desktop"),
+            ("deviceType", &Device::this_one(&asking).kind.to_string()),
+            ("deviceIdentifier", asking.as_str()),
+            ("deviceName", "asking"),
+        ])
+        .unwrap();
+    let token: serde_json::Value = signed_in.body_mut().read_json().unwrap();
+    assert!(token["access_token"].is_string());
+
+    // One confirmation, one approval; biometrics confirm too (the OS's
+    // stored user key, given back for the approval), but only this vault's
+    // key, and unlocking with it again isn't confirming.
+    let (second, _, second_code) = ask_to_sign_in(&url, &email, &asking);
+    let phrase = app.sign_in_requests().unwrap()[0].fingerprint.clone();
+    assert_eq!(
+        app.answer_sign_in_request(&second, &phrase, true),
+        Err(Error::ConfirmFirst)
+    );
+    assert!(matches!(
+        app.confirm_approval_with_key(SymmetricKey::generate()),
+        Err(Error::Refused(_))
+    ));
+    app.unlock_with_key(SymmetricKey::from_bytes(&user_key).unwrap())
+        .unwrap();
+    assert_eq!(
+        app.answer_sign_in_request(&second, &phrase, true),
+        Err(Error::ConfirmFirst)
+    );
+    // A confirmation is used up by a denial too. Denying needs none, and
+    // sends no key: the request is gone.
+    app.confirm_approval_with_key(SymmetricKey::from_bytes(&user_key).unwrap())
+        .unwrap();
+    app.answer_sign_in_request(&second, "", false).unwrap();
+    assert!(app.sign_in_requests().unwrap().is_empty());
+    assert_eq!(read_answer(&url, &asking, &second, &second_code).0, 400);
+    let (fourth, _, _) = ask_to_sign_in(&url, &email, &asking);
+    let phrase = app.sign_in_requests().unwrap()[0].fingerprint.clone();
+    assert_eq!(
+        app.answer_sign_in_request(&fourth, &phrase, true),
+        Err(Error::ConfirmFirst)
+    );
+    // And by an approval that went wrong (the wrong phrase).
+    app.confirm_with_master_password(PASSWORD).unwrap();
+    assert!(app
+        .answer_sign_in_request(&fourth, "not-the-phrase-shown-here", true)
+        .is_err());
+    assert_eq!(
+        app.answer_sign_in_request(&fourth, &phrase, true),
+        Err(Error::ConfirmFirst)
+    );
+
+    // Turned off on this device (which needs confirming first), approving
+    // doesn't ask.
+    assert_eq!(app.set_confirm_approvals(false), Err(Error::ConfirmFirst));
+    app.confirm_with_master_password(PASSWORD).unwrap();
+    app.set_confirm_approvals(false).unwrap();
+    assert!(!app.confirm_approvals());
+    app.answer_sign_in_request(&fourth, &phrase, true).unwrap();
+
+    // Another account never sees them.
+    let other = new_email("approval-other");
+    sign_up(&server, &other);
+    let mut other_app = signed_in_app(&url, &other);
+    ask_to_sign_in(&url, &email, &asking);
+    assert!(other_app.sign_in_requests().unwrap().is_empty());
+    // Locking forgets the listed requests.
+    assert_eq!(app.sign_in_requests().unwrap().len(), 1);
+    app.lock();
+    assert!(app.kept_sign_in_requests().is_empty());
+    assert_eq!(app.sign_in_requests().err(), Some(Error::SignedOut));
+}
+
+/// The person's own logins' numbers (DESIGN.md in the meta repo, "Members'
+/// own passwords"): a member of an organization's app tells the server how
+/// many of their own logins have weak or reused passwords, after each sync,
+/// while the organization has "Members' own passwords" on, and its owners
+/// see those numbers, never which logins. An organization's items don't
+/// count. With it off (an organization made the upstream way, as here), the
+/// app sends nothing.
+#[test]
+fn an_apps_own_logins_numbers_reach_the_organizations_owners() {
+    let Some(server) = server() else { return };
+    let url = std::env::var("PB_TEST_SERVER").unwrap();
+    let email = new_email("own-health");
+    sign_up(&server, &email);
+    let mut session = sign_in(&server, &email);
+    let (org_id, _) = new_organization(&server, &mut session, &email);
+
+    let mut app = signed_in_app(&url, &email);
+    for (name, password) in [
+        ("Old forum", "password1"),
+        ("Bank", "Vq7#mZ2!pL9@xR4&tW8"),
+        ("Bank, again", "Vq7#mZ2!pL9@xR4&tW8"),
+    ] {
+        let draft = ItemDraft {
+            name: name.into(),
+            username: Some("ana".into()),
+            password: secret(password),
+            ..ItemDraft::default()
+        };
+        app.save(None, &draft, &[]).unwrap();
+    }
+    let vault = app.vault().unwrap();
+    let it = vault.collections.keys().next().unwrap().clone();
+    let shared = ItemDraft {
+        name: "Office Wi-Fi".into(),
+        password: secret("password1"),
+        organization_id: Some(org_id.clone()),
+        ..ItemDraft::default()
+    };
+    app.save(None, &shared, &[it]).unwrap();
+    app.sync().unwrap();
+    assert_eq!(
+        app.own_health_reported(),
+        None,
+        "sent while the organization has it off"
+    );
+
+    let on = server
+        .raw(
+            &mut session,
+            "PUT",
+            &format!("/api/keykeeper/organizations/{org_id}/member-health-setting"),
+            Some(json!({ "enabled": true })),
+        )
+        .unwrap();
+    assert_eq!(on["enabled"], true, "{on}");
+    app.sync().unwrap();
+    let reported = app.own_health_reported().expect("the numbers were sent");
+    assert_eq!((reported.logins, reported.weak, reported.reused), (3, 1, 2));
+
+    let seen = server
+        .raw(
+            &mut session,
+            "GET",
+            &format!("/api/keykeeper/organizations/{org_id}/member-health"),
+            None,
+        )
+        .unwrap();
+    let rows = seen["data"].as_array().unwrap();
+    assert_eq!(rows.len(), 1, "{seen}");
+    assert_eq!(rows[0]["logins"], 3);
+    assert_eq!(rows[0]["weak"], 1);
+    assert_eq!(rows[0]["reused"], 2);
+    // The apps don't check breaches, so they never say how many are exposed.
+    assert!(rows[0]["exposed"].is_null(), "{seen}");
+    assert!(rows[0]["reportedAt"].is_string(), "{seen}");
+    // Numbers, and nothing that names an item.
+    let text = seen.to_string();
+    assert!(!text.contains("Old forum") && !text.contains("Bank"));
+}
+
+/// An expiration date and reminder days the app's editor sets go to the
+/// server as the web vault keeps them (text fields named `keykeeper.expires`
+/// and `keykeeper.remind`), come back with the next sync, stay through an
+/// edit that doesn't touch them, and go when the date is cleared.
+#[test]
+fn an_expiration_date_and_reminder_days_saved_in_the_app_come_back() {
+    use passbundle_core::expiration::{Date, Remind, REMIND_FIELD};
+    use passbundle_core::vault::{Expiration, EXPIRES_FIELD};
+
+    let Some(server) = server() else { return };
+    let url = std::env::var("PB_TEST_SERVER").unwrap();
+    let email = new_email("expires");
+    sign_up(&server, &email);
+    let mut app = signed_in_app(&url, &email);
+    let draft = ItemDraft {
+        name: "Domain renewal".into(),
+        note: true,
+        expiration: Some(Expiration {
+            date: Date::parse_iso("2027-03-31"),
+            remind: Remind::parse("90,30,7,1").unwrap(),
+        }),
+        ..ItemDraft::default()
+    };
+    app.save(None, &draft, &[]).unwrap();
+    let fields = |app: &App| -> Vec<(String, String)> {
+        let item = app
+            .vault()
+            .unwrap()
+            .items
+            .iter()
+            .find(|i| i.name == "Domain renewal")
+            .unwrap();
+        item.fields
+            .iter()
+            .map(|f| (f.name.clone(), f.value.as_str().to_owned()))
+            .collect()
+    };
+    let expected = vec![
+        (EXPIRES_FIELD.to_owned(), "2027-03-31".to_owned()),
+        (REMIND_FIELD.to_owned(), "90,30,7,1".to_owned()),
+    ];
+    assert_eq!(fields(&app), expected);
+
+    // Read on another device, then renamed there: the date and days stay.
+    let mut other = signed_in_app(&url, &email);
+    assert_eq!(fields(&other), expected);
+    let (id, mut renamed) = {
+        let item = other
+            .vault()
+            .unwrap()
+            .items
+            .iter()
+            .find(|i| i.name == "Domain renewal")
+            .unwrap();
+        (item.id.clone(), ItemDraft::of(item))
+    };
+    renamed.notes = secret("Renew at the registrar.");
+    other.save(Some(&id), &renamed, &[]).unwrap();
+    app.sync().unwrap();
+    assert_eq!(fields(&app), expected);
+
+    // Cleared in the editor: both go.
+    let mut cleared = {
+        let item = app.vault().unwrap().item(&id).unwrap();
+        ItemDraft::of(item)
+    };
+    cleared.expiration = Some(Expiration::default());
+    app.save(Some(&id), &cleared, &[]).unwrap();
+    assert_eq!(fields(&app), vec![]);
+}
+
+/// The new-device check (DESIGN.md in the meta repo, "New-device check"),
+/// on a server with it on: the account's first sign-in isn't asked; a new
+/// device waits with a number, which the account's other device (the app,
+/// signed in) lists without, and approves by typing it; the new device
+/// finishes and keeps the device token it's given, so signing in on it
+/// again isn't asked, while the same device without its token is new
+/// again; a wrong number denies it at once, and so does Deny; and signing in
+/// again while it waits, without the check's token, starts a new one.
+#[test]
+fn a_new_device_waits_for_its_number_from_another_and_is_known_after() {
+    use passbundle_core::new_device::{Answered, Email, Status};
+    use passbundle_core::secrets::{Secret, SecretStore};
+    use std::sync::Arc;
+    let Ok(url) = std::env::var("PB_TEST_SERVER_NEW_DEVICE") else {
+        eprintln!("PB_TEST_SERVER_NEW_DEVICE isn't set; skipping the new-device check's test (NEW_DEVICE_CHECK=true tools/test-server.sh starts one).");
+        return;
+    };
+    let server = Server::new(&url, Device::this_one(&Device::new_identifier())).unwrap();
+    let email = new_email("new-device");
+    sign_up(&server, &email);
+    // The first sign-in isn't asked: no device could approve it.
+    let mut approving = signed_in_app(&url, &email);
+
+    let dir = std::env::temp_dir().join(format!("pb-new-device-{}", uuid::Uuid::new_v4().simple()));
+    let secrets = Arc::new(MemorySecretStore::default());
+    let mut new = App::open(Store::new(&dir), Box::new(secrets.clone()));
+    let Step::NewDevice(check) = new.sign_in(&url, &email, PASSWORD).unwrap() else {
+        panic!("a new device should wait for approval");
+    };
+    assert_eq!(check.status, Status::Waiting);
+    let number: u8 = check.number.parse().unwrap();
+    assert!((10..=99).contains(&number), "{number}");
+    assert!(check.approvers);
+    // Another device can approve, so a code by email waits a day.
+    assert_eq!(check.email, Email::Later);
+    assert!(new.signing_in());
+    let Step::NewDevice(still) = new.new_device_status().unwrap() else {
+        panic!("still waiting");
+    };
+    assert_eq!(still.status, Status::Waiting);
+
+    // The other device lists it, with where it's from, and never its number.
+    let (waiting, source) = approving.new_device_checks().unwrap();
+    assert_eq!(waiting.len(), 1);
+    let listed = &waiting[0];
+    assert_eq!(listed.id, check.id);
+    assert_eq!(listed.ip, "127.0.0.1");
+    assert!(
+        listed.device.starts_with("PassBundle on "),
+        "{}",
+        listed.device
+    );
+    // This computer's address is a private one, and the test server has no
+    // location database.
+    assert_eq!(listed.location, None);
+    assert_eq!(source, None);
+    assert!(
+        listed.left > 9 * 60 && listed.left <= 10 * 60,
+        "{}",
+        listed.left
+    );
+    // Nothing is sent for a number that isn't two digits: still waiting.
+    assert!(approving
+        .answer_new_device_check(&check.id, Some("4"))
+        .is_err());
+    assert_eq!(approving.new_device_checks().unwrap().0.len(), 1);
+
+    // The number shown on the new device approves it, and it signs in.
+    assert_eq!(
+        approving.answer_new_device_check(&check.id, Some(&check.number)),
+        Ok(Answered::Approved)
+    );
+    assert!(approving.new_device_checks().unwrap().0.is_empty());
+    assert_eq!(new.new_device_status().unwrap(), Step::Done);
+    assert!(matches!(new.state(), State::Unlocked { .. }));
+    assert!(!new.signing_in());
+    // It keeps the device token it was given, beside the refresh token.
+    let token = secrets
+        .get_secret(Secret::DeviceToken, &url, &email)
+        .expect("a device token kept");
+    assert!(secrets.get(&url, &email).is_some());
+
+    // Signed out and in again, it shows its token: not asked.
+    new.sign_out();
+    assert!(secrets.get(&url, &email).is_none());
+    assert_eq!(
+        secrets
+            .get_secret(Secret::DeviceToken, &url, &email)
+            .as_deref(),
+        Some(&*token)
+    );
+    assert_eq!(new.sign_in(&url, &email, PASSWORD).unwrap(), Step::Done);
+    drop(new);
+
+    // The same device (its identifier, kept in its folder) without its
+    // token is new again.
+    let forgetful = Arc::new(MemorySecretStore::default());
+    let mut new = App::open(Store::new(&dir), Box::new(forgetful.clone()));
+    let Step::NewDevice(second) = new.sign_in(&url, &email, PASSWORD).unwrap() else {
+        panic!("a device without its token should wait for approval");
+    };
+    assert_ne!(second.id, check.id);
+    // A check has one holder: signing in again without its token (a new
+    // sign-in, as after the app started again) ends it and starts another,
+    // whose number the old one's approval can't answer.
+    let Step::NewDevice(again) = new.sign_in(&url, &email, PASSWORD).unwrap() else {
+        panic!("still waiting");
+    };
+    assert_ne!(again.id, second.id);
+    assert!(matches!(
+        approving.answer_new_device_check(&second.id, Some(&second.number)),
+        Err(Error::Refused(_))
+    ));
+    let second = again;
+
+    // A wrong number denies it at once: one try.
+    let wrong = if second.number == "10" { "11" } else { "10" };
+    assert_eq!(
+        approving.answer_new_device_check(&second.id, Some(wrong)),
+        Ok(Answered::WrongNumber)
+    );
+    assert!(approving.new_device_checks().unwrap().0.is_empty());
+    let Step::NewDevice(denied) = new.new_device_status().unwrap() else {
+        panic!("denied, not signed in");
+    };
+    assert_eq!(denied.status, Status::Denied);
+    assert_eq!(denied.denied_why.as_deref(), Some("number"));
+    assert!(!matches!(new.state(), State::Unlocked { .. }));
+    // Its number can't approve it after that.
+    assert!(matches!(
+        approving.answer_new_device_check(&second.id, Some(&second.number)),
+        Err(Error::Refused(_))
+    ));
+
+    // Starting again makes a new check, which Deny denies.
+    let Step::NewDevice(third) = new.sign_in(&url, &email, PASSWORD).unwrap() else {
+        panic!("a new check");
+    };
+    assert_ne!(third.id, second.id);
+    assert_eq!(
+        approving.answer_new_device_check(&third.id, None),
+        Ok(Answered::Denied)
+    );
+    let Step::NewDevice(denied) = new.new_device_status().unwrap() else {
+        panic!("denied, not signed in");
+    };
+    assert_eq!(denied.status, Status::Denied);
+    assert_eq!(denied.denied_why.as_deref(), Some("denied"));
+    assert!(forgetful
+        .get_secret(Secret::DeviceToken, &url, &email)
+        .is_none());
+
+    // Locked, the other device lists nothing and answers nothing.
+    let Step::NewDevice(fourth) = new.sign_in(&url, &email, PASSWORD).unwrap() else {
+        panic!("a new check");
+    };
+    approving.lock();
+    assert_eq!(approving.new_device_checks().err(), Some(Error::SignedOut));
+    assert_eq!(
+        approving.answer_new_device_check(&fourth.id, Some(&fourth.number)),
+        Err(Error::SignedOut)
+    );
     let _ = std::fs::remove_dir_all(dir);
 }

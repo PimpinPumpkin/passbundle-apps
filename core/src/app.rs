@@ -1,25 +1,32 @@
-//! The app's state, as the screens see it: signed out, locked, or unlocked,
-//! and everything they ask for. One per process; the bridge (ffi.rs) holds it.
-//! See docs/core.md: signing in, two-step login, unlocking from the kept sync,
-//! and syncing with the kept refresh token.
+//! One account's state, as the screens see it: signed out, locked, or
+//! unlocked, and everything they ask for. One per account signed in on this
+//! device (accounts.rs, which the bridge, ffi.rs, holds), each with its own
+//! folder, keys, choices, and lock. See docs/core.md: signing in, two-step
+//! login, the new-device check, unlocking from the kept sync, and syncing
+//! with the kept refresh token.
 
 use std::path::PathBuf;
-use std::time::{Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use zeroize::Zeroizing;
 
 use crate::agent::{self, Agent};
 use crate::autolock::{AutoLock, Preferences, Readings, Reason};
 use crate::clipboard;
-use crate::crypto::SymmetricKey;
+use crate::crypto::{EncString, SymmetricKey};
+use crate::device_approval::{self, SignInRequest};
 use crate::error::{Error, Result};
 use crate::generator;
 use crate::generator_policy::GeneratorPolicy;
-use crate::kdf::normalize_email;
+use crate::kdf::{normalize_email, Prelogin};
 use crate::lock_policy::LockPolicy;
-use crate::secrets::SecretStore;
-use crate::server::{Device, Download, PendingSignIn, Server, Session, SignIn, TwoFactor};
+use crate::new_device;
+use crate::secrets::{Secret, SecretStore};
+use crate::security_key::{KeyAnswer, SecurityKeyRequest};
+use crate::server::{Device, Download, Next, PendingSignIn, Server, Session, SignIn, TwoFactor};
 use crate::store::{Settings, Store};
+use crate::synced_settings::{self, Known};
+use crate::two_step::{self, Offer};
 use crate::vault::{Item, ItemDraft, Sync, Vault};
 
 #[derive(Debug, PartialEq, Eq)]
@@ -40,16 +47,49 @@ pub enum State {
     },
 }
 
+/// An item saved (`App::save`): its id, and whether the sync after it came
+/// through. When it didn't, the item is saved all the same, and this device
+/// shows it; the rest of the vault catches up at the next sync.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Saved {
+    pub id: String,
+    pub synced: bool,
+}
+
+/// A second step made ready (Duo's address, a security key's request), or
+/// a sign-in that went through without it.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Prepared<T> {
+    Ready(T),
+    SignedIn,
+}
+
 /// Where signing in got to.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Step {
     Done,
-    /// The second step, with the methods the server offers (0 authenticator, 1 email).
-    TwoFactor(Vec<u8>),
+    /// The second step, with what the server offers (two_step.rs).
+    TwoFactor(Offer),
+    /// The new-device check holds it (new_device.rs): the number to type on
+    /// another of the account's devices, and how it stands. Ask how it
+    /// stands every few seconds (`new_device_status`).
+    NewDevice(new_device::Check),
 }
 
 pub struct App {
+    /// This account's own id on this device (accounts.rs): its folder's
+    /// name, and what a phone's biometric unlock keeps its key under. Empty
+    /// for an app opened on a folder of its own (`App::open`).
+    id: String,
     store: Store,
+    /// What's the device's, not the account's: how the app looks, and
+    /// whether screenshots are allowed. The account's own store, for an app
+    /// opened on a folder of its own.
+    device: Store,
+    /// This install's device identifier, for signing in when this account
+    /// has none kept yet (accounts.rs): one per install, as upstream's apps
+    /// have it.
+    install_identifier: Option<String>,
     secrets: Box<dyn SecretStore>,
     settings: Option<Settings>,
     server: Option<Server>,
@@ -70,17 +110,89 @@ pub struct App {
     /// opened before can't save over an item's secrets (`grant`).
     grant: u64,
     autolock: AutoLock,
+    /// The last item whose history was asked for, as the server sent it and
+    /// opened (history.rs): to show a version's secrets, or restore it,
+    /// without asking again. Forgotten when the vault locks.
+    history: Option<History>,
+    /// The generator's last password or passphrase, which its Copy copies
+    /// (as `value("", "generated")`), so it clears like any secret. Forgotten
+    /// when the vault locks.
+    generated: Option<Zeroizing<String>>,
+    /// Websites' icons, in memory while the vault is open (icons.rs).
+    icons: crate::icons::Cache,
+    /// Counts each time the icons are emptied (locking, signing out,
+    /// turning them off), so one fetched before isn't kept after.
+    icon_session: u64,
+    /// Sign-in requests from the last listing, and when they were listed
+    /// (docs/core.md, "Approving a sign-in"): an approval goes only to the
+    /// key of one listed here, whose phrase the person saw. Forgotten when
+    /// the vault locks.
+    sign_in_requests: Option<(Instant, Vec<SignInRequest>)>,
+    /// When the person last confirmed it's them (biometrics or the master
+    /// password) to approve a sign-in; one confirmation, one approval.
+    confirmed: Option<Instant>,
+    /// With "Immediately": autofill or a passkey unlocked the vault away
+    /// from the app's screens and showed what there is to pick (`offered`).
+    /// It locks when the pick's answer is handed back (`left`), or at this
+    /// time (on either clock) if nothing is picked.
+    pick_by: Option<(Instant, SystemTime)>,
+    /// The person's own logins' numbers last told the server this unlock
+    /// (DESIGN.md in the meta repo, "Members' own passwords"), and whether
+    /// the server doesn't take them; forgotten when the vault locks.
+    own_health: Option<crate::health::OwnCounts>,
+    own_health_unheard: bool,
+    /// Each own login's weak-or-not, by id and revision (health::own_counts).
+    own_weak: std::collections::HashMap<String, bool>,
+    /// The desktop agent's tray was told of items to be reminded about, so
+    /// signing out tells it there are none.
+    told_agent: bool,
+}
+
+/// How long a list that autofill or a passkey showed, having unlocked the
+/// vault with "Immediately" chosen, waits to be picked from (`App::offered`).
+pub const PICK_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// How long confirming it's you lasts, to approve a sign-in.
+const CONFIRMATION_LASTS: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// An item's past versions, opened (`App::history`).
+pub struct History {
+    pub id: String,
+    /// The person can't see the item's passwords: only when and by whom.
+    pub hide_passwords: bool,
+    /// Newest first; a version that doesn't open has no item.
+    pub versions: Vec<Version>,
+}
+
+pub struct Version {
+    pub id: String,
+    pub revision_date: Option<String>,
+    pub saved_by: serde_json::Value,
+    pub item: Option<Item>,
 }
 
 impl App {
     pub fn open(store: Store, secrets: Box<dyn SecretStore>) -> App {
+        let device = store.clone();
+        App::open_in("", store, device, secrets)
+    }
+
+    /// One account of several (accounts.rs): `id` is its own on this device,
+    /// `store` its folder, and `device` the app's, for what's the device's.
+    pub fn open_in(id: &str, store: Store, device: Store, secrets: Box<dyn SecretStore>) -> App {
         let settings = store.settings();
         let server = settings
             .as_ref()
             .and_then(|s| Server::new(&s.server, Device::this_one(&s.device_identifier)).ok());
         let preferences = store.preferences();
+        if let Some(dir) = store.dir() {
+            crate::icons::forget_kept(dir);
+        }
         App {
+            id: id.to_owned(),
             store,
+            device,
+            install_identifier: None,
             secrets,
             settings,
             server,
@@ -94,7 +206,75 @@ impl App {
             reprompted: None,
             grant: 0,
             autolock: AutoLock::new(Instant::now(), SystemTime::now()),
+            history: None,
+            generated: None,
+            icons: crate::icons::Cache::default(),
+            icon_session: 0,
+            sign_in_requests: None,
+            confirmed: None,
+            pick_by: None,
+            own_health: None,
+            own_health_unheard: false,
+            own_weak: Default::default(),
+            told_agent: false,
         }
+    }
+
+    /// An app for no account: signed out, with nothing kept and nowhere to
+    /// keep anything (`Store::none`). What a call for an account that isn't
+    /// on this device sees (accounts.rs).
+    pub fn nobody() -> App {
+        App::open_in(
+            "",
+            Store::none(),
+            Store::none(),
+            Box::new(crate::secrets::MemorySecretStore::default()),
+        )
+    }
+
+    /// This account's own id on this device (accounts.rs).
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// The server and email signed in to (or being signed in to).
+    pub fn account(&self) -> Option<(&str, &str)> {
+        self.settings
+            .as_ref()
+            .map(|s| (s.server.as_str(), s.email.as_str()))
+    }
+
+    /// The device identifier a sign-in uses when this account has none kept.
+    pub fn use_install_identifier(&mut self, identifier: &str) {
+        self.install_identifier = Some(identifier.to_owned());
+    }
+
+    /// Whether a sign-in waits for its second step (`finish_sign_in`), or
+    /// for the new-device check (`new_device_status`).
+    pub fn signing_in(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    /// Gives up on a sign-in waiting for its second step: the account is
+    /// as it was kept (its server and email as on this device).
+    pub fn cancel_sign_in(&mut self) {
+        self.pending = None;
+        self.settings = self.store.settings();
+        self.server = self
+            .settings
+            .as_ref()
+            .and_then(|s| Server::new(&s.server, Device::this_one(&s.device_identifier)).ok());
+    }
+
+    /// Whether this account has a vault kept on this device (it's signed
+    /// in, locked or not).
+    pub fn has_vault(&self) -> bool {
+        self.store.has_sync()
+    }
+
+    /// The account's id on its server, from the open vault or the kept sync.
+    pub fn user_id_kept(&self) -> Option<String> {
+        self.user_id().ok()
     }
 
     /// Talks to the agent at `address`, which must be the program at `program` (tests).
@@ -103,7 +283,7 @@ impl App {
     }
 
     pub fn state(&self) -> State {
-        match (&self.settings, &self.vault, self.store.sync().is_some()) {
+        match (&self.settings, &self.vault, self.store.has_sync()) {
             (Some(s), Some(_), _) => State::Unlocked {
                 server: s.server.clone(),
                 email: s.email.clone(),
@@ -123,21 +303,95 @@ impl App {
         self.vault.as_ref()
     }
 
-    /// Signs in to a server: the vault comes down, is kept, and opens.
-    pub fn sign_in(&mut self, server_url: &str, email: &str, password: &str) -> Result<Step> {
-        self.lock();
-        // One identifier per install, whichever account signs in.
-        let identifier = self
-            .settings
+    /// Makes an account on the server (docs/core.md, "Making an account"),
+    /// then signs in to it, as `sign_in`. Slow: the master key twice, and a
+    /// new RSA key pair (`register` takes one made beforehand, away from the
+    /// app).
+    pub fn sign_up(
+        &mut self,
+        server_url: &str,
+        email: &str,
+        name: Option<&str>,
+        password: &str,
+        hint: Option<&str>,
+    ) -> Result<Step> {
+        // A server address that can't be used, or that isn't a PassBundle
+        // server's, is refused before the slow part.
+        Server::new(server_url, Device::this_one(&Device::new_identifier()))?.check()?;
+        let account = crate::signup::NewAccount::make(email, name, password, hint)?;
+        self.register(server_url, &account, password)
+    }
+
+    /// Sends a new account to the server, then signs in to it with the
+    /// settings it was made with (not what the server says now). Once the
+    /// server has it, a failure says so (`Error::AccountMade`): signing in
+    /// is what's left, not making it again.
+    pub fn register(
+        &mut self,
+        server_url: &str,
+        account: &crate::signup::NewAccount,
+        password: &str,
+    ) -> Result<Step> {
+        let identifier = self.device_identifier();
+        let server = Server::new(server_url, Device::this_one(&identifier))?;
+        server.register(account)?;
+        let prelogin = Prelogin::of(&account.kdf);
+        self.sign_in_as(
+            server_url,
+            server,
+            identifier,
+            &prelogin,
+            &account.email,
+            password,
+        )
+        .map_err(|e| Error::AccountMade {
+            sure: true,
+            why: Box::new(e),
+        })
+    }
+
+    /// One identifier per install, whichever account signs in: this
+    /// account's, or the install's (accounts.rs), or a new one.
+    fn device_identifier(&self) -> String {
+        self.settings
             .as_ref()
             .map(|s| s.device_identifier.clone())
-            .unwrap_or_else(Device::new_identifier);
+            .or_else(|| self.install_identifier.clone())
+            .unwrap_or_else(Device::new_identifier)
+    }
+
+    /// Signs in to a server: the vault comes down, is kept, and opens.
+    pub fn sign_in(&mut self, server_url: &str, email: &str, password: &str) -> Result<Step> {
+        let identifier = self.device_identifier();
         let server = Server::new(server_url, Device::this_one(&identifier))?;
         let prelogin = server.prelogin(email)?;
-        let signed_in = server.sign_in_with(&prelogin, email, password)?;
+        self.sign_in_as(server_url, server, identifier, &prelogin, email, password)
+    }
+
+    fn sign_in_as(
+        &mut self,
+        server_url: &str,
+        server: Server,
+        identifier: String,
+        prelogin: &Prelogin,
+        email: &str,
+        password: &str,
+    ) -> Result<Step> {
+        self.lock();
+        let (kept_server, kept_email) = (
+            server_url.trim().trim_end_matches('/').to_owned(),
+            normalize_email(email),
+        );
+        // What this device was given when it last signed in to the account,
+        // kept by its server and email whether or not the account is on
+        // this device now: so it isn't new to the account again.
+        let remembered = self
+            .secrets
+            .get_secret(Secret::DeviceToken, &kept_server, &kept_email);
+        let signed_in = server.sign_in_remembered(prelogin, email, password, remembered)?;
         self.settings = Some(Settings {
-            server: server_url.trim().trim_end_matches('/').to_owned(),
-            email: normalize_email(email),
+            server: kept_server,
+            email: kept_email,
             kdf: prelogin.kdf,
             kdf_iterations: prelogin.kdf_iterations,
             kdf_memory: prelogin.kdf_memory,
@@ -147,29 +401,225 @@ impl App {
         self.server = Some(server);
         match signed_in {
             SignIn::Done(session) => self.signed_in(session),
-            SignIn::NeedsTwoFactor(pending) => {
-                let providers = pending.providers.clone();
+            SignIn::NeedsTwoFactor(pending) | SignIn::NeedsApproval(pending) => {
                 self.pending = Some(pending);
-                Ok(Step::TwoFactor(providers))
+                self.waiting_step()
             }
         }
     }
 
-    /// Two-step login's second step. A wrong code can be tried again.
-    pub fn finish_sign_in(&mut self, provider: u8, code: &str, remember: bool) -> Result<Step> {
-        let (Some(server), Some(pending)) = (&self.server, &self.pending) else {
+    /// What a sign-in waits for now, as the server last said: two-step
+    /// login or the new-device check. A device token the server answered
+    /// with two-step login instead is forgotten, as upstream's apps do.
+    fn waiting_step(&mut self) -> Result<Step> {
+        let pending = self.pending.as_mut().ok_or(Error::SignedOut)?;
+        if std::mem::take(&mut pending.forget_remembered) {
+            if let Some(s) = &self.settings {
+                self.secrets
+                    .forget_secret(Secret::DeviceToken, &s.server, &s.email);
+            }
+        }
+        Ok(match pending.check() {
+            Some(check) => Step::NewDevice(check.clone()),
+            None => Step::TwoFactor(pending.offer.clone()),
+        })
+    }
+
+    /// Where a waiting sign-in got to after the server's answer.
+    fn next_step(&mut self, next: Result<Next>) -> Result<Step> {
+        match next? {
+            Next::Done(session) => {
+                self.pending = None;
+                self.signed_in(session)
+            }
+            Next::TwoFactor | Next::NewDevice => self.waiting_step(),
+        }
+    }
+
+    /// How the new-device check holding this sign-in stands now (asked
+    /// every 3 seconds while it waits): waiting, denied, or ended, with what
+    /// a code by email can do. Once it's approved, the sign-in finishes with
+    /// the check's token, and this is `Done`.
+    pub fn new_device_status(&mut self) -> Result<Step> {
+        let (Some(server), Some(pending)) = (&self.server, &mut self.pending) else {
             return Err(Error::SignedOut);
         };
-        let session = server.finish_sign_in(
+        server.new_device_status(pending)?;
+        match pending.check().map(|c| c.status) {
+            Some(new_device::Status::Approved) => {
+                let token = pending
+                    .check
+                    .as_ref()
+                    .map(|held| held.token.clone())
+                    .ok_or(Error::SignedOut)?;
+                let next = server.send_sign_in(pending, None, Some(token.as_str()));
+                self.next_step(next)
+            }
+            Some(_) => self.waiting_step(),
+            None => Err(Error::SignedOut),
+        }
+    }
+
+    /// "Email me a code" (or, with devices that can approve, "Can't use
+    /// your other devices?"), for the sign-in the new-device check holds.
+    pub fn new_device_email(&mut self) -> Result<Step> {
+        let (Some(server), Some(pending)) = (&self.server, &mut self.pending) else {
+            return Err(Error::SignedOut);
+        };
+        server.new_device_email(pending)?;
+        self.waiting_step()
+    }
+
+    /// Finishes the sign-in the new-device check holds with the code sent
+    /// by email (8 digits, checked first). A wrong one can be tried again.
+    pub fn finish_new_device_with_code(&mut self, code: &str) -> Result<Step> {
+        let code = new_device::email_code(code)?;
+        let (Some(server), Some(pending)) = (&self.server, &mut self.pending) else {
+            return Err(Error::SignedOut);
+        };
+        if pending.check.is_none() {
+            return Err(Error::SignedOut);
+        }
+        let next = server.send_sign_in(pending, None, Some(&code));
+        self.next_step(next)
+    }
+
+    /// Two-step login's second step with a code: an authenticator app's, an
+    /// emailed one, a YubiKey's, or a recovery code (two_step.rs). A wrong
+    /// code can be tried again. Duo and a security key have their own
+    /// (`finish_with_duo`, `finish_with_key`).
+    pub fn finish_sign_in(&mut self, provider: u8, code: &str, remember: bool) -> Result<Step> {
+        let code = match provider {
+            two_step::AUTHENTICATOR | two_step::EMAIL => code.trim().to_owned(),
+            two_step::YUBIKEY => two_step::yubikey_otp(code)?,
+            two_step::RECOVERY_CODE => two_step::recovery_code(code)?,
+            _ => {
+                return Err(Error::TwoStep(
+                    "PassBundle can't finish that kind of two-step login with a code.",
+                ))
+            }
+        };
+        let finished = self.finish_second_step(provider, code, remember);
+        match (provider, finished) {
+            (two_step::RECOVERY_CODE, Err(Error::WrongCode)) => Err(Error::TwoStep(
+                "That recovery code isn't right. Check it, or use another way to sign in.",
+            )),
+            (two_step::YUBIKEY, Err(Error::WrongCode)) => Err(Error::TwoStep(
+                "That YubiKey code didn't work. Touch your YubiKey again, or use another way to sign in.",
+            )),
+            (_, finished) => finished,
+        }
+    }
+
+    fn finish_second_step(&mut self, provider: u8, code: String, remember: bool) -> Result<Step> {
+        let (Some(server), Some(pending)) = (&self.server, &mut self.pending) else {
+            return Err(Error::SignedOut);
+        };
+        let next = server.send_sign_in(
             pending,
-            &TwoFactor {
+            Some(&TwoFactor {
                 provider,
-                code: code.to_owned(),
+                code,
                 remember,
-            },
+            }),
+            None,
         )?;
-        self.pending = None;
-        self.signed_in(session)
+        match next {
+            // Two-step login again: the code wasn't right.
+            Next::TwoFactor => Err(Error::WrongCode),
+            next => self.next_step(Ok(next)),
+        }
+    }
+
+    /// The master password hint, for the lock screen (`Server::password_hint`):
+    /// the account kept here asks its server, with no session. None when the
+    /// server emailed it to the account's email.
+    pub fn password_hint(&self) -> Result<Option<String>> {
+        let (Some(server), Some(settings)) = (&self.server, &self.settings) else {
+            return Err(Error::SignedOut);
+        };
+        server.password_hint(&settings.email)
+    }
+
+    /// What the server offers now, new from it when what this sign-in has
+    /// is spent or old (`fresh_for`). A sign-in that went through meanwhile
+    /// (two-step login turned off elsewhere) finishes.
+    fn fresh_offer(&mut self, fresh_for: Duration) -> Result<Option<Offer>> {
+        let (Some(server), Some(pending)) = (&self.server, &mut self.pending) else {
+            return Err(Error::SignedOut);
+        };
+        if pending.spent || pending.offered_at.elapsed() > fresh_for {
+            if let Some(session) = server.renew_offer(pending)? {
+                self.pending = None;
+                self.signed_in(session)?;
+                return Ok(None);
+            }
+        }
+        Ok(self.pending.as_ref().map(|p| p.offer.clone()))
+    }
+
+    /// Duo's Universal Prompt address for this sign-in, for the browser:
+    /// a new one unless the server made this one in the last minute (Duo
+    /// gives a sign-in five minutes), or `SignedIn` if the sign-in went
+    /// through without it.
+    pub fn duo_address(&mut self) -> Result<Prepared<String>> {
+        let Some(offer) = self.fresh_offer(Duration::from_secs(60))? else {
+            return Ok(Prepared::SignedIn);
+        };
+        let duo = offer.duo.ok_or(Error::TwoStep(
+            "The server doesn't offer Duo for this account now. Use another way to sign in.",
+        ))?;
+        Ok(Prepared::Ready(duo.url))
+    }
+
+    /// Two-step login's second step with Duo: its answer as the browser
+    /// hands it back (two_step.rs, `Duo::token`).
+    pub fn finish_with_duo(&mut self, link: &str, remember: bool) -> Result<Step> {
+        let duo = self
+            .pending
+            .as_ref()
+            .and_then(|p| p.offer.duo.clone())
+            .ok_or(Error::TwoStep(
+                "That Duo answer was for another sign-in. Continue with Duo again.",
+            ))?;
+        let token = duo.token(link)?;
+        match self.finish_second_step(two_step::DUO, token, remember) {
+            Err(Error::WrongCode) => Err(Error::TwoStep(
+                "Duo didn't let this sign-in through. Continue with Duo to try again.",
+            )),
+            finished => finished,
+        }
+    }
+
+    /// The security key request for this sign-in (security_key), with a new
+    /// challenge if the last was tried or is a few minutes old, or
+    /// `SignedIn` if the sign-in went through without it.
+    pub fn security_key_request(&mut self) -> Result<Prepared<SecurityKeyRequest>> {
+        let Some(offer) = self.fresh_offer(Duration::from_secs(240))? else {
+            return Ok(Prepared::SignedIn);
+        };
+        let server = self.server.as_ref().ok_or(Error::SignedOut)?;
+        let options = offer.security_key.ok_or(Error::TwoStep(
+            "The server doesn't offer a security key for this account now. Use another way to sign in.",
+        ))?;
+        SecurityKeyRequest::new(&options, server.base()).map(Prepared::Ready)
+    }
+
+    /// Two-step login's second step with a security key's answer to
+    /// `request`, checked first (security_key::webauthn).
+    pub fn finish_with_key(
+        &mut self,
+        request: &SecurityKeyRequest,
+        answer: &KeyAnswer,
+        remember: bool,
+    ) -> Result<Step> {
+        let token = request.token(answer)?;
+        match self.finish_second_step(two_step::SECURITY_KEY, token, remember) {
+            Err(Error::WrongCode) => Err(Error::TwoStep(
+                "The server didn't take the security key's answer. Try again, or use another way to sign in.",
+            )),
+            finished => finished,
+        }
     }
 
     /// Asks the server to email the code, for a sign-in waiting on one.
@@ -180,8 +630,18 @@ impl App {
         server.send_email_code(pending)
     }
 
-    fn signed_in(&mut self, session: Session) -> Result<Step> {
+    fn signed_in(&mut self, mut session: Session) -> Result<Step> {
         let settings = self.settings.as_ref().expect("set before signing in");
+        // What the server gave this device to show next time: kept before
+        // anything else, so a sign-in that stops part way still has it.
+        if let Some(token) = session.device_token.take() {
+            self.secrets.keep_secret(
+                Secret::DeviceToken,
+                &settings.server,
+                &settings.email,
+                &token,
+            );
+        }
         self.store.save_settings(settings)?;
         self.secrets
             .keep(&settings.server, &settings.email, &session.refresh_token);
@@ -211,6 +671,7 @@ impl App {
                 refresh_token,
                 expires_at: 0,
                 user_key: vault.user_key().clone(),
+                device_token: None,
             });
         self.vault = Some(vault);
         let kept = self.store.sync();
@@ -223,6 +684,11 @@ impl App {
             .map(GeneratorPolicy::from_sync)
             .unwrap_or_default();
         self.autolock = AutoLock::new(Instant::now(), SystemTime::now());
+    }
+
+    /// How long ago the vault kept here was synced, by its file's time.
+    pub fn kept_age(&self) -> Option<std::time::Duration> {
+        self.store.sync_age()
     }
 
     /// The account's id: the open vault's, or the kept sync's.
@@ -294,16 +760,17 @@ impl App {
     }
 
     /// Turns it off (for the extension too: it's one enrollment). On Android
-    /// the app's own Keystore key and the user key it sealed go instead.
+    /// the app's own Keystore key and the user key it sealed go instead, and
+    /// on iOS the Keychain item: this account's, by its id on this device.
     pub fn remove_biometric(&self) -> Result<()> {
         #[cfg(target_os = "android")]
         {
-            crate::android::remove_biometric();
+            crate::android::remove_biometric(&self.id);
             Ok(())
         }
         #[cfg(all(target_os = "ios", feature = "ffi"))]
         {
-            crate::ffi::remove_biometric();
+            crate::ffi::remove_biometric(&self.id);
             Ok(())
         }
         #[cfg(not(any(target_os = "android", all(target_os = "ios", feature = "ffi"))))]
@@ -313,6 +780,8 @@ impl App {
     /// Brings the vault up to date from the server and keeps the new sync.
     /// Signed out (the session ended) leaves the kept vault open, to read.
     pub fn sync(&mut self) -> Result<()> {
+        // The account the vault kept here is (its id on the server).
+        let kept = self.user_id().ok();
         let (Some(server), Some(settings)) = (&self.server, &self.settings) else {
             return Err(Error::SignedOut);
         };
@@ -328,6 +797,11 @@ impl App {
             }
             other => other?,
         };
+        if let Err(e) = same_account(kept.as_deref(), &sync.profile.id) {
+            self.session = None;
+            self.secrets.forget(&settings.server, &settings.email);
+            return Err(e);
+        }
         self.store.save_sync(&text)?;
         self.policy = LockPolicy::from_sync(&text);
         self.generator_policy = GeneratorPolicy::from_sync(&text);
@@ -335,7 +809,159 @@ impl App {
         self.secrets
             .keep(&settings.server, &settings.email, &session.refresh_token);
         self.vault = Some(Vault::open(&sync, session.user_key().clone())?);
+        // A server without them, or one that's gone for a moment, leaves the
+        // generator's settings as they are here.
+        let _ = self.sync_settings();
+        self.report_own_health();
         Ok(())
+    }
+
+    /// Tells the server how many of the person's own logins have weak or
+    /// reused passwords (health.rs, `own_counts`), numbers only, for their
+    /// organizations' owners and admins: only while an organization they've
+    /// joined has "Members' own passwords" on, which the server says
+    /// (`own_health_seen_by`), once each unlock and again when the numbers
+    /// change, and not again this unlock once a server says it doesn't take
+    /// them. Never fails a sync.
+    fn report_own_health(&mut self) {
+        if self.own_health_unheard {
+            return;
+        }
+        let (Some(server), Some(session), Some(vault)) =
+            (&self.server, self.session.as_mut(), &self.vault)
+        else {
+            return;
+        };
+        if !vault.in_an_organization() {
+            return;
+        }
+        let counts = crate::health::own_counts(vault, &mut self.own_weak);
+        if self.own_health == Some(counts) {
+            return;
+        }
+        match server.own_health_seen_by(session) {
+            Ok(Some(seen_by)) if seen_by.is_empty() => return,
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                self.own_health_unheard = true;
+                return;
+            }
+            // Tried again at the next sync.
+            Err(_) => return,
+        }
+        match server.report_own_health(session, &counts) {
+            Ok(Some(true)) => self.own_health = Some(counts),
+            // Turned off since: nothing was kept, so it's sent again later.
+            Ok(Some(false)) => {}
+            Ok(None) => self.own_health_unheard = true,
+            // Tried again at the next sync.
+            Err(_) => {}
+        }
+    }
+
+    /// What the person's own logins' numbers were last told the server as,
+    /// this unlock (`report_own_health`).
+    pub fn own_health_reported(&self) -> Option<crate::health::OwnCounts> {
+        self.own_health
+    }
+
+    /// The expiration reminders due today (expiration.rs), each marked shown
+    /// so it's said once, and every item at one of its steps whether shown
+    /// before or not. On a computer, the desktop agent's tray is told those
+    /// two numbers (and never which items), on a thread of its own.
+    pub fn reminders(&mut self) -> Result<crate::expiration::Check> {
+        let vault = self.vault.as_ref().ok_or(Error::SignedOut)?;
+        let mut shown = self.store.shown_reminders();
+        let found = crate::expiration::check(vault, &mut shown, crate::expiration::Date::today());
+        self.store.save_shown_reminders(&shown)?;
+        if found.standing.total() > 0 || self.told_agent {
+            self.tell_agent(found.standing);
+        }
+        Ok(found)
+    }
+
+    /// Tells the desktop agent how many of this account's items to remind
+    /// about, without waiting for it: an agent that doesn't know the command
+    /// never answers. Phones have no agent.
+    fn tell_agent(&mut self, counts: crate::expiration::Counts) {
+        #[cfg(not(phone))]
+        {
+            let Ok(user_id) = self.user_id() else { return };
+            let found = match &self.agent {
+                Some(found) => Ok(found.clone()),
+                None => Agent::installed(),
+            };
+            let Ok((address, program)) = found else {
+                return;
+            };
+            self.told_agent = counts.total() > 0;
+            std::thread::spawn(move || {
+                if let Ok(mut agent) = Agent::connect(&address, &program, &user_id) {
+                    let _ = agent.reminders(counts);
+                }
+            });
+        }
+        #[cfg(phone)]
+        let _ = counts;
+    }
+
+    /// The generator's settings and the server's copy (synced_settings):
+    /// saves a change made here, or takes the server's, or gives the server
+    /// these if it has none this account can read.
+    pub fn sync_settings(&mut self) -> Result<()> {
+        let (Some(server), Some(settings)) = (&self.server, &self.settings) else {
+            return Err(Error::SignedOut);
+        };
+        let Some(session) = self.session.as_mut() else {
+            return Err(Error::SignedOut);
+        };
+        let key = session.user_key().clone();
+        let account = synced_settings::account(&settings.server, &settings.email);
+        let here = self.store.generator_options();
+        let known = self.store.synced_settings();
+        let seen = synced_settings::seen(known.as_ref(), &account);
+        let now = synced_settings::now_ms();
+        let save = |session: &mut Session, doc: serde_json::Map<String, serde_json::Value>| {
+            let data = key.encrypt_str(&synced_settings::text(&doc)).to_string();
+            server.save_settings(session, &data).map(|()| doc)
+        };
+        let ours = |doc| Known {
+            account: account.clone(),
+            settings: doc,
+            generator: here.clone(),
+        };
+        let known = match synced_settings::step(known.as_ref(), &account, &here, now) {
+            synced_settings::Step::Save(doc) => ours(save(session, doc)?),
+            synced_settings::Step::Read => {
+                let remote = server.settings(session)?.and_then(|data| {
+                    let text = EncString::parse(&data).ok()?.decrypt_string(&key).ok()?;
+                    synced_settings::parse(&text)
+                });
+                match (remote, known) {
+                    // None this account can read: this device's.
+                    (None, _) => ours(save(
+                        session,
+                        synced_settings::document(&serde_json::Map::new(), &here, seen, now),
+                    )?),
+                    // Older than one this device has seen: a server handing
+                    // back an old copy. This device's goes back instead.
+                    (Some(doc), Some(k)) if synced_settings::rev_of(&doc) < seen => ours(save(
+                        session,
+                        synced_settings::document(&k.settings, &here, seen, now),
+                    )?),
+                    (Some(doc), _) => {
+                        let taken = synced_settings::take(&doc, &here);
+                        self.store.save_generator_options(&taken)?;
+                        Known {
+                            account,
+                            settings: doc,
+                            generator: taken,
+                        }
+                    }
+                }
+            }
+        };
+        self.store.save_synced_settings(&known)
     }
 
     /// When to lock by itself (docs/core.md, "Locking by itself").
@@ -383,7 +1009,22 @@ impl App {
         let held = self.generator_policy.apply(options);
         let made = generator::generate(&held)?;
         self.store.save_generator_options(&held)?;
+        if self.vault.is_some() {
+            self.generated = Some(Zeroizing::new(made.as_str().to_owned()));
+        }
         Ok((made, held))
+    }
+
+    /// Takes what the generator shows as its last value, for its Copy to
+    /// copy (`value("", "generated")`): what the person sees, even if
+    /// something else made one since (Android's offer to save a sign-in
+    /// opens an editor with a generator of its own). Only while unlocked.
+    pub fn keep_generated(&mut self, shown: &str) -> Result<()> {
+        if self.vault.is_none() {
+            return Err(Error::SignedOut);
+        }
+        self.generated = Some(Zeroizing::new(shown.to_owned()));
+        Ok(())
     }
 
     pub fn set_preferences(&mut self, preferences: Preferences) -> Result<()> {
@@ -394,8 +1035,27 @@ impl App {
     }
 
     /// The app was used just now (the screens say, at most about once a second).
+    /// Its screens are in front, so a wait for a pick (`offered`) is over.
     pub fn used(&mut self) {
         self.autolock.used(Instant::now(), SystemTime::now());
+        self.pick_by = None;
+    }
+
+    /// Autofill or a passkey unlocked the vault while the app's screens
+    /// weren't in front, and handed back a list to pick from (Android's
+    /// "Unlock PassBundle", docs/phones.md, "Locking"). With "Immediately"
+    /// chosen, or the policy's, the vault stays open for the pick only: it
+    /// locks when the pick's fill or passkey is handed back (`left`), or after
+    /// `PICK_WAIT` if nothing is picked.
+    pub fn offered(&mut self) {
+        self.offered_at(Instant::now(), SystemTime::now());
+    }
+
+    /// `offered`, at a given time (tests).
+    pub fn offered_at(&mut self, now: Instant, wall: SystemTime) {
+        if self.vault.is_some() && self.held().immediately() {
+            self.pick_by = Some((now + PICK_WAIT, wall + PICK_WAIT));
+        }
     }
 
     /// Locks if it's time to, from what the OS says; returns why it locked.
@@ -413,14 +1073,22 @@ impl App {
     ) -> Option<Reason> {
         self.vault.as_ref()?;
         let held = self.held();
-        let reason = self.autolock.check(&held, readings, now, wall)?;
+        let checked = self.autolock.check(&held, readings, now, wall);
+        // "Immediately", and a list autofill or a passkey showed that nothing
+        // was picked from in time (`offered`).
+        let unpicked = held.immediately()
+            && self
+                .pick_by
+                .is_some_and(|(by, by_wall)| now >= by || wall >= by_wall);
+        let reason = checked.or(unpicked.then_some(Reason::Idle))?;
         self.time_up();
         Some(reason)
     }
 
     /// The app left the screen (a phone's app switcher or home, a computer's
-    /// window closed or minimized): locks if the person chose "Immediately"
-    /// on a phone, or the policy says so. Returns whether it locked.
+    /// window closed or minimized, or on Android autofill or a passkey
+    /// handing back its answer): locks if the person chose "Immediately" on
+    /// a phone, or the policy says so. Returns whether it locked.
     pub fn left(&mut self) -> bool {
         if self.vault.is_none() || !self.held().immediately() {
             return false;
@@ -441,8 +1109,17 @@ impl App {
 
     /// Drops every key and everything decrypted.
     pub fn lock(&mut self) {
+        self.own_health = None;
+        self.own_health_unheard = false;
+        self.own_weak.clear();
+        self.pick_by = None;
+        self.sign_in_requests = None;
+        self.confirmed = None;
         self.reprompted = None;
         self.grant += 1;
+        self.history = None;
+        self.generated = None;
+        self.forget_icons();
         self.vault = None;
         self.session = None;
         self.pending = None;
@@ -451,8 +1128,12 @@ impl App {
     /// Forgets the vault and the session on this device, and unlocking with
     /// Windows Hello or Touch ID if it was on; keeps the server and email.
     pub fn sign_out(&mut self) {
-        if self.store.sync().is_some() {
+        if self.store.has_sync() {
             let _ = self.remove_biometric();
+        }
+        // The agent's tray stops saying this account's items expire.
+        if self.told_agent {
+            self.tell_agent(crate::expiration::Counts::default());
         }
         if let Some(s) = &self.settings {
             self.secrets.forget(&s.server, &s.email);
@@ -484,6 +1165,276 @@ impl App {
         let vault = self.vault.as_ref().ok_or(Error::SignedOut)?;
         if !vault.is_master_password(&Sync::from_json(&text)?, &settings.prelogin(), password)? {
             return Err(Error::WrongPassword);
+        }
+        Ok(())
+    }
+
+    /// Whether approving a sign-in asks for biometrics or the master
+    /// password first, on this device (on until turned off).
+    pub fn confirm_approvals(&self) -> bool {
+        self.store.approvals().confirm
+    }
+
+    /// Turning it on needs nothing; turning it off needs the person to have
+    /// confirmed it's them in the last minute (as approving does), and uses
+    /// that confirmation up, so nobody at an unlocked device turns it off and
+    /// approves without them.
+    pub fn set_confirm_approvals(&mut self, confirm: bool) -> Result<()> {
+        if !confirm && self.confirm_approvals() {
+            let confirmed = self.take_confirmation();
+            if !confirmed {
+                return Err(Error::ConfirmFirst);
+            }
+        }
+        self.store
+            .save_approvals(&crate::store::Approvals { confirm })
+    }
+
+    /// Whether the person confirmed it's them in the last minute; either way
+    /// the confirmation is used up.
+    fn take_confirmation(&mut self) -> bool {
+        self.confirmed
+            .take()
+            .is_some_and(|at| at.elapsed() < CONFIRMATION_LASTS)
+    }
+
+    /// The master password, as the person confirming it's them, to approve a
+    /// sign-in or turn off asking for that.
+    pub fn confirm_with_master_password(&mut self, password: &str) -> Result<()> {
+        self.confirmed = None;
+        self.check_master_password(password)?;
+        self.confirmed = Some(Instant::now());
+        Ok(())
+    }
+
+    /// Biometrics, as the person confirming it's them for the same: the user
+    /// key the OS kept for biometric unlock (the phone's Keystore or
+    /// Keychain), given back after its prompt, must be the open vault's
+    /// (compared in constant time). Only the approval prompt's own call comes
+    /// here, never unlocking or a passkey's check that it's the person. A
+    /// key that isn't this vault's means that unlock is out of date.
+    pub fn confirm_approval_with_key(&mut self, key: SymmetricKey) -> Result<()> {
+        self.confirmed = None;
+        let vault = self.vault.as_ref().ok_or(Error::SignedOut)?;
+        if !same_key(vault.user_key(), &key) {
+            return Err(Error::Refused(
+                "that unlock is out of date; use your master password, then turn it on again",
+            ));
+        }
+        self.confirmed = Some(Instant::now());
+        Ok(())
+    }
+
+    /// On a computer: Windows Hello or Touch ID through the desktop agent,
+    /// its prompt saying it's to approve a sign-in, then
+    /// `confirm_approval_with_key`. False if the person cancelled. A key that
+    /// no longer opens the vault turns that unlock off, as unlocking does.
+    pub fn confirm_approval_with_biometric(&mut self) -> Result<bool> {
+        self.confirmed = None;
+        let mut agent = self.agent()?;
+        let Some(key) = agent.unlock_to_approve()? else {
+            return Ok(false);
+        };
+        match self.confirm_approval_with_key(key) {
+            Err(Error::Refused(why)) => {
+                let _ = agent.remove();
+                Err(Error::Refused(why))
+            }
+            other => other.map(|()| true),
+        }
+    }
+
+    /// Sign-in requests waiting for this account's answer, newest first,
+    /// from the server, while unlocked (docs/core.md, "Approving a
+    /// sign-in"). They're kept, so an approval goes only to one of them.
+    pub fn sign_in_requests(&mut self) -> Result<Vec<SignInRequest>> {
+        let call = self.sign_in_requests_call()?;
+        let fetched = call.fetch()?;
+        self.keep_sign_in_requests(&call, fetched)
+    }
+
+    /// What asking the server for sign-in requests needs, so the bridge can
+    /// ask without holding the app (the app asks every few seconds, and the
+    /// screens read the core meanwhile): the server, and a session token
+    /// that's good for a minute more (refreshed here first if not).
+    pub fn sign_in_requests_call(&mut self) -> Result<SignInRequestsCall> {
+        let email = self.vault.as_ref().ok_or(Error::SignedOut)?.email.clone();
+        let (Some(server), Some(session)) = (&self.server, self.session.as_mut()) else {
+            return Err(Error::SignedOut);
+        };
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        if session.expires_at <= now + 60 {
+            server.refresh(session)?;
+        }
+        Ok(SignInRequestsCall {
+            server: server.clone(),
+            access_token: session.access_token.clone(),
+            email,
+        })
+    }
+
+    /// Keeps what the server listed (`SignInRequestsCall::fetch`), for the
+    /// account it was asked for, if its vault is still the one open.
+    pub fn keep_sign_in_requests(
+        &mut self,
+        call: &SignInRequestsCall,
+        (body, server_now): (serde_json::Value, Option<u64>),
+    ) -> Result<Vec<SignInRequest>> {
+        let vault = self.vault.as_ref().ok_or(Error::SignedOut)?;
+        if vault.email != call.email {
+            return Err(Error::SignedOut);
+        }
+        // The server's clock, or this device's if it didn't say.
+        let server_now = server_now.unwrap_or_else(|| {
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0)
+        });
+        let requests = device_approval::parse_pending(&body, &call.email, server_now);
+        self.sign_in_requests = Some((Instant::now(), requests));
+        Ok(self.kept_sign_in_requests())
+    }
+
+    /// The requests from the last listing as they stand now, without the
+    /// server: one whose time is up is gone.
+    pub fn kept_sign_in_requests(&self) -> Vec<SignInRequest> {
+        let Some((listed, requests)) = &self.sign_in_requests else {
+            return Vec::new();
+        };
+        let elapsed = listed.elapsed().as_secs();
+        requests.iter().filter_map(|r| r.after(elapsed)).collect()
+    }
+
+    /// Sign-ins on new devices waiting for this account's approval
+    /// (new_device.rs), from the server, newest first, while unlocked, and
+    /// who the locations are from. Listed beside the sign-in requests
+    /// (`sign_in_requests`); never their numbers.
+    pub fn new_device_checks(
+        &mut self,
+    ) -> Result<(Vec<new_device::Waiting>, Option<new_device::LocationSource>)> {
+        let call = self.sign_in_requests_call()?;
+        let fetched = call.fetch_new_devices();
+        self.keep_new_device_checks(&call, fetched)
+    }
+
+    /// What `SignInRequestsCall::fetch_new_devices` listed, for the account
+    /// it was asked for, if its vault is still the one open.
+    pub fn keep_new_device_checks(
+        &self,
+        call: &SignInRequestsCall,
+        fetched: Result<serde_json::Value>,
+    ) -> Result<(Vec<new_device::Waiting>, Option<new_device::LocationSource>)> {
+        let vault = self.vault.as_ref().ok_or(Error::SignedOut)?;
+        if vault.email != call.email {
+            return Err(Error::SignedOut);
+        }
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        Ok(new_device::parse_waiting(&fetched?, now))
+    }
+
+    /// Approves another device's sign-in with the number the person typed,
+    /// the one that device shows (two digits, checked before anything is
+    /// sent), or denies it (`number` None). Approving sends no key, so it
+    /// asks for no confirmation first: the number, shown only on the new
+    /// device, is the proof that the person is at both. A wrong number
+    /// denies it (`WrongNumber`): each takes one try.
+    pub fn answer_new_device_check(
+        &mut self,
+        id: &str,
+        number: Option<&str>,
+    ) -> Result<new_device::Answered> {
+        if let Some(typed) = number {
+            new_device::typed_number(typed)?;
+        }
+        if self.vault.is_none() {
+            return Err(Error::SignedOut);
+        }
+        let (Some(server), Some(session)) = (&self.server, self.session.as_mut()) else {
+            return Err(Error::SignedOut);
+        };
+        server.answer_new_device(session, id, number)
+    }
+
+    /// Approves or denies a listed sign-in request. Approving sends the user
+    /// key wrapped to the request's public key, and only when:
+    /// - `fingerprint` is the phrase of the request the core listed (what
+    ///   the person saw), and the server still has it waiting with that key;
+    /// - the person confirmed it's them in the last minute, where this
+    ///   device asks for that (`confirm_approvals`).
+    pub fn answer_sign_in_request(
+        &mut self,
+        id: &str,
+        fingerprint: &str,
+        approve: bool,
+    ) -> Result<()> {
+        let answered = self.answer_sign_in_request_once(id, fingerprint, approve);
+        // One confirmation, one answer: used up by an approval, a denial, or
+        // anything that went wrong.
+        self.confirmed = None;
+        answered
+    }
+
+    fn answer_sign_in_request_once(
+        &mut self,
+        id: &str,
+        fingerprint: &str,
+        approve: bool,
+    ) -> Result<()> {
+        let request = self
+            .kept_sign_in_requests()
+            .into_iter()
+            .find(|r| r.id == id)
+            .ok_or(Error::Refused(
+                "that sign-in request has expired or was answered",
+            ))?;
+        if approve {
+            if request.fingerprint != fingerprint {
+                return Err(Error::Refused(
+                    "the fingerprint phrase isn't that sign-in request's",
+                ));
+            }
+            let confirmed = self
+                .confirmed
+                .is_some_and(|at| at.elapsed() < CONFIRMATION_LASTS);
+            if self.confirm_approvals() && !confirmed {
+                return Err(Error::ConfirmFirst);
+            }
+        }
+        let vault = self.vault.as_ref().ok_or(Error::SignedOut)?;
+        let (Some(server), Some(session)) = (&self.server, self.session.as_mut()) else {
+            return Err(Error::SignedOut);
+        };
+        // Still waiting, with the key the person saw the phrase of.
+        let now = server.sign_in_request(session, id)?;
+        if now["requestApproved"].as_bool().is_some() || !now["responseDate"].is_null() {
+            return Err(Error::Refused("that sign-in request was already answered"));
+        }
+        let wrapped = if approve {
+            let key = now["publicKey"].as_str().and_then(|k| {
+                base64::Engine::decode(&base64::engine::general_purpose::STANDARD, k).ok()
+            });
+            if key.as_deref() != Some(request.public_key()) {
+                return Err(Error::Refused(
+                    "that sign-in request changed since it was shown; deny it",
+                ));
+            }
+            Some(device_approval::wrap_user_key(
+                request.public_key(),
+                vault.user_key(),
+            )?)
+        } else {
+            None
+        };
+        server.answer_sign_in_request(session, id, wrapped.as_ref())?;
+        if let Some((_, requests)) = &mut self.sign_in_requests {
+            requests.retain(|r| r.id != id);
         }
         Ok(())
     }
@@ -572,13 +1523,21 @@ impl App {
         self.attachment_to_fetch(id, attachment_id)?.save_in(dir)
     }
 
-    /// Saves an item, new (no id) or edited, then syncs.
+    /// Saves an item, new (no id) or edited, then syncs. An organization's
+    /// item being edited goes into `collection_ids` (its shared folders) as
+    /// well, when they're given and differ from the ones it's in.
+    ///
+    /// Once the server has it, it's saved, whatever happens next: a sync
+    /// that fails then (the connection dropped, say) doesn't make it a
+    /// failure, or Save again would make a second one (`Saved::synced`).
+    /// The item as the server saved it goes in the vault kept here, so it
+    /// shows until a sync brings the rest.
     pub fn save(
         &mut self,
         id: Option<&str>,
         draft: &ItemDraft,
         collection_ids: &[String],
-    ) -> Result<()> {
+    ) -> Result<Saved> {
         let vault = self.vault.as_ref().ok_or(Error::SignedOut)?;
         let editing = id.and_then(|id| vault.item(id));
         // The editor reveals an item's secrets into its fields; one that asks
@@ -587,16 +1546,123 @@ impl App {
         if editing.is_some_and(|item| !self.may_use(item)) {
             return Err(Error::MasterPasswordFirst);
         }
+        // Nor can one whose secrets the person may not see: the editor
+        // would have saved blanks over them (docs/core.md, "Folders and
+        // permissions"). The web vault edits those.
+        if editing.is_some_and(|item| !vault.grid(item).see_passwords) {
+            return Err(Error::Refused(
+                "you can't see this item's passwords, so edit it in the web vault",
+            ));
+        }
+        let moved = editing.filter(|item| {
+            let mut held = item.collection_ids.clone();
+            let mut asked = collection_ids.to_vec();
+            held.sort();
+            asked.sort();
+            asked.dedup();
+            item.organization_id.is_some() && !asked.is_empty() && held != asked
+        });
+        // A move between shared folders is checked as the server checks it
+        // (change_item_folders), before anything is saved: share in each
+        // folder it leaves, and create in each it joins, with share on the
+        // item. Folders the person doesn't reach stay as they are.
+        if let Some(item) = moved {
+            let grid = vault.grid(item);
+            if !grid.edit {
+                return Err(Error::Refused(
+                    "your organization doesn't let you change this item's shared folders",
+                ));
+            }
+            let leaves = item
+                .collection_ids
+                .iter()
+                .filter(|c| !collection_ids.contains(c));
+            for c in leaves {
+                if vault.collection_grids.get(c).is_some_and(|g| !g.share) {
+                    return Err(Error::Refused(
+                        "your organization doesn't let you move items out of this shared folder",
+                    ));
+                }
+            }
+            let joins = collection_ids
+                .iter()
+                .filter(|c| !item.collection_ids.contains(c));
+            for c in joins {
+                if !grid.share || !vault.collection_grids.get(c).is_some_and(|g| g.create) {
+                    return Err(Error::Refused(
+                        "your organization doesn't let you add this item to that shared folder",
+                    ));
+                }
+            }
+        }
+        let moved = moved.is_some();
         let body = vault.encrypt_item(draft, editing)?;
         let (Some(server), Some(session)) = (&self.server, self.session.as_mut()) else {
             return Err(Error::SignedOut);
         };
-        server.save_item(session, id, body, collection_ids)?;
-        self.sync()
+        let saved = server.save_item(session, id, body, collection_ids)?;
+        // Then its shared folders, which the server changes on their own:
+        // saved either way, so a refusal still leaves this device up to date.
+        let placed = match (moved, id) {
+            (true, Some(id)) => server.set_item_collections(session, id, collection_ids),
+            _ => Ok(()),
+        };
+        let synced = self.sync();
+        if synced.is_err() {
+            // Shown as saved; a vault the answer doesn't open stays as it was.
+            let _ = self.keep_saved("ciphers", &saved);
+        }
+        // The move's refusal, if any: the item is saved, but not moved.
+        placed?;
+        Ok(Saved {
+            id: id
+                .map(str::to_owned)
+                .or_else(|| saved["id"].as_str().map(str::to_owned))
+                .unwrap_or_default(),
+            synced: synced.is_ok(),
+        })
+    }
+
+    /// Puts an item or a folder as the server saved it (its answer to the
+    /// save, which is as a sync has it) in the vault kept here (`list`:
+    /// "ciphers" or "folders"), in place of the one it was or as a new one,
+    /// and opens the vault again with it. For a save whose sync didn't come
+    /// through; the next sync replaces the whole vault with the server's.
+    /// Nothing is kept if the vault doesn't open with it.
+    fn keep_saved(&mut self, list: &str, saved: &serde_json::Value) -> Result<()> {
+        let id = saved["id"]
+            .as_str()
+            .ok_or(Error::Damaged("the server didn't say which item it saved"))?;
+        let key = self
+            .vault
+            .as_ref()
+            .ok_or(Error::SignedOut)?
+            .user_key()
+            .clone();
+        let mut kept: serde_json::Value =
+            serde_json::from_str(&self.store.sync().ok_or(Error::SignedOut)?)
+                .map_err(|_| Error::Damaged("the vault kept here"))?;
+        if kept[list].is_null() {
+            kept[list] = serde_json::json!([]);
+        }
+        let listed = kept[list]
+            .as_array_mut()
+            .ok_or(Error::Damaged("the vault kept here"))?;
+        match listed.iter_mut().find(|c| c["id"] == id) {
+            Some(was) => *was = saved.clone(),
+            None => listed.push(saved.clone()),
+        }
+        let text = kept.to_string();
+        let vault = Vault::open(&Sync::from_json(&text)?, key)?;
+        self.store.save_sync(&text)?;
+        self.vault = Some(vault);
+        Ok(())
     }
 
     /// Makes a folder, its name under the user key, as folders are
-    /// (docs/core.md, "Items"), then syncs. Answers its id.
+    /// (docs/core.md, "Items"), then syncs. Answers its id. Once the server
+    /// has made it, it's made: a sync that fails then leaves it in the vault
+    /// kept here (as `save` does), so trying again doesn't make another.
     pub fn create_folder(&mut self, name: &str) -> Result<String> {
         let name = Self::folder_name(name)?;
         let vault = self.vault.as_ref().ok_or(Error::SignedOut)?;
@@ -605,7 +1671,10 @@ impl App {
             return Err(Error::SignedOut);
         };
         let id = server.create_folder(session, &encrypted)?;
-        self.sync()?;
+        if self.sync().is_err() {
+            let made = serde_json::json!({ "id": id, "name": encrypted, "object": "folder" });
+            let _ = self.keep_saved("folders", &made);
+        }
         Ok(id)
     }
 
@@ -845,6 +1914,165 @@ impl App {
         })
     }
 
+    /// Favorites an item or not, then syncs: the person's own mark, as
+    /// upstream's partial update keeps it, so an item they can't edit takes
+    /// it too.
+    pub fn set_favorite(&mut self, id: &str, favorite: bool) -> Result<()> {
+        let vault = self.vault.as_ref().ok_or(Error::SignedOut)?;
+        let item = vault.item(id).ok_or(Error::Damaged("no such item"))?;
+        let folder = item.folder_id.clone();
+        let (Some(server), Some(session)) = (&self.server, self.session.as_mut()) else {
+            return Err(Error::SignedOut);
+        };
+        server.set_favorite(session, id, folder.as_deref(), favorite)?;
+        self.sync()
+    }
+
+    /// How the app looks on this device: whether logins show their
+    /// websites' icons.
+    pub fn appearance(&self) -> crate::store::Appearance {
+        self.device.appearance()
+    }
+
+    /// Whether PassBundle's windows may be in screenshots, screen
+    /// recordings, and screen sharing on this computer (`store::Screenshots`).
+    pub fn screenshots(&self) -> crate::store::Screenshots {
+        self.device.screenshots()
+    }
+
+    pub fn set_screenshots(&mut self, screenshots: crate::store::Screenshots) -> Result<()> {
+        self.device.save_screenshots(&screenshots)
+    }
+
+    pub fn set_appearance(&mut self, appearance: crate::store::Appearance) -> Result<()> {
+        self.device.save_appearance(&appearance)?;
+        self.appearance_changed();
+        Ok(())
+    }
+
+    /// How the app looks changed (here, or for another account on this
+    /// device): with icons off, the ones kept go.
+    pub fn appearance_changed(&mut self) {
+        if !self.device.appearance().show_icons {
+            self.forget_icons();
+        }
+    }
+
+    /// What fetching a website's icon needs, away from the app (ffi.rs,
+    /// `pb_icon`): the server's address, and which emptying of the icons
+    /// it's for (`keep_icon`), while the vault is open and icons are on.
+    pub fn icon_source(&self) -> Option<(String, u64)> {
+        self.vault.as_ref()?;
+        if !self.device.appearance().show_icons {
+            return None;
+        }
+        let server = self.settings.as_ref()?.server.clone();
+        Some((server, self.icon_session))
+    }
+
+    /// A host's icon as the server gave it while the vault's been open:
+    /// Some(Some(icon)), Some(None) when it had none, None to ask it.
+    pub fn kept_icon(&mut self, host: &str) -> Option<Option<&[u8]>> {
+        self.icon_source()?;
+        self.icons.get(host)
+    }
+
+    /// Keeps what the server answered for a host, if the icons haven't been
+    /// emptied since `icon_source` said `session`.
+    pub fn keep_icon(&mut self, session: u64, host: &str, icon: Option<Vec<u8>>) {
+        if self.icon_source().is_some_and(|(_, now)| now == session) {
+            self.icons.put(host, icon);
+        }
+    }
+
+    fn forget_icons(&mut self) {
+        self.icons.clear();
+        self.icon_session += 1;
+    }
+
+    /// An item's past versions (history.rs), from the server, opened: kept
+    /// until another item's are asked for, or the vault locks.
+    pub fn history(&mut self, id: &str) -> Result<&History> {
+        let vault = self.vault.as_ref().ok_or(Error::SignedOut)?;
+        let item = vault.item(id).ok_or(Error::Damaged("no such item"))?;
+        if !self.may_use(item) {
+            return Err(Error::MasterPasswordFirst);
+        }
+        let (Some(server), Some(session)) = (&self.server, self.session.as_mut()) else {
+            return Err(Error::SignedOut);
+        };
+        let answer = server.item_history(session, id)?;
+        let hide_passwords = answer["hidePasswords"].as_bool() != Some(false);
+        let versions = answer["data"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|v| Version {
+                id: v["id"].as_str().unwrap_or_default().to_owned(),
+                revision_date: v["revisionDate"].as_str().map(str::to_owned),
+                saved_by: v["savedBy"].clone(),
+                // Without the item's passwords, the server sends no contents.
+                item: (!hide_passwords && v["cipher"].is_object())
+                    .then(|| vault.open_version(&v["cipher"]).ok())
+                    .flatten(),
+            })
+            .collect();
+        self.history = Some(History {
+            id: id.to_owned(),
+            hide_passwords,
+            versions,
+        });
+        Ok(self.history.as_ref().expect("just kept"))
+    }
+
+    /// The kept history of an item, if it's the one asked for last.
+    pub fn kept_history(&self, id: &str) -> Option<&History> {
+        self.history.as_ref().filter(|h| h.id == id)
+    }
+
+    /// Puts an item back as one of its versions had it (asked for with
+    /// `history`), as a normal edit, then syncs.
+    pub fn restore_version(&mut self, id: &str, version_id: &str) -> Result<()> {
+        let vault = self.vault.as_ref().ok_or(Error::SignedOut)?;
+        let current = vault.item(id).ok_or(Error::Damaged("no such item"))?;
+        if !self.may_use(current) {
+            return Err(Error::MasterPasswordFirst);
+        }
+        let grid = vault.grid(current);
+        if !grid.edit || !grid.see_passwords || current.deleted {
+            return Err(Error::Refused("you can't restore this item's versions"));
+        }
+        let version = self
+            .kept_history(id)
+            .and_then(|h| h.versions.iter().find(|v| v.id == version_id))
+            .and_then(|v| v.item.as_ref())
+            .ok_or(Error::Damaged("no such version"))?;
+        let body = vault.encrypt_restore(version, current)?;
+        let collections = current.collection_ids.clone();
+        let (Some(server), Some(session)) = (&self.server, self.session.as_mut()) else {
+            return Err(Error::SignedOut);
+        };
+        server.save_item(session, Some(id), body, &collections)?;
+        self.history = None;
+        self.sync()
+    }
+
+    /// Clears an item's history for everyone (no `version_id`), or deletes
+    /// one version, where the person may (the server decides too).
+    pub fn delete_history(&mut self, id: &str, version_id: Option<&str>) -> Result<()> {
+        let vault = self.vault.as_ref().ok_or(Error::SignedOut)?;
+        let item = vault.item(id).ok_or(Error::Damaged("no such item"))?;
+        if !vault.may_clear_history(item) {
+            return Err(Error::Refused("you can't clear this item's history"));
+        }
+        let (Some(server), Some(session)) = (&self.server, self.session.as_mut()) else {
+            return Err(Error::SignedOut);
+        };
+        server.delete_history(session, id, version_id)?;
+        self.history = None;
+        Ok(())
+    }
+
     pub fn trash(&mut self, id: &str) -> Result<()> {
         let (Some(server), Some(session)) = (&self.server, self.session.as_mut()) else {
             return Err(Error::SignedOut);
@@ -857,15 +2085,49 @@ impl App {
     /// current code), "notes", "field:<index>", or a card's or an identity's
     /// (`Item::detail`). Secrets clear after 30 seconds.
     pub fn copy(&self, id: &str, what: &str) -> Result<()> {
-        if what == "username" || crate::vault::PLAIN_DETAILS.contains(&what) {
-            return clipboard::copy_text(&self.value(id, what)?);
+        if id.is_empty() && what == "generated" {
+            return clipboard::copy_secret(&self.value(id, what)?, clipboard::CLEAR_AFTER);
         }
-        clipboard::copy_secret(&self.value(id, what)?, clipboard::CLEAR_AFTER)
+        let item = self
+            .vault
+            .as_ref()
+            .and_then(|v| v.item(id))
+            .ok_or(Error::Damaged("no such item"))?;
+        let plain_detail = item.details.iter().any(|d| d.key == what && !d.secret);
+        if what == "username" || crate::vault::PLAIN_DETAILS.contains(&what) || plain_detail {
+            return clipboard::copy_text(&self.value_to_copy(id, what)?);
+        }
+        clipboard::copy_secret(&self.value_to_copy(id, what)?, clipboard::CLEAR_AFTER)
+    }
+
+    /// The value `copy` copies, on a computer or (through its native piece)
+    /// a phone: never a secret the person's shared folder hides from them,
+    /// as the screens never offer it (`Item::is_secret`).
+    pub fn value_to_copy(&self, id: &str, what: &str) -> Result<zeroize::Zeroizing<String>> {
+        if let Some(vault) = self.vault.as_ref() {
+            if let Some(item) = vault.item(id) {
+                if item.is_secret(what) && !vault.grid(item).see_passwords {
+                    return Err(Error::Refused(
+                        "your organization hides this item's passwords from you",
+                    ));
+                }
+            }
+        }
+        self.value(id, what)
     }
 
     /// The value `copy` copies. On phones the app's native piece puts it on
     /// the clipboard itself (docs/phones.md, "Copying").
     pub fn value(&self, id: &str, what: &str) -> Result<zeroize::Zeroizing<String>> {
+        // The generator's last password, for its Copy.
+        if id.is_empty() && what == "generated" {
+            return self
+                .generated
+                .as_ref()
+                .filter(|_| self.vault.is_some())
+                .map(|g| Zeroizing::new(g.as_str().to_owned()))
+                .ok_or(Error::Damaged("nothing to copy"));
+        }
         let item = self
             .vault
             .as_ref()
@@ -881,6 +2143,9 @@ impl App {
         }
         if let Some(detail) = item.detail(what) {
             return Ok(detail);
+        }
+        if let Some(detail) = item.details.iter().find(|d| d.key == what) {
+            return Ok(Zeroizing::new(detail.value.as_str().to_owned()));
         }
         let secret = match what {
             "password" => item.password.as_ref().map(|p| p.as_str().to_owned()),
@@ -913,6 +2178,64 @@ impl App {
 /// credentials in the vault (WebAuthn's InvalidStateError).
 pub const ALREADY_HAS_PASSKEY: &str =
     "PassBundle already has a passkey for this account on this site";
+
+/// Asking the server for sign-in requests without holding the app
+/// (`App::sign_in_requests_call`).
+pub struct SignInRequestsCall {
+    server: Server,
+    access_token: Zeroizing<String>,
+    email: String,
+}
+
+impl SignInRequestsCall {
+    /// The server's list, and its clock.
+    pub fn fetch(&self) -> Result<(serde_json::Value, Option<u64>)> {
+        self.server.pending_sign_in_requests(&self.access_token)
+    }
+
+    /// The server's list of sign-ins on new devices waiting for approval
+    /// (new_device.rs), with its clock in it (`serverDate`).
+    pub fn fetch_new_devices(&self) -> Result<serde_json::Value> {
+        self.server.waiting_new_devices(&self.access_token)
+    }
+}
+
+/// A sync is for the account whose vault is kept here, by its id on the
+/// server, or for a new one (nothing kept yet): a server that answers with
+/// another account's vault is refused, and nothing of it is kept. An
+/// account's id never changes, then, once it's on this device, and two
+/// accounts here never share one (accounts.rs refuses a new one that would):
+/// the desktop agent keeps each account's biometric key by it (DESIGN.md in
+/// the meta repo, "Several accounts in the apps").
+fn same_account(kept: Option<&str>, synced: &str) -> Result<()> {
+    match kept {
+        Some(kept) if kept != synced => Err(Error::Refused(
+            "the server sent another account's vault; sign out, then sign in again",
+        )),
+        _ => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod same_account_tests {
+    use super::*;
+
+    #[test]
+    fn a_sync_is_for_the_account_kept_here_or_a_new_one() {
+        assert_eq!(same_account(None, "a"), Ok(()));
+        assert_eq!(same_account(Some("a"), "a"), Ok(()));
+        assert!(matches!(
+            same_account(Some("a"), "b"),
+            Err(Error::Refused(_))
+        ));
+    }
+}
+
+/// Whether two keys are the same, in constant time.
+fn same_key(a: &SymmetricKey, b: &SymmetricKey) -> bool {
+    let (a, b) = (a.to_bytes(), b.to_bytes());
+    a.len() == b.len() && a.iter().zip(b.iter()).fold(0u8, |d, (x, y)| d | (x ^ y)) == 0
+}
 
 /// A passkey to make (`App::passkey_create`): what the site asked for.
 pub struct NewPasskey<'a> {
@@ -1245,5 +2568,110 @@ mod attachment_tests {
         let short = safe_name(&long);
         assert!(short.len() <= 200 && short.ends_with(".pdf"), "{short}");
         assert!(short.starts_with('\u{e9}'));
+    }
+}
+
+#[cfg(test)]
+mod device_token_tests {
+    use std::sync::{Arc, Mutex};
+
+    use super::*;
+    use crate::secrets::MemorySecretStore;
+
+    /// A stand-in server: prelogin, then each sign-in answered with the
+    /// next of `answers` (status, JSON). Each sign-in's form, as sent.
+    fn stand_in(answers: Vec<(u16, &'static str)>) -> (String, Arc<Mutex<Vec<String>>>) {
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", server.server_addr().to_ip().unwrap());
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let log = sent.clone();
+        std::thread::spawn(move || {
+            let mut answers = answers.into_iter();
+            for mut request in server.incoming_requests() {
+                let json = |status: u16, body: &str| {
+                    tiny_http::Response::from_string(body)
+                        .with_status_code(status)
+                        .with_header(
+                            tiny_http::Header::from_bytes("Content-Type", "application/json")
+                                .unwrap(),
+                        )
+                };
+                if request.url() == "/identity/accounts/prelogin" {
+                    let prelogin = r#"{"kdf":0,"kdfIterations":600000}"#;
+                    let _ = request.respond(json(200, prelogin));
+                    continue;
+                }
+                let mut body = String::new();
+                let _ = request.as_reader().read_to_string(&mut body);
+                log.lock().unwrap().push(body);
+                let (status, answer) = answers.next().unwrap_or((500, "{}"));
+                let _ = request.respond(json(status, answer));
+            }
+        });
+        (url, sent)
+    }
+
+    const TWO_STEP: &str =
+        r#"{"error":"invalid_grant","TwoFactorProviders":["0"],"TwoFactorProviders2":{"0":null}}"#;
+    const HELD: &str = r#"{"error":"invalid_grant","error_description":"new device verification required","KeykeeperNewDeviceCheck":{"id":"5f0c6f1e-6f3b-4a43-9a52-0d3f1c2b7e11","token":"AbCdEfGhIjKlMnOpQrStUvWxYz0123456789-_abcde","number":"47","status":"waiting","deniedWhy":null,"expiresAt":"2026-11-08T12:10:00.000000Z","approvers":true,"email":"later","emailAfter":null,"codeSent":false,"object":"keykeeperNewDeviceCheck"}}"#;
+
+    #[test]
+    fn the_kept_device_token_is_sent_and_forgotten_only_when_two_step_login_is_asked_for() {
+        let (url, sent) = stand_in(vec![(400, HELD), (400, TWO_STEP)]);
+        let email = "ana@example.test";
+        let secrets = Arc::new(MemorySecretStore::default());
+        // Kept from a sign-in before, by the server and email as typed:
+        // the account isn't on this device now.
+        assert!(secrets.keep_secret(Secret::DeviceToken, &url, email, "device-token-1"));
+        let dir = std::env::temp_dir().join(format!("pb-device-token-{}", uuid::Uuid::new_v4()));
+        let mut app = App::open(Store::new(&dir), Box::new(secrets.clone()));
+
+        // Sent, and the server holds it anyway (a new device to it): the
+        // number to show, and the token stays.
+        let Step::NewDevice(check) = app
+            .sign_in(
+                &format!("{url}/"),
+                " Ana@Example.test ",
+                "correct horse battery",
+            )
+            .unwrap()
+        else {
+            panic!("the new-device check should hold it");
+        };
+        assert_eq!(check.number, "47");
+        assert!(app.signing_in());
+        assert!(secrets
+            .get_secret(Secret::DeviceToken, &url, email)
+            .is_some());
+
+        // Two-step login instead: the token is no good, and goes.
+        let step = app.sign_in(&url, email, "correct horse battery").unwrap();
+        assert!(matches!(step, Step::TwoFactor(_)));
+        assert!(secrets
+            .get_secret(Secret::DeviceToken, &url, email)
+            .is_none());
+
+        let sent = sent.lock().unwrap();
+        for form in sent.iter() {
+            assert!(form.contains("twoFactorProvider=5"), "{form}");
+            assert!(form.contains("twoFactorToken=device-token-1"), "{form}");
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_number_that_isnt_two_digits_is_refused_before_anything_is_sent() {
+        let mut app = App::nobody();
+        assert_eq!(
+            app.answer_new_device_check("check-1", Some("4")),
+            Err(Error::TwoStep(
+                "Type the two-digit number shown on the new device."
+            ))
+        );
+        // Two digits, but no vault open here: nothing to approve from.
+        assert_eq!(
+            app.answer_new_device_check("check-1", Some("47")),
+            Err(Error::SignedOut)
+        );
     }
 }

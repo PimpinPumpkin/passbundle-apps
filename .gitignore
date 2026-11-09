@@ -7,3 +7,7 @@ app/android/app/src/main/jniLibs/
 app/ios/PassBundleCore.xcframework/
 app/android/rustls-maven/
 app/integration_test/fixtures.g.dart
+# Made by the Windows and Linux release workflows (tools/release-folder.sh,
+# and the packing after it).
+/stage/
+/dist/

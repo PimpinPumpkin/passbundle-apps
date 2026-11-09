@@ -5,6 +5,14 @@
 # CI runs it after each build; on Linux it needs a display (DISPLAY, such as
 # Xvfb's).
 #
+# It needs a build with test hooks, as CI's are: the core built with its
+# test-hooks feature (cargo build --release --features ffi,test-hooks) and
+# the app with --dart-define=PB_TEST_HOOKS=true. Those take PB_MEASURE,
+# PB_DATA_DIR, PB_SECRETS=memory, and PB_ALLOW_SCREENSHOTS=1 (the window in
+# screenshots, which macOS and Windows otherwise leave it out of) from the
+# environment; a release ignores them, and would open on the computer's own
+# PassBundle folder.
+#
 #   tools/measure.sh <executable> <bundle> <screenshot.png>
 set -euo pipefail
 
@@ -20,7 +28,7 @@ cp "$(dirname "$0")/../app/test/sample/settings.json" "$(dirname "$0")/../app/te
 lines=$(mktemp)
 started=$(now_us)
 PB_MEASURE=1 PB_MEASURE_FILE="$lines" PB_MEASURE_PASSWORD='correct horse battery staple 1' \
-  PB_DATA_DIR="$data" PB_SECRETS=memory "$exe" > /dev/null 2>&1 &
+  PB_DATA_DIR="$data" PB_SECRETS=memory PB_ALLOW_SCREENSHOTS=1 "$exe" > /dev/null 2>&1 &
 pid=$!
 for _ in $(seq 1 120); do
   grep -q '^ready' "$lines" 2> /dev/null && break

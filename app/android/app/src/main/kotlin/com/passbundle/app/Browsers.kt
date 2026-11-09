@@ -78,6 +78,21 @@ object Browsers {
         return write(context, readTrusted(context).put(packageName, JSONArray(signers)))
     }
 
+    /** The browsers the person trusted on this device, by name, for Settings. */
+    @Synchronized
+    fun trusted(context: Context): List<Map<String, String>> {
+        val all = readTrusted(context)
+        return all.keys().asSequence().sorted().map { mapOf("package" to it, "name" to label(context, it)) }.toList()
+    }
+
+    /** Stops trusting a browser: its pages' domains count no more. */
+    @Synchronized
+    fun untrust(context: Context, packageName: String): Boolean {
+        val all = readTrusted(context)
+        all.remove(packageName)
+        return write(context, all)
+    }
+
     /**
      * The app's name, as the launcher shows it, made safe to show: one line,
      * without characters that change how it reads, and not too long. Its

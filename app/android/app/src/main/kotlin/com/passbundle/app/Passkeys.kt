@@ -1,11 +1,9 @@
 package com.passbundle.app
 
 import android.content.Context
-import android.content.pm.ApplicationInfo
 import android.util.Base64
 import androidx.credentials.provider.CallingAppInfo
 import org.json.JSONObject
-import java.io.File
 import java.security.MessageDigest
 
 /**
@@ -41,7 +39,7 @@ object Passkeys {
         if (signers.size != 1) return null
         val hash = MessageDigest.getInstance("SHA-256").digest(signers[0].toByteArray())
         // Anything going wrong (a site's file is anyone's text) means no.
-        val allowed = runCatching { Core.appMayUsePasskeys(rpId, info.packageName, hash, testStatements(context, rpId)) }.getOrDefault(false)
+        val allowed = runCatching { Core.appMayUsePasskeys(rpId, info.packageName, hash, AppSites.testStatements(context, rpId)) }.getOrDefault(false)
         return if (allowed) Caller("android:apk-key-hash:${base64url(hash)}", false, info.packageName) else null
     }
 
@@ -61,16 +59,4 @@ object Passkeys {
             .toByteArray(Charsets.UTF_8)
 
     fun sha256(bytes: ByteArray): ByteArray = MessageDigest.getInstance("SHA-256").digest(bytes)
-
-    /**
-     * Debug builds only: the asset links a test names for its test site
-     * (`passkey-test-asset-links.json` in the app's folder, `{site: statements}`),
-     * standing in for fetching them. Release builds always fetch.
-     */
-    private fun testStatements(context: Context, rpId: String): String? {
-        if ((context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) == 0) return null
-        val file = File(context.filesDir, "passkey-test-asset-links.json")
-        if (!file.exists()) return null
-        return runCatching { JSONObject(file.readText()).optJSONArray(rpId)?.toString() }.getOrNull()
-    }
 }

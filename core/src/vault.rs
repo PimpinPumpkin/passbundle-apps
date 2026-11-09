@@ -56,6 +56,117 @@ pub struct CollectionData {
     pub id: String,
     pub organization_id: String,
     pub name: String,
+    /// Upstream's three fields on the person's grant, the closest preset
+    /// of their grid (`keykeeper`), for a server that sends no grid.
+    #[serde(default)]
+    pub read_only: Option<bool>,
+    #[serde(default)]
+    pub hide_passwords: Option<bool>,
+    #[serde(default)]
+    pub manage: Option<bool>,
+    /// What the person can do in this shared folder (docs/core.md, "Folders
+    /// and permissions"), as PassBundle's server sends it.
+    #[serde(default)]
+    pub keykeeper: Option<Grid>,
+    /// The folder's icon and color, encrypted with the organization's key as
+    /// its name is (docs/core.md, "Folder icons"); none for the plain folder.
+    #[serde(default)]
+    pub keykeeper_look: Option<String>,
+}
+
+/// What someone can do in a shared folder, or with an item: PassBundle's
+/// grid of capabilities (passbundle-server's keykeeper_folder_permissions.rs,
+/// passbundle-clients' folder-permissions.ts). Having the folder at all is
+/// "see items". The server enforces creating, editing, deleting, managing,
+/// and viewing history; the apps keep to seeing passwords and sharing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Grid {
+    pub see_passwords: bool,
+    pub create: bool,
+    pub edit: bool,
+    pub delete: bool,
+    pub export: bool,
+    pub share: bool,
+    pub print: bool,
+    pub view_history: bool,
+    pub manage: bool,
+}
+
+impl Grid {
+    /// Everything: the person's own items.
+    pub const ALL: Grid = Grid {
+        see_passwords: true,
+        create: true,
+        edit: true,
+        delete: true,
+        export: true,
+        share: true,
+        print: true,
+        view_history: true,
+        manage: true,
+    };
+
+    /// The preset upstream's three fields name, as the server reads a grant
+    /// saved without a grid.
+    pub fn preset(read_only: bool, hide_passwords: bool, manage: bool) -> Grid {
+        if manage {
+            return Grid::ALL;
+        }
+        let edit = !read_only;
+        let see_passwords = !hide_passwords;
+        Grid {
+            see_passwords,
+            create: edit,
+            edit,
+            delete: edit,
+            export: false,
+            share: edit && see_passwords,
+            print: see_passwords,
+            view_history: true,
+            manage: false,
+        }
+    }
+
+    /// For each capability, the more open of the two: an item in several
+    /// shared folders, as the server decides.
+    pub fn or(self, other: Grid) -> Grid {
+        Grid {
+            see_passwords: self.see_passwords || other.see_passwords,
+            create: self.create || other.create,
+            edit: self.edit || other.edit,
+            delete: self.delete || other.delete,
+            export: self.export || other.export,
+            share: self.share || other.share,
+            print: self.print || other.print,
+            view_history: self.view_history || other.view_history,
+            manage: self.manage || other.manage,
+        }
+    }
+}
+
+impl CollectionData {
+    /// The person's grid here: the server's, or the preset of upstream's
+    /// fields. A field the server leaves out counts as the least access
+    /// (read only, passwords hidden, no managing): the server decides, and
+    /// the app never offers more than it said.
+    pub fn grid(&self) -> Grid {
+        self.keykeeper.unwrap_or_else(|| {
+            Grid::preset(
+                self.read_only.unwrap_or(true),
+                self.hide_passwords.unwrap_or(true),
+                self.manage.unwrap_or(false),
+            )
+        })
+    }
+}
+
+/// What an item's upstream fields say the person may do with it, as the
+/// server works them out from their shared folders.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct CipherPermissions {
+    pub delete: Option<bool>,
+    pub restore: Option<bool>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -77,6 +188,14 @@ pub struct CipherData {
     #[serde(default)]
     pub collection_ids: Vec<String>,
     pub revision_date: Option<String>,
+    pub creation_date: Option<String>,
+    /// The person may change it (upstream's `edit`), see its passwords
+    /// (`viewPassword`), and move it to the trash (`permissions.delete`).
+    /// For an organization's item, each is no when the server doesn't say;
+    /// the person's own items are theirs to do anything with.
+    pub edit: Option<bool>,
+    pub view_password: Option<bool>,
+    pub permissions: Option<CipherPermissions>,
     // What an edit keeps as the server sent it (Kept).
     pub reprompt: Option<u8>,
     pub password_history: Option<serde_json::Value>,
@@ -84,6 +203,10 @@ pub struct CipherData {
     pub ssh_key: Option<SshKeyData>,
     pub card: Option<CardData>,
     pub identity: Option<IdentityData>,
+    /// Upstream's newer kinds (6, 7, 8), as sent: shown, not edited.
+    pub bank_account: Option<serde_json::Value>,
+    pub drivers_license: Option<serde_json::Value>,
+    pub passport: Option<serde_json::Value>,
     #[serde(default)]
     pub attachments: Option<Vec<AttachmentData>>,
 }
@@ -156,6 +279,9 @@ pub struct LoginData {
 #[derive(Clone, Debug, Deserialize)]
 pub struct UriData {
     pub uri: Option<String>,
+    /// The address's checksum, encrypted, as sent.
+    #[serde(rename = "uriChecksum", default)]
+    pub uri_checksum: Option<String>,
     /// How the website is matched (matching.rs); null for the default.
     #[serde(rename = "match", default)]
     pub match_type: Option<u8>,
@@ -187,6 +313,11 @@ pub enum ItemKind {
     Card,
     Identity,
     SshKey,
+    /// Upstream's newer kinds, which the web vault makes where the server
+    /// offers them: the apps show them.
+    BankAccount,
+    DriversLicense,
+    Passport,
     Other(u8),
 }
 
@@ -198,17 +329,76 @@ impl From<u8> for ItemKind {
             3 => ItemKind::Card,
             4 => ItemKind::Identity,
             5 => ItemKind::SshKey,
+            6 => ItemKind::BankAccount,
+            7 => ItemKind::DriversLicense,
+            8 => ItemKind::Passport,
             other => ItemKind::Other(other),
         }
     }
 }
 
-/// A custom field. Hidden ones are secrets.
+/// A custom field. Hidden ones are secrets; yes-or-no ones hold "true" or
+/// "false".
 pub struct Field {
     pub name: String,
     pub value: Zeroizing<String>,
     pub hidden: bool,
+    pub boolean: bool,
 }
+
+/// One of a bank account's, a driver's license's, or a passport's values
+/// (upstream's newer kinds): what the view calls it, and whether it's a
+/// secret, shown only when revealed, like a password.
+pub struct Detail {
+    /// Upstream's name for it, as `kind.property` ("bankAccount.iban").
+    pub key: String,
+    pub label: &'static str,
+    pub value: Zeroizing<String>,
+    pub secret: bool,
+}
+
+/// The values of upstream's newer kinds, in the order the web vault shows
+/// them (passbundle-clients, item-versions.ts): (property, label, secret).
+pub const BANK_ACCOUNT_DETAILS: [(&str, &str, bool); 10] = [
+    ("bankName", "Bank name", false),
+    ("nameOnAccount", "Name on account", false),
+    ("accountType", "Account type", false),
+    ("accountNumber", "Account number", true),
+    ("routingNumber", "Routing number", false),
+    ("branchNumber", "Branch number", false),
+    ("pin", "PIN", true),
+    ("swiftCode", "SWIFT code", true),
+    ("iban", "IBAN", true),
+    ("bankContactPhone", "Bank's phone", false),
+];
+pub const DRIVERS_LICENSE_DETAILS: [(&str, &str, bool); 11] = [
+    ("firstName", "First name", false),
+    ("middleName", "Middle name", false),
+    ("lastName", "Last name", false),
+    ("dateOfBirth", "Date of birth", false),
+    ("licenseNumber", "License number", true),
+    ("issuingCountry", "Issuing country", false),
+    ("issuingState", "Issuing state", false),
+    ("issueDate", "Issue date", false),
+    ("expirationDate", "Expiration date", false),
+    ("issuingAuthority", "Issuing authority", false),
+    ("licenseClass", "License class", false),
+];
+pub const PASSPORT_DETAILS: [(&str, &str, bool); 13] = [
+    ("givenName", "First name", false),
+    ("surname", "Last name", false),
+    ("dateOfBirth", "Date of birth", false),
+    ("sex", "Sex", false),
+    ("birthPlace", "Place of birth", false),
+    ("nationality", "Nationality", false),
+    ("issuingCountry", "Issuing country", false),
+    ("passportNumber", "Passport number", true),
+    ("passportType", "Passport type", false),
+    ("nationalIdentificationNumber", "National ID number", true),
+    ("issuingAuthority", "Issuing authority", false),
+    ("issueDate", "Issue date", false),
+    ("expirationDate", "Expiration date", false),
+];
 
 /// Our own data on an item, in custom fields named "keykeeper.<something>":
 /// fill rules, an expiration date, a template marker (DESIGN.md, "Choosing
@@ -224,10 +414,22 @@ impl Field {
         self.name.starts_with(RESERVED_FIELD_PREFIX)
     }
 
-    /// Whether the app's editor edits it: a named text or hidden field of
-    /// the person's own (`kind`, upstream's field type, from `Kept`).
+    /// Whether the app's editor edits it: a named text, hidden, or yes-or-no
+    /// field of the person's own (`kind`, upstream's field type, from
+    /// `Kept`). Linked fields, nameless ones (or blank), and our own data stay as they are.
     pub fn edited_by_the_app(&self, kind: u8) -> bool {
-        kind <= 1 && !self.reserved() && !self.name.is_empty()
+        kind <= 2 && !self.reserved() && !self.name.trim().is_empty()
+    }
+
+    /// Upstream's field type: 0 text, 1 hidden, 2 yes or no.
+    pub fn kind(&self) -> u8 {
+        if self.hidden {
+            1
+        } else if self.boolean {
+            2
+        } else {
+            0
+        }
     }
 }
 
@@ -253,6 +455,13 @@ pub struct Item {
     pub fields: Vec<Field>,
     /// The server's revision, which an edit names so it can't overwrite a newer one.
     pub revision_date: Option<String>,
+    /// When it was made, as the server says (ISO 8601).
+    pub creation_date: Option<String>,
+    /// What the server lets the person do with it (upstream's fields; see
+    /// `Vault::grid`): change it, see its secrets, and move it to the trash.
+    pub editable: bool,
+    pub view_password: bool,
+    pub deletable: bool,
     /// A card's details, for a card.
     pub card: Option<Card>,
     /// An identity's details, for an identity.
@@ -263,6 +472,8 @@ pub struct Item {
     pub attachments: Vec<Attachment>,
     /// A login's passkey, if it has one (docs/core.md, "Passkeys").
     pub passkey: Option<Passkey>,
+    /// A bank account's, driver's license's, or passport's values.
+    pub details: Vec<Detail>,
     /// What an edit keeps that the app doesn't show or change.
     pub kept: Kept,
 }
@@ -364,6 +575,35 @@ impl Passkey {
     }
 }
 
+/// A login's passkeys as stored (upstream's encrypted `fido2Credentials`):
+/// each one's credential ID and counter, opened with `key`, and the entry
+/// itself; one whose ID doesn't open is left out.
+fn stored_passkeys(
+    stored: Option<&serde_json::Value>,
+    key: &SymmetricKey,
+) -> Vec<(String, u32, serde_json::Value)> {
+    let open = |entry: &serde_json::Value, name: &str| {
+        entry
+            .get(name)
+            .and_then(|v| v.as_str())
+            .and_then(|raw| EncString::parse(raw).ok())
+            .and_then(|e| e.decrypt_string(key).ok())
+            .map(|v| v.as_str().to_owned())
+    };
+    stored
+        .and_then(|s| s.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| {
+            let id = open(entry, "credentialId")?;
+            let counter = open(entry, "counter")
+                .and_then(|c| c.trim().parse().ok())
+                .unwrap_or(0);
+            Some((id, counter, entry.clone()))
+        })
+        .collect()
+}
+
 /// What an attachment whose name or key doesn't open is called.
 pub const CANT_OPEN_ATTACHMENT: &str = "An attachment that can't be opened";
 
@@ -414,6 +654,29 @@ pub const PLAIN_DETAILS: [&str; 10] = [
 ];
 
 impl Item {
+    /// Whether a value, by the name the app reveals and copies it with
+    /// ("password", "field:2", "cardNumber", "bankAccount.iban"), is one of
+    /// the item's secrets, which someone whose shared folder hides
+    /// passwords is never given (docs/core.md, "Folders and permissions").
+    /// Only the values known to be plain aren't: the username, the notes, a
+    /// card's, an identity's, or an SSH key's plain details
+    /// (`PLAIN_DETAILS`), a newer kind's plain ones, and plain text or
+    /// yes-or-no custom fields. Anything else, a name added later included,
+    /// is a secret.
+    pub fn is_secret(&self, what: &str) -> bool {
+        let plain = match what {
+            "username" | "notes" => true,
+            what if PLAIN_DETAILS.contains(&what) => true,
+            what if what.contains('.') => self.details.iter().any(|d| d.key == what && !d.secret),
+            other => other
+                .strip_prefix("field:")
+                .and_then(|i| i.parse::<usize>().ok())
+                .and_then(|i| self.fields.get(i))
+                .is_some_and(|f| !f.hidden),
+        };
+        !plain
+    }
+
     /// One of a card's or an identity's values (`SECRET_DETAILS`,
     /// `PLAIN_DETAILS`); None if it hasn't that one.
     pub fn detail(&self, what: &str) -> Option<Zeroizing<String>> {
@@ -597,6 +860,9 @@ pub struct Kept {
     pub fido2_credentials: Option<serde_json::Value>,
     pub autofill_on_page_load: Option<bool>,
     pub password_revision_date: Option<String>,
+    /// A login's websites as sent, encrypted: an edit by someone who can't
+    /// see the item's passwords sends them back exactly so (`encrypt_item_from`).
+    pub uris_sent: Option<serde_json::Value>,
     /// Each of `fields`' upstream type (0 text, 1 hidden, 2 yes or no, 3
     /// linked) and what a linked one is linked to.
     pub field_kinds: Vec<(u8, Option<serde_json::Value>)>,
@@ -661,6 +927,36 @@ pub struct ItemDraft {
     pub folder_id: Option<String>,
     pub organization_id: Option<String>,
     pub favorite: bool,
+    /// A new item from a template (templates.rs): its id and name, which go
+    /// with the item as the web vault records them. An edit keeps whatever
+    /// template the item came from.
+    pub template: Option<(String, String)>,
+    /// The editor's "Expires" and "Remind me" (expiration.rs), replacing
+    /// the item's; None keeps the item's as they are.
+    pub expiration: Option<Expiration>,
+}
+
+/// An item's expiration date and when it reminds, as the editor sets them:
+/// no date clears both, and the default reminder days aren't stored.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Expiration {
+    pub date: Option<crate::expiration::Date>,
+    pub remind: crate::expiration::Remind,
+}
+
+impl Expiration {
+    /// The fields they're kept in, as (name, value): the date, then the
+    /// reminder days unless they're the default.
+    pub fn fields(&self) -> Vec<(&'static str, String)> {
+        let Some(date) = self.date else {
+            return Vec::new();
+        };
+        let mut fields = vec![(EXPIRES_FIELD, date.iso())];
+        if let Some(remind) = self.remind.stored() {
+            fields.push((crate::expiration::REMIND_FIELD, remind));
+        }
+        fields
+    }
 }
 
 impl ItemDraft {
@@ -703,11 +999,61 @@ impl ItemDraft {
                     name: f.name.clone(),
                     value: Zeroizing::new(f.value.as_str().to_owned()),
                     hidden: f.hidden,
+                    boolean: f.boolean,
                 })
                 .collect(),
             folder_id: item.folder_id.clone(),
             organization_id: item.organization_id.clone(),
             favorite: item.favorite,
+            template: None,
+            expiration: None,
+        }
+    }
+}
+
+/// For the app's tests (the test-hooks feature, never in a release): items
+/// given expiration dates and reminder days as if the web vault had set
+/// them, whenever a vault opens, since a test's sample vault is encrypted.
+#[cfg(feature = "test-hooks")]
+pub mod test_hooks {
+    use std::collections::BTreeMap;
+    use std::sync::Mutex;
+
+    use zeroize::Zeroizing;
+
+    use super::{Field, Item, EXPIRES_FIELD};
+    use crate::expiration::REMIND_FIELD;
+
+    /// By item id: the date ("YYYY-MM-DD"), and the reminder days, if any.
+    pub static EXPIRING: Mutex<BTreeMap<String, (String, Option<String>)>> =
+        Mutex::new(BTreeMap::new());
+
+    pub(super) fn expire(items: &mut [Item]) {
+        let given = EXPIRING.lock().unwrap_or_else(|p| p.into_inner());
+        for item in items.iter_mut() {
+            let Some((date, remind)) = given.get(&item.id) else {
+                continue;
+            };
+            let mut at = 0;
+            while at < item.fields.len() {
+                if item.fields[at].name == EXPIRES_FIELD || item.fields[at].name == REMIND_FIELD {
+                    item.fields.remove(at);
+                    item.kept.field_kinds.remove(at);
+                } else {
+                    at += 1;
+                }
+            }
+            for (name, value) in [(EXPIRES_FIELD, Some(date)), (REMIND_FIELD, remind.as_ref())] {
+                if let Some(value) = value {
+                    item.fields.push(Field {
+                        name: name.to_owned(),
+                        value: Zeroizing::new(value.clone()),
+                        hidden: false,
+                        boolean: false,
+                    });
+                    item.kept.field_kinds.push((0, None));
+                }
+            }
         }
     }
 }
@@ -725,6 +1071,10 @@ pub struct Vault {
     pub collections: HashMap<String, String>,
     /// Each collection's organization.
     pub collection_orgs: HashMap<String, String>,
+    /// What the person can do in each collection (shared folder).
+    pub collection_grids: HashMap<String, Grid>,
+    /// Each shared folder's icon and color, opened, for those that have one.
+    pub collection_looks: HashMap<String, crate::places::Look>,
     pub organizations: HashMap<String, String>,
     pub items: Vec<Item>,
     pub damaged: Vec<DamagedItem>,
@@ -832,6 +1182,24 @@ impl Vault {
             .iter()
             .map(|c| (c.id.clone(), c.organization_id.clone()))
             .collect();
+        let collection_grids = sync
+            .collections
+            .iter()
+            .map(|c| (c.id.clone(), c.grid()))
+            .collect();
+        // A look that doesn't open, or isn't one, is the plain folder: a
+        // folder's icon is never worth an error.
+        let collection_looks = sync
+            .collections
+            .iter()
+            .filter_map(|c| {
+                let key = keys.organizations.get(&c.organization_id)?;
+                let text = EncString::parse(c.keykeeper_look.as_deref()?)
+                    .and_then(|e| e.decrypt_string(key))
+                    .ok()?;
+                Some((c.id.clone(), crate::places::parse_look(&text)?))
+            })
+            .collect();
         let mut items = Vec::new();
         let mut damaged = Vec::new();
         for cipher in &sync.ciphers {
@@ -844,6 +1212,8 @@ impl Vault {
             }
         }
         items.sort_by_key(|i| i.name.to_lowercase());
+        #[cfg(feature = "test-hooks")]
+        test_hooks::expire(&mut items);
 
         Ok(Vault {
             user_id: sync.profile.id.clone(),
@@ -851,11 +1221,69 @@ impl Vault {
             folders,
             collections,
             collection_orgs,
+            collection_grids,
+            collection_looks,
             organizations,
             items,
             damaged,
             keys,
         })
+    }
+
+    /// What the person may do with an item (docs/core.md, "Folders and
+    /// permissions"): everything with their own; with an organization's, the
+    /// most open of its shared folders they have, as the server decides,
+    /// held to what the server says of the item itself. An organization's
+    /// item in none of the person's shared folders (an admin's view of one
+    /// with no folder) goes by the item's own fields.
+    /// Whether the person is a confirmed member of an organization: one
+    /// whose key they have.
+    pub fn in_an_organization(&self) -> bool {
+        !self.keys.organizations.is_empty()
+    }
+
+    pub fn grid(&self, item: &Item) -> Grid {
+        if item.organization_id.is_none() {
+            return Grid::ALL;
+        }
+        let folders = self.item_grids(item);
+        let mut grid = folders.iter().copied().reduce(Grid::or).unwrap_or(Grid {
+            see_passwords: item.view_password,
+            create: false,
+            edit: item.editable,
+            delete: item.deletable,
+            export: false,
+            share: item.editable && item.view_password,
+            print: item.view_password,
+            view_history: true,
+            manage: false,
+        });
+        grid.edit &= item.editable;
+        grid.see_passwords &= item.view_password;
+        grid.delete &= item.deletable;
+        grid
+    }
+
+    /// The person's grid in each of an item's shared folders they have.
+    fn item_grids(&self, item: &Item) -> Vec<Grid> {
+        item.collection_ids
+            .iter()
+            .filter_map(|c| self.collection_grids.get(c).copied())
+            .collect()
+    }
+
+    /// Whether the person may clear an item's history, or delete one of its
+    /// versions: as the server decides, view item history and delete in the
+    /// same shared folder (or their own item).
+    pub fn may_clear_history(&self, item: &Item) -> bool {
+        if item.organization_id.is_none() {
+            return true;
+        }
+        let folders = self.item_grids(item);
+        if folders.is_empty() {
+            return item.deletable;
+        }
+        folders.iter().any(|g| g.view_history && g.delete)
     }
 
     /// Encrypts a draft as the server takes it (upstream's cipher request):
@@ -901,6 +1329,124 @@ impl Vault {
         editing: Option<&Item>,
         passkeys: Option<serde_json::Value>,
     ) -> Result<serde_json::Value> {
+        self.encrypt_item_from(draft, editing, editing, passkeys)
+    }
+
+    /// One of an item's past versions (history.rs), as the server sent it,
+    /// opened as the item is: under its own key, or its owner's.
+    pub fn open_version(&self, cipher: &serde_json::Value) -> Result<Item> {
+        let data: CipherData = serde_json::from_value(cipher.clone())
+            .map_err(|e| Error::Malformed(format!("a version the core can't read ({e})")))?;
+        self.keys.open_item(&data)
+    }
+
+    /// Puts an item back as one of its versions had it, as a normal edit
+    /// (passbundle-clients, item-versions.ts, `restoredView`): the version's
+    /// contents (its name, notes, fields, websites and how they match, its
+    /// passkeys, and whether it asks for the master password), and the item
+    /// as it is now for the rest (its folder, favorite, owner, shared
+    /// folders, attachments, and key). The password it replaces goes into
+    /// its history, as any edit's does. Refused for a version of another
+    /// kind, owner, or key, which only the web vault restores.
+    ///
+    /// A passkey the item still has is kept as it is now, with the higher
+    /// of its counters (signing in raises it, and a site refuses one that
+    /// goes back); one the version doesn't have goes (`restore_drops`).
+    pub fn encrypt_restore(&self, version: &Item, current: &Item) -> Result<serde_json::Value> {
+        if version.kind != current.kind
+            || version.organization_id != current.organization_id
+            || version.kept.key != current.kept.key
+        {
+            return Err(Error::Refused(
+                "this version is of another kind, owner, or key; restore it in the web vault",
+            ));
+        }
+        let mut draft = ItemDraft::of(version);
+        draft.folder_id = current.folder_id.clone();
+        draft.favorite = current.favorite;
+        let key = self.item_value_key(current)?;
+        let now = stored_passkeys(current.kept.fido2_credentials.as_ref(), key);
+        let passkeys = version
+            .kept
+            .fido2_credentials
+            .as_ref()
+            .and_then(|stored| stored.as_array())
+            .map(|then| {
+                serde_json::Value::Array(
+                    then.iter()
+                        .map(|entry| {
+                            let opened = stored_passkeys(Some(&serde_json::json!([entry])), key);
+                            let still = opened.first().and_then(|(id, counter, _)| {
+                                now.iter().find(|(now_id, now_counter, _)| {
+                                    now_id == id && now_counter >= counter
+                                })
+                            });
+                            match still {
+                                Some((_, _, now_entry)) => now_entry.clone(),
+                                None => entry.clone(),
+                            }
+                        })
+                        .collect(),
+                )
+            });
+        self.encrypt_item_from(&draft, Some(current), Some(version), passkeys)
+    }
+
+    /// The passkeys restoring `version` would take from the item, which it
+    /// has now and the version doesn't: who each is for ("shop.example.test,
+    /// ana"), to warn before restoring.
+    pub fn restore_drops(&self, version: &Item, current: &Item) -> Vec<String> {
+        let Ok(key) = self.item_value_key(current) else {
+            return Vec::new();
+        };
+        let then = stored_passkeys(version.kept.fido2_credentials.as_ref(), key);
+        stored_passkeys(current.kept.fido2_credentials.as_ref(), key)
+            .into_iter()
+            .filter(|(id, _, _)| !then.iter().any(|(then_id, _, _)| then_id == id))
+            .map(|(_, _, entry)| {
+                let text = |name: &str| {
+                    entry
+                        .get(name)
+                        .and_then(|v| v.as_str())
+                        .and_then(|raw| EncString::parse(raw).ok())
+                        .and_then(|e| e.decrypt_string(key).ok())
+                        .map(|v| v.as_str().to_owned())
+                        .filter(|v| !v.is_empty())
+                };
+                [text("rpName").or_else(|| text("rpId")), text("userName")]
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .collect()
+    }
+
+    /// The key an item's values are under: its own, or its owner's.
+    fn item_value_key<'a>(&'a self, item: &'a Item) -> Result<&'a SymmetricKey> {
+        if let Some(key) = item.kept.item_key.as_ref() {
+            return Ok(key);
+        }
+        match &item.organization_id {
+            Some(org) => self
+                .keys
+                .organizations
+                .get(org)
+                .ok_or(Error::Damaged("that organization's key doesn't open")),
+            None => Ok(&self.keys.user),
+        }
+    }
+
+    /// `encrypt_item_with`, keeping what the editor doesn't edit (the kept
+    /// values, the fields it doesn't show, and how each website matches)
+    /// from `source`: the item itself, or, to restore one, its version.
+    fn encrypt_item_from(
+        &self,
+        draft: &ItemDraft,
+        editing: Option<&Item>,
+        source: Option<&Item>,
+        passkeys: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value> {
         use serde_json::json;
         if let Some(item) = editing {
             if !matches!(
@@ -920,7 +1466,30 @@ impl Vault {
                 ));
             }
         }
+        // Someone who can't see the item's passwords can't change its
+        // websites: autofill sends the password where they point. They go
+        // back exactly as stored, encrypted, so the server can tell
+        // (DESIGN.md, "Folders and permissions").
+        let websites_kept = match editing {
+            Some(item) if item.kind == ItemKind::Login && !self.grid(item).see_passwords => {
+                if draft.uris != item.uris {
+                    return Err(Error::Refused(
+                        "you can't see this item's passwords, so its websites stay as they are",
+                    ));
+                }
+                Some(
+                    item.kept
+                        .uris_sent
+                        .clone()
+                        .unwrap_or(serde_json::Value::Null),
+                )
+            }
+            _ => None,
+        };
+        // The item's own: its key, its history, and when its password changed.
         let kept = editing.map(|i| &i.kept);
+        // What the editor doesn't edit, from the item or the version restored.
+        let from = source.map(|i| &i.kept);
         let key = self.value_key(draft, editing)?;
         let enc = |text: &str| key.encrypt_str(text).to_string();
         let enc_opt = |text: Option<&str>| text.filter(|t| !t.is_empty()).map(enc);
@@ -964,17 +1533,35 @@ impl Vault {
                 json!({
                     "name": enc(&f.name),
                     "value": enc(&f.value),
-                    "type": if f.hidden { 1 } else { 0 },
+                    "type": f.kind(),
                     "linkedId": null,
                 })
             })
             .collect();
-        // Yes-or-no and linked fields, and our own data, which the editor
-        // doesn't edit, stay, each where it was among the item's fields.
-        if let Some(item) = editing {
+        // A new item from a template records it, as the web vault does
+        // (passbundle-clients, templates.ts): a text field after the rest.
+        if let (None, Some((id, name))) = (editing, &draft.template) {
+            fields.push(json!({
+                "name": enc(crate::templates::TEMPLATE_FIELD),
+                "value": enc(&crate::templates::marker(id, name)),
+                "type": 0,
+                "linkedId": null,
+            }));
+        }
+        // Linked fields and nameless ones, which the editor doesn't edit, stay,
+        // each where it was among the item's fields (the version's, when
+        // restoring one). Our own data (`keykeeper.*`: fill rules, template
+        // markers, expiration dates) is the item's as it is now: restoring a
+        // version never brings back a rule or a marker taken off since.
+        let replaced = |field: &Field| {
+            draft.expiration.is_some()
+                && (field.name == EXPIRES_FIELD || field.name == crate::expiration::REMIND_FIELD)
+        };
+        for (item, ours) in [(source, false), (editing.or(source), true)] {
+            let Some(item) = item else { continue };
             let kinds = &item.kept.field_kinds;
             for (at, (field, (kind, linked))) in item.fields.iter().zip(kinds).enumerate() {
-                if !field.edited_by_the_app(*kind) {
+                if !field.edited_by_the_app(*kind) && field.reserved() == ours && !replaced(field) {
                     fields.insert(
                         at.min(fields.len()),
                         json!({
@@ -986,6 +1573,17 @@ impl Vault {
                     );
                 }
             }
+        }
+
+        // The editor's expiration date and reminder days, after the rest,
+        // as the web vault adds them.
+        for (name, value) in draft.expiration.iter().flat_map(Expiration::fields) {
+            fields.push(json!({
+                "name": enc(name),
+                "value": enc(&value),
+                "type": 0,
+                "linkedId": null,
+            }));
         }
 
         let mut body = json!({
@@ -1000,7 +1598,7 @@ impl Vault {
             "name": enc(&draft.name),
             "notes": enc_opt(draft.notes.as_deref().map(String::as_str)),
             "favorite": draft.favorite,
-            "reprompt": kept.map_or(0, |k| k.reprompt),
+            "reprompt": from.map_or(0, |k| k.reprompt),
             "key": kept.and_then(|k| k.key.clone()),
             "fields": fields,
             "passwordHistory": if history.is_empty() { serde_json::Value::Null } else { history.into() },
@@ -1041,7 +1639,7 @@ impl Vault {
                 "licenseNumber": secret(&id.license_number),
             });
         } else if draft.note {
-            body["secureNote"] = kept
+            body["secureNote"] = from
                 .and_then(|k| k.secure_note.clone())
                 .unwrap_or_else(|| json!({ "type": 0 }));
         } else {
@@ -1054,13 +1652,13 @@ impl Vault {
                 // Each with its checksum, as upstream's apps write it: an
                 // item with its own key shows only websites whose checksum
                 // matches, so a server can't swap one in.
-                "uris": draft.uris.iter().map(|u| json!({
+                "uris": websites_kept.clone().unwrap_or_else(|| draft.uris.iter().map(|u| json!({
                     "uri": enc(u),
                     "uriChecksum": enc(&uri_checksum(u)),
-                    "match": editing.and_then(|i| i.uris.iter().position(|kept| kept == u).and_then(|at| i.uri_matches.get(at).copied().flatten())),
-                })).collect::<Vec<_>>(),
-                "fido2Credentials": passkeys.or_else(|| kept.and_then(|k| k.fido2_credentials.clone())),
-                "autofillOnPageLoad": kept.and_then(|k| k.autofill_on_page_load),
+                    "match": source.and_then(|i| i.uris.iter().position(|kept| kept == u).and_then(|at| i.uri_matches.get(at).copied().flatten())),
+                })).collect::<Vec<_>>().into()),
+                "fido2Credentials": passkeys.or_else(|| from.and_then(|k| k.fido2_credentials.clone())),
+                "autofillOnPageLoad": from.and_then(|k| k.autofill_on_page_load),
                 "passwordRevisionDate": if password_changed {
                     Some(now.clone())
                 } else {
@@ -1161,6 +1759,7 @@ impl Keyring {
 
     fn open_item(&self, c: &CipherData) -> Result<Item> {
         let key = self.key_for(c)?;
+        let own = c.organization_id.is_none();
         let name = open_text(&c.name, &key)?
             .map(|n| n.as_str().to_owned())
             .unwrap_or_default();
@@ -1185,6 +1784,7 @@ impl Keyring {
                 name: plain(open_text(&f.name, &key)?).unwrap_or_default(),
                 value: open_text(&f.value, &key)?.unwrap_or_else(|| Zeroizing::new(String::new())),
                 hidden: f.kind == 1,
+                boolean: f.kind == 2,
             });
             field_kinds.push((f.kind, f.linked_id.clone()));
         }
@@ -1255,6 +1855,38 @@ impl Keyring {
             }),
             _ => None,
         };
+        // A bank account's, driver's license's, or passport's values, each
+        // under the item's key; one that doesn't open fails the item, as
+        // any other value does.
+        let mut details = Vec::new();
+        let newer = match ItemKind::from(c.kind) {
+            ItemKind::BankAccount => {
+                Some(("bankAccount", &c.bank_account, &BANK_ACCOUNT_DETAILS[..]))
+            }
+            ItemKind::DriversLicense => Some((
+                "driversLicense",
+                &c.drivers_license,
+                &DRIVERS_LICENSE_DETAILS[..],
+            )),
+            ItemKind::Passport => Some(("passport", &c.passport, &PASSPORT_DETAILS[..])),
+            _ => None,
+        };
+        if let Some((part, Some(values), specs)) = newer {
+            for (property, label, secret) in specs {
+                let raw = values
+                    .get(property)
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned);
+                if let Some(value) = open_text(&raw, &key)?.filter(|v| !v.is_empty()) {
+                    details.push(Detail {
+                        key: format!("{part}.{property}"),
+                        label,
+                        value,
+                        secret: *secret,
+                    });
+                }
+            }
+        }
         let login = c.login.as_ref();
         let passkey = login
             .filter(|_| ItemKind::from(c.kind) == ItemKind::Login)
@@ -1273,6 +1905,13 @@ impl Keyring {
             fido2_credentials: login.and_then(|l| l.fido2_credentials.clone()),
             autofill_on_page_load: login.and_then(|l| l.autofill_on_page_load),
             password_revision_date: login.and_then(|l| l.password_revision_date.clone()),
+            uris_sent: login.and_then(|l| l.uris.as_ref()).map(|uris| {
+                uris.iter()
+                    .map(|u| {
+                        serde_json::json!({ "uri": u.uri, "uriChecksum": u.uri_checksum, "match": u.match_type })
+                    })
+                    .collect()
+            }),
             field_kinds,
         };
         Ok(Item {
@@ -1292,11 +1931,17 @@ impl Keyring {
             totp,
             fields,
             revision_date: c.revision_date.clone(),
+            creation_date: c.creation_date.clone(),
+            // The least access where the server doesn't say (CipherData).
+            editable: c.edit.unwrap_or(own),
+            view_password: c.view_password.unwrap_or(own),
+            deletable: c.permissions.as_ref().and_then(|p| p.delete).unwrap_or(own),
             card,
             identity,
             ssh_key,
             attachments,
             passkey,
+            details,
             kept,
         })
     }

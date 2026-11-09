@@ -114,12 +114,13 @@ fn editing_keeps_the_item_key_reprompt_passkeys_other_fields_and_history() {
     let item = vault.item(&id).unwrap();
     assert_eq!(item.kept.reprompt, 1);
 
-    // The editor edits the text and hidden fields only. A new password, and
-    // the hidden "API key" field removed.
+    // The editor edits the text, hidden, and yes-or-no fields, not linked
+    // ones. A new password, and the hidden "API key" field removed.
     let mut draft = ItemDraft::of(item);
-    assert_eq!(draft.fields.len(), 1);
+    assert_eq!(draft.fields.len(), 2);
+    assert!(draft.fields[1].boolean && draft.fields[1].value.as_str() == "true");
     draft.password = Some("a-new-password".to_owned().into());
-    draft.fields.clear();
+    draft.fields.retain(|f| !f.hidden);
     let body = vault.encrypt_item(&draft, Some(item)).unwrap();
     assert_eq!(body["reprompt"], 1, "still asks for the master password");
     assert_eq!(body["key"], item_key_as_sent, "keeps its own key");
@@ -420,4 +421,342 @@ fn cards_and_identities_are_edited_and_made() {
     assert_eq!(body["type"], 3);
     assert_eq!(opened(&key, &body["card"]["number"]), "4000056655665556");
     assert!(body["card"]["code"].is_null());
+}
+
+/// A custom template whose note asks for the master password again
+/// (src/templates.rs): its hidden default is left out until the password is
+/// given, as the note's own secrets are; its plain one is offered.
+#[test]
+fn a_template_that_asks_for_the_master_password_keeps_its_hidden_default_back() {
+    let (mut v, prelogin, password) = sample();
+    let id = v["ids"]["withKey"].as_str().unwrap().to_owned();
+    let item_key = open(&v, &prelogin, &password)
+        .item(&id)
+        .unwrap()
+        .kept
+        .item_key
+        .clone()
+        .expect("the vectors' item has its own key");
+    let enc = |text: &str| serde_json::Value::from(item_key.encrypt_str(text).to_string());
+    {
+        let c = cipher(&mut v, &id);
+        c["type"] = 2.into();
+        c["login"] = serde_json::Value::Null;
+        c["secureNote"] = serde_json::json!({ "type": 0 });
+        c["reprompt"] = 1.into();
+        c["fields"] = serde_json::json!([
+            { "name": enc("Model"), "value": enc("not-a-real-model"), "type": 0, "linkedId": null },
+            { "name": enc("Admin PIN"), "value": enc("not-a-real-pin"), "type": 1, "linkedId": null },
+            {
+                "name": enc("keykeeper.template-definition"),
+                "value": enc(r#"{"id":"office-router","base":"note","v":1}"#),
+                "type": 0,
+                "linkedId": null,
+            },
+        ]);
+    }
+    let vault = open(&v, &prelogin, &password);
+    let defaults = |given: bool| {
+        let groups = passbundle_core::templates::groups(&vault, |_| given);
+        let router = groups
+            .iter()
+            .flat_map(|g| &g.templates)
+            .find(|t| t.id == "office-router")
+            .expect("the custom template")
+            .clone();
+        let value = |label: &str| {
+            router
+                .fields
+                .iter()
+                .find(|f| f.label == label)
+                .unwrap()
+                .value
+                .clone()
+        };
+        (value("Model"), value("Admin PIN"))
+    };
+    assert_eq!(defaults(false), (Some("not-a-real-model".into()), None));
+    assert_eq!(
+        defaults(true),
+        (
+            Some("not-a-real-model".into()),
+            Some("not-a-real-pin".into())
+        )
+    );
+}
+
+/// What a server leaves out of a shared folder or an organization's item
+/// (docs/core.md, "Folders and permissions") counts as the least access:
+/// read only, passwords hidden, no deleting. The person's own items aren't
+/// held back by it.
+#[test]
+fn permissions_a_server_leaves_out_count_as_the_least_access() {
+    let (mut v, prelogin, password) = sample();
+    let shared = v["ids"]["shared"].as_str().unwrap().to_owned();
+    let personal = v["ids"]["personal"].as_str().unwrap().to_owned();
+    let collection = v["ids"]["collection"].as_str().unwrap().to_owned();
+    // The vectors' shared folder says only readOnly: false, and their
+    // shared item says nothing.
+    let vault = open(&v, &prelogin, &password);
+    let grid = vault.grid(vault.item(&shared).unwrap());
+    assert!(!grid.see_passwords && !grid.edit && !grid.delete && !grid.share);
+    assert!(vault.grid(vault.item(&personal).unwrap()).see_passwords);
+    assert!(!vault.collection_grids[&collection].see_passwords);
+
+    // Said in full, as PassBundle's server says it, it's as given.
+    for c in v["sync"]["collections"].as_array_mut().unwrap() {
+        c["readOnly"] = false.into();
+        c["hidePasswords"] = false.into();
+        c["manage"] = false.into();
+    }
+    {
+        let c = cipher(&mut v, &shared);
+        c["edit"] = true.into();
+        c["viewPassword"] = true.into();
+        c["permissions"] = serde_json::json!({ "delete": true, "restore": true });
+    }
+    let vault = open(&v, &prelogin, &password);
+    let grid = vault.grid(vault.item(&shared).unwrap());
+    assert!(grid.see_passwords && grid.edit && grid.delete && grid.share);
+}
+
+/// A version's passkeys (src/history.rs): a login with a second passkey
+/// shows as changed, though its first is the same.
+#[test]
+fn a_second_passkey_shows_in_an_items_history() {
+    let (mut v, prelogin, password) = sample();
+    let id = v["ids"]["withKey"].as_str().unwrap().to_owned();
+    let item_key = open(&v, &prelogin, &password)
+        .item(&id)
+        .unwrap()
+        .kept
+        .item_key
+        .clone()
+        .expect("the vectors' item has its own key");
+    let enc = |text: &str| serde_json::Value::from(item_key.encrypt_str(text).to_string());
+    let passkey = |user: &str| {
+        serde_json::json!({
+            "credentialId": enc(&format!("credential-{user}")),
+            "keyType": enc("public-key"),
+            "rpId": enc("backup.example.test"),
+            "userName": enc(user),
+        })
+    };
+    let passkey_entry = |v: &serde_json::Value| {
+        let vault = open(v, &prelogin, &password);
+        let entries = passbundle_core::history::entries(vault.item(&id).unwrap());
+        let entry = entries
+            .into_iter()
+            .find(|e| e.key == "login.passkey.0")
+            .expect("a passkey row");
+        (entry.value.as_str().to_owned(), entry.compare)
+    };
+    cipher(&mut v, &id)["login"]["fido2Credentials"] = serde_json::json!([passkey("ana")]);
+    let (one, one_compared) = passkey_entry(&v);
+    cipher(&mut v, &id)["login"]["fido2Credentials"] =
+        serde_json::json!([passkey("ana"), passkey("ana.work")]);
+    let (two, two_compared) = passkey_entry(&v);
+    assert_eq!(one, "backup.example.test, ana");
+    assert_eq!(two, "backup.example.test, ana and 1 more");
+    assert_ne!(one_compared, two_compared);
+}
+
+/// Restoring a version (Vault::encrypt_restore) keeps a passkey the item
+/// still has as it is now, with its raised counter, since a site refuses a
+/// counter that goes back; and says first which passkey it would take away.
+#[test]
+fn restoring_a_version_keeps_the_passkeys_counters_and_says_what_it_drops() {
+    let (mut v, prelogin, password) = sample();
+    let id = v["ids"]["withKey"].as_str().unwrap().to_owned();
+    let item_key = open(&v, &prelogin, &password)
+        .item(&id)
+        .unwrap()
+        .kept
+        .item_key
+        .clone()
+        .expect("the vectors' item has its own key");
+    let enc = |text: &str| serde_json::Value::from(item_key.encrypt_str(text).to_string());
+    let passkey = |id: &str, user: &str, counter: u32| {
+        serde_json::json!({
+            "credentialId": enc(id),
+            "keyType": enc("public-key"),
+            "rpId": enc("backup.example.test"),
+            "userName": enc(user),
+            "counter": enc(&counter.to_string()),
+        })
+    };
+    // The version: one passkey, counted 1.
+    cipher(&mut v, &id)["login"]["fido2Credentials"] =
+        serde_json::json!([passkey("one", "ana", 1)]);
+    let then = open(&v, &prelogin, &password);
+    let version = then.item(&id).unwrap();
+    // Now: that passkey counted 5, and a second one since.
+    cipher(&mut v, &id)["login"]["fido2Credentials"] =
+        serde_json::json!([passkey("one", "ana", 5), passkey("two", "ana.work", 0)]);
+    let vault = open(&v, &prelogin, &password);
+    let current = vault.item(&id).unwrap();
+
+    assert_eq!(
+        vault.restore_drops(version, current),
+        ["backup.example.test, ana.work"]
+    );
+    let body = vault.encrypt_restore(version, current).unwrap();
+    let restored = body["login"]["fido2Credentials"].as_array().unwrap();
+    assert_eq!(restored.len(), 1);
+    assert_eq!(opened(&item_key, &restored[0]["credentialId"]), "one");
+    assert_eq!(opened(&item_key, &restored[0]["counter"]), "5");
+    assert!(vault.restore_drops(current, current).is_empty());
+}
+
+/// The vectors' shared login, made as another app would save it, from `draft`
+/// (encrypted under the organization's key), and the vault opened with it.
+fn shared_as(
+    v: &mut serde_json::Value,
+    prelogin: &Prelogin,
+    password: &str,
+    draft: ItemDraft,
+    change: impl FnOnce(&mut serde_json::Value),
+) -> (Vault, serde_json::Value) {
+    let id = v["ids"]["shared"].as_str().unwrap().to_owned();
+    let org = v["ids"]["organization"].as_str().unwrap().to_owned();
+    let made = open(v, prelogin, password)
+        .encrypt_item(
+            &ItemDraft {
+                organization_id: Some(org),
+                ..draft
+            },
+            None,
+        )
+        .unwrap();
+    {
+        let c = cipher(v, &id);
+        for part in ["type", "name", "login", "secureNote", "fields"] {
+            c[part] = made[part].clone();
+        }
+        change(c);
+    }
+    (open(v, prelogin, password), made)
+}
+
+/// Someone who can't see an item's passwords can't change its websites
+/// (DESIGN.md, "Folders and permissions"): an edit sends them back exactly
+/// as stored, encrypted, which the server checks, and a changed one is
+/// refused before anything is sent.
+#[test]
+fn without_see_passwords_an_edit_sends_the_websites_back_as_stored() {
+    let (mut v, prelogin, password) = sample();
+    let id = v["ids"]["shared"].as_str().unwrap().to_owned();
+    let (vault, made) = shared_as(
+        &mut v,
+        &prelogin,
+        &password,
+        ItemDraft {
+            name: "Domain admin".into(),
+            uris: vec!["https://bank.example.test/login".into()],
+            ..ItemDraft::default()
+        },
+        |c| c["viewPassword"] = false.into(),
+    );
+    let item = vault.item(&id).unwrap();
+    assert!(!vault.grid(item).see_passwords);
+
+    let mut draft = ItemDraft::of(item);
+    draft.name = "Renamed".into();
+    let body = vault.encrypt_item(&draft, Some(item)).unwrap();
+    assert_eq!(body["login"]["uris"], made["login"]["uris"]);
+
+    draft.uris = vec!["https://evil.example.test/".into()];
+    assert!(matches!(
+        vault.encrypt_item(&draft, Some(item)),
+        Err(passbundle_core::error::Error::Refused(_))
+    ));
+}
+
+/// Restoring a version never brings back our own data (`keykeeper.*`) that
+/// the item doesn't have now, such as a fill rule taken off: that comes from
+/// the item as it is now; the rest from the version.
+#[test]
+fn restoring_a_version_keeps_our_own_fields_as_they_are_now() {
+    let (mut v, prelogin, password) = sample();
+    let id = v["ids"]["withKey"].as_str().unwrap().to_owned();
+    let item_key = open(&v, &prelogin, &password)
+        .item(&id)
+        .unwrap()
+        .kept
+        .item_key
+        .clone()
+        .expect("the vectors' item has its own key");
+    let enc = |text: &str| serde_json::Value::from(item_key.encrypt_str(text).to_string());
+    let field = |name: &str, value: &str, kind: u8| serde_json::json!({ "name": enc(name), "value": enc(value), "type": kind, "linkedId": null });
+    let rule =
+        r#"{"v":1,"host":"bank.example.test","field":{"id":"q"},"fill":{"from":"password"}}"#;
+    cipher(&mut v, &id)["fields"] =
+        serde_json::json!([field("Ticket", "IT-1", 0), field("keykeeper.fill", rule, 1),]);
+    let then = open(&v, &prelogin, &password);
+    let version = then.item(&id).unwrap();
+    cipher(&mut v, &id)["fields"] = serde_json::json!([
+        field("Ticket", "IT-2", 0),
+        field("keykeeper.expires", "2027-01-31", 0),
+    ]);
+    let vault = open(&v, &prelogin, &password);
+    let current = vault.item(&id).unwrap();
+
+    let body = vault.encrypt_restore(version, current).unwrap();
+    let fields: Vec<(String, String)> = body["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| {
+            (
+                opened(&item_key, &f["name"]),
+                opened(&item_key, &f["value"]),
+            )
+        })
+        .collect();
+    assert_eq!(
+        fields,
+        [
+            ("Ticket".to_owned(), "IT-1".to_owned()),
+            ("keykeeper.expires".to_owned(), "2027-01-31".to_owned()),
+        ]
+    );
+}
+
+/// Templates are offered by where they are, as the web vault offers them:
+/// an MSP's copy shows under its organization, never under a name its
+/// definition gives, since anyone who can edit an item could write one.
+#[test]
+fn template_groups_never_name_who_a_copy_came_from() {
+    let (mut v, prelogin, password) = sample();
+    let field = |name: &str, value: &str| passbundle_core::vault::Field {
+        name: name.into(),
+        value: Zeroizing::new(value.into()),
+        hidden: false,
+        boolean: false,
+    };
+    let (vault, _) = shared_as(
+        &mut v,
+        &prelogin,
+        &password,
+        ItemDraft {
+            note: true,
+            name: "Router".into(),
+            fields: vec![
+                field("Model", "not-a-real-model"),
+                field(
+                    passbundle_core::templates::DEFINITION_FIELD,
+                    r#"{"id":"office-router","base":"note","v":1,"from":"Your MSP (trust us)"}"#,
+                ),
+            ],
+            ..ItemDraft::default()
+        },
+        |_| {},
+    );
+    let groups = passbundle_core::templates::groups(&vault, |_| true);
+    let names: Vec<&str> = groups.iter().map(|g| g.name.as_str()).collect();
+    let org = v["ids"]["organization"].as_str().unwrap();
+    let org_name = vault.organizations.get(org).unwrap();
+    assert_eq!(names, [org_name.as_str(), "Built-in"]);
+    assert_eq!(groups[0].templates[0].id, "office-router");
+    assert!(!serde_json::to_string(&groups).unwrap().contains("trust us"));
 }

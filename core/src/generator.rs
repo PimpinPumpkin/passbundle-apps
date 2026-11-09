@@ -137,7 +137,8 @@ pub fn shortest(options: &Options) -> usize {
 }
 
 /// EFF's long word list: 7,776 words, so each word adds about 12.9 bits.
-fn words() -> &'static [&'static str] {
+/// The fingerprint phrase uses it too, in this order (device_approval.rs).
+pub(crate) fn words() -> &'static [&'static str] {
     static WORDS: OnceLock<Vec<&'static str>> = OnceLock::new();
     WORDS.get_or_init(|| include_str!("words/eff-large.txt").lines().collect())
 }

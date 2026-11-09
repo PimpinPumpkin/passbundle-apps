@@ -2,24 +2,39 @@
 //! design is docs/core.md in the meta repo (PimpinPumpkin/Passbundle), with
 //! test vectors in docs/vectors/core-v1.json (a copy is in tests/vectors).
 
+pub mod accounts;
 pub mod agent;
 pub mod app;
 pub mod asset_links;
 pub mod autolock;
 pub mod clipboard;
 pub mod crypto;
+pub mod device_approval;
 pub mod error;
+pub mod expiration;
 pub mod generator;
 pub mod generator_policy;
+pub mod health;
+pub mod history;
+pub mod icons;
 pub mod kdf;
 pub mod lock_policy;
 pub mod managed;
 pub mod matching;
+pub mod new_device;
 pub mod passkey;
+pub mod places;
 pub mod secrets;
+pub mod security_key;
 pub mod server;
+pub mod signup;
 pub mod store;
+pub mod synced_settings;
+pub mod templates;
 pub mod totp;
+pub mod two_step;
+#[cfg(not(phone))]
+pub mod updates;
 pub mod vault;
 
 #[cfg(target_os = "android")]

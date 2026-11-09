@@ -9,6 +9,8 @@ import android.service.autofill.FillRequest
 import android.service.autofill.SaveCallback
 import android.service.autofill.SaveRequest
 import org.json.JSONObject
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * PassBundle as Android's autofill service (docs/phones.md, "Autofill"). It
@@ -18,13 +20,30 @@ import org.json.JSONObject
 class PassBundleAutofill : AutofillService() {
     override fun onFillRequest(request: FillRequest, cancellationSignal: CancellationSignal, callback: FillCallback) {
         val structure = request.fillContexts.lastOrNull()?.structure ?: return callback.onSuccess(null)
-        val fields = Fields.find(structure)
+        // Whatever an app's screen holds, reading it never stops PassBundle
+        // (and the unlocked vault with it): a screen it can't read gets nothing.
+        val fields = runCatching { Fields.find(structure) }.getOrNull() ?: return callback.onSuccess(null)
         // Never PassBundle's own screens.
         if (fields.packageName == packageName) return callback.onSuccess(null)
-        callback.onSuccess(Responses.forFields(this, fields))
+        // Checking an app's sites can reach the network: off the main thread,
+        // one request at a time, for a moment at most, well inside Android's
+        // wait for an answer. A request Android cancelled meanwhile is skipped.
+        val cancelled = AtomicBoolean(false)
+        cancellationSignal.setOnCancelListener { cancelled.set(true) }
+        filling.execute {
+            if (cancelled.get()) return@execute
+            val response = runCatching { Responses.forFields(this, fields, SITES_WAIT_MS) }.getOrNull()
+            if (!cancelled.get()) runCatching { callback.onSuccess(response) }
+        }
     }
 
     companion object {
+        /** How long a fill waits for checking the sites an app names (AppSites.kt). */
+        private const val SITES_WAIT_MS = 2000L
+
+        /** Fill requests, one at a time. */
+        private val filling = Executors.newSingleThreadExecutor()
+
         /** How long a sign-in to save waits for the app's screens. */
         private const val SAVE_WAITS_MS = 10 * 60 * 1000L
 
@@ -36,7 +55,8 @@ class PassBundleAutofill : AutofillService() {
          * channel method). The screens take it unlocked, so the core says then
          * whether it's a new password for a login it has: the one login for
          * the same app or site with the same username, by the rules autofill
-         * fills with. That login's `id` comes with it, to update it.
+         * fills with, in any unlocked account. That login's `id` and its
+         * `account` come with it, to update it there.
          */
         @Synchronized
         fun takeSave(): Map<String, String>? {
@@ -49,7 +69,11 @@ class PassBundleAutofill : AutofillService() {
                 (0 until items.length())
                     .map { items.getJSONObject(it) }
                     .filter { !it.isNull("username") && it.optString("username") == save["username"] }
-            return if (same.size == 1) save + ("id" to same[0].getString("id")) else save
+            return if (same.size == 1) {
+                save + ("id" to same[0].getString("id")) + ("account" to same[0].optString("account"))
+            } else {
+                save
+            }
         }
 
         @Synchronized
@@ -70,8 +94,8 @@ class PassBundleAutofill : AutofillService() {
      */
     override fun onSaveRequest(request: SaveRequest, callback: SaveCallback) {
         val structure = request.fillContexts.lastOrNull()?.structure ?: return callback.onSuccess()
-        val fields = Fields.find(structure)
-        val (username, password) = Fields.values(structure, fields)
+        val fields = runCatching { Fields.find(structure) }.getOrNull() ?: return callback.onSuccess()
+        val (username, password) = runCatching { Fields.values(structure, fields) }.getOrNull() ?: return callback.onSuccess()
         if (password.isNullOrEmpty()) return callback.onSuccess()
         // A page's domain only from a browser (Browsers.kt); another app's sign-in is saved for the app.
         val domain = Browsers.domain(fields.webDomain)?.takeIf { Browsers.trusts(this, fields.packageName) }

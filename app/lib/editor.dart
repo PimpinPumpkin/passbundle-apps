@@ -1,20 +1,42 @@
 // Adding and editing an item. Editing shows its secrets in the fields, so
 // they pass through Dart while the editor is open, as typing them does; the
-// core encrypts what's saved (docs/core.md, "Memory").
+// core encrypts what's saved (docs/core.md, "Memory"). A new item comes from
+// the New item picker (new_item.dart): a kind, or a template with its
+// fields. Where it goes is one Folder picker, grouped by owner, as the web
+// vault has it: Personal and its folders, then each organization's shared
+// folders the person may add items to.
 import 'package:flutter/material.dart';
 
 import 'core.dart';
 import 'generator.dart';
+import 'glyphs.dart';
+import 'new_item.dart';
+import 'places.dart';
 import 'theme.dart';
 import 'widgets.dart';
 
-/// Opens the editor; resolves to the saved item's id ('' for a new one), or null if cancelled.
-Future<String?> openEditor(
+/// What the editor saved: the item's id ('' for a new one), and whether the
+/// sync after saving came through. When it didn't, the item is saved all the
+/// same and shows on this device (core/src/app.rs, `save`): the editor
+/// closes, so it's never saved twice.
+class EditorSaved {
+  const EditorSaved(this.id, {this.synced = true});
+
+  final String id;
+  final bool synced;
+}
+
+/// Opens the editor; resolves to what was saved, or null if cancelled. A
+/// new item is the kind or template `choice` picked, going to `place` (as
+/// [_ItemEditorState.place] says it) unless the person picks another.
+Future<EditorSaved?> openEditor(
   BuildContext context, {
   required Core core,
-  required Map<String, dynamic> places,
+  required Places places,
   String? id,
   Map<String, dynamic>? prefill,
+  NewItemChoice? choice,
+  String? place,
   required bool asDialog,
 }) {
   final editor = ItemEditor(
@@ -22,9 +44,11 @@ Future<String?> openEditor(
     places: places,
     id: id,
     prefill: prefill,
+    choice: choice,
+    place: place,
   );
   if (asDialog) {
-    return showDialog<String>(
+    return showDialog<EditorSaved>(
       context: context,
       builder: (context) => Dialog(
         clipBehavior: Clip.antiAlias,
@@ -36,19 +60,26 @@ Future<String?> openEditor(
       ),
     );
   }
-  return Navigator.of(context).push<String>(
+  return Navigator.of(context).push<EditorSaved>(
     MaterialPageRoute(fullscreenDialog: true, builder: (_) => editor),
   );
 }
 
+/// A custom field as the editor has it: upstream's type (0 text, 1 hidden,
+/// 2 yes or no), its name, and its value ("true" or "false" for yes or no).
 class _Field {
-  _Field(String name, String value, this.hidden)
+  _Field(String name, String value, this.kind)
     : name = TextEditingController(text: name),
-      value = TextEditingController(text: value);
+      value = TextEditingController(text: value),
+      yes = value == 'true';
 
   final TextEditingController name;
   final TextEditingController value;
-  bool hidden;
+  int kind;
+  bool yes;
+
+  bool get hidden => kind == 1;
+  bool get boolean => kind == 2;
 }
 
 class ItemEditor extends StatefulWidget {
@@ -58,11 +89,19 @@ class ItemEditor extends StatefulWidget {
     required this.places,
     this.id,
     this.prefill,
+    this.choice,
+    this.place,
   });
 
   final Core core;
-  final Map<String, dynamic> places;
+  final Places places;
   final String? id;
+
+  /// For a new item: the kind or template picked.
+  final NewItemChoice? choice;
+
+  /// For a new item: where it goes, unless the person picks another.
+  final String? place;
 
   /// A new login's name, username, password, and website, already filled in
   /// (a sign-in Android's autofill offered to save); for an existing login,
@@ -82,6 +121,13 @@ class _ItemEditorState extends State<ItemEditor> {
   final uris = <TextEditingController>[];
   final fields = <_Field>[];
 
+  /// When it expires ("YYYY-MM-DD", empty for never), and when it reminds:
+  /// as `keykeeper.remind` holds it, empty for the default
+  /// (core/src/expiration.rs), with the item's own days in words.
+  final expires = TextEditingController();
+  String remind = '';
+  String? remindWords;
+
   /// login, note, card, or identity.
   String kind = 'login';
   bool get note => kind == 'note';
@@ -99,6 +145,10 @@ class _ItemEditorState extends State<ItemEditor> {
     for (final k in _identityParts.keys) k: TextEditingController(),
   };
   bool favorite = false;
+
+  /// Whether the person may change the item's websites: always for a new
+  /// item, and for an existing one only when they can see its passwords.
+  bool get websitesEditable => !editing || permissions['seePasswords'] == true;
   num? grant;
   bool hidden = true;
   String? folderId;
@@ -106,6 +156,19 @@ class _ItemEditorState extends State<ItemEditor> {
   String? collectionId;
   String? error;
   bool working = false;
+
+  /// The template a new item is made from: `{id, name, ...}`.
+  Map<String, dynamic>? template;
+
+  /// The template an item being edited came from, to name it.
+  String? templateName;
+
+  /// An organization's item being edited: the shared folders it's in, the
+  /// first of which the Folder picker shows.
+  List<String> held = const [];
+
+  /// What the person may do with the item being edited (its shared folders').
+  Map<String, dynamic> permissions = const {};
 
   bool get editing => widget.id != null;
 
@@ -120,6 +183,10 @@ class _ItemEditorState extends State<ItemEditor> {
     if (id != null && item != null) {
       final reveal = widget.core.reveal;
       kind = item['kind'] as String;
+      templateName = (item['template'] as Map?)?['name'] as String?;
+      permissions = Map<String, dynamic>.from(
+        (item['permissions'] as Map?) ?? const {},
+      );
       final cardDetails = item['card'] as Map<String, dynamic>?;
       if (cardDetails != null) {
         card['cardholderName']!.text =
@@ -151,8 +218,8 @@ class _ItemEditorState extends State<ItemEditor> {
       final itemFields = (item['fields'] as List).cast<Map<String, dynamic>>();
       for (var i = 0; i < itemFields.length; i++) {
         final f = itemFields[i];
-        // Yes-or-no, linked, and nameless fields are the web vault's to
-        // edit, and our own data (fill rules, an expiration date) isn't a
+        // Linked and nameless fields are the web vault's to edit, and our
+        // own data (fill rules, an expiration date, the template) isn't a
         // custom field; saving keeps them (core/src/vault.rs, Kept).
         if (f['editable'] == false) continue;
         final hidden = f['hidden'] == true;
@@ -160,17 +227,44 @@ class _ItemEditorState extends State<ItemEditor> {
           _Field(
             f['name'] as String,
             (hidden ? reveal(id, 'field:$i') : f['value'] as String?) ?? '',
-            hidden,
+            (f['type'] as int?) ?? (hidden ? 1 : 0),
           ),
         );
       }
       favorite = item['favorite'] == true;
+      expires.text = (item['expires'] ?? '') as String;
+      final itemRemind = item['remind'] as Map?;
+      remind = (itemRemind?['value'] as String?) ?? '';
+      remindWords = itemRemind?['words'] as String?;
       folderId = item['folderId'] as String?;
       organizationId = item['organizationId'] as String?;
-      final collections =
-          (item['collectionIds'] as List?)?.cast<String>() ?? const [];
-      collectionId = collections.isEmpty ? null : collections.first;
+      held = (item['collectionIds'] as List?)?.cast<String>() ?? const [];
+      // The first of its shared folders the person has.
+      collectionId = shown;
     }
+    // A new item: the kind or template picked, where it's going.
+    final choice = widget.choice;
+    if (id == null && choice != null) {
+      kind = choice.kind;
+      template = choice.template;
+      for (final f
+          in ((template?['fields'] as List?) ?? const [])
+              .cast<Map<String, dynamic>>()) {
+        final kind = switch (f['kind']) {
+          'hidden' => 1,
+          'boolean' => 2,
+          _ => 0,
+        };
+        fields.add(
+          _Field(
+            f['label'] as String,
+            (f['value'] as String?) ?? (kind == 2 ? 'false' : ''),
+            kind,
+          ),
+        );
+      }
+    }
+    if (id == null) pickPlace(widget.place ?? 'personal:');
     final prefill = widget.prefill;
     // A new password for this login (a sign-in Android's autofill offered to save).
     if (id != null && item != null && prefill != null) {
@@ -186,15 +280,112 @@ class _ItemEditorState extends State<ItemEditor> {
     if (uris.isEmpty && kind == 'login') uris.add(TextEditingController());
   }
 
-  List<Map<String, dynamic>> get organizations =>
-      (widget.places['organizations'] as List).cast<Map<String, dynamic>>();
+  /// The Folder picker's value: `personal:` and the folder's id (none for
+  /// no folder), or `org:`, the organization's id, `:`, and the shared
+  /// folder's id.
+  String get place => organizationId == null
+      ? 'personal:${folderId ?? ''}'
+      : 'org:$organizationId:${collectionId ?? ''}';
 
-  List<Map<String, dynamic>> get collections {
-    final org = organizations
-        .where((o) => o['id'] == organizationId)
-        .firstOrNull;
-    return ((org?['collections'] as List?) ?? const [])
-        .cast<Map<String, dynamic>>();
+  /// Puts the item where the picker says.
+  void pickPlace(String value) {
+    final parts = value.split(':');
+    if (parts.first == 'personal') {
+      organizationId = null;
+      collectionId = null;
+      folderId = parts[1].isEmpty ? null : parts[1];
+    } else if (parts.first == 'org' && parts.length == 3) {
+      organizationId = parts[1];
+      collectionId = parts[2];
+      // An organization's item keeps the person's own folder as it was.
+      if (!editing) folderId = null;
+    }
+  }
+
+  /// The shared folder the picker shows an organization's item in: the
+  /// first of its folders the person has.
+  String? get shown =>
+      held.where((c) => widget.places.collection(c) != null).firstOrNull ??
+      held.firstOrNull;
+
+  /// The picker can't change anything: an organization's item the person
+  /// may not move between its shared folders, as the server has it (edit
+  /// and share on the item, and share in the folder it leaves; the server
+  /// refuses it too).
+  bool get placeLocked {
+    if (!editing || organizationId == null) return false;
+    if (permissions['edit'] != true || permissions['share'] != true) {
+      return true;
+    }
+    final from = shown == null ? null : widget.places.collection(shown!);
+    return (from?['grid'] as Map?)?['share'] != true;
+  }
+
+  /// The Folder picker's choices, grouped by owner: (value, label, glyph,
+  /// depth), a heading's value starting with "heading:". An item stays with
+  /// its owner (moving it between owners is the web vault's), and goes only
+  /// into shared folders the person may add items to (or is in already).
+  List<(String, String, String, int)> get placeOptions {
+    final options = <(String, String, String, int)>[];
+    if (!editing || organizationId == null) {
+      options.add(('heading:personal', 'Personal', Glyphs.person, 0));
+      options.add(('personal:', 'No folder', Glyphs.folder, 1));
+      for (final f in widget.places.folders) {
+        options.add((
+          'personal:${f['id']}',
+          f['label'] as String,
+          Glyphs.folder,
+          1 + (f['depth'] as int),
+        ));
+      }
+    }
+    for (final o in widget.places.organizations) {
+      if (editing && o['id'] != organizationId) continue;
+      final shared = (o['collections'] as List)
+          .cast<Map<String, dynamic>>()
+          .where((c) => c['canCreate'] == true || held.contains(c['id']))
+          .toList();
+      if (shared.isEmpty) continue;
+      options.add((
+        'heading:${o['id']}',
+        o['name'] as String,
+        Glyphs.building,
+        0,
+      ));
+      for (final c in shared) {
+        options.add((
+          'org:${o['id']}:${c['id']}',
+          c['label'] as String,
+          Glyphs.sharedFolder,
+          1 + (c['depth'] as int),
+        ));
+      }
+    }
+    // An item somewhere the person can't see listed still shows where it is.
+    if (!options.any((o) => o.$1 == place)) {
+      options.add((place, 'Where it is now', Glyphs.folder, 1));
+    }
+    return options;
+  }
+
+  /// The other shared folders an organization's item is in, which the
+  /// picker leaves as they are.
+  List<String> get alsoIn => [
+    for (final c in held)
+      if (c != collectionId)
+        widget.places.collection(c)?['name'] as String? ?? 'a shared folder',
+  ];
+
+  /// The shared folders it's to be in: the one picked in place of the one
+  /// it showed, and the rest as they are.
+  List<String> get collectionIds {
+    if (organizationId == null || collectionId == null) return const [];
+    if (!editing) return [collectionId!];
+    return [
+      collectionId!,
+      for (final c in held)
+        if (c != shown && c != collectionId) c,
+    ];
   }
 
   Future<void> save() async {
@@ -222,29 +413,71 @@ class _ItemEditorState extends State<ItemEditor> {
       'uris': [for (final u in uris) u.text.trim()],
       'fields': [
         for (final f in fields)
+          // Names as they are: one with spaces around it is the web
+          // vault's too, and stays so.
           if (f.name.text.trim().isNotEmpty)
             {
-              'name': f.name.text.trim(),
-              'value': f.value.text,
-              'hidden': f.hidden,
+              'name': f.name.text,
+              'value': f.boolean ? (f.yes ? 'true' : 'false') : f.value.text,
+              'type': f.kind,
             },
       ],
       'folderId': folderId,
       'organizationId': organizationId,
-      'collectionIds': [?collectionId],
+      'collectionIds': collectionIds,
       'favorite': favorite,
+      // An empty date clears it and its reminder days (core/src/ffi.rs, pb_save).
+      'expires': expires.text.trim(),
+      'remind': remind,
       'grant': ?grant,
+      if (template != null)
+        'template': {'id': template!['id'], 'name': template!['name']},
     };
     final answer = await whileBusy(() => Core.save(widget.id, draft));
     if (!mounted) return;
     if (answer.ok) {
-      Navigator.of(context).pop(widget.id ?? '');
+      Navigator.of(context).pop(
+        EditorSaved(widget.id ?? '', synced: answer.body['synced'] != false),
+      );
     } else {
       setState(() {
         working = false;
-        error = answer.error;
+        // Offline, nothing was saved: what's typed stays, for another try.
+        error = answer.offline
+            ? 'Not saved. ${answer.error} What you typed is still here.'
+            : answer.error;
       });
     }
+  }
+
+  /// "Remind me"'s choices: (what the field holds, what it says). The
+  /// item's own days, when they aren't one of these, stay a choice.
+  List<(String, String)> get remindOptions => [
+    ..._remindOptions,
+    if (!_remindOptions.any((o) => o.$1 == remind))
+      (remind, remindWords ?? remind),
+  ];
+
+  /// The calendar, for the expiration date.
+  Future<void> pickExpiry() async {
+    final now = DateTime.now();
+    final first = DateTime(now.year - 20);
+    final last = DateTime(now.year + 50, 12, 31);
+    final shown = DateTime.tryParse(expires.text.trim());
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: shown != null && !shown.isBefore(first) && !shown.isAfter(last)
+          ? shown
+          : now,
+      firstDate: first,
+      lastDate: last,
+    );
+    if (picked == null || !mounted) return;
+    String two(int n) => n.toString().padLeft(2, '0');
+    setState(
+      () => expires.text =
+          '${picked.year}-${two(picked.month)}-${two(picked.day)}',
+    );
   }
 
   /// A text field for a detail; secrets are hidden until shown.
@@ -279,6 +512,7 @@ class _ItemEditorState extends State<ItemEditor> {
     gap(),
     DropdownButtonFormField<String?>(
       initialValue: brand,
+      isExpanded: true,
       decoration: const InputDecoration(labelText: 'Brand'),
       items: [
         const DropdownMenuItem(value: null, child: Text('None')),
@@ -295,33 +529,27 @@ class _ItemEditorState extends State<ItemEditor> {
       keyboard: TextInputType.number,
     ),
     gap(),
-    Row(
-      children: [
-        Expanded(
-          child: DropdownButtonFormField<String?>(
-            initialValue: expMonth,
-            decoration: const InputDecoration(labelText: 'Expiration month'),
-            items: [
-              const DropdownMenuItem(value: null, child: Text('None')),
-              for (var m = 1; m <= 12; m++)
-                DropdownMenuItem(
-                  value: '$m',
-                  child: Text(m.toString().padLeft(2, '0')),
-                ),
-            ],
-            onChanged: (v) => setState(() => expMonth = v),
-          ),
-        ),
-        const SizedBox(width: 12),
-        Expanded(
-          child: _detail(
-            card['expYear']!,
-            'Expiration year',
-            keyboard: TextInputType.number,
-          ),
-        ),
-      ],
-    ),
+    _sideBySide([
+      DropdownButtonFormField<String?>(
+        initialValue: expMonth,
+        isExpanded: true,
+        decoration: const InputDecoration(labelText: 'Expiration month'),
+        items: [
+          const DropdownMenuItem(value: null, child: Text('None')),
+          for (var m = 1; m <= 12; m++)
+            DropdownMenuItem(
+              value: '$m',
+              child: Text(m.toString().padLeft(2, '0')),
+            ),
+        ],
+        onChanged: (v) => setState(() => expMonth = v),
+      ),
+      _detail(
+        card['expYear']!,
+        'Expiration year',
+        keyboard: TextInputType.number,
+      ),
+    ]),
     gap(),
     _detail(
       card['code']!,
@@ -330,6 +558,35 @@ class _ItemEditorState extends State<ItemEditor> {
       keyboard: TextInputType.number,
     ),
   ];
+
+  /// Two fields side by side where there's room for both labels, else one
+  /// over the other.
+  Widget _sideBySide(List<Widget> fields) => LayoutBuilder(
+    builder: (context, constraints) {
+      final roomy =
+          constraints.maxWidth / MediaQuery.textScalerOf(context).scale(1) >=
+          380;
+      if (!roomy) {
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            for (var i = 0; i < fields.length; i++) ...[
+              if (i > 0) const SizedBox(height: 12),
+              fields[i],
+            ],
+          ],
+        );
+      }
+      return Row(
+        children: [
+          for (var i = 0; i < fields.length; i++) ...[
+            if (i > 0) const SizedBox(width: 12),
+            Expanded(child: fields[i]),
+          ],
+        ],
+      );
+    },
+  );
 
   List<Widget> _identityFields(Widget Function([double]) gap) => [
     for (final part in _identityParts.entries) ...[
@@ -347,15 +604,195 @@ class _ItemEditorState extends State<ItemEditor> {
     ],
   ];
 
+  /// What the editor's title calls the item: "New Wi-Fi network", "Edit login".
+  String get title {
+    final what =
+        (template?['name'] as String?) ??
+        templateName ??
+        ItemKind.of(kind).one;
+    // "Wi-Fi network" and "API key" keep their capitals; "Login" doesn't.
+    final first = what.split(' ').first;
+    final keep =
+        first.length > 1 &&
+        first.substring(1).toLowerCase() != first.substring(1);
+    final named = keep || what.isEmpty
+        ? what
+        : what[0].toLowerCase() + what.substring(1);
+    return editing ? 'Edit $named' : 'New $named';
+  }
+
+  /// A custom field, as the web vault's form has it: its value under its
+  /// name (a switch for yes or no), with its menu: rename it, change its
+  /// kind, or remove it.
+  Widget customField(int i) {
+    final f = fields[i];
+    final menu = PopupMenuButton<String>(
+      tooltip: 'More for ${f.name.text}',
+      icon: const Icon(Icons.more_vert_rounded),
+      onSelected: (action) async {
+        switch (action) {
+          case 'rename':
+            final named = await askFieldName(
+              context,
+              'Rename field',
+              f.name.text,
+            );
+            if (named != null && mounted) setState(() => f.name.text = named);
+          case 'remove':
+            setState(() => fields.removeAt(i));
+          default:
+            final k = int.parse(action);
+            setState(() {
+              if (k == 2 && f.kind != 2) f.yes = f.value.text == 'true';
+              if (k != 2 && f.kind == 2) {
+                f.value.text = f.yes ? 'true' : 'false';
+              }
+              f.kind = k;
+            });
+        }
+      },
+      itemBuilder: (_) => [
+        const PopupMenuItem(value: 'rename', child: Text('Rename')),
+        for (final e in _fieldKinds.entries)
+          CheckedPopupMenuItem(
+            value: '${e.key}',
+            checked: f.kind == e.key,
+            child: Text(e.value),
+          ),
+        const PopupMenuItem(value: 'remove', child: Text('Remove')),
+      ],
+    );
+    if (f.boolean) {
+      return Row(
+        children: [
+          Expanded(
+            child: SwitchListTile(
+              value: f.yes,
+              onChanged: (v) => setState(() => f.yes = v),
+              title: Text(f.name.text),
+              contentPadding: const EdgeInsets.only(left: 4),
+            ),
+          ),
+          menu,
+        ],
+      );
+    }
+    return Row(
+      children: [
+        Expanded(
+          child: TextField(
+            controller: f.value,
+            obscureText: f.hidden && hidden,
+            decoration: InputDecoration(
+              labelText: f.name.text,
+              suffixIcon: f.hidden
+                  ? IconButton(
+                      tooltip: hidden ? 'Show' : 'Hide',
+                      icon: Icon(
+                        hidden
+                            ? Icons.visibility_outlined
+                            : Icons.visibility_off_outlined,
+                      ),
+                      onPressed: () => setState(() => hidden = !hidden),
+                    )
+                  : null,
+            ),
+          ),
+        ),
+        const SizedBox(width: 4),
+        menu,
+      ],
+    );
+  }
+
+  /// Adds a field of a kind, once it has a name.
+  Future<void> addField(int kind) async {
+    final named = await askFieldName(context, 'Add a field');
+    if (named == null || !mounted) return;
+    setState(() => fields.add(_Field(named, kind == 2 ? 'false' : '', kind)));
+  }
+
+  /// One Folder picker, grouped by owner, as the web vault has it.
+  Widget folderPicker() {
+    final c = context.colors;
+    final options = placeOptions;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        DropdownButtonFormField<String>(
+          key: const ValueKey('folder-picker'),
+          initialValue: place,
+          isExpanded: true,
+          decoration: const InputDecoration(labelText: 'Folder'),
+          items: [
+            for (final (value, label, glyph, depth) in options)
+              DropdownMenuItem(
+                value: value,
+                enabled: !value.startsWith('heading:'),
+                child: Padding(
+                  padding: EdgeInsets.only(left: 18.0 * depth),
+                  child: Row(
+                    children: [
+                      Glyph(
+                        glyph,
+                        size: 18,
+                        color: value.startsWith('heading:')
+                            ? Theme.of(context).colorScheme.onSurface
+                            : c.muted,
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text(
+                          label,
+                          overflow: TextOverflow.ellipsis,
+                          style: value.startsWith('heading:')
+                              ? const TextStyle(fontWeight: FontWeight.w700)
+                              : null,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+          ],
+          onChanged: placeLocked
+              ? null
+              : (v) {
+                  if (v == null || v.startsWith('heading:')) return;
+                  setState(() => pickPlace(v));
+                },
+        ),
+        if (alsoIn.isNotEmpty || placeLocked)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(4, 6, 4, 0),
+            child: Text(
+              [
+                if (alsoIn.isNotEmpty) 'Also in ${alsoIn.join(', ')}.',
+                if (placeLocked) 'Your organization doesn\'t let you move it to another shared folder.',
+              ].join(' '),
+              style: TextStyle(color: c.muted, fontSize: 13),
+            ),
+          ),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final c = context.colors;
     Widget gap([double h = 12]) => SizedBox(height: h);
-    final folders = (widget.places['folders'] as List)
-        .cast<Map<String, dynamic>>();
+    Widget label(String text) => Text(
+      text,
+      style: TextStyle(
+        color: c.muted,
+        fontSize: 12,
+        fontWeight: FontWeight.w600,
+      ),
+    );
+    final primary = Theme.of(context).colorScheme.primary;
     return Scaffold(
       appBar: AppBar(
-        title: Text(editing ? 'Edit item' : 'New item'),
+        title: Text(title),
         automaticallyImplyLeading: false,
         leading: IconButton(
           tooltip: 'Cancel',
@@ -382,25 +819,6 @@ class _ItemEditorState extends State<ItemEditor> {
               style: TextStyle(color: Theme.of(context).colorScheme.error),
             ),
             gap(),
-          ],
-          if (!editing) ...[
-            SegmentedButton<String>(
-              showSelectedIcon: false,
-              segments: const [
-                ButtonSegment(value: 'login', label: Text('Login')),
-                ButtonSegment(value: 'note', label: Text('Note')),
-                ButtonSegment(value: 'card', label: Text('Card')),
-                ButtonSegment(value: 'identity', label: Text('Identity')),
-              ],
-              selected: {kind},
-              onSelectionChanged: (s) => setState(() {
-                kind = s.first;
-                if (kind == 'login' && uris.isEmpty) {
-                  uris.add(TextEditingController());
-                }
-              }),
-            ),
-            gap(16),
           ],
           TextField(
             controller: name,
@@ -458,37 +876,122 @@ class _ItemEditorState extends State<ItemEditor> {
               ),
             ),
             gap(16),
-            Text(
-              'Websites',
-              style: TextStyle(
-                color: c.muted,
-                fontSize: 12,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
+            label('Websites'),
             for (var i = 0; i < uris.length; i++) ...[
               gap(6),
               TextField(
                 controller: uris[i],
+                // Someone who can't see the item's passwords can't change
+                // where autofill sends them (core: vault.rs, encrypt_item_from).
+                readOnly: !websitesEditable,
                 keyboardType: TextInputType.url,
                 decoration: InputDecoration(
                   hintText: 'https://example.com',
-                  suffixIcon: IconButton(
-                    tooltip: 'Remove',
-                    icon: const Icon(Icons.remove_circle_outline),
-                    onPressed: () => setState(() => uris.removeAt(i)),
-                  ),
+                  suffixIcon: websitesEditable
+                      ? IconButton(
+                          tooltip: 'Remove',
+                          icon: const Icon(Icons.remove_circle_outline),
+                          onPressed: () => setState(() => uris.removeAt(i)),
+                        )
+                      : null,
                 ),
               ),
             ],
-            Align(
-              alignment: Alignment.centerLeft,
-              child: TextButton.icon(
-                onPressed: () =>
-                    setState(() => uris.add(TextEditingController())),
-                icon: const Icon(Icons.add_rounded),
-                label: const Text('Add a website'),
+            if (websitesEditable)
+              Align(
+                alignment: Alignment.centerLeft,
+                child: TextButton.icon(
+                  onPressed: () =>
+                      setState(() => uris.add(TextEditingController())),
+                  icon: const Icon(Icons.add_rounded),
+                  label: const Text('Add a website'),
+                ),
+              )
+            else
+              Padding(
+                padding: const EdgeInsets.only(top: 6),
+                child: Text(
+                  "Someone who can see this item's passwords can change its websites.",
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
               ),
+          ],
+          gap(16),
+          // A template's fields, under its name, as in the web vault.
+          label(
+            template != null || templateName != null
+                ? '${template?['name'] ?? templateName} details'
+                : 'Custom fields',
+          ),
+          for (var i = 0; i < fields.length; i++) ...[gap(6), customField(i)],
+          Align(
+            alignment: Alignment.centerLeft,
+            child: PopupMenuButton<int>(
+              tooltip: 'Add a field',
+              onSelected: addField,
+              itemBuilder: (_) => [
+                for (final e in _fieldKinds.entries)
+                  PopupMenuItem(value: e.key, child: Text(e.value)),
+              ],
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 10),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.add_rounded, size: 18, color: primary),
+                    const SizedBox(width: 8),
+                    Text(
+                      'Add a field',
+                      style: TextStyle(
+                        color: primary,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          gap(),
+          // When it expires, and when to be reminded (as the web vault's
+          // "Expires"): the reminders are the app's and the extension's.
+          TextField(
+            controller: expires,
+            keyboardType: TextInputType.datetime,
+            onChanged: (_) => setState(() {}),
+            decoration: InputDecoration(
+              labelText: 'Expires (optional)',
+              hintText: 'YYYY-MM-DD',
+              suffixIcon: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (expires.text.isNotEmpty)
+                    IconButton(
+                      tooltip: 'No expiration date',
+                      icon: const Icon(Icons.close_rounded),
+                      onPressed: () => setState(expires.clear),
+                    ),
+                  IconButton(
+                    tooltip: 'Pick a date',
+                    icon: const Icon(Icons.event_outlined),
+                    onPressed: pickExpiry,
+                  ),
+                ],
+              ),
+            ),
+          ),
+          if (expires.text.trim().isNotEmpty) ...[
+            gap(),
+            DropdownButtonFormField<String>(
+              key: const ValueKey('remind-me'),
+              initialValue: remind,
+              isExpanded: true,
+              decoration: const InputDecoration(labelText: 'Remind me'),
+              items: [
+                for (final (value, words) in remindOptions)
+                  DropdownMenuItem(value: value, child: Text(words)),
+              ],
+              onChanged: (v) => setState(() => remind = v ?? ''),
             ),
           ],
           gap(),
@@ -499,115 +1002,7 @@ class _ItemEditorState extends State<ItemEditor> {
             decoration: const InputDecoration(labelText: 'Notes'),
           ),
           gap(16),
-          Text(
-            'Custom fields',
-            style: TextStyle(
-              color: c.muted,
-              fontSize: 12,
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-          for (var i = 0; i < fields.length; i++) ...[
-            gap(6),
-            Row(
-              children: [
-                Expanded(
-                  child: TextField(
-                    controller: fields[i].name,
-                    decoration: const InputDecoration(hintText: 'Name'),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: TextField(
-                    controller: fields[i].value,
-                    obscureText: fields[i].hidden,
-                    decoration: const InputDecoration(hintText: 'Value'),
-                  ),
-                ),
-                IconButton(
-                  tooltip: fields[i].hidden
-                      ? 'Hidden: make it visible'
-                      : 'Visible: hide it',
-                  icon: Icon(
-                    fields[i].hidden
-                        ? Icons.visibility_off_outlined
-                        : Icons.visibility_outlined,
-                  ),
-                  onPressed: () =>
-                      setState(() => fields[i].hidden = !fields[i].hidden),
-                ),
-                IconButton(
-                  tooltip: 'Remove',
-                  icon: const Icon(Icons.remove_circle_outline),
-                  onPressed: () => setState(() => fields.removeAt(i)),
-                ),
-              ],
-            ),
-          ],
-          Align(
-            alignment: Alignment.centerLeft,
-            child: TextButton.icon(
-              onPressed: () =>
-                  setState(() => fields.add(_Field('', '', false))),
-              icon: const Icon(Icons.add_rounded),
-              label: const Text('Add a field'),
-            ),
-          ),
-          gap(16),
-          DropdownButtonFormField<String?>(
-            initialValue: folderId,
-            decoration: const InputDecoration(labelText: 'Folder'),
-            items: [
-              const DropdownMenuItem(value: null, child: Text('No folder')),
-              for (final f in folders)
-                DropdownMenuItem(
-                  value: f['id'] as String,
-                  child: Text(f['name'] as String),
-                ),
-            ],
-            onChanged: (v) => setState(() => folderId = v),
-          ),
-          if (organizations.isNotEmpty) ...[
-            gap(),
-            DropdownButtonFormField<String?>(
-              initialValue: organizationId,
-              decoration: const InputDecoration(labelText: 'Owner'),
-              // Moving an item between owners is for the web vault, which re-encrypts it.
-              items: [
-                const DropdownMenuItem(value: null, child: Text('My vault')),
-                for (final o in organizations)
-                  DropdownMenuItem(
-                    value: o['id'] as String,
-                    child: Text(o['name'] as String),
-                  ),
-              ],
-              onChanged: editing
-                  ? null
-                  : (v) => setState(() {
-                      organizationId = v;
-                      final first = collections.firstOrNull;
-                      collectionId = first?['id'] as String?;
-                    }),
-            ),
-          ],
-          if (organizationId != null) ...[
-            gap(),
-            DropdownButtonFormField<String?>(
-              initialValue: collectionId,
-              decoration: const InputDecoration(labelText: 'Collection'),
-              items: [
-                for (final col in collections)
-                  DropdownMenuItem(
-                    value: col['id'] as String,
-                    child: Text(col['name'] as String),
-                  ),
-              ],
-              onChanged: editing
-                  ? null
-                  : (v) => setState(() => collectionId = v),
-            ),
-          ],
+          folderPicker(),
           gap(),
           SwitchListTile(
             value: favorite,
@@ -619,6 +1014,75 @@ class _ItemEditorState extends State<ItemEditor> {
       ),
     );
   }
+}
+
+/// The kinds of custom field, as the editor offers them.
+const _fieldKinds = {0: 'Text', 1: 'Hidden', 2: 'Yes or no'};
+
+/// "Remind me": the default (stored as no field), earlier, later, or never,
+/// as `keykeeper.remind` holds them (core/src/expiration.rs).
+const _remindOptions = [
+  ('', '30, 7, and 1 day before'),
+  ('90,30,7,1', '90, 30, 7, and 1 day before'),
+  ('7,1', '7 and 1 day before'),
+  ('none', "Don't remind me"),
+];
+
+/// A field's name, asked for: null when cancelled.
+Future<String?> askFieldName(
+  BuildContext context,
+  String title, [
+  String name = '',
+]) => showDialog<String>(
+  context: context,
+  builder: (context) => _FieldNameDialog(title: title, name: name),
+);
+
+class _FieldNameDialog extends StatefulWidget {
+  const _FieldNameDialog({required this.title, required this.name});
+
+  final String title;
+  final String name;
+
+  @override
+  State<_FieldNameDialog> createState() => _FieldNameDialogState();
+}
+
+class _FieldNameDialogState extends State<_FieldNameDialog> {
+  late final field = TextEditingController(text: widget.name);
+
+  @override
+  void dispose() {
+    field.dispose();
+    super.dispose();
+  }
+
+  void done() {
+    final name = field.text.trim();
+    if (name.isNotEmpty) Navigator.pop(context, name);
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    title: Text(widget.title),
+    content: TextField(
+      controller: field,
+      autofocus: true,
+      decoration: const InputDecoration(labelText: 'Name'),
+      onChanged: (_) => setState(() {}),
+      onSubmitted: (_) => done(),
+    ),
+    actions: [
+      TextButton(
+        onPressed: () => Navigator.pop(context),
+        child: const Text('Cancel'),
+      ),
+      FilledButton(
+        onPressed: field.text.trim().isEmpty ? null : done,
+        child: const Text('Save'),
+      ),
+    ],
+  );
 }
 
 /// Card brands, as upstream's apps name them.

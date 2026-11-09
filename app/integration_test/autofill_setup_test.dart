@@ -1,16 +1,19 @@
 // The app's half of the autofill test (tools/android-autofill-test.sh): signs
 // in to the test server, turns on biometric unlock, and locks, as someone's
 // phone would be. Then it waits while the script fills another app's sign-in
-// form from it (the test runner uninstalls the app when its tests end), until
-// the script says it's done. Run only by that script.
+// form from it (the test runner uninstalls the app when its tests end), saves
+// what the script signs in with, chooses "Immediately" and unlocks when the
+// script asks, until the script says it's done. Run only by that script.
 import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
 
+import 'package:passbundle/autofill_offer.dart';
 import 'package:passbundle/core.dart';
 import 'package:passbundle/main.dart';
+import 'package:passbundle/unlock_offer.dart';
 
 const server = String.fromEnvironment('PB_TEST_SERVER');
 const email = String.fromEnvironment('PB_TEST_EMAIL');
@@ -30,6 +33,44 @@ Future<void> pumpUntil(
   throw TestFailure('Never showed up: $finder');
 }
 
+/// Taps once the screen holds still: hit-testable, and in the same place for
+/// a few frames (the keyboard going away moves the screen, and on a small
+/// screen it covers what's under it).
+///
+/// With [inList], it's a row of a list that scrolls (Settings, on CI's small
+/// screen), and it's scrolled into view whenever it can't be hit: rows above
+/// it fill in as their answers come from the phone (the autofill card, the
+/// biometric row), and each one pushes it down, out of view.
+Future<void> tapWhenStill(
+  WidgetTester tester,
+  Finder finder, {
+  bool inList = false,
+}) async {
+  FocusManager.instance.primaryFocus?.unfocus();
+  Offset? last;
+  var still = 0;
+  final end = DateTime.now().add(const Duration(seconds: 30));
+  while (still < 3 && DateTime.now().isBefore(end)) {
+    await tester.pump(const Duration(milliseconds: 100));
+    final found = finder.hitTestable().evaluate();
+    if (found.isEmpty && inList && finder.evaluate().isNotEmpty) {
+      await tester.ensureVisible(finder);
+    }
+    final at = found.isEmpty ? null : tester.getCenter(finder);
+    still = at != null && at == last ? still + 1 : 0;
+    last = at;
+  }
+  if (still < 3) {
+    final why = finder.evaluate().isEmpty
+        ? 'not there'
+        : last == null
+        ? 'there, but never where a tap reaches it'
+        : 'still moving, last at $last';
+    throw TestFailure('Never held still ($why): $finder');
+  }
+  await tester.tap(finder);
+}
+
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
 
@@ -41,6 +82,13 @@ void main() {
       kept.deleteSync(recursive: true);
     }
     await Core.openOnThisDevice();
+    // A phone with biometrics set up would offer them after signing in; this
+    // turns them on in Settings instead, so it's been declined just now.
+    declineOffer();
+    // The script turns on autofill itself (adb), so the vault's offer to
+    // turn it on was put off too (autofill_offer.dart; phone_test.dart
+    // checks it).
+    putOffAutofill();
     await tester.pumpWidget(PassBundleApp(key: UniqueKey()));
     await pumpUntil(tester, find.text('Sign in to PassBundle'));
     await tester.tap(find.text('Self-hosted?'));
@@ -51,8 +99,8 @@ void main() {
       find.widgetWithText(TextField, 'Master password'),
       password,
     );
-    await tester.tap(find.text('Sign in'));
-    await pumpUntil(tester, find.text('Autofill test app'));
+    await tapWhenStill(tester, find.text('Sign in'));
+    await pumpUntil(tester, find.text('Logins'));
 
     // Debug builds' stand-in for Android's prompt says yes, here and when
     // autofill unlocks later (it's kept for the app's next process).
@@ -71,11 +119,12 @@ void main() {
             w.value,
       ),
     );
-    await tester.tap(find.text('Close'));
+    await tester.tap(find.byTooltip('Items'));
     await tester.pump(const Duration(milliseconds: 400));
     await tester.tap(find.byTooltip('Lock'));
     await pumpUntil(tester, find.text(unlockWith));
-    expect(File('$dir/biometric.sealed').existsSync(), isTrue);
+    // Sealed for the account signed in to: its own key, by its id here.
+    expect(File('$dir/biometric-${Core.account}.sealed').existsSync(), isTrue);
 
     // The script fills the other app now. Then it signs in there with
     // something new and accepts Android's offer to save it: this app opens
@@ -92,7 +141,7 @@ void main() {
       find.widgetWithText(TextField, 'not-a-real-password-new'),
       findsOneWidget,
     );
-    expect(find.text('New item'), findsOneWidget);
+    expect(find.text('New login'), findsOneWidget);
     await tester.tap(find.text('Save'));
     await pumpUntil(tester, find.text('Saved'));
     // Saved for the app it was signed in to (checked in the vault: on a small
@@ -112,7 +161,7 @@ void main() {
       find.widgetWithText(TextField, 'not-a-real-password-changed'),
       timeout: const Duration(minutes: 6),
     );
-    expect(find.text('Edit item'), findsOneWidget);
+    expect(find.text('Edit login'), findsOneWidget);
     expect(find.widgetWithText(TextField, 'new@example.test'), findsOneWidget);
     await tester.tap(find.text('Save'));
     await pumpUntil(tester, find.text('Saved the changes'));
@@ -127,10 +176,95 @@ void main() {
     );
     File('$dir/autofill-updated').writeAsStringSync('');
 
-    // Then it leaves this file (run-as), and this ends.
+    // Where the script trusted the test app as a browser earlier (Android
+    // 11 and later), Settings lists it, and stopping trusting it there takes
+    // it off; elsewhere the script goes on to the end.
+    final untrust = File('$dir/autofill-untrust');
     final done = File('$dir/autofill-done');
-    final end = DateTime.now().add(const Duration(minutes: 2));
+    final immediately = File('$dir/autofill-immediately');
+    var end = DateTime.now().add(const Duration(minutes: 2));
+    while (!untrust.existsSync() &&
+        !immediately.existsSync() &&
+        !done.existsSync() &&
+        DateTime.now().isBefore(end)) {
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(seconds: 1)),
+      );
+    }
+    if (untrust.existsSync()) {
+      // Back in front: the cover the app shows while it's away fades.
+      await tester.pump(const Duration(seconds: 2));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Settings'));
+      await pumpUntil(tester, find.text('Browsers you trust for autofill'));
+      expect(find.text('com.passbundle.autofilltest'), findsOneWidget);
+      // Down Settings as far as it (a small screen shows only the top),
+      // once the autofill card above has come in and pushed it down.
+      await pumpUntil(tester, find.text('Use PassBundle for autofill'));
+      await tapWhenStill(tester, find.text('Stop trusting'), inList: true);
+      for (var i = 0; i < 50; i++) {
+        await tester.pump(const Duration(milliseconds: 100));
+        if (find.text('Browsers you trust for autofill').evaluate().isEmpty) {
+          break;
+        }
+      }
+      expect(find.text('Browsers you trust for autofill'), findsNothing);
+      await tester.tap(find.byTooltip('Items'));
+      await tester.pump(const Duration(milliseconds: 400));
+      File('$dir/autofill-untrusted').writeAsStringSync('');
+    }
+
+    // Then "Immediately" (docs/phones.md, "Locking"), as the script asks
+    // with files: `autofill-immediately` chooses it here and locks;
+    // `autofill-unlock` unlocks, as the app's own screens would, while the
+    // script's app is in front. The script checks a fill or a passkey handed
+    // back locks it. Then it leaves `autofill-done` (run-as), and this ends.
+    final unlock = File('$dir/autofill-unlock');
+    final noBiometric = File('$dir/autofill-no-biometric');
+    end = DateTime.now().add(const Duration(minutes: 8));
     while (!done.existsSync() && DateTime.now().isBefore(end)) {
+      if (immediately.existsSync()) {
+        immediately.deleteSync();
+        // The screen going off doesn't lock it here, so only the hand-back can.
+        final chosen = Core().setPreferences({
+          'lockAfterMinutes': 0,
+          'lockOnSleep': false,
+        });
+        expect(chosen.ok, isTrue, reason: chosen.error);
+        Core().lock();
+        expect(Core().state()['state'], 'locked');
+        // In front (Android 13 and earlier here), the app's screens show it
+        // locked at their next check (main.dart, every two seconds) before
+        // the script sends the app home. Otherwise, still showing the vault,
+        // they'd tell the core the app left, and heard during the unlock
+        // asked for next, that would lock it again ("Immediately", ffi.rs's
+        // notices). Away (Android 14, after the passkeys), nothing waits:
+        // Android freezes an app left in the background for a while, and
+        // this half would miss the script's next ask.
+        if (WidgetsBinding.instance.lifecycleState ==
+            AppLifecycleState.resumed) {
+          await pumpUntil(tester, find.text(unlockWith));
+        }
+        File('$dir/autofill-immediately-chosen').writeAsStringSync('');
+      }
+      if (unlock.existsSync()) {
+        unlock.deleteSync();
+        final unlocked = await tester.runAsync(() => Core.unlock(password));
+        expect(unlocked!.ok, isTrue, reason: unlocked.error);
+        expect(Core().state()['state'], 'unlocked');
+        File('$dir/autofill-unlocked').writeAsStringSync('');
+      }
+      // `autofill-no-biometric`: biometric unlock off, and locked, so
+      // autofill asks for the master password itself.
+      if (noBiometric.existsSync()) {
+        noBiometric.deleteSync();
+        final removed = await tester.runAsync(Core.removeBiometric);
+        expect(removed!.ok, isTrue, reason: removed.error);
+        expect((await Core.biometricStatus())['status'], isNot('setUp'));
+        Core().lock();
+        expect(Core().state()['state'], 'locked');
+        File('$dir/autofill-no-biometric-done').writeAsStringSync('');
+      }
       await tester.runAsync(
         () => Future<void>.delayed(const Duration(seconds: 1)),
       );

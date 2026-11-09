@@ -2,20 +2,31 @@
 # Starts a throwaway PassBundle server for the core's server tests
 # (core/tests/server.rs), on plain HTTP at 127.0.0.1, which the core allows
 # for this computer only. Prints its URL once it answers; stop it with
-# `kill $(cat <data folder>/server.pid)`.
+# `kill $(cat <data folder>/server.pid)`. With a host name (localhost), the
+# server is named that instead of its address: WebAuthn takes only a
+# domain, so security key tests need one.
 #
-#   tools/test-server.sh <passbundle-server binary> <port> <data folder>
+# The new-device check (DESIGN.md in the meta repo, "New-device check") is
+# off, since nearly every test signs in on a device the account has never
+# used; NEW_DEVICE_CHECK=true turns it on, for the tests of it. An
+# IP-to-location database (IP_LOCATION_DATABASE, a MaxMind DB file, passed
+# on to the server as it is) is optional: without one, no location is shown.
+#
+#   [NEW_DEVICE_CHECK=true] [IP_LOCATION_DATABASE=<file>] \
+#     tools/test-server.sh <passbundle-server binary> <port> <data folder> [host name]
 set -euo pipefail
 
 bin=$1
 port=$2
 data=$3
+host=${4:-127.0.0.1}
 mkdir -p "$data"
 
-DATA_FOLDER="$data" \
+NEW_DEVICE_CHECK="${NEW_DEVICE_CHECK:-false}" \
+  DATA_FOLDER="$data" \
   ROCKET_ADDRESS=127.0.0.1 \
   ROCKET_PORT="$port" \
-  DOMAIN="http://127.0.0.1:$port" \
+  DOMAIN="http://$host:$port" \
   WEB_VAULT_ENABLED=false \
   SIGNUPS_ALLOWED=true \
   SIGNUPS_VERIFY=false \
@@ -35,7 +46,7 @@ echo $! > "$data/server.pid"
 
 for _ in $(seq 1 120); do
   if curl -fsS "http://127.0.0.1:$port/alive" > /dev/null 2>&1; then
-    echo "http://127.0.0.1:$port"
+    echo "http://$host:$port"
     exit 0
   fi
   sleep 0.5

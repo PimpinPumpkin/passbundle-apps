@@ -1,33 +1,43 @@
-//! The app's bridge: plain C functions for Flutter's dart:ffi, around one
-//! `App`. No key crosses it, and a secret crosses only when the person reveals
-//! it or edits it (docs/core.md, "Memory" and "The bridge to the app").
-//! Strings in and out are UTF-8 JSON; free every returned string with
-//! `pb_free`. Calls that take a while (signing in, unlocking, syncing,
-//! saving) are made from a background isolate; the app doesn't read while one
-//! is running.
+//! The app's bridge: plain C functions for Flutter's dart:ffi, around the
+//! accounts signed in on this device (accounts.rs), each an `App`. No key
+//! crosses it, and a secret crosses only when the person reveals it or edits
+//! it (docs/core.md, "Memory" and "The bridge to the app"). Strings in and
+//! out are UTF-8 JSON; free every returned string with `pb_free`. Calls that
+//! take a while (signing in, unlocking, syncing, saving) are made from a
+//! background isolate; the app doesn't read while one is running.
+//!
+//! Every call about an account takes the account's id on this device first
+//! (`account`): the one the screens showed when they made the call, so a
+//! call can't land on another account the screens switched to meanwhile.
+//! "" is the account being signed in to; an id that isn't here sees an app
+//! with nothing in it (`App::nobody`). DESIGN.md in the meta repo, "Several
+//! accounts in the apps".
 
 use std::ffi::{c_char, CStr, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, MutexGuard, TryLockError};
+use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
 use zeroize::Zeroizing;
 
+use crate::accounts::Accounts;
 use crate::agent::Status;
-use crate::app::{App, State, Step};
+use crate::app::{App, Prepared, State, Step};
 use crate::autolock::{self, Preferences};
 use crate::error::Error;
+use crate::expiration;
 use crate::generator;
 use crate::secrets::{MemorySecretStore, OsSecretStore, SecretStore};
 use crate::store::Store;
+use crate::templates;
 use crate::totp::Totp;
 use crate::vault::{
     Card, Field, Identity, Item, ItemDraft, ItemKind, Vault, EXPIRES_FIELD, SECRET_DETAILS,
 };
 
-static APP: Mutex<Option<App>> = Mutex::new(None);
+static APP: Mutex<Option<Accounts>> = Mutex::new(None);
 /// The OS said the computer is going to sleep while a slow call had the app:
 /// the app hears it as soon as that call is done.
 static SLEEP_NOTICE: AtomicBool = AtomicBool::new(false);
@@ -50,37 +60,102 @@ fn out(value: Value) -> *mut c_char {
         .unwrap_or(std::ptr::null_mut())
 }
 
-/// Runs a call on the app, turning a panic into an error instead of unwinding into Dart.
-fn with_app(call: impl FnOnce(&mut App) -> Value) -> *mut c_char {
-    out(app_value(call))
+/// A panic in the core, caught at the bridge: nothing the person did, and
+/// trying again usually works.
+const STOPPED: &str =
+    "Something went wrong inside PassBundle. Try again; if it keeps happening, quit PassBundle and open it again.";
+
+/// Runs a call on the accounts, turning a panic into an error instead of
+/// unwinding into Dart.
+fn with_accounts(call: impl FnOnce(&mut Accounts) -> Value) -> *mut c_char {
+    out(accounts_value(call))
 }
 
-fn app_value(call: impl FnOnce(&mut App) -> Value) -> Value {
+fn accounts_value(call: impl FnOnce(&mut Accounts) -> Value) -> Value {
     catch_unwind(AssertUnwindSafe(|| {
         let guard = APP.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        on_app(guard, call)
+        on_accounts(guard, call)
     }))
-    .unwrap_or_else(|_| json!({ "ok": false, "error": "The core stopped unexpectedly." }))
+    .unwrap_or_else(|_| json!({ "ok": false, "error": STOPPED }))
 }
 
-/// `with_app`, for calls that wait on the network or the desktop agent's
-/// socket: run on a thread of the core's own. Dart signals the threads that
-/// run Dart (its profiler, in debug builds), and a signal arriving in a
-/// blocking read or connect ends it with "Interrupted system call".
-fn with_app_waiting(call: impl FnOnce(&mut App) -> Value + Send) -> *mut c_char {
+/// `with_accounts`, for calls that wait on the network or the desktop
+/// agent's socket: run on a thread of the core's own. Dart signals the
+/// threads that run Dart (its profiler, in debug builds), and a signal
+/// arriving in a blocking read or connect ends it with "Interrupted system
+/// call".
+fn with_accounts_waiting(call: impl FnOnce(&mut Accounts) -> Value + Send) -> *mut c_char {
     out(std::thread::scope(|scope| {
         scope
-            .spawn(|| app_value(call))
+            .spawn(|| accounts_value(call))
             .join()
-            .unwrap_or_else(|_| json!({ "ok": false, "error": "The core stopped unexpectedly." }))
+            .unwrap_or_else(|_| json!({ "ok": false, "error": STOPPED }))
     }))
 }
 
-/// An attachment: the app says where its file is (checking the item may be
-/// used), then the download, opening it, and `then` happen without the app,
-/// so a long download doesn't hold up its other calls (locking, the screens'
-/// reads). On a thread of the core's own, as `with_app_waiting`.
+/// `with_accounts`, but None instead of waiting while a slow call (a sync,
+/// say) has the app.
+fn with_accounts_now(call: impl FnOnce(&mut Accounts) -> Value) -> Option<*mut c_char> {
+    let guard = match APP.try_lock() {
+        Ok(guard) => guard,
+        Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        Err(TryLockError::WouldBlock) => return None,
+    };
+    Some(out(catch_unwind(AssertUnwindSafe(|| {
+        on_accounts(guard, call)
+    }))
+    .unwrap_or_else(|_| json!({ "ok": false, "error": STOPPED }))))
+}
+
+fn on_accounts(
+    mut guard: MutexGuard<'_, Option<Accounts>>,
+    call: impl FnOnce(&mut Accounts) -> Value,
+) -> Value {
+    let accounts = guard.get_or_insert_with(|| {
+        let dir = Store::default_dir();
+        Accounts::open(&dir, secrets(&dir))
+    });
+    notices(accounts);
+    let value = call(accounts);
+    notices(accounts);
+    value
+}
+
+/// One account's app: the one named, or for "" the one being signed in
+/// to. An account that isn't here sees an app for no account, with nothing
+/// in it, that keeps nothing.
+fn on_account(
+    accounts: &mut Accounts,
+    account: &str,
+    call: impl FnOnce(&mut App) -> Value,
+) -> Value {
+    match accounts.app(account) {
+        Some(app) => call(app),
+        None => call(&mut App::nobody()),
+    }
+}
+
+/// Runs a call on one account's app (`on_account`).
+fn with_app(account: &str, call: impl FnOnce(&mut App) -> Value) -> *mut c_char {
+    with_accounts(|accounts| on_account(accounts, account, call))
+}
+
+fn app_value(account: &str, call: impl FnOnce(&mut App) -> Value) -> Value {
+    accounts_value(|accounts| on_account(accounts, account, call))
+}
+
+/// `with_app`, on a thread of the core's own (`with_accounts_waiting`).
+fn with_app_waiting(account: &str, call: impl FnOnce(&mut App) -> Value + Send) -> *mut c_char {
+    with_accounts_waiting(|accounts| on_account(accounts, account, call))
+}
+
+/// An attachment: the account's app says where its file is (checking the
+/// item may be used), then the download, opening it, and `then` happen
+/// without the app, so a long download doesn't hold up its other calls
+/// (locking, the screens' reads). On a thread of the core's own, as
+/// `with_app_waiting`.
 fn attachment_then(
+    account: &str,
     id: &str,
     attachment_id: &str,
     then: impl FnOnce(crate::app::AttachmentFile) -> Value + Send,
@@ -89,70 +164,151 @@ fn attachment_then(
         scope
             .spawn(|| {
                 let mut to_fetch = None;
-                let asked = app_value(|app| match app.attachment_to_fetch(id, attachment_id) {
-                    Ok(file) => {
-                        to_fetch = Some(file);
-                        json!({ "ok": true })
+                let asked = app_value(account, |app| {
+                    match app.attachment_to_fetch(id, attachment_id) {
+                        Ok(file) => {
+                            to_fetch = Some(file);
+                            json!({ "ok": true })
+                        }
+                        Err(e) => failed(e),
                     }
-                    Err(e) => failed(e),
                 });
                 match to_fetch {
-                    Some(file) => catch_unwind(AssertUnwindSafe(|| then(file))).unwrap_or_else(
-                        |_| json!({ "ok": false, "error": "The core stopped unexpectedly." }),
-                    ),
+                    Some(file) => catch_unwind(AssertUnwindSafe(|| then(file)))
+                        .unwrap_or_else(|_| json!({ "ok": false, "error": STOPPED })),
                     None => asked,
                 }
             })
             .join()
-            .unwrap_or_else(|_| json!({ "ok": false, "error": "The core stopped unexpectedly." }))
+            .unwrap_or_else(|_| json!({ "ok": false, "error": STOPPED }))
     })
 }
 
-/// `with_app`, but None instead of waiting while a slow call (a sync, say) has the app.
-fn with_app_now(call: impl FnOnce(&mut App) -> Value) -> Option<*mut c_char> {
-    let guard = match APP.try_lock() {
-        Ok(guard) => guard,
-        Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
-        Err(TryLockError::WouldBlock) => return None,
-    };
-    Some(out(catch_unwind(AssertUnwindSafe(|| on_app(guard, call)))
-        .unwrap_or_else(
-            |_| json!({ "ok": false, "error": "The core stopped unexpectedly." }),
-        )))
-}
-
-fn on_app(mut guard: MutexGuard<'_, Option<App>>, call: impl FnOnce(&mut App) -> Value) -> Value {
-    let app = guard.get_or_insert_with(|| {
-        let dir = Store::default_dir();
-        App::open(Store::new(&dir), secrets(&dir))
-    });
-    notices(app);
-    let value = call(app);
-    notices(app);
-    value
-}
-
-/// What the OS said while a slow call had the app.
-fn notices(app: &mut App) {
+/// What the OS said while a slow call had the app: for every account.
+fn notices(accounts: &mut Accounts) {
     if SLEEP_NOTICE.swap(false, Ordering::SeqCst) {
-        app.sleeping();
+        accounts.sleeping();
     }
     if LEFT_NOTICE.swap(false, Ordering::SeqCst) {
-        app.left();
+        accounts.left();
     }
 }
 
-fn secrets(dir: &std::path::Path) -> Box<dyn SecretStore> {
-    // Tests and CI keep the refresh token in memory, never in the OS's store.
-    if std::env::var("PB_SECRETS").as_deref() == Ok("memory") {
-        Box::new(MemorySecretStore::default())
-    } else {
-        Box::new(OsSecretStore::new(dir))
+/// On a phone, locks first each account whose time is up (docs/phones.md,
+/// "Locking"), for the calls that autofill, passkeys, and the phone's own
+/// native code make. They reach the core whether or not the app's screens
+/// are running, and the screens ask whether to lock (`pb_tick`) only while
+/// they show an account as unlocked: a vault that autofill unlocked with
+/// biometrics, with the screens closed or showing it locked, would
+/// otherwise stay open past its time.
+fn lock_if_due(accounts: &mut Accounts) {
+    #[cfg(phone)]
+    {
+        // iOS's AutoFill extension holds a vault for one request, and locks
+        // every account as it ends (`pb_autofill_close`): there's no wait to
+        // count, and a policy's sign-out is the app's to do.
+        if accounts.is_beside() {
+            return;
+        }
+        notices(accounts);
+        let _ = accounts.tick(&autolock::readings());
     }
+    #[cfg(not(phone))]
+    let _ = accounts;
+}
+
+/// The accounts, for a phone's native code: None while a slow call has
+/// them, or before the core is open.
+#[cfg(phone)]
+fn accounts_now() -> Option<MutexGuard<'static, Option<Accounts>>> {
+    match APP.try_lock() {
+        Ok(guard) => Some(guard),
+        Err(TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
+        Err(TryLockError::WouldBlock) => None,
+    }
+}
+
+/// The phone's screen went off (Android's broadcast, which the app's native
+/// code hears for the whole process, screens or not): each account locks if
+/// its person chose that, or its policy says so, now or as soon as a slow
+/// call that has the app is done. Whether one locked now, or may once that
+/// call is done.
+#[cfg(target_os = "android")]
+pub(crate) fn screen_off() -> bool {
+    let Some(mut guard) = accounts_now() else {
+        SLEEP_NOTICE.store(true, Ordering::SeqCst);
+        return true;
+    };
+    guard.as_mut().is_some_and(Accounts::sleeping)
+}
+
+/// Autofill or a passkey handed its answer back: a fill's values, or a
+/// passkey's signature or new passkey, or that there's none (Kotlin's
+/// FillActivity and PasskeyActivity, as they finish). Nothing of PassBundle's
+/// is on the screen anymore, so each account with "Immediately" chosen, or
+/// its policy's, locks now, as when the app's own screens leave
+/// (`App::left`), or as soon as a slow call that has the app is done.
+/// Whether one locked now, or may once that call is done. Never waits for
+/// the app: Kotlin calls it on the main thread.
+#[cfg(target_os = "android")]
+pub(crate) fn answered() -> bool {
+    let Some(mut guard) = accounts_now() else {
+        LEFT_NOTICE.store(true, Ordering::SeqCst);
+        return true;
+    };
+    guard.as_mut().is_some_and(Accounts::left)
+}
+
+/// Autofill or a passkey unlocked an account and handed back a list to
+/// pick from (Kotlin's FillActivity and PasskeyActivity): with
+/// "Immediately", the vault stays open for the pick only (`App::offered`),
+/// and if nothing is picked, locks when the wait is over. On a thread of the
+/// core's own, so it never holds up Kotlin's main thread; a check that comes
+/// first (any call autofill or a passkey makes) locks then too.
+#[cfg(target_os = "android")]
+pub(crate) fn offered() {
+    fn on_open(call: impl FnOnce(&mut Accounts)) {
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            let mut guard = APP.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(accounts) = guard.as_mut() {
+                call(accounts);
+            }
+        }));
+    }
+    std::thread::spawn(|| {
+        on_open(Accounts::offered);
+        std::thread::sleep(crate::app::PICK_WAIT + std::time::Duration::from_secs(1));
+        on_open(lock_if_due);
+    });
+}
+
+fn secrets(dir: &std::path::Path) -> Arc<dyn SecretStore> {
+    // Test builds (the test-hooks feature) can keep the refresh token in
+    // memory, never in the OS's store; a release always uses the OS's.
+    #[cfg(feature = "test-hooks")]
+    if std::env::var("PB_SECRETS").as_deref() == Ok("memory") {
+        return Arc::new(MemorySecretStore::default());
+    }
+    Arc::new(OsSecretStore::new(dir))
 }
 
 fn failed(e: Error) -> Value {
-    json!({ "ok": false, "error": e.to_string(), "signedOut": e == Error::SignedOut })
+    json!({
+        "ok": false,
+        "error": e.to_string(),
+        "signedOut": e == Error::SignedOut,
+        // This device couldn't reach the server: the screens say they show
+        // the copy kept here, and that a change waits for the connection.
+        "offline": e.offline(),
+        // About the server's address, not the email or password: the
+        // sign-in screen says it under the server field (docs/core.md,
+        // "Checking a server").
+        "field": if e.about_the_server() { json!("server") } else { Value::Null },
+        // Making an account got to the server: signing in is what's left.
+        "accountMade": matches!(e, Error::AccountMade { .. }),
+        // Approving a sign-in waits for biometrics or the master password.
+        "confirmFirst": e == Error::ConfirmFirst,
+    })
 }
 
 fn done(result: crate::Result<()>) -> Value {
@@ -165,15 +321,47 @@ fn done(result: crate::Result<()>) -> Value {
 fn step(result: crate::Result<Step>) -> Value {
     match result {
         Ok(Step::Done) => json!({ "ok": true, "step": "done" }),
-        Ok(Step::TwoFactor(providers)) => {
-            json!({ "ok": true, "step": "twoFactor", "providers": providers })
-        }
+        Ok(Step::TwoFactor(offer)) => json!({
+            "ok": true,
+            "step": "twoFactor",
+            // The methods offered that the apps do (two_step.rs); a
+            // recovery code (8) always works besides.
+            "providers": offer.providers,
+            "email": offer.email,
+            "yubikeyNfc": offer.yubikey_nfc,
+            // How this device reaches a security key, or null where it can't.
+            "securityKey": crate::security_key::here(),
+        }),
+        Ok(Step::NewDevice(check)) => json!({
+            "ok": true,
+            "step": "newDevice",
+            "check": new_device_check(&check),
+        }),
         Err(e) => failed(e),
     }
 }
 
-fn state(app: &App) -> Value {
-    match app.state() {
+/// A sign-in the new-device check holds, as the waiting screen shows it
+/// (new_device.rs): `{id, number, status ("waiting", "approved", "denied",
+/// "ended"), deniedWhy, expiresAt, approvers, email ("now", "later",
+/// "waiting", "never"), emailAfter, codeSent, emailTo}`. Never its token.
+fn new_device_check(check: &crate::new_device::Check) -> Value {
+    json!({
+        "id": check.id,
+        "number": check.number,
+        "status": check.status.name(),
+        "deniedWhy": check.denied_why,
+        "expiresAt": check.expires_at,
+        "approvers": check.approvers,
+        "email": check.email.name(),
+        "emailAfter": check.email_after,
+        "codeSent": check.code_sent,
+        "emailTo": check.email_to,
+    })
+}
+
+fn state_of(state: State) -> Value {
+    match state {
         State::SignedOut { server, email } => {
             json!({ "state": "signedOut", "server": server, "email": email })
         }
@@ -186,6 +374,44 @@ fn state(app: &App) -> Value {
     }
 }
 
+/// The accounts signed in here, as the account menu shows them: `{active,
+/// accounts: [{id, server, email, state, name, tone}], most, tones, last:
+/// {server, email}}`. `active` is the one the screens show (null when none
+/// is signed in); `name` what the person calls an account (null until they
+/// name it), and `tone` its color, one of `tones`; `last` the server and
+/// email last signed in to or out of.
+fn accounts_json(accounts: &Accounts) -> Value {
+    let list: Vec<Value> = accounts
+        .summaries()
+        .into_iter()
+        .map(|a| {
+            json!({
+                "id": a.id,
+                "server": a.server,
+                "email": a.email,
+                "state": if a.unlocked { "unlocked" } else { "locked" },
+                "name": a.name,
+                "tone": a.tone,
+            })
+        })
+        .collect();
+    json!({
+        "active": accounts.active(),
+        "accounts": list,
+        "most": crate::accounts::MOST,
+        "tones": crate::accounts::TONES,
+        "last": accounts.last().map(|l| json!({ "server": l.server, "email": l.email })),
+    })
+}
+
+/// What an item is labeled with when it's listed beside other accounts'
+/// (autofill, passkeys): its account's name, or email, while more than one
+/// account is signed in here; nothing otherwise.
+#[cfg(phone)]
+fn account_label(accounts: &Accounts, id: &str) -> Option<String> {
+    (accounts.summaries().len() > 1).then(|| accounts.label(id))
+}
+
 fn kind(kind: ItemKind) -> &'static str {
     match kind {
         ItemKind::Login => "login",
@@ -193,22 +419,68 @@ fn kind(kind: ItemKind) -> &'static str {
         ItemKind::Card => "card",
         ItemKind::Identity => "identity",
         ItemKind::SshKey => "sshKey",
+        ItemKind::BankAccount => "bankAccount",
+        ItemKind::DriversLicense => "driversLicense",
+        ItemKind::Passport => "passport",
         ItemKind::Other(_) => "other",
     }
 }
 
+/// Where an item is, as the web vault's list shows it beside each item: an
+/// organization's item by its first shared folder (or the organization), a
+/// person's own by its folder, or Personal.
+fn place(vault: &Vault, item: &Item) -> String {
+    if let Some(org) = &item.organization_id {
+        let mut folders: Vec<&String> = item
+            .collection_ids
+            .iter()
+            .filter_map(|c| vault.collections.get(c))
+            .collect();
+        folders.sort_by_key(|n| n.to_lowercase());
+        return folders
+            .first()
+            .map(|n| (*n).clone())
+            .or_else(|| vault.organizations.get(org).cloned())
+            .unwrap_or_default();
+    }
+    item.folder_id
+        .as_ref()
+        .and_then(|f| vault.folders.get(f))
+        .cloned()
+        .unwrap_or_else(|| "Personal".to_owned())
+}
+
+/// What the person may do with an item, for the screens to offer only what
+/// the server allows (docs/core.md, "Folders and permissions").
+fn permissions(vault: &Vault, item: &Item) -> Value {
+    let grid = vault.grid(item);
+    json!({
+        "edit": grid.edit,
+        "seePasswords": grid.see_passwords,
+        "delete": grid.delete,
+        "share": grid.share,
+        "viewHistory": grid.view_history,
+        "clearHistory": grid.view_history && vault.may_clear_history(item),
+    })
+}
+
 fn summary(vault: &Vault, item: &Item) -> Value {
+    let template = templates::template_of(item);
     json!({
         "id": item.id,
         "kind": kind(item.kind),
+        "category": templates::category(item),
         "name": item.name,
         "subtitle": item.card.as_ref().map(|c| c.summary())
             .or_else(|| item.identity.as_ref().map(|i| i.full_name()))
             .or_else(|| item.ssh_key.as_ref().and_then(|k| k.fingerprint.clone()))
+            .or_else(|| item.details.iter().find(|d| !d.secret).map(|d| d.value.as_str().to_owned()))
             .or_else(|| item.username.clone())
             .or_else(|| item.uris.first().cloned())
             .unwrap_or_default(),
         "website": item.uris.first(),
+        // The host its tile's icon is for (icons.rs), for a login.
+        "iconHost": (item.kind == ItemKind::Login).then(|| item.uris.first().and_then(|u| crate::icons::host_of(u))).flatten(),
         "favorite": item.favorite,
         // Asks for the master password before its secrets are used.
         "reprompt": item.kept.reprompt != 0,
@@ -216,25 +488,128 @@ fn summary(vault: &Vault, item: &Item) -> Value {
         "folder": item.folder_id.as_ref().and_then(|f| vault.folders.get(f)),
         "organizationId": item.organization_id,
         "organization": item.organization_id.as_ref().and_then(|o| vault.organizations.get(o)),
+        "collectionIds": item.collection_ids,
+        "where": place(vault, item),
+        "template": template.map(|(_, name, _)| name),
+        // A custom template (a note that defines one), and a copy an MSP
+        // keeps in its clients' Templates folder, which lists show only
+        // while that folder is open.
+        "isTemplate": templates::definition_of(item).is_some(),
+        "mspCopy": templates::is_msp_copy(item),
+        // When it expires, from today (expiration.rs): `{date, state, days,
+        // label}`, or null.
+        "expiry": expiration::view(item, expiration::Date::today()),
     })
 }
 
 /// Opens the app on a folder of its own instead of the usual one, with the
-/// refresh token kept in memory when `memory_secrets`: for tests and tools.
+/// refresh tokens kept in memory when `memory_secrets`: for tests, tools,
+/// and phones (whose folder only the OS knows). Answers the accounts
+/// (`pb_accounts`), with the state of the one the screens show.
 ///
 /// # Safety
 /// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
 #[no_mangle]
 pub unsafe extern "C" fn pb_open(dir: *const c_char, memory_secrets: bool) -> *mut c_char {
     let dir = text(dir);
-    let secrets: Box<dyn SecretStore> = if memory_secrets {
-        Box::new(MemorySecretStore::default())
+    let secrets: Arc<dyn SecretStore> = if memory_secrets {
+        Arc::new(MemorySecretStore::default())
     } else {
-        Box::new(OsSecretStore::new(std::path::Path::new(&dir)))
+        Arc::new(OsSecretStore::new(std::path::Path::new(&dir)))
     };
     *APP.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) =
-        Some(App::open(Store::new(dir), secrets));
-    with_app(|app| state(app))
+        Some(Accounts::open(std::path::Path::new(&dir), secrets));
+    with_accounts(|accounts| opened(accounts))
+}
+
+/// The accounts, and the state of the one the screens show (`ok`, for the
+/// calls that answer with them when they've done what was asked).
+fn opened(accounts: &Accounts) -> Value {
+    let mut answer = accounts_json(accounts);
+    answer["ok"] = json!(true);
+    let active = accounts.active().unwrap_or_default().to_owned();
+    if let (Value::Object(map), Value::Object(state)) =
+        (&mut answer, state_of(accounts.state(&active)))
+    {
+        map.extend(state);
+    }
+    answer
+}
+
+/// The accounts signed in here (`accounts_json`), and the state of the one
+/// the screens show.
+#[no_mangle]
+pub extern "C" fn pb_accounts() -> *mut c_char {
+    with_accounts(|accounts| opened(accounts))
+}
+
+/// The screens show this account now; the one they showed stays as it is,
+/// unlocked or locked. Answers as `pb_accounts`, or the words to show.
+///
+/// # Safety
+/// `account` is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_switch(account: *const c_char) -> *mut c_char {
+    let account = text(account);
+    with_accounts(|accounts| match accounts.switch(&account) {
+        Ok(()) => opened(accounts),
+        Err(e) => failed(e),
+    })
+}
+
+/// Names an account here and picks its color, from `{name, tone}`: `name`
+/// (empty or null for its email) at most 40 characters, `tone` one of
+/// `pb_accounts`' `tones` (null keeps its color). Kept on this device only.
+/// Answers as `pb_accounts`, or the words to show.
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_set_account_label(
+    account: *const c_char,
+    label: *const c_char,
+) -> *mut c_char {
+    let account = text(account);
+    let label: Value = serde_json::from_str(&text(label)).unwrap_or(Value::Null);
+    let (name, tone) = (label["name"].as_str(), label["tone"].as_str());
+    with_accounts(|accounts| match accounts.set_label(&account, name, tone) {
+        Ok(()) => opened(accounts),
+        Err(e) => failed(e),
+    })
+}
+
+/// What a search finds in every unlocked account (the "All accounts"
+/// place): each item's summary, as `pb_list` gives it, with its account's
+/// id on this device (`account`), by name. Nothing of a locked account.
+///
+/// # Safety
+/// `query` is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_list_all(query: *const c_char) -> *mut c_char {
+    let query = text(query);
+    with_accounts(|accounts| {
+        Value::Array(
+            accounts
+                .search_all(&query)
+                .into_iter()
+                .map(|(id, vault, item)| {
+                    let mut listed = summary(vault, item);
+                    listed["account"] = json!(id);
+                    listed
+                })
+                .collect(),
+        )
+    })
+}
+
+/// Gives up the sign-in waiting for its second step, and the account being
+/// added: answers as `pb_accounts`.
+#[no_mangle]
+pub extern "C" fn pb_cancel_sign_in() -> *mut c_char {
+    with_accounts(|accounts| {
+        accounts.cancel_sign_in();
+        opened(accounts)
+    })
 }
 
 /// Talks to the agent whose home folder is `home` and whose program is
@@ -248,13 +623,13 @@ pub unsafe extern "C" fn pb_use_agent_home(
     program: *const c_char,
 ) -> *mut c_char {
     let (home, program) = (text(home), text(program));
-    with_app(|app| {
+    with_accounts(|accounts| {
         let address = passbundle_ipc::address_for(
             std::ffi::OsStr::new(&home),
             crate::brand::NAME,
             crate::brand::DOMAIN,
         );
-        app.use_agent_at(address, program.into());
+        accounts.use_agent_at(address, program.into());
         json!({ "ok": true })
     })
 }
@@ -272,18 +647,48 @@ fn method() -> &'static str {
 
 /// Whether this account can unlock with Windows Hello or Touch ID here:
 /// "setUp", "notSetUp", "unavailable", or "noAgent" (the desktop agent isn't
-/// running), with the method's name.
+/// running), with the method's name. "unsupported" where it can't work at
+/// all, so the screens don't offer it: the Mac, until the agent's Touch ID
+/// is signed (DESIGN.md, "Biometric unlock"), and Linux, which has no agent.
+/// An agent that says it can (the test builds' stand-in) is taken at its word.
+///
+/// # Safety
+/// `account` is null or a NUL-terminated UTF-8 string, valid for the call.
 #[no_mangle]
-pub extern "C" fn pb_biometric_status() -> *mut c_char {
-    with_app_waiting(|app| {
-        let status = match app.biometric_status() {
-            Ok(Status::SetUp) => "setUp",
-            Ok(Status::NotSetUp) => "notSetUp",
-            Ok(Status::Unavailable) => "unavailable",
-            Err(Error::NoAgent) => "noAgent",
-            Err(_) => "unavailable",
-        };
+pub unsafe extern "C" fn pb_biometric_status(account: *const c_char) -> *mut c_char {
+    let account = text(account);
+    with_app_waiting(&account, |app| {
+        let status = biometric_status_here(app.biometric_status());
         json!({ "status": status, "method": method() })
+    })
+}
+
+/// What the screens are told about unlocking with biometrics, from what the
+/// agent says (`pb_biometric_status`).
+fn biometric_status_here(said: crate::Result<Status>) -> &'static str {
+    let windows = cfg!(target_os = "windows");
+    match said {
+        Ok(Status::SetUp) => "setUp",
+        Ok(Status::NotSetUp) => "notSetUp",
+        Ok(Status::Unavailable) if windows => "unavailable",
+        Err(Error::NoAgent) if windows => "noAgent",
+        Err(_) if windows => "unavailable",
+        Ok(Status::Unavailable) | Err(_) => "unsupported",
+    }
+}
+
+/// The account's master password hint, for the lock screen: `{ok, hint}`,
+/// the hint when the server shows it, or null when it emailed it to the
+/// account's email; or the words to show.
+///
+/// # Safety
+/// `account` is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_password_hint(account: *const c_char) -> *mut c_char {
+    let account = text(account);
+    with_app_waiting(&account, |app| match app.password_hint() {
+        Ok(hint) => json!({ "ok": true, "hint": hint }),
+        Err(e) => failed(e),
     })
 }
 
@@ -298,27 +703,39 @@ pub extern "C" fn pb_start_agent() -> *mut c_char {
 }
 
 /// Turns it on (the agent asks); `on` says whether the person agreed.
+///
+/// # Safety
+/// `account` is null or a NUL-terminated UTF-8 string, valid for the call.
 #[no_mangle]
-pub extern "C" fn pb_biometric_enroll() -> *mut c_char {
-    with_app_waiting(|app| match app.enroll_biometric() {
+pub unsafe extern "C" fn pb_biometric_enroll(account: *const c_char) -> *mut c_char {
+    let account = text(account);
+    with_app_waiting(&account, |app| match app.enroll_biometric() {
         Ok(on) => json!({ "ok": true, "on": on }),
         Err(e) => failed(e),
     })
 }
 
 /// Unlocks with it (the agent asks); `unlocked` is false if the person cancelled.
+///
+/// # Safety
+/// `account` is null or a NUL-terminated UTF-8 string, valid for the call.
 #[no_mangle]
-pub extern "C" fn pb_biometric_unlock() -> *mut c_char {
-    with_app_waiting(|app| match app.unlock_with_biometric() {
+pub unsafe extern "C" fn pb_biometric_unlock(account: *const c_char) -> *mut c_char {
+    let account = text(account);
+    with_app_waiting(&account, |app| match app.unlock_with_biometric() {
         Ok(unlocked) => json!({ "ok": true, "unlocked": unlocked }),
         Err(e) => failed(e),
     })
 }
 
 /// Turns it off, for the browser extension too.
+///
+/// # Safety
+/// `account` is null or a NUL-terminated UTF-8 string, valid for the call.
 #[no_mangle]
-pub extern "C" fn pb_biometric_remove() -> *mut c_char {
-    with_app_waiting(|app| done(app.remove_biometric()))
+pub unsafe extern "C" fn pb_biometric_remove(account: *const c_char) -> *mut c_char {
+    let account = text(account);
+    with_app_waiting(&account, |app| done(app.remove_biometric()))
 }
 
 #[no_mangle]
@@ -333,12 +750,33 @@ pub extern "C" fn pb_servers() -> *mut c_char {
     out(json!({ "ours": crate::brand::SERVER, "managed": crate::managed::server() }))
 }
 
-/// Signed out, locked, or unlocked, with the server and email.
+/// An account's state: signed out, locked, or unlocked, with the server and
+/// email. For "" (no account, or one being added), signed out, with the
+/// server and email being signed in to, or last signed in to or out of.
+///
+/// # Safety
+/// `account` is null or a NUL-terminated UTF-8 string, valid for the call.
 #[no_mangle]
-pub extern "C" fn pb_state() -> *mut c_char {
-    with_app(|app| state(app))
+pub unsafe extern "C" fn pb_state(account: *const c_char) -> *mut c_char {
+    let account = text(account);
+    with_accounts(|accounts| state_of(accounts.state(&account)))
 }
 
+/// Where signing in got to (`step`), and on its way the account signed in
+/// to, which the screens show now (`account`).
+fn signed_in(accounts: &Accounts, result: crate::Result<Step>) -> Value {
+    let done = matches!(result, Ok(Step::Done));
+    let mut answer = step(result);
+    if done {
+        answer["account"] = json!(accounts.active());
+    }
+    answer
+}
+
+/// Signs in: to an account here already with the same server and email
+/// (signing in again), or a new one, which joins the others (up to
+/// `accounts::MOST`; `pb_accounts` says how many there are).
+///
 /// # Safety
 /// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
 #[no_mangle]
@@ -348,7 +786,54 @@ pub unsafe extern "C" fn pb_sign_in(
     password: *const c_char,
 ) -> *mut c_char {
     let (server, email, password) = (text(server), text(email), Zeroizing::new(text(password)));
-    with_app_waiting(|app| step(app.sign_in(&server, &email, &password)))
+    with_accounts_waiting(|accounts| {
+        let result = accounts.sign_in(&server, &email, &password);
+        signed_in(accounts, result)
+    })
+}
+
+/// Makes an account on the server, then signs in to it (docs/core.md,
+/// "Making an account"): the same answer as `pb_sign_in`. `name` and `hint`
+/// may be empty.
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_sign_up(
+    server: *const c_char,
+    email: *const c_char,
+    name: *const c_char,
+    password: *const c_char,
+    hint: *const c_char,
+) -> *mut c_char {
+    let (server, email, name) = (text(server), text(email), text(name));
+    let (password, hint) = (Zeroizing::new(text(password)), Zeroizing::new(text(hint)));
+    let given = |t: &str| Some(t.to_owned()).filter(|t| !t.trim().is_empty());
+    let (name, hint) = (given(&name), given(&hint).map(Zeroizing::new));
+    // The slow part (the master key, an RSA key pair) away from the app, so
+    // nothing else waits on it; a server address that can't be used first.
+    let made = crate::server::Server::new(
+        &server,
+        crate::server::Device::this_one(&crate::server::Device::new_identifier()),
+    )
+    // A PassBundle server there, before the slow part.
+    .and_then(|s| s.check())
+    .and_then(|_| {
+        crate::signup::NewAccount::make(
+            &email,
+            name.as_deref(),
+            &password,
+            hint.as_deref().map(|h| h.as_str()),
+        )
+    });
+    let account = match made {
+        Ok(account) => account,
+        Err(e) => return out(failed(e)),
+    };
+    with_accounts_waiting(|accounts| {
+        let result = accounts.register(&server, &account, &password);
+        signed_in(accounts, result)
+    })
 }
 
 /// # Safety
@@ -360,20 +845,156 @@ pub unsafe extern "C" fn pb_finish_sign_in(
     remember: bool,
 ) -> *mut c_char {
     let code = text(code);
-    with_app_waiting(|app| step(app.finish_sign_in(provider, &code, remember)))
+    with_accounts_waiting(|accounts| {
+        let result = accounts.finish_sign_in(provider, &code, remember);
+        signed_in(accounts, result)
+    })
 }
 
+/// How the new-device check holding the sign-in stands now, asked every 3
+/// seconds while it waits: the same answer as `pb_sign_in` (`newDevice`
+/// with how it stands, or `done` once it's approved and the sign-in
+/// finished with its token).
+#[no_mangle]
+pub extern "C" fn pb_new_device_status() -> *mut c_char {
+    with_accounts_waiting(|accounts| {
+        let result = accounts.new_device_status();
+        signed_in(accounts, result)
+    })
+}
+
+/// "Email me a code" for the sign-in the new-device check holds (or, with
+/// devices that can approve, "Can't use your other devices?"): the same
+/// answer as `pb_sign_in`, with how it stands now.
+#[no_mangle]
+pub extern "C" fn pb_new_device_email() -> *mut c_char {
+    with_accounts_waiting(|accounts| {
+        let result = accounts.new_device_email();
+        signed_in(accounts, result)
+    })
+}
+
+/// Finishes the sign-in the new-device check holds with the code from the
+/// email: the same answer as `pb_sign_in`.
+///
+/// # Safety
+/// `code` is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_new_device_code(code: *const c_char) -> *mut c_char {
+    let code = text(code);
+    with_accounts_waiting(|accounts| {
+        let result = accounts.finish_new_device_with_code(&code);
+        signed_in(accounts, result)
+    })
+}
+
+/// Asks the server to email the code, for the sign-in waiting for one.
 #[no_mangle]
 pub extern "C" fn pb_send_email_code() -> *mut c_char {
-    with_app_waiting(|app| done(app.send_email_code()))
+    with_accounts_waiting(|accounts| done(accounts.send_email_code()))
+}
+
+/// Duo's address for the sign-in waiting for its second step, for the
+/// browser: `{ok, url}`, or the answer of a sign-in that went through
+/// without it (as `pb_sign_in`'s). On Windows and Linux, this app becomes
+/// the one `passbundle://` links open first, for Duo's way back
+/// (two_step.rs, `take_links`).
+#[no_mangle]
+pub extern "C" fn pb_duo_start() -> *mut c_char {
+    with_accounts_waiting(|accounts| match accounts.duo_address() {
+        Ok(Prepared::Ready(url)) => match crate::two_step::take_links() {
+            Ok(()) => json!({ "ok": true, "url": url }),
+            Err(e) => failed(e),
+        },
+        Ok(Prepared::SignedIn) => signed_in(accounts, Ok(Step::Done)),
+        Err(e) => failed(e),
+    })
+}
+
+/// Two-step login's second step with Duo's answer, the link the browser
+/// came back with: the same answer as `pb_sign_in`.
+///
+/// # Safety
+/// `link` is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_duo_finish(link: *const c_char, remember: bool) -> *mut c_char {
+    let link = text(link);
+    with_accounts_waiting(|accounts| {
+        let result = accounts.finish_with_duo(&link, remember);
+        signed_in(accounts, result)
+    })
+}
+
+/// Two-step login's second step with a security key (security_key): the
+/// server's request, then the key asked (which waits for the person, so
+/// the other calls don't wait on it), then the answer sent. The same answer
+/// as `pb_sign_in`.
+#[no_mangle]
+pub extern "C" fn pb_security_key_sign_in(remember: bool) -> *mut c_char {
+    out(std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                let mut prepared = None;
+                let asked = accounts_value(|accounts| match accounts.security_key_request() {
+                    Ok(Prepared::Ready(request)) => {
+                        prepared = Some(request);
+                        json!({ "ok": true })
+                    }
+                    Ok(Prepared::SignedIn) => signed_in(accounts, Ok(Step::Done)),
+                    Err(e) => failed(e),
+                });
+                let Some((id, request)) = prepared else {
+                    return asked;
+                };
+                let answer =
+                    match catch_unwind(AssertUnwindSafe(|| crate::security_key::ask(&request))) {
+                        Ok(Ok(answer)) => answer,
+                        Ok(Err(e)) => return failed(e),
+                        Err(_) => return json!({ "ok": false, "error": STOPPED }),
+                    };
+                accounts_value(|accounts| {
+                    let result = accounts.finish_with_key(&id, &request, &answer, remember);
+                    signed_in(accounts, result)
+                })
+            })
+            .join()
+            .unwrap_or_else(|_| json!({ "ok": false, "error": STOPPED }))
+    }))
+}
+
+/// Stops a security key's wait (`pb_security_key_sign_in`), from any thread.
+#[no_mangle]
+pub extern "C" fn pb_security_key_cancel() -> *mut c_char {
+    crate::security_key::cancel();
+    out(json!({ "ok": true }))
+}
+
+/// A second copy of the app, opened by the OS with Duo's link (Windows and
+/// Linux): leaves it for the copy that's signing in, which picks it up with
+/// `pb_handed_over_link`. Whether it was a link to leave.
+///
+/// # Safety
+/// `link` is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_hand_over_link(link: *const c_char) -> *mut c_char {
+    let link = text(link);
+    let left = crate::two_step::hand_over(&Store::default_dir(), &link);
+    out(json!({ "ok": left }))
+}
+
+/// The link a second copy of the app left (`pb_hand_over_link`), once, or null.
+#[no_mangle]
+pub extern "C" fn pb_handed_over_link() -> *mut c_char {
+    out(json!(crate::two_step::handed_over(&Store::default_dir())))
 }
 
 /// # Safety
 /// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
 #[no_mangle]
-pub unsafe extern "C" fn pb_unlock(password: *const c_char) -> *mut c_char {
+pub unsafe extern "C" fn pb_unlock(account: *const c_char, password: *const c_char) -> *mut c_char {
+    let account = text(account);
     let password = Zeroizing::new(text(password));
-    with_app(|app| {
+    with_app(&account, |app| {
         let started = Instant::now();
         match app.unlock(&password) {
             Ok(()) => json!({ "ok": true, "ms": started.elapsed().as_millis() as u64 }),
@@ -382,30 +1003,103 @@ pub unsafe extern "C" fn pb_unlock(password: *const c_char) -> *mut c_char {
     })
 }
 
+/// # Safety
+/// `account` is null or a NUL-terminated UTF-8 string, valid for the call.
 #[no_mangle]
-pub extern "C" fn pb_sync() -> *mut c_char {
-    with_app_waiting(|app| done(app.sync()))
-}
-
-#[no_mangle]
-pub extern "C" fn pb_lock() -> *mut c_char {
-    with_app(|app| {
-        app.lock();
-        state(app)
+pub unsafe extern "C" fn pb_sync(account: *const c_char) -> *mut c_char {
+    let account = text(account);
+    with_app_waiting(&account, |app| match app.sync() {
+        Ok(()) => json!({ "ok": true }),
+        // Offline: how old the copy kept here is, for the screens to say.
+        Err(e) if e.offline() => {
+            let mut answer = failed(e);
+            answer["keptSecondsAgo"] = json!(app.kept_age().map(|age| age.as_secs()));
+            answer
+        }
+        Err(e) => failed(e),
     })
 }
 
-/// An item's value for the clipboard, for the phone app's native piece
-/// (android.rs, or `pb_secret` for iOS's Swift). None while locked, while a
-/// slow call has the app, or if there's nothing to copy.
+/// Whether a PassBundle server answers at an address, before signing in or
+/// making an account there (docs/core.md, "Checking a server"): `{ok}`, or
+/// what's wrong, with `field: "server"`.
+///
+/// # Safety
+/// `server` is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_check_server(server: *const c_char) -> *mut c_char {
+    let server = text(server);
+    // Its own thread, as the other calls that wait on the network.
+    out(std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                catch_unwind(AssertUnwindSafe(|| {
+                    done(
+                        crate::server::Server::new(&server, crate::server::Device::this_one(""))
+                            .and_then(|s| s.check()),
+                    )
+                }))
+                .unwrap_or_else(|_| json!({ "ok": false, "error": STOPPED }))
+            })
+            .join()
+            .unwrap_or_else(|_| json!({ "ok": false, "error": STOPPED }))
+    }))
+}
+
+/// Saves the generator's settings to the server now, or takes its newer ones
+/// (synced_settings): the apps call it when the generator closes.
+///
+/// # Safety
+/// `account` is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_sync_settings(account: *const c_char) -> *mut c_char {
+    let account = text(account);
+    with_app_waiting(&account, |app| done(app.sync_settings()))
+}
+
+/// Locks one account; the others stay as they are. Answers its state.
+///
+/// # Safety
+/// `account` is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_lock(account: *const c_char) -> *mut c_char {
+    let account = text(account);
+    with_accounts(|accounts| {
+        accounts.lock(&account);
+        state_of(accounts.state(&account))
+    })
+}
+
+/// An account's app, for a phone's native code, after locking each account
+/// whose time is up: None while a slow call has the app, before the core is
+/// open, or for an account that isn't here.
 #[cfg(phone)]
-pub(crate) fn value_for_copy(id: &str, what: &str) -> Option<Zeroizing<String>> {
-    let guard = match APP.try_lock() {
-        Ok(guard) => guard,
-        Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
-        Err(TryLockError::WouldBlock) => return None,
-    };
-    guard.as_ref()?.value(id, what).ok()
+fn on_phone<T>(account: &str, call: impl FnOnce(&mut App) -> Option<T>) -> Option<T> {
+    let mut guard = accounts_now()?;
+    let accounts = guard.as_mut()?;
+    lock_if_due(accounts);
+    if account.is_empty() {
+        return None;
+    }
+    call(accounts.app(account)?)
+}
+
+/// An item's value for the clipboard, for the phone app's native piece
+/// (android.rs, or `pb_secret` for iOS's Swift): never a secret the
+/// person's shared folder hides from them (`App::value_to_copy`). None while
+/// locked, while a slow call has the app, or if there's nothing to copy.
+#[cfg(phone)]
+pub(crate) fn value_for_copy(account: &str, id: &str, what: &str) -> Option<Zeroizing<String>> {
+    on_phone(account, |app| app.value_to_copy(id, what).ok())
+}
+
+/// An item's value for Android's autofill to fill (android.rs), or iOS's
+/// AutoFill extension (`pb_fill_secret`): as for copying, except that a
+/// secret a shared folder hides still fills, as upstream's apps fill it,
+/// without the person seeing it.
+#[cfg(phone)]
+pub(crate) fn value_for_fill(account: &str, id: &str, what: &str) -> Option<Zeroizing<String>> {
+    on_phone(account, |app| app.value(id, what).ok())
 }
 
 /// An item's value for the iOS app's Swift to put on the pasteboard
@@ -415,16 +1109,17 @@ pub(crate) fn value_for_copy(id: &str, what: &str) -> Option<Zeroizing<String>> 
 /// `pb_free_secret`, which wipes it first.
 ///
 /// # Safety
-/// `id` and `what` are NUL-terminated UTF-8 strings, and `len` points to
-/// writable memory, for the call.
+/// `account`, `id`, and `what` are NUL-terminated UTF-8 strings, and `len`
+/// points to writable memory, for the call.
 #[cfg(target_os = "ios")]
 #[no_mangle]
 pub unsafe extern "C" fn pb_secret(
+    account: *const c_char,
     id: *const c_char,
     what: *const c_char,
     len: *mut usize,
 ) -> *mut u8 {
-    let Some(value) = value_for_copy(&text(id), &text(what)) else {
+    let Some(value) = value_for_copy(&text(account), &text(id), &text(what)) else {
         return std::ptr::null_mut();
     };
     let bytes: Box<[u8]> = value.as_bytes().into();
@@ -447,18 +1142,19 @@ pub unsafe extern "C" fn pb_free_secret(bytes: *mut u8, len: usize) {
     zeroize::Zeroize::zeroize(&mut *owned);
 }
 
-/// The unlocked vault's user key, for the iOS app's Swift to keep in the
-/// Keychain for unlocking with Face ID or Touch ID (docs/phones.md,
-/// "Unlocking with biometrics"), without passing through Dart; null while
-/// locked or busy. `len` gets its length. Free it with `pb_free_secret`,
-/// which wipes it.
+/// An unlocked account's user key, for the iOS app's Swift to keep in the
+/// Keychain for unlocking that account with Face ID or Touch ID
+/// (docs/phones.md, "Unlocking with biometrics"), without passing through
+/// Dart; null while it's locked or busy. `len` gets its length. Free it with
+/// `pb_free_secret`, which wipes it.
 ///
 /// # Safety
-/// `len` points to writable memory, for the call.
+/// `account` is a NUL-terminated UTF-8 string, and `len` points to writable
+/// memory, for the call.
 #[cfg(target_os = "ios")]
 #[no_mangle]
-pub unsafe extern "C" fn pb_user_key(len: *mut usize) -> *mut u8 {
-    let Some(key) = user_key_for_biometric() else {
+pub unsafe extern "C" fn pb_user_key(account: *const c_char, len: *mut usize) -> *mut u8 {
+    let Some(key) = user_key_for_biometric(&text(account)) else {
         return std::ptr::null_mut();
     };
     let bytes: Box<[u8]> = key.as_slice().into();
@@ -466,99 +1162,175 @@ pub unsafe extern "C" fn pb_user_key(len: *mut usize) -> *mut u8 {
     Box::into_raw(bytes).cast()
 }
 
-/// Opens the kept vault with the user key Swift read from the Keychain after
-/// Face ID or Touch ID: "" if it opened, else the words to show. A key that
-/// no longer opens it means biometric unlock is out of date, and is turned
-/// off. Free the answer with `pb_free`.
+/// Opens an account's kept vault with the user key Swift read from that
+/// account's Keychain item after Face ID or Touch ID: "" if it opened, else
+/// the words to show. A key that no longer opens it means biometric unlock
+/// is out of date, and is turned off. Free the answer with `pb_free`.
 ///
 /// # Safety
-/// `key` points to `len` readable bytes, for the call.
+/// `account` is a NUL-terminated UTF-8 string, and `key` points to `len`
+/// readable bytes, for the call.
 #[cfg(target_os = "ios")]
 #[no_mangle]
-pub unsafe extern "C" fn pb_unlock_with_key(key: *const u8, len: usize) -> *mut c_char {
+pub unsafe extern "C" fn pb_unlock_with_key(
+    account: *const c_char,
+    key: *const u8,
+    len: usize,
+) -> *mut c_char {
     let key = Zeroizing::new(std::slice::from_raw_parts(key, len).to_vec());
-    let why = match unlock_with_key_for_biometric(&key) {
+    let why = match unlock_with_key_for_biometric(&text(account), &key) {
         Ok(()) => String::new(),
         Err(why) => why,
     };
     CString::new(why).unwrap_or_default().into_raw()
 }
 
-/// The logins for a website, for iOS's AutoFill extension, as `fillable` has
-/// them: names and usernames only, never a password. Free it with `pb_free`.
+/// The user key Swift read from an account's Keychain item after Face ID or
+/// Touch ID, given back to confirm it's the person approving a sign-in to
+/// that account, never to unlock: "" if it's that account's open vault's,
+/// else the words to show. Free the answer with `pb_free`.
 ///
 /// # Safety
-/// `domain` is a NUL-terminated UTF-8 string, for the call.
+/// `account` is a NUL-terminated UTF-8 string, and `key` points to `len`
+/// readable bytes, for the call.
+#[cfg(target_os = "ios")]
+#[no_mangle]
+pub unsafe extern "C" fn pb_confirm_approval_with_key(
+    account: *const c_char,
+    key: *const u8,
+    len: usize,
+) -> *mut c_char {
+    let key = Zeroizing::new(std::slice::from_raw_parts(key, len).to_vec());
+    let why = match confirm_approval_with_key_for_biometric(&text(account), &key) {
+        Ok(()) => String::new(),
+        Err(why) => why,
+    };
+    CString::new(why).unwrap_or_default().into_raw()
+}
+
+/// What Swift does when the core turns an account's biometric unlock off
+/// (signing out, or a key that's out of date): it deletes that account's
+/// Keychain item. Swift sets it at start.
+#[cfg(target_os = "ios")]
+static REMOVE_BIOMETRIC: std::sync::OnceLock<extern "C" fn(*const c_char)> =
+    std::sync::OnceLock::new();
+
+/// Swift's function to turn an account's biometric unlock off (it's given
+/// the account's id on this device), set once at start.
+#[cfg(target_os = "ios")]
+#[no_mangle]
+pub extern "C" fn pb_set_remove_biometric(remove: extern "C" fn(*const c_char)) {
+    let _ = REMOVE_BIOMETRIC.set(remove);
+}
+
+/// Turns an account's biometric unlock off on iOS: Swift deletes its
+/// Keychain item.
+#[cfg(target_os = "ios")]
+pub(crate) fn remove_biometric(account: &str) {
+    let Some(remove) = REMOVE_BIOMETRIC.get() else {
+        return;
+    };
+    if let Ok(account) = CString::new(account) {
+        remove(account.as_ptr());
+    }
+}
+
+/// Opens the accounts the app keeps in the App Group folder `dir`, for iOS's
+/// AutoFill extension (docs/phones.md, "Autofill"): all locked, read beside
+/// the app without changing its folder (`Accounts::open_beside`), with the
+/// refresh tokens in the Keychain group the two share. Answers as
+/// `pb_accounts`. Free it with `pb_free`.
+///
+/// # Safety
+/// `dir` is a NUL-terminated UTF-8 string, valid for the call.
+#[cfg(target_os = "ios")]
+#[no_mangle]
+pub unsafe extern "C" fn pb_autofill_open(dir: *const c_char) -> *mut c_char {
+    let dir = text(dir);
+    let secrets: Arc<dyn SecretStore> = Arc::new(OsSecretStore::new(std::path::Path::new(&dir)));
+    *APP.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) =
+        Some(Accounts::open_beside(std::path::Path::new(&dir), secrets));
+    with_accounts(|accounts| opened(accounts))
+}
+
+/// Ends an AutoFill request: every account locks (its keys and everything
+/// decrypted wiped), and the accounts are let go, so nothing of the vault
+/// stays in the extension's process, which iOS may keep for the next one.
+#[cfg(target_os = "ios")]
+#[no_mangle]
+pub extern "C" fn pb_autofill_close() -> *mut c_char {
+    let mut guard = APP.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(accounts) = guard.as_mut() {
+        let ids: Vec<String> = accounts.summaries().into_iter().map(|a| a.id).collect();
+        for id in ids {
+            accounts.lock(&id);
+        }
+    }
+    *guard = None;
+    out(json!({ "ok": true }))
+}
+
+/// The logins for a website, for iOS's AutoFill extension, as `fillable`
+/// has them: from every account unlocked in the extension, names and
+/// usernames only, never a password. Free it with `pb_free`.
+///
+/// # Safety
+/// `domain` is a NUL-terminated UTF-8 string, valid for the call.
 #[cfg(target_os = "ios")]
 #[no_mangle]
 pub unsafe extern "C" fn pb_fillable(domain: *const c_char) -> *mut c_char {
     out(fillable("", &text(domain)))
 }
 
+/// A login's value for iOS's AutoFill extension to fill ("username" or
+/// "password"), from the account named, as UTF-8 bytes; null while it's
+/// locked or busy, or if there's none. Taken only once the person picks the
+/// login. `len` gets its length. Free it with `pb_free_secret`, which wipes
+/// it first.
+///
+/// # Safety
+/// `account`, `id`, and `what` are NUL-terminated UTF-8 strings, and `len`
+/// points to writable memory, for the call.
+#[cfg(target_os = "ios")]
+#[no_mangle]
+pub unsafe extern "C" fn pb_fill_secret(
+    account: *const c_char,
+    id: *const c_char,
+    what: *const c_char,
+    len: *mut usize,
+) -> *mut u8 {
+    let Some(value) = value_for_fill(&text(account), &text(id), &text(what)) else {
+        return std::ptr::null_mut();
+    };
+    let bytes: Box<[u8]> = value.as_bytes().into();
+    *len = bytes.len();
+    Box::into_raw(bytes).cast()
+}
+
 /// What iOS may suggest above the keyboard, for the app to give iOS after
-/// each sync (docs/phones.md, "Autofill"): `[{id, username, domain}]`, never
-/// a password; none while locked. Free it with `pb_free`.
+/// each sync (docs/phones.md, "Autofill"): from every unlocked account,
+/// `[{account, id, username, domain}]`, never a password. Free it with
+/// `pb_free`.
 #[cfg(target_os = "ios")]
 #[no_mangle]
 pub extern "C" fn pb_suggestions() -> *mut c_char {
-    with_app(|app| match app.vault() {
-        Some(vault) => Value::Array(
-            vault
-                .suggestions()
-                .into_iter()
-                .map(|s| json!({ "id": s.id, "username": s.username, "domain": s.domain }))
-                .collect(),
-        ),
-        None => json!([]),
-    })
-}
-
-/// The passkeys iOS may suggest in its passkey sheet, for the app to give iOS
-/// after each sync (docs/phones.md, "Passkeys"): `[{id, rpId, userName,
-/// credentialId, userHandle}]`, the IDs in base64url, never a key; none while
-/// locked. Free it with `pb_free`.
-#[cfg(target_os = "ios")]
-#[no_mangle]
-pub extern "C" fn pb_passkey_suggestions() -> *mut c_char {
-    with_app(|app| match app.vault() {
-        Some(vault) => Value::Array(
-            vault
-                .passkey_suggestions()
-                .into_iter()
-                .map(|s| {
-                    json!({
-                        "id": s.id,
-                        "rpId": s.rp_id,
-                        "userName": s.user_name,
-                        "credentialId": base64url(&s.credential_id),
-                        "userHandle": base64url(&s.user_handle),
+    with_accounts(|accounts| {
+        Value::Array(
+            accounts
+                .unlocked()
+                .flat_map(|(account, vault)| {
+                    vault.suggestions().into_iter().map(move |s| {
+                        json!({
+                            "account": account,
+                            "id": s.id,
+                            "username": s.username,
+                            "domain": s.domain,
+                        })
                     })
                 })
                 .collect(),
-        ),
-        None => json!([]),
+        )
     })
-}
-
-/// What Swift does when the core turns biometric unlock off (signing out, or
-/// a key that's out of date): it deletes the Keychain item. Swift sets it at
-/// start.
-#[cfg(target_os = "ios")]
-static REMOVE_BIOMETRIC: std::sync::OnceLock<extern "C" fn()> = std::sync::OnceLock::new();
-
-/// Swift's function to turn biometric unlock off, set once at start.
-#[cfg(target_os = "ios")]
-#[no_mangle]
-pub extern "C" fn pb_set_remove_biometric(remove: extern "C" fn()) {
-    let _ = REMOVE_BIOMETRIC.set(remove);
-}
-
-/// Turns biometric unlock off on iOS: Swift deletes the Keychain item.
-#[cfg(target_os = "ios")]
-pub(crate) fn remove_biometric() {
-    if let Some(remove) = REMOVE_BIOMETRIC.get() {
-        remove();
-    }
 }
 
 /// Opens the core on the Android app's folder, unless it's open already: the
@@ -567,79 +1339,120 @@ pub(crate) fn remove_biometric() {
 pub(crate) fn open_if_closed(dir: &str) {
     let mut guard = APP.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if guard.is_none() {
-        let secrets = Box::new(OsSecretStore::new(std::path::Path::new(dir)));
-        *guard = Some(App::open(Store::new(dir), secrets));
+        let secrets = Arc::new(OsSecretStore::new(std::path::Path::new(dir)));
+        *guard = Some(Accounts::open(std::path::Path::new(dir), secrets));
     }
 }
 
-/// The logins for an Android app or the page a browser shows, for the phone's
-/// autofill (android.rs, or `pb_fillable` for iOS's AutoFill extension):
-/// names and usernames only. `locked` while there's no open vault, and `busy`
-/// while a slow call has the app.
+/// The logins for an Android app or the page a browser shows, for its
+/// autofill (android.rs), or for a website in iOS's AutoFill extension
+/// (`pb_fillable`), from every unlocked account: names and usernames only,
+/// each with its account's id on this device (`account`), which filling it
+/// names, and with more than one account here, the account's name or email
+/// (`accountLabel`). `locked` while no account is unlocked (with the account
+/// the screens show, to unlock), `signedOut` with no account, and `busy`
+/// while a slow call has the app. `account` is the one the screens show.
 #[cfg(phone)]
 pub(crate) fn fillable(package: &str, domain: &str) -> Value {
     use crate::matching::Target;
-    let guard = match APP.try_lock() {
-        Ok(guard) => guard,
-        Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
-        Err(TryLockError::WouldBlock) => return json!({ "busy": true }),
+    let Some(mut guard) = accounts_now() else {
+        return json!({ "busy": true });
     };
-    let Some(app) = guard.as_ref() else {
+    let Some(accounts) = guard.as_mut() else {
         return json!({ "locked": true, "signedOut": true });
     };
-    let Some(vault) = app.vault() else {
-        let signed_out = matches!(app.state(), State::SignedOut { .. });
-        return json!({ "locked": true, "signedOut": signed_out });
+    lock_if_due(accounts);
+    let Some(shown) = accounts.active().map(str::to_owned) else {
+        return json!({ "locked": true, "signedOut": true });
     };
+    if accounts.unlocked().next().is_none() {
+        // Which account unlocking opens, by name, when there's more than one.
+        return json!({
+            "locked": true,
+            "signedOut": false,
+            "account": shown,
+            "accountLabel": account_label(accounts, &shown),
+        });
+    }
     let target = if domain.is_empty() {
         Target::App(package)
     } else {
         Target::Website(domain)
     };
-    let items: Vec<Value> = vault
-        .matching(&target)
-        .iter()
-        .map(|i| json!({ "id": i.id, "name": i.name, "username": i.username, "reprompt": i.kept.reprompt != 0 }))
+    let items: Vec<Value> = accounts
+        .fillable(&target)
+        .into_iter()
+        .map(|(account, i)| {
+            json!({
+                "id": i.id,
+                "account": account,
+                "accountLabel": account_label(accounts, account),
+                "name": i.name,
+                "username": i.username,
+                "reprompt": i.kept.reprompt != 0,
+            })
+        })
         .collect();
-    json!({ "locked": false, "items": items })
+    json!({ "locked": false, "account": shown, "items": items })
 }
 
 /// The master password, for a login that asks for it again before Android's
 /// autofill fills it (android.rs): `{ok}`, or the words to show.
 #[cfg(target_os = "android")]
-pub(crate) fn confirm_master_password(id: &str, password: &str) -> Value {
-    app_value(|app| done(app.confirm_master_password(id, password)))
+pub(crate) fn confirm_master_password(account: &str, id: &str, password: &str) -> Value {
+    accounts_value(|accounts| {
+        lock_if_due(accounts);
+        on_account(accounts, account, |app| {
+            done(app.confirm_master_password(id, password))
+        })
+    })
 }
 
-/// The unlocked vault's user key, for the phone app to seal for biometric
-/// unlock (android.rs, or `pb_user_key` for iOS's Keychain). None while locked
-/// or busy.
-#[cfg(phone)]
-pub(crate) fn user_key_for_biometric() -> Option<Zeroizing<Vec<u8>>> {
-    let guard = match APP.try_lock() {
-        Ok(guard) => guard,
-        Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
-        Err(TryLockError::WouldBlock) => return None,
-    };
-    Some(Zeroizing::new(
-        guard.as_ref()?.vault()?.user_key().to_bytes().to_vec(),
-    ))
+/// Unlocks an account with its master password, for Android's autofill
+/// while it's locked and there's no biometric unlock (FillActivity.kt): as
+/// the lock screen does (`pb_unlock`), the account named. `{ok}`, or the
+/// words to show.
+#[cfg(target_os = "android")]
+pub(crate) fn unlock_with_master_password(account: &str, password: &str) -> Value {
+    accounts_value(|accounts| {
+        lock_if_due(accounts);
+        if account.is_empty() {
+            return failed(Error::SignedOut);
+        }
+        on_account(accounts, account, |app| done(app.unlock(password)))
+    })
 }
 
-/// Opens the kept vault with the user key the phone app's biometric unlock
-/// opened (android.rs, or `pb_unlock_with_key` for iOS); the error's words
-/// otherwise.
+/// An unlocked account's user key, for the phone app to seal for that
+/// account's biometric unlock (android.rs, or `pb_user_key` for iOS's
+/// Keychain). None while it's locked or busy.
 #[cfg(phone)]
-pub(crate) fn unlock_with_key_for_biometric(key: &[u8]) -> Result<(), String> {
-    let mut guard = match APP.try_lock() {
-        Ok(guard) => guard,
-        Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
-        Err(TryLockError::WouldBlock) => return Err("PassBundle is busy; try again.".into()),
+pub(crate) fn user_key_for_biometric(account: &str) -> Option<Zeroizing<Vec<u8>>> {
+    on_phone(account, |app| {
+        Some(Zeroizing::new(app.vault()?.user_key().to_bytes().to_vec()))
+    })
+}
+
+/// The account a phone's biometric key is given back to, after its prompt:
+/// the error's words when it isn't here or the core is busy.
+#[cfg(phone)]
+fn for_biometric(
+    account: &str,
+    key: &[u8],
+    call: impl FnOnce(&mut App, crate::crypto::SymmetricKey) -> crate::Result<()>,
+) -> Result<(), String> {
+    let Some(mut guard) = accounts_now() else {
+        return Err("PassBundle is busy; try again.".into());
     };
-    let app = guard.as_mut().ok_or_else(|| Error::SignedOut.to_string())?;
+    let accounts = guard.as_mut().ok_or_else(|| Error::SignedOut.to_string())?;
+    let app = (!account.is_empty())
+        .then(|| accounts.app(account))
+        .flatten()
+        .ok_or_else(|| Error::SignedOut.to_string())?;
     let key = crate::crypto::SymmetricKey::from_bytes(key).map_err(|e| e.to_string())?;
-    match app.unlock_with_key(key) {
-        // Out of date (the account's keys changed): it's turned off.
+    match call(&mut *app, key) {
+        // Not this account's vault's key (its keys changed): out of date,
+        // and turned off.
         Err(e @ Error::Refused(_)) => {
             let _ = app.remove_biometric();
             Err(e.to_string())
@@ -648,141 +1461,231 @@ pub(crate) fn unlock_with_key_for_biometric(key: &[u8]) -> Result<(), String> {
     }
 }
 
-fn unlocked(app: &App) -> bool {
-    matches!(app.state(), State::Unlocked { .. })
+/// The user key the phone app's biometric prompt opened, from the account's
+/// own Keystore key or Keychain item, given back to confirm it's the person
+/// approving a sign-in to that account (android.rs, or
+/// `pb_confirm_approval_with_key` for iOS): never to unlock. The error's
+/// words otherwise; a key that isn't that account's open vault's turns its
+/// biometric unlock off, as unlocking does.
+#[cfg(phone)]
+pub(crate) fn confirm_approval_with_key_for_biometric(
+    account: &str,
+    key: &[u8],
+) -> Result<(), String> {
+    for_biometric(account, key, App::confirm_approval_with_key)
+}
+
+/// Opens an account's kept vault with the user key the phone app's
+/// biometric unlock opened, from that account's own Keystore key or Keychain
+/// item (android.rs, or `pb_unlock_with_key` for iOS); the error's words
+/// otherwise.
+#[cfg(phone)]
+pub(crate) fn unlock_with_key_for_biometric(account: &str, key: &[u8]) -> Result<(), String> {
+    for_biometric(account, key, App::unlock_with_key)
 }
 
 /// When to lock by itself: `lockAfterMinutes` (null: only when the app
 /// closes) and `lockOnSleep` (when the screen locks or the computer sleeps).
+///
+/// # Safety
+/// `account` is null or a NUL-terminated UTF-8 string, valid for the call.
 #[no_mangle]
-pub extern "C" fn pb_preferences() -> *mut c_char {
-    with_app(|app| json!(app.preferences()))
+pub unsafe extern "C" fn pb_preferences(account: *const c_char) -> *mut c_char {
+    let account = text(account);
+    with_app(&account, |app| json!(app.preferences()))
 }
 
 /// The organizations' "Vault lock" policy (docs/core.md, "Locking by
 /// policy"): `maxMinutes` (the longest wait, or null), `immediately`,
-/// `onSystemLock`, and `signOut`. All off when no organization sets it.
+/// `onSystemLock`, and `signOut`; and `removeUnlockWithPin`, from their
+/// "Remove Unlock with PIN" policy. All off when no organization sets them.
+///
+/// # Safety
+/// `account` is null or a NUL-terminated UTF-8 string, valid for the call.
 #[no_mangle]
-pub extern "C" fn pb_lock_policy() -> *mut c_char {
-    with_app(|app| json!(app.lock_policy()))
+pub unsafe extern "C" fn pb_lock_policy(account: *const c_char) -> *mut c_char {
+    let account = text(account);
+    with_app(&account, |app| json!(app.lock_policy()))
 }
 
 /// # Safety
-/// `preferences` is null or a NUL-terminated UTF-8 string, valid for the call.
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
 #[no_mangle]
-pub unsafe extern "C" fn pb_set_preferences(preferences: *const c_char) -> *mut c_char {
+pub unsafe extern "C" fn pb_set_preferences(
+    account: *const c_char,
+    preferences: *const c_char,
+) -> *mut c_char {
+    let account = text(account);
     let preferences = serde_json::from_str::<Preferences>(&text(preferences));
-    with_app(|app| match preferences {
+    with_app(&account, |app| match preferences {
         Ok(preferences) => done(app.set_preferences(preferences)),
         Err(_) => failed(Error::Damaged("those choices")),
     })
 }
 
-/// The person used the app just now. Skipped while a slow call has the app.
+/// The person used the app just now, in this account: its wait starts
+/// again (the others keep theirs). Skipped while a slow call has the app.
+///
+/// # Safety
+/// `account` is null or a NUL-terminated UTF-8 string, valid for the call.
 #[no_mangle]
-pub extern "C" fn pb_used() -> *mut c_char {
-    with_app_now(|app| {
-        app.used();
+pub unsafe extern "C" fn pb_used(account: *const c_char) -> *mut c_char {
+    let account = text(account);
+    with_accounts_now(|accounts| {
+        accounts.used(&account);
         json!({ "ok": true })
     })
     .unwrap_or_else(|| out(json!({ "ok": true })))
 }
 
-/// Locks if it's time to (docs/core.md, "Locking by itself"). The app asks
-/// every two seconds while unlocked: `locked` says whether the vault is locked
-/// now, and `reason` why it just locked ("idle", "screenLocked", "slept").
-/// While a slow call has the app, `busy` is true, and the next tick decides.
+/// Whether any account is unlocked now.
+fn any_unlocked(accounts: &Accounts) -> bool {
+    accounts.summaries().iter().any(|a| a.unlocked)
+}
+
+/// Locks each account whose time is up, by its own choices and policy
+/// (docs/core.md, "Locking by itself"). The app asks every two seconds while
+/// any account is unlocked: `locked` says whether one locked (or signed out)
+/// just now, `reason` why the first did ("idle", "screenLocked", "slept"),
+/// and `unlocked` whether any still is; with the accounts as they are now
+/// (`active`, `accounts`, as `pb_accounts`), so the screens see one that
+/// locked or unlocked some other way (autofill, say). While a slow call has
+/// the app, `busy` is true, and the next tick decides.
 #[no_mangle]
 pub extern "C" fn pb_tick() -> *mut c_char {
     // Asked outside the app's lock: on Linux it's a D-Bus call.
     let readings = autolock::readings();
-    with_app_now(|app| {
-        let reason = app.tick(&readings);
-        json!({ "busy": false, "locked": !unlocked(app), "reason": reason.map(|r| r.name()) })
+    with_accounts_now(|accounts| {
+        let locked = accounts.tick(&readings);
+        let mut answer = accounts_json(accounts);
+        answer["busy"] = json!(false);
+        answer["locked"] = json!(!locked.is_empty());
+        answer["reason"] = json!(locked.first().map(|(_, r)| r.name()));
+        answer["unlocked"] = json!(any_unlocked(accounts));
+        answer
     })
-    .unwrap_or_else(|| out(json!({ "busy": true, "locked": false })))
+    .unwrap_or_else(|| out(json!({ "busy": true, "locked": false, "unlocked": true })))
 }
 
-/// The app left the screen (a phone's app switcher or home): locks now if the
-/// person chose "Immediately". `locked` says whether the vault is locked now.
+/// The app left the screen (a phone's app switcher or home): each account
+/// whose person chose "Immediately", or whose policy says so, locks now.
+/// `locked` says whether one did.
 #[no_mangle]
 pub extern "C" fn pb_left() -> *mut c_char {
-    with_app_now(|app| {
-        app.left();
-        json!({ "busy": false, "locked": !unlocked(app) })
-    })
-    .unwrap_or_else(|| {
-        LEFT_NOTICE.store(true, Ordering::SeqCst);
-        out(json!({ "busy": true, "locked": false }))
-    })
+    with_accounts_now(|accounts| json!({ "busy": false, "locked": accounts.left() }))
+        .unwrap_or_else(|| {
+            LEFT_NOTICE.store(true, Ordering::SeqCst);
+            out(json!({ "busy": true, "locked": false }))
+        })
 }
 
-/// The OS says the computer is about to sleep: locks now if the person chose
-/// that, or as soon as a slow call that has the app is done.
+/// The OS says the computer is about to sleep: each account whose person
+/// chose that, or whose policy says so, locks now, or as soon as a slow call
+/// that has the app is done. `locked` says whether one did.
 #[no_mangle]
 pub extern "C" fn pb_sleeping() -> *mut c_char {
-    with_app_now(|app| {
-        app.sleeping();
-        json!({ "busy": false, "locked": !unlocked(app) })
-    })
-    .unwrap_or_else(|| {
-        SLEEP_NOTICE.store(true, Ordering::SeqCst);
-        out(json!({ "busy": true, "locked": false }))
+    with_accounts_now(|accounts| json!({ "busy": false, "locked": accounts.sleeping() }))
+        .unwrap_or_else(|| {
+            SLEEP_NOTICE.store(true, Ordering::SeqCst);
+            out(json!({ "busy": true, "locked": false }))
+        })
+}
+
+/// Signs out of one account: its vault, session, and biometric unlock are
+/// forgotten, and its folder, and the others stay as they are. Answers as
+/// `pb_accounts`: the screens show the first of the others, if any.
+///
+/// # Safety
+/// `account` is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_sign_out(account: *const c_char) -> *mut c_char {
+    let account = text(account);
+    with_accounts_waiting(|accounts| {
+        accounts.sign_out(&account);
+        opened(accounts)
     })
 }
 
+/// Where items live, as the web vault's menu has it (places.rs): the
+/// person's own folders (Personal's), and each organization with its shared
+/// folders, by name, each nested inside the one its name starts with, with
+/// what the person can do there (`grid`; `canCreate` means new items may go
+/// in it). Each has `id`, `name` (the whole name), `label` (what it's called
+/// where it sits), `depth`, and `parentId`; a shared folder has its `look`
+/// (`{icon, tone}`, or null for the plain folder; places.rs).
+///
+/// # Safety
+/// `account` is null or a NUL-terminated UTF-8 string, valid for the call.
 #[no_mangle]
-pub extern "C" fn pb_sign_out() -> *mut c_char {
-    with_app_waiting(|app| {
-        app.sign_out();
-        state(app)
-    })
-}
-
-/// Folders, and organizations with their collections, for the screens and the editor.
-#[no_mangle]
-pub extern "C" fn pb_places() -> *mut c_char {
-    with_app(|app| {
+pub unsafe extern "C" fn pb_places(account: *const c_char) -> *mut c_char {
+    let account = text(account);
+    with_app(&account, |app| {
         let Some(vault) = app.vault() else {
             return json!({ "folders": [], "organizations": [] });
         };
-        let by_name = |v: &Value| v["name"].as_str().unwrap_or_default().to_lowercase();
-        let mut folders: Vec<Value> = vault
-            .folders
-            .iter()
-            .map(|(id, name)| json!({ "id": id, "name": name }))
-            .collect();
-        folders.sort_by_key(by_name);
-        let mut organizations: Vec<Value> = vault
-            .organizations
-            .iter()
+        let nested = |entries: Vec<(String, String)>| crate::places::nest(&entries);
+        let folders: Vec<Value> = nested(
+            vault
+                .folders
+                .iter()
+                .map(|(id, name)| (id.clone(), name.clone()))
+                .collect(),
+        )
+        .into_iter()
+        .map(|n| json!({ "id": n.id, "name": n.name, "label": n.label, "depth": n.depth, "parentId": n.parent }))
+        .collect();
+        let mut organizations: Vec<(&String, &String)> = vault.organizations.iter().collect();
+        organizations.sort_by_key(|(_, name)| name.to_lowercase());
+        let organizations: Vec<Value> = organizations
+            .into_iter()
             .map(|(id, name)| {
-                let mut collections: Vec<Value> = vault
-                    .collection_orgs
-                    .iter()
-                    .filter(|(_, org)| *org == id)
-                    .filter_map(|(c, _)| {
-                        vault
-                            .collections
-                            .get(c)
-                            .map(|name| json!({ "id": c, "name": name }))
+                let collections: Vec<Value> = nested(
+                    vault
+                        .collection_orgs
+                        .iter()
+                        .filter(|(_, org)| *org == id)
+                        .filter_map(|(c, _)| vault.collections.get(c).map(|n| (c.clone(), n.clone())))
+                        .collect(),
+                )
+                .into_iter()
+                .map(|n| {
+                    let grid = vault.collection_grids.get(&n.id).copied().unwrap_or_default();
+                    json!({
+                        "id": n.id, "name": n.name, "label": n.label, "depth": n.depth, "parentId": n.parent,
+                        "grid": grid, "canCreate": grid.create,
+                        "look": vault.collection_looks.get(&n.id),
                     })
-                    .collect();
-                collections.sort_by_key(by_name);
+                })
+                .collect();
                 json!({ "id": id, "name": name, "collections": collections })
             })
             .collect();
-        organizations.sort_by_key(by_name);
         json!({ "folders": folders, "organizations": organizations })
+    })
+}
+
+/// Templates to make new items from, grouped as the web vault's New item
+/// picker groups them (templates.rs): `[{name, templates: [{id, name, base,
+/// category, fields: [{label, kind, value}], source, from}]}]`.
+///
+/// # Safety
+/// `account` is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_templates(account: *const c_char) -> *mut c_char {
+    let account = text(account);
+    with_app(&account, |app| match app.vault() {
+        Some(vault) => json!(templates::groups(vault, |item| app.may_use(item))),
+        None => json!([{ "name": "Built-in", "templates": templates::built_in() }]),
     })
 }
 
 /// # Safety
 /// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
 #[no_mangle]
-pub unsafe extern "C" fn pb_list(query: *const c_char) -> *mut c_char {
+pub unsafe extern "C" fn pb_list(account: *const c_char, query: *const c_char) -> *mut c_char {
+    let account = text(account);
     let query = text(query);
-    with_app(|app| match app.vault() {
+    with_app(&account, |app| match app.vault() {
         Some(vault) => Value::Array(
             vault
                 .search(&query)
@@ -799,9 +1702,10 @@ pub unsafe extern "C" fn pb_list(query: *const c_char) -> *mut c_char {
 /// # Safety
 /// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
 #[no_mangle]
-pub unsafe extern "C" fn pb_item(id: *const c_char) -> *mut c_char {
+pub unsafe extern "C" fn pb_item(account: *const c_char, id: *const c_char) -> *mut c_char {
+    let account = text(account);
     let id = text(id);
-    with_app(|app| {
+    with_app(&account, |app| {
         let Some(vault) = app.vault() else {
             return Value::Null;
         };
@@ -817,6 +1721,35 @@ pub unsafe extern "C" fn pb_item(id: *const c_char) -> *mut c_char {
             return view;
         }
         view["grant"] = json!(app.grant());
+        view["permissions"] = permissions(vault, item);
+        view["created"] = json!(item.creation_date);
+        view["revisionDate"] = json!(item.revision_date);
+        view["passwordChanged"] = json!(item.kept.password_revision_date);
+        // How strong its password is (health.rs), for someone who may see it.
+        if let Some(password) = item.password.as_ref().filter(|p| {
+            !p.is_empty() && item.kind == ItemKind::Login && vault.grid(item).see_passwords
+        }) {
+            let hints: Vec<&str> = [item.username.as_deref(), Some(item.name.as_str())]
+                .into_iter()
+                .flatten()
+                .collect();
+            view["strength"] = json!(crate::health::word(crate::health::strength(
+                password, &hints
+            )));
+        }
+        if let Some((id, name, category)) = templates::template_of(item) {
+            view["template"] = json!({ "id": id, "name": name, "category": category });
+        }
+        if let Some(d) = templates::definition_of(item) {
+            view["definition"] = json!({ "base": d.base, "from": d.from });
+        }
+        // A bank account's, driver's license's, or passport's values; the
+        // secrets show only when revealed (`pb_reveal` with their key).
+        view["details"] = item
+            .details
+            .iter()
+            .map(|d| json!({ "key": d.key, "label": d.label, "secret": d.secret, "value": if d.secret { None } else { Some(d.value.as_str()) } }))
+            .collect();
         view["username"] = json!(item.username);
         view["uris"] = json!(item.uris);
         view["collectionIds"] = json!(item.collection_ids);
@@ -830,12 +1763,15 @@ pub unsafe extern "C" fn pb_item(id: *const c_char) -> *mut c_char {
             .zip(&item.kept.field_kinds)
             .map(|(f, (kind, _))| json!({ "name": f.name, "hidden": f.hidden, "type": kind, "reserved": f.reserved(), "editable": f.edited_by_the_app(*kind), "value": if f.hidden || f.reserved() { None } else { Some(f.value.as_str()) } }))
             .collect();
-        // The expiration date the web vault or the extension set, if any.
+        // The expiration date set on it, if any, and when it reminds: `value`
+        // as the field holds it (null for the default) and in words.
         view["expires"] = json!(item
             .fields
             .iter()
             .find(|f| f.name == EXPIRES_FIELD)
             .map(|f| f.value.as_str()));
+        let remind = expiration::Remind::of(item);
+        view["remind"] = json!({ "value": remind.stored(), "words": remind.words() });
         // A card's and an identity's plain details, and which secrets they have.
         if let Some(card) = &item.card {
             view["card"] = json!({
@@ -897,23 +1833,439 @@ pub unsafe extern "C" fn pb_item(id: *const c_char) -> *mut c_char {
                 "hasLicenseNumber": has(&identity.license_number),
             });
         }
-        // The app edits logins, notes, cards, and identities; the web vault edits SSH keys.
-        view["editable"] = json!(matches!(
+        // The app edits logins, notes, cards, and identities, where the
+        // person may; the web vault edits SSH keys and the newer kinds, and
+        // the item says so (`editInWebVault`), so Edit isn't just gone.
+        let may_edit = vault.grid(item).edit && vault.grid(item).see_passwords;
+        let app_edits = matches!(
             item.kind,
             ItemKind::Login | ItemKind::SecureNote | ItemKind::Card | ItemKind::Identity
-        ));
+        );
+        view["editable"] = json!(app_edits && may_edit);
+        view["editInWebVault"] = json!(!app_edits && may_edit && !item.deleted);
         view
+    })
+}
+
+/// Favorites an item or not (`favorite` "true" or "false"), then syncs:
+/// `{ok}`, or the words to show.
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_set_favorite(
+    account: *const c_char,
+    id: *const c_char,
+    favorite: *const c_char,
+) -> *mut c_char {
+    let account = text(account);
+    let (id, favorite) = (text(id), text(favorite) == "true");
+    with_app_waiting(&account, |app| done(app.set_favorite(&id, favorite)))
+}
+
+/// How the app looks on this device: `{showIcons}`.
+#[no_mangle]
+pub extern "C" fn pb_appearance() -> *mut c_char {
+    with_accounts(|accounts| json!(accounts.appearance()))
+}
+
+/// Changes how the app looks: `{showIcons}`. Turning icons off forgets the
+/// ones kept.
+///
+/// # Safety
+/// `appearance` is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_set_appearance(appearance: *const c_char) -> *mut c_char {
+    let appearance = serde_json::from_str::<crate::store::Appearance>(&text(appearance));
+    with_accounts(|accounts| match appearance {
+        Ok(a) => done(accounts.set_appearance(a)),
+        Err(_) => failed(Error::Damaged("those choices")),
+    })
+}
+
+/// Whether PassBundle's windows may be in screenshots, screen recordings,
+/// and screen sharing on this computer: `{allow}`, false until the person
+/// allows them (macOS and Windows keep them out; DESIGN.md, "Screenshots").
+/// Test builds (the test-hooks feature) allow them with
+/// PB_ALLOW_SCREENSHOTS=1, for CI's screenshots of the real window; a
+/// release reads no such setting.
+#[no_mangle]
+pub extern "C" fn pb_screenshots() -> *mut c_char {
+    with_accounts(|accounts| {
+        #[cfg(feature = "test-hooks")]
+        if std::env::var("PB_ALLOW_SCREENSHOTS").as_deref() == Ok("1") {
+            return json!({ "allow": true });
+        }
+        json!(accounts.screenshots())
+    })
+}
+
+/// Allows screenshots of PassBundle on this computer, or keeps it out of
+/// them again: `{allow}`. `{ok}`, or the words to show.
+///
+/// # Safety
+/// `screenshots` is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_set_screenshots(screenshots: *const c_char) -> *mut c_char {
+    let screenshots = serde_json::from_str::<crate::store::Screenshots>(&text(screenshots));
+    with_accounts(|accounts| match screenshots {
+        Ok(s) => done(accounts.set_screenshots(s)),
+        Err(_) => failed(Error::Damaged("that choice")),
+    })
+}
+
+/// A website's icon for a login's tile (icons.rs): `{ok, icon}`, the image
+/// in base64, or `{ok, icon: null}` where there's none (or icons are off,
+/// or the vault is locked). From the server's icon service the first time,
+/// away from the app's other calls, then from memory while the vault stays
+/// open; nothing of it is written to the device. It's asked of the
+/// account's own server, and kept with that account only.
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_icon(account: *const c_char, host: *const c_char) -> *mut c_char {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let (account, host) = (text(account), text(host));
+    // Only a host name the core would make.
+    if crate::icons::host_of(&format!("https://{host}")).as_deref() != Some(host.as_str()) {
+        return out(json!({ "ok": false, "error": "not a website's host" }));
+    }
+    #[cfg(feature = "test-hooks")]
+    if let Some(icon) = TEST_ICONS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&host)
+    {
+        return out(json!({ "ok": true, "icon": STANDARD.encode(icon) }));
+    }
+    let mut source = None;
+    let mut kept = None;
+    let _ = app_value(&account, |app| {
+        source = app.icon_source();
+        kept = app
+            .kept_icon(&host)
+            .map(|icon| icon.map(|bytes| STANDARD.encode(bytes)));
+        Value::Null
+    });
+    let Some((server, session)) = source else {
+        return out(json!({ "ok": true, "icon": null }));
+    };
+    if let Some(kept) = kept {
+        return out(json!({ "ok": true, "icon": kept }));
+    }
+    out(waiting(|| {
+        let fetched = crate::server::Server::new(&server, crate::server::Device::this_one(""))
+            .and_then(|s| s.icon(&host));
+        match fetched {
+            Ok(icon) => {
+                let encoded = icon.as_deref().map(|bytes| STANDARD.encode(bytes));
+                let _ = app_value(&account, |app| {
+                    app.keep_icon(session, &host, icon);
+                    Value::Null
+                });
+                json!({ "ok": true, "icon": encoded })
+            }
+            Err(e) => failed(e),
+        }
+    }))
+}
+
+/// Websites' icons `pb_icon` answers with instead of asking a server, for
+/// tests (the test-hooks feature): `{"<host>": "<base64>"}`, replacing any
+/// given before; `{}` for none.
+#[cfg(feature = "test-hooks")]
+static TEST_ICONS: std::sync::Mutex<std::collections::BTreeMap<String, Vec<u8>>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// # Safety
+/// `icons` is null or a NUL-terminated UTF-8 string, valid for the call.
+#[cfg(feature = "test-hooks")]
+#[no_mangle]
+pub unsafe extern "C" fn pb_test_icons(icons: *const c_char) -> *mut c_char {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let given: std::collections::BTreeMap<String, String> =
+        serde_json::from_str(&text(icons)).unwrap_or_default();
+    let decoded = given
+        .into_iter()
+        .filter_map(|(host, icon)| Some((host, STANDARD.decode(icon).ok()?)))
+        .collect();
+    *TEST_ICONS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = decoded;
+    out(json!({ "ok": true }))
+}
+
+/// Items given expiration dates and reminder days whenever a vault opens,
+/// for tests (the test-hooks feature): `{"<item id>": {"expires":
+/// "YYYY-MM-DD", "remind": "7,1"}}`, replacing any given before; `{}` for
+/// none. Lock and unlock (or sync) for an open vault to take them.
+///
+/// # Safety
+/// `given` is null or a NUL-terminated UTF-8 string, valid for the call.
+#[cfg(feature = "test-hooks")]
+#[no_mangle]
+pub unsafe extern "C" fn pb_test_expiration(given: *const c_char) -> *mut c_char {
+    let given: std::collections::BTreeMap<String, Value> =
+        serde_json::from_str(&text(given)).unwrap_or_default();
+    *crate::vault::test_hooks::EXPIRING
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = given
+        .into_iter()
+        .filter_map(|(id, v)| {
+            let date = v["expires"].as_str()?.to_owned();
+            Some((id, (date, v["remind"].as_str().map(str::to_owned))))
+        })
+        .collect();
+    out(json!({ "ok": true }))
+}
+
+/// The expiration reminders due now for an account's open vault
+/// (expiration.rs), each said once: `{ok, title, due: {soon, expired},
+/// standing: {soon, expired}}`. `title` is what to say ("2 items expire
+/// soon"), null when nothing is due; `standing` is every item at one of its
+/// steps, shown before or not, which a computer's desktop agent is told for
+/// its tray.
+///
+/// # Safety
+/// `account` is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_reminders(account: *const c_char) -> *mut c_char {
+    let account = text(account);
+    with_app(&account, |app| match app.reminders() {
+        Ok(found) => json!({
+            "ok": true,
+            "title": expiration::words(found.due),
+            "due": found.due,
+            "standing": found.standing,
+        }),
+        Err(e) => failed(e),
+    })
+}
+
+/// The logins with something to fix (health.rs), and the items expired or
+/// expiring within 30 days (expiration.rs): `{ok, items: [{id, weak, reused,
+/// unsecured, expires}]}`, `expires` an expiring item's label, else null.
+/// Judged away from the app's other calls.
+///
+/// # Safety
+/// `account` is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_health(account: *const c_char) -> *mut c_char {
+    let account = text(account);
+    let mut logins = None;
+    let mut expiring = Vec::new();
+    let _ = app_value(&account, |app| {
+        if let Some(vault) = app.vault() {
+            logins = Some(crate::health::logins(vault));
+            expiring = expiration::expiring(vault, expiration::Date::today())
+                .into_iter()
+                .map(|(item, status)| (item.id.clone(), expiration::label(status)))
+                .collect();
+        }
+        Value::Null
+    });
+    let Some(logins) = logins else {
+        return out(json!({ "ok": true, "items": [] }));
+    };
+    out(waiting(
+        || json!({ "ok": true, "items": health_items(crate::health::report(&logins), &expiring) }),
+    ))
+}
+
+/// Health's items: each login with a password to fix, and each item expired
+/// or expiring within 30 days (`expires`, its label), each item once.
+fn health_items(issues: Vec<crate::health::Issues>, expiring: &[(String, String)]) -> Vec<Value> {
+    let label = |id: &str| {
+        expiring
+            .iter()
+            .find(|(e, _)| e == id)
+            .map(|(_, l)| l.clone())
+    };
+    let mut items: Vec<Value> = issues
+        .iter()
+        .map(|i| {
+            let mut v = json!(i);
+            v["expires"] = json!(label(&i.id));
+            v
+        })
+        .collect();
+    for (id, label) in expiring {
+        if !issues.iter().any(|i| &i.id == id) {
+            items.push(json!({ "id": id, "weak": false, "reused": 0, "unsecured": false, "expires": label }));
+        }
+    }
+    items
+}
+
+/// An item's past versions (history.rs), from the server: `{ok,
+/// hidePasswords, canRestore, canClear, unreadable, versions: [{id,
+/// revisionDate, savedBy, opens, restorable, changes, rows}]}`, newest
+/// first, without the versions that look the same as the one before
+/// (`history::distinct`). A secret's values in `rows` are null
+/// (`pb_item_version` shows them).
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_history(account: *const c_char, id: *const c_char) -> *mut c_char {
+    let account = text(account);
+    let id = text(id);
+    with_app_waiting(&account, |app| match app.history(&id) {
+        Ok(_) => history_view(app, &id),
+        Err(e) => failed(e),
+    })
+}
+
+fn history_view(app: &App, id: &str) -> Value {
+    let (Some(vault), Some(history)) = (app.vault(), app.kept_history(id)) else {
+        return failed(Error::Damaged("no such item"));
+    };
+    let Some(current) = vault.item(id) else {
+        return failed(Error::Damaged("no such item"));
+    };
+    let grid = vault.grid(current);
+    let editable = matches!(
+        current.kind,
+        ItemKind::Login | ItemKind::SecureNote | ItemKind::Card | ItemKind::Identity
+    );
+    let can_restore = editable && grid.edit && grid.see_passwords && !current.deleted;
+    let opened: Vec<&Item> = history
+        .versions
+        .iter()
+        .filter_map(|v| v.item.as_ref())
+        .collect();
+    let listed = crate::history::distinct(&opened, current);
+    let mut opened_at = 0;
+    let mut versions = Vec::new();
+    for v in &history.versions {
+        let saved_by = crate::history::saved_by(&v.saved_by, &vault.user_id);
+        let base = json!({ "id": v.id, "revisionDate": v.revision_date, "savedBy": saved_by });
+        match &v.item {
+            None if history.hide_passwords => versions.push(base),
+            None => {}
+            Some(item) => {
+                let show = listed[opened_at];
+                opened_at += 1;
+                if !show {
+                    continue;
+                }
+                let rows = crate::history::rows(item, current, false);
+                let mut view = base;
+                view["opens"] = json!(true);
+                view["changes"] = json!(rows.iter().filter(|r| r.changed).count());
+                view["restorable"] = json!(
+                    can_restore
+                        && item.kind == current.kind
+                        && item.organization_id == current.organization_id
+                        && item.kept.key == current.kept.key
+                );
+                view["rows"] = json!(rows);
+                versions.push(view);
+            }
+        }
+    }
+    let unreadable = if history.hide_passwords {
+        0
+    } else {
+        history.versions.iter().filter(|v| v.item.is_none()).count()
+    };
+    json!({
+        "ok": true,
+        "hidePasswords": history.hide_passwords,
+        "canRestore": can_restore,
+        "canClear": grid.view_history && vault.may_clear_history(current),
+        "unreadable": unreadable,
+        "versions": versions,
+    })
+}
+
+/// One version beside the item now, with its secrets when `reveal` is
+/// "true" (and the person may see them): `{ok, rows}`. From the history
+/// `pb_history` asked for last. `dropsPasskeys` says who each passkey is for
+/// that restoring it would take from the item (`Vault::restore_drops`).
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_item_version(
+    account: *const c_char,
+    id: *const c_char,
+    version_id: *const c_char,
+    reveal: *const c_char,
+) -> *mut c_char {
+    let account = text(account);
+    let (id, version_id, reveal) = (text(id), text(version_id), text(reveal) == "true");
+    with_app(&account, |app| {
+        let (Some(vault), Some(history)) = (app.vault(), app.kept_history(&id)) else {
+            return failed(Error::Damaged("no such version"));
+        };
+        let Some(current) = vault.item(&id) else {
+            return failed(Error::Damaged("no such item"));
+        };
+        let Some(version) = history
+            .versions
+            .iter()
+            .find(|v| v.id == version_id)
+            .and_then(|v| v.item.as_ref())
+        else {
+            return failed(Error::Damaged("no such version"));
+        };
+        let reveal = reveal && vault.grid(current).see_passwords && app.may_use(current);
+        json!({
+            "ok": true,
+            "rows": crate::history::rows(version, current, reveal),
+            "dropsPasskeys": vault.restore_drops(version, current),
+        })
+    })
+}
+
+/// Restores one of an item's versions as a normal edit, then syncs: `{ok}`,
+/// or the words to show. From the history `pb_history` asked for last.
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_restore_version(
+    account: *const c_char,
+    id: *const c_char,
+    version_id: *const c_char,
+) -> *mut c_char {
+    let account = text(account);
+    let (id, version_id) = (text(id), text(version_id));
+    with_app_waiting(&account, |app| done(app.restore_version(&id, &version_id)))
+}
+
+/// Clears an item's history (`version_id` empty) or deletes one version:
+/// `{ok}`, or the words to show.
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_delete_history(
+    account: *const c_char,
+    id: *const c_char,
+    version_id: *const c_char,
+) -> *mut c_char {
+    let account = text(account);
+    let (id, version_id) = (text(id), text(version_id));
+    with_app_waiting(&account, |app| {
+        done(app.delete_history(&id, Some(version_id.as_str()).filter(|v| !v.is_empty())))
     })
 }
 
 /// Makes a folder: `{ok, id}`, or the words to show.
 ///
 /// # Safety
-/// `name` is null or a NUL-terminated UTF-8 string, valid for the call.
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
 #[no_mangle]
-pub unsafe extern "C" fn pb_create_folder(name: *const c_char) -> *mut c_char {
+pub unsafe extern "C" fn pb_create_folder(
+    account: *const c_char,
+    name: *const c_char,
+) -> *mut c_char {
+    let account = text(account);
     let name = text(name);
-    with_app_waiting(|app| match app.create_folder(&name) {
+    with_app_waiting(&account, |app| match app.create_folder(&name) {
         Ok(id) => json!({ "ok": true, "id": id }),
         Err(e) => failed(e),
     })
@@ -924,19 +2276,28 @@ pub unsafe extern "C" fn pb_create_folder(name: *const c_char) -> *mut c_char {
 /// # Safety
 /// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
 #[no_mangle]
-pub unsafe extern "C" fn pb_rename_folder(id: *const c_char, name: *const c_char) -> *mut c_char {
+pub unsafe extern "C" fn pb_rename_folder(
+    account: *const c_char,
+    id: *const c_char,
+    name: *const c_char,
+) -> *mut c_char {
+    let account = text(account);
     let (id, name) = (text(id), text(name));
-    with_app_waiting(|app| done(app.rename_folder(&id, &name)))
+    with_app_waiting(&account, |app| done(app.rename_folder(&id, &name)))
 }
 
 /// Deletes a folder; its items stay, in no folder: `{ok}`, or the words to show.
 ///
 /// # Safety
-/// `id` is null or a NUL-terminated UTF-8 string, valid for the call.
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
 #[no_mangle]
-pub unsafe extern "C" fn pb_delete_folder(id: *const c_char) -> *mut c_char {
+pub unsafe extern "C" fn pb_delete_folder(
+    account: *const c_char,
+    id: *const c_char,
+) -> *mut c_char {
+    let account = text(account);
     let id = text(id);
-    with_app_waiting(|app| done(app.delete_folder(&id)))
+    with_app_waiting(&account, |app| done(app.delete_folder(&id)))
 }
 
 /// Saves one of an item's attachments to the Downloads folder (docs/core.md,
@@ -946,16 +2307,21 @@ pub unsafe extern "C" fn pb_delete_folder(id: *const c_char) -> *mut c_char {
 /// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
 #[no_mangle]
 pub unsafe extern "C" fn pb_save_attachment(
+    account: *const c_char,
     id: *const c_char,
     attachment_id: *const c_char,
 ) -> *mut c_char {
+    let account = text(account);
     let (id, attachment_id) = (text(id), text(attachment_id));
-    out(attachment_then(&id, &attachment_id, |file| {
-        match file.save() {
+    out(attachment_then(
+        &account,
+        &id,
+        &attachment_id,
+        |file| match file.save() {
             Ok(path) => json!({ "ok": true, "path": path.to_string_lossy() }),
             Err(e) => failed(e),
-        }
-    }))
+        },
+    ))
 }
 
 /// Saves one of an item's attachments in `dir` (an iPhone's Documents folder,
@@ -965,30 +2331,40 @@ pub unsafe extern "C" fn pb_save_attachment(
 /// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
 #[no_mangle]
 pub unsafe extern "C" fn pb_save_attachment_in(
+    account: *const c_char,
     id: *const c_char,
     attachment_id: *const c_char,
     dir: *const c_char,
 ) -> *mut c_char {
+    let account = text(account);
     let (id, attachment_id, dir) = (text(id), text(attachment_id), text(dir));
-    out(attachment_then(&id, &attachment_id, |file| {
-        match file.save_in(std::path::Path::new(&dir)) {
+    out(attachment_then(
+        &account,
+        &id,
+        &attachment_id,
+        |file| match file.save_in(std::path::Path::new(&dir)) {
             Ok(path) => json!({ "ok": true, "path": path.to_string_lossy() }),
             Err(e) => failed(e),
-        }
-    }))
+        },
+    ))
 }
 
 /// Writes an attachment into a file Android opened for it (android.rs):
 /// `{ok}`, or the words to show. Slow: off the main thread.
 #[cfg(target_os = "android")]
-pub(crate) fn write_attachment_to(id: &str, attachment_id: &str, fd: i32) -> Value {
-    attachment_then(id, attachment_id, |file| done(file.write_to(fd)))
+pub(crate) fn write_attachment_to(account: &str, id: &str, attachment_id: &str, fd: i32) -> Value {
+    attachment_then(account, id, attachment_id, |file| done(file.write_to(fd)))
 }
 
 /// The logins with a passkey for a site (its ID), for a phone's list of
-/// passkeys (docs/phones.md, "Passkeys"): `{locked}`, or `{items: [{id, name,
-/// userName, userDisplayName, credentialId, userHandle, discoverable,
-/// reprompt}]}`, the IDs in base64url. Never a key.
+/// passkeys (docs/phones.md, "Passkeys"), from every unlocked account:
+/// `{locked, account}` while none is (the account the screens show, to
+/// unlock), or `{account, accounts: [{id, label}], items: [{id, account,
+/// accountLabel, name, userName, userDisplayName, credentialId, userHandle,
+/// discoverable, reprompt}]}`, the IDs in base64url, each with its account's
+/// id on this device, which signing with it names, and with more than one
+/// account here, its name or email. `accounts` are the unlocked ones, the
+/// one shown first, where a new passkey can go. Never a key.
 ///
 /// # Safety
 /// `rp_id` is null or a NUL-terminated UTF-8 string, valid for the call.
@@ -999,18 +2375,32 @@ pub unsafe extern "C" fn pb_passkeys(rp_id: *const c_char) -> *mut c_char {
 
 /// `pb_passkeys`, for Android's JNI too.
 pub(crate) fn passkeys(rp_id: &str) -> Value {
-    app_value(|app| {
-        if app.vault().is_none() {
-            return json!({ "locked": true });
+    accounts_value(|accounts| {
+        lock_if_due(accounts);
+        let Some(shown) = accounts.active().map(str::to_owned) else {
+            return json!({ "locked": true, "signedOut": true });
+        };
+        // The unlocked accounts, the one shown first: where a new passkey
+        // can go.
+        let several = accounts.summaries().len() > 1;
+        let mut unlocked: Vec<Value> = accounts
+            .unlocked()
+            .map(|(id, _)| json!({ "id": id, "label": accounts.label(id) }))
+            .collect();
+        unlocked.sort_by_key(|a| a["id"] != json!(shown));
+        if unlocked.is_empty() {
+            return json!({ "locked": true, "account": shown });
         }
-        let items: Vec<Value> = app
+        let items: Vec<Value> = accounts
             .passkeys_for(rp_id)
             .into_iter()
-            .filter_map(|item| {
+            .filter_map(|(account, item)| {
                 let passkey = item.passkey.as_ref()?;
                 let raw = crate::passkey::credential_id(&passkey.credential_id).ok()?;
                 Some(json!({
                     "id": item.id,
+                    "account": account,
+                    "accountLabel": several.then(|| accounts.label(account)),
                     "name": item.name,
                     "userName": passkey.user_name,
                     "userDisplayName": passkey.user_display_name,
@@ -1022,7 +2412,7 @@ pub(crate) fn passkeys(rp_id: &str) -> Value {
                 }))
             })
             .collect();
-        json!({ "locked": false, "items": items })
+        json!({ "locked": false, "account": shown, "accounts": unlocked, "items": items })
     })
 }
 
@@ -1036,7 +2426,8 @@ fn waiting(call: impl FnOnce() -> Value + Send) -> Value {
     })
 }
 
-/// Signs in to a site with a login's passkey (docs/core.md, "Passkeys"):
+/// Signs in to a site with a login's passkey (docs/core.md, "Passkeys"), from
+/// the account named:
 /// `{ok, authenticatorData, signature, credentialId, userHandle}` in
 /// base64url, or the words to show. `client_data_hash` is base64url (32
 /// bytes); `user_verified` is "true" when the person proved who they are in
@@ -1046,24 +2437,27 @@ fn waiting(call: impl FnOnce() -> Value + Send) -> Value {
 /// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
 #[no_mangle]
 pub unsafe extern "C" fn pb_passkey_assert(
+    account: *const c_char,
     id: *const c_char,
     rp_id: *const c_char,
     client_data_hash: *const c_char,
     user_verified: *const c_char,
 ) -> *mut c_char {
-    let (id, rp_id, hash, verified) = (
+    let (account, id, rp_id, hash, verified) = (
+        text(account),
         text(id),
         text(rp_id),
         text(client_data_hash),
         text(user_verified),
     );
     out(waiting(|| {
-        passkey_assert(&id, &rp_id, &hash, verified == "true")
+        passkey_assert(&account, &id, &rp_id, &hash, verified == "true")
     }))
 }
 
 /// `pb_passkey_assert`, for Android's JNI too (off the main thread).
 pub(crate) fn passkey_assert(
+    account: &str,
     id: &str,
     rp_id: &str,
     client_data_hash: &str,
@@ -1077,24 +2471,28 @@ pub(crate) fn passkey_assert(
     let Some(hash) = hash else {
         return failed(Error::Damaged("a client data hash that isn't 32 bytes"));
     };
-    app_value(
-        |app| match app.passkey_assert(id, rp_id, &hash, user_verified) {
-            Ok(a) => json!({
-                "ok": true,
-                "authenticatorData": base64url(&a.authenticator_data),
-                "signature": base64url(&a.signature),
-                "credentialId": base64url(&a.credential_id),
-                // None stored: left out, as WebAuthn has it, rather than empty.
-                "userHandle": (!a.user_handle.is_empty()).then(|| base64url(&a.user_handle)),
-            }),
-            Err(e) => failed(e),
-        },
-    )
+    accounts_value(|accounts| {
+        lock_if_due(accounts);
+        on_account(accounts, account, |app| {
+            match app.passkey_assert(id, rp_id, &hash, user_verified) {
+                Ok(a) => json!({
+                    "ok": true,
+                    "authenticatorData": base64url(&a.authenticator_data),
+                    "signature": base64url(&a.signature),
+                    "credentialId": base64url(&a.credential_id),
+                    // None stored: left out, as WebAuthn has it, rather than empty.
+                    "userHandle": (!a.user_handle.is_empty()).then(|| base64url(&a.user_handle)),
+                }),
+                Err(e) => failed(e),
+            }
+        })
+    })
 }
 
 /// Makes a passkey for a site (docs/core.md, "Passkeys", "Making one"), from
-/// `{rpId, rpName, userHandle, userName, userDisplayName, userVerified,
-/// discoverable, login, exclude}` (IDs and the user handle in base64url;
+/// `{account, rpId, rpName, userHandle, userName, userDisplayName,
+/// userVerified, discoverable, login, exclude}` (IDs and the user handle in
+/// base64url; `account` the account it goes in, by its id on this device;
 /// `login` the item it goes in, or null for a new login): `{ok, itemId,
 /// credentialId, attestationObject, authenticatorData, publicKey}` in
 /// base64url, or the words to show. Waits on the network: it's saved first.
@@ -1141,47 +2539,259 @@ pub(crate) fn passkey_create(request: &str) -> Value {
     );
     let user_verified = r["userVerified"].as_bool() == Some(true);
     let discoverable = r["discoverable"].as_bool() != Some(false);
-    app_value(|app| {
-        match app.passkey_create(&crate::app::NewPasskey {
-            rp_id: &rp_id,
-            rp_name: rp_name.as_deref(),
-            user_handle: &user_handle,
-            user_name: user_name.as_deref(),
-            user_display_name: user_display_name.as_deref(),
-            user_verified,
-            discoverable,
-            login: login.as_deref(),
-            exclude: &exclude,
-        }) {
-            Ok(made) => json!({
-                "ok": true,
-                "itemId": made.item_id,
-                "credentialId": base64url(&made.credential_id),
-                "attestationObject": base64url(&made.attestation_object),
-                "authenticatorData": base64url(&made.authenticator_data),
-                "publicKey": base64url(&made.public_key),
-            }),
-            Err(e) => {
-                // The site's own "already registered" (InvalidStateError).
-                let excluded = e == Error::Refused(crate::app::ALREADY_HAS_PASSKEY);
-                let mut answer = failed(e);
-                answer["excluded"] = json!(excluded);
-                answer
+    let account = r["account"].as_str().unwrap_or_default().to_owned();
+    accounts_value(|accounts| {
+        lock_if_due(accounts);
+        on_account(accounts, &account, |app| {
+            match app.passkey_create(&crate::app::NewPasskey {
+                rp_id: &rp_id,
+                rp_name: rp_name.as_deref(),
+                user_handle: &user_handle,
+                user_name: user_name.as_deref(),
+                user_display_name: user_display_name.as_deref(),
+                user_verified,
+                discoverable,
+                login: login.as_deref(),
+                exclude: &exclude,
+            }) {
+                Ok(made) => json!({
+                    "ok": true,
+                    "itemId": made.item_id,
+                    "credentialId": base64url(&made.credential_id),
+                    "attestationObject": base64url(&made.attestation_object),
+                    "authenticatorData": base64url(&made.authenticator_data),
+                    "publicKey": base64url(&made.public_key),
+                }),
+                Err(e) => {
+                    // The site's own "already registered" (InvalidStateError).
+                    let excluded = e == Error::Refused(crate::app::ALREADY_HAS_PASSKEY);
+                    let mut answer = failed(e);
+                    answer["excluded"] = json!(excluded);
+                    answer
+                }
             }
-        }
+        })
     })
 }
 
 /// The master password as proof the person is who they are, for a passkey
 /// (Android's JNI): `{ok}`, or the words to show. Slow (the KDF).
 #[cfg(target_os = "android")]
-pub(crate) fn check_master_password(password: &str) -> Value {
-    app_value(|app| done(app.check_master_password(password)))
+pub(crate) fn check_master_password(account: &str, password: &str) -> Value {
+    accounts_value(|accounts| {
+        lock_if_due(accounts);
+        on_account(accounts, account, |app| {
+            done(app.check_master_password(password))
+        })
+    })
 }
 
 fn base64url(bytes: &[u8]) -> String {
     use base64::Engine;
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+}
+
+/// Sign-in requests waiting for this account's answer (docs/core.md,
+/// "Approving a sign-in"), from the server, newest first: `{ok, requests:
+/// [{id, device, ip, fingerprint, ageSeconds, secondsLeft}], checks: [{id,
+/// device, deviceType, ip, location, ageSeconds, secondsLeft, emailAfter}],
+/// locationSource: {name, url}}`, `checks` being sign-ins on new devices
+/// waiting for approval with the number they show (new_device.rs), and
+/// `locationSource` who the locations are from (null when the server has
+/// none). Only while unlocked; the app asks every few seconds then.
+///
+/// The server is asked without holding the app, on a thread of the core's
+/// own, so the screens' reads and locking go on meanwhile. What it lists is
+/// kept with the account asked for, which alone can approve them. A server
+/// that can't list new devices' checks lists none.
+///
+/// # Safety
+/// `account` is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_sign_in_requests(account: *const c_char) -> *mut c_char {
+    let account = text(account);
+    out(std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                let mut call = None;
+                let asked = app_value(&account, |app| match app.sign_in_requests_call() {
+                    Ok(c) => {
+                        call = Some(c);
+                        json!({ "ok": true })
+                    }
+                    Err(e) => failed(e),
+                });
+                let Some(call) = call else { return asked };
+                let fetched = call.fetch();
+                let checks = call.fetch_new_devices();
+                app_value(&account, |app| {
+                    match fetched.and_then(|f| app.keep_sign_in_requests(&call, f)) {
+                        Ok(requests) => {
+                            let (checks, source) = app
+                                .keep_new_device_checks(&call, checks)
+                                .unwrap_or_default();
+                            json!({
+                                "ok": true,
+                                "requests": sign_in_requests(&requests),
+                                "checks": new_device_checks(&checks),
+                                "locationSource": source.map(|s| json!({ "name": s.name, "url": s.url })),
+                            })
+                        }
+                        Err(e) => failed(e),
+                    }
+                })
+            })
+            .join()
+            .unwrap_or_else(|_| json!({ "ok": false, "error": "The core stopped unexpectedly." }))
+    }))
+}
+
+fn sign_in_requests(requests: &[crate::device_approval::SignInRequest]) -> Vec<Value> {
+    requests
+        .iter()
+        .map(|r| {
+            json!({
+                "id": r.id,
+                "deviceId": r.device_id,
+                "deviceType": r.device_type,
+                "device": r.device,
+                "ip": r.ip,
+                "fingerprint": r.fingerprint,
+                "ageSeconds": r.age,
+                "secondsLeft": r.left,
+            })
+        })
+        .collect()
+}
+
+fn new_device_checks(checks: &[crate::new_device::Waiting]) -> Vec<Value> {
+    checks
+        .iter()
+        .map(|c| {
+            json!({
+                "id": c.id,
+                "device": c.device,
+                "deviceType": c.device_type,
+                "ip": c.ip,
+                "location": c.location,
+                "ageSeconds": c.age,
+                "secondsLeft": c.left,
+                "emailAfter": c.email_after,
+            })
+        })
+        .collect()
+}
+
+/// Approves (`approve`: "true") another device's sign-in that the new-device
+/// check holds, with the number the person typed (two digits, checked
+/// before anything is sent), or denies it: `{ok, answered}`, `answered`
+/// being "approved", "denied", or "wrongNumber" (the number wasn't the new
+/// device's, so the server denied it). No confirmation first: approving
+/// sends no key.
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_answer_new_device_check(
+    account: *const c_char,
+    id: *const c_char,
+    number: *const c_char,
+    approve: *const c_char,
+) -> *mut c_char {
+    let account = text(account);
+    let (id, number, approve) = (text(id), text(number), text(approve) == "true");
+    with_app_waiting(&account, |app| {
+        match app.answer_new_device_check(&id, approve.then_some(number.as_str())) {
+            Ok(answered) => json!({ "ok": true, "answered": answered.name() }),
+            Err(e) => failed(e),
+        }
+    })
+}
+
+/// Approves (`approve`: "true") or denies a listed sign-in request. Approving
+/// takes the fingerprint phrase the person was shown, and may answer
+/// `confirmFirst`: ask for biometrics or the master password, then again.
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_answer_sign_in_request(
+    account: *const c_char,
+    id: *const c_char,
+    fingerprint: *const c_char,
+    approve: *const c_char,
+) -> *mut c_char {
+    let account = text(account);
+    let (id, fingerprint, approve) = (text(id), text(fingerprint), text(approve) == "true");
+    with_app_waiting(&account, |app| {
+        done(app.answer_sign_in_request(&id, &fingerprint, approve))
+    })
+}
+
+/// The master password, as the person confirming it's them to approve a
+/// sign-in: `{ok}`, or the words to show.
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_confirm_with_master_password(
+    account: *const c_char,
+    password: *const c_char,
+) -> *mut c_char {
+    let account = text(account);
+    let password = Zeroizing::new(text(password));
+    with_app_waiting(&account, |app| {
+        done(app.confirm_with_master_password(&password))
+    })
+}
+
+/// Windows Hello or Touch ID through the desktop agent, as the person
+/// confirming it's them to approve a sign-in (or turn off asking): `{ok,
+/// confirmed}`, `confirmed` false if they cancelled. Phones confirm through
+/// their own code instead (android.rs, `pb_confirm_approval_with_key`).
+///
+/// # Safety
+/// `account` is null or a NUL-terminated UTF-8 string, valid for the call.
+#[cfg(not(phone))]
+#[no_mangle]
+pub unsafe extern "C" fn pb_confirm_approval_with_biometric(account: *const c_char) -> *mut c_char {
+    let account = text(account);
+    with_app_waiting(&account, |app| {
+        match app.confirm_approval_with_biometric() {
+            Ok(confirmed) => json!({ "ok": true, "confirmed": confirmed }),
+            Err(e) => failed(e),
+        }
+    })
+}
+
+/// Whether approving a sign-in asks for biometrics or the master password
+/// first on this device: `{confirm}`.
+///
+/// # Safety
+/// `account` is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_approvals(account: *const c_char) -> *mut c_char {
+    let account = text(account);
+    with_app(
+        &account,
+        |app| json!({ "confirm": app.confirm_approvals() }),
+    )
+}
+
+/// Turning it off needs the person to have confirmed it's them just now
+/// (`confirmFirst` otherwise), and uses that up.
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the
+/// call; `confirm` is "true" or "false".
+#[no_mangle]
+pub unsafe extern "C" fn pb_set_approvals(
+    account: *const c_char,
+    confirm: *const c_char,
+) -> *mut c_char {
+    let account = text(account);
+    let confirm = text(confirm) == "true";
+    with_app(&account, |app| done(app.set_confirm_approvals(confirm)))
 }
 
 /// Checks the master password for an item that asks for it again (docs/core.md,
@@ -1191,12 +2801,16 @@ fn base64url(bytes: &[u8]) -> String {
 /// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
 #[no_mangle]
 pub unsafe extern "C" fn pb_confirm_master_password(
+    account: *const c_char,
     id: *const c_char,
     password: *const c_char,
 ) -> *mut c_char {
+    let account = text(account);
     let id = text(id);
     let password = Zeroizing::new(text(password));
-    with_app_waiting(|app| done(app.confirm_master_password(&id, &password)))
+    with_app_waiting(&account, |app| {
+        done(app.confirm_master_password(&id, &password))
+    })
 }
 
 /// A secret, while the person reveals it or edits the item: "password",
@@ -1205,14 +2819,26 @@ pub unsafe extern "C" fn pb_confirm_master_password(
 /// # Safety
 /// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
 #[no_mangle]
-pub unsafe extern "C" fn pb_reveal(id: *const c_char, what: *const c_char) -> *mut c_char {
+pub unsafe extern "C" fn pb_reveal(
+    account: *const c_char,
+    id: *const c_char,
+    what: *const c_char,
+) -> *mut c_char {
+    let account = text(account);
     let (id, what) = (text(id), text(what));
-    with_app(|app| {
+    with_app(&account, |app| {
         let Some(item) = app.vault().and_then(|v| v.item(&id)) else {
             return Value::Null;
         };
         if !app.may_use(item) {
             return Value::Null;
+        }
+        // Never a secret someone may not see (their shared folder hides passwords).
+        if item.is_secret(&what) && app.vault().is_some_and(|v| !v.grid(item).see_passwords) {
+            return Value::Null;
+        }
+        if let Some(detail) = item.details.iter().find(|d| d.key == what) {
+            return json!(detail.value.as_str());
         }
         let secret = match what.as_str() {
             "password" => item.password.as_ref().map(|p| p.as_str()),
@@ -1238,9 +2864,14 @@ pub unsafe extern "C" fn pb_reveal(id: *const c_char, what: *const c_char) -> *m
 /// # Safety
 /// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
 #[no_mangle]
-pub unsafe extern "C" fn pb_copy(id: *const c_char, what: *const c_char) -> *mut c_char {
+pub unsafe extern "C" fn pb_copy(
+    account: *const c_char,
+    id: *const c_char,
+    what: *const c_char,
+) -> *mut c_char {
+    let account = text(account);
     let (id, what) = (text(id), text(what));
-    with_app(|app| done(app.copy(&id, &what)))
+    with_app(&account, |app| done(app.copy(&id, &what)))
 }
 
 /// The item's current one-time code and the seconds it has left.
@@ -1248,12 +2879,14 @@ pub unsafe extern "C" fn pb_copy(id: *const c_char, what: *const c_char) -> *mut
 /// # Safety
 /// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
 #[no_mangle]
-pub unsafe extern "C" fn pb_totp(id: *const c_char) -> *mut c_char {
+pub unsafe extern "C" fn pb_totp(account: *const c_char, id: *const c_char) -> *mut c_char {
+    let account = text(account);
     let id = text(id);
-    with_app(|app| {
+    with_app(&account, |app| {
+        // Not for someone whose shared folder hides the item's passwords.
         let Some(secret) = app
             .vault()
-            .and_then(|v| v.item(&id))
+            .and_then(|v| v.item(&id).filter(|i| v.grid(i).see_passwords))
             .filter(|i| app.may_use(i))
             .and_then(|i| i.totp.as_ref())
         else {
@@ -1274,15 +2907,24 @@ pub unsafe extern "C" fn pb_totp(id: *const c_char) -> *mut c_char {
 
 /// Saves an item from the editor: `id` empty for a new one. The draft is
 /// `{name, note, username, password, totp, notes, uris, fields: [{name,
-/// value, hidden}], folderId, organizationId, collectionIds, favorite}`.
+/// value, type}], folderId, organizationId, collectionIds, favorite,
+/// template: {id, name}}`: a field's `type` is upstream's (0 text, 1
+/// hidden, 2 yes or no), and `template` names the template a new item is
+/// made from. For an organization's item being edited, `collectionIds` are
+/// the shared folders it's to be in. Answers `{ok, id, synced}`.
 ///
 /// # Safety
 /// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
 #[no_mangle]
-pub unsafe extern "C" fn pb_save(id: *const c_char, draft: *const c_char) -> *mut c_char {
+pub unsafe extern "C" fn pb_save(
+    account: *const c_char,
+    id: *const c_char,
+    draft: *const c_char,
+) -> *mut c_char {
+    let account = text(account);
     let id = text(id);
     let draft_json = Zeroizing::new(text(draft));
-    with_app_waiting(|app| {
+    with_app_waiting(&account, |app| {
         let d: Value = match serde_json::from_str(&draft_json) {
             Ok(d) => d,
             Err(e) => {
@@ -1349,16 +2991,60 @@ pub unsafe extern "C" fn pb_save(id: *const c_char, draft: *const c_char) -> *mu
                 .as_array()
                 .into_iter()
                 .flatten()
-                .map(|f| Field {
-                    name: f["name"].as_str().unwrap_or_default().to_owned(),
-                    value: Zeroizing::new(f["value"].as_str().unwrap_or_default().to_owned()),
-                    hidden: f["hidden"].as_bool().unwrap_or(false),
+                .map(|f| {
+                    // Upstream's field type (0 text, 1 hidden, 2 yes or no), or `hidden`.
+                    let kind =
+                        f["type"]
+                            .as_u64()
+                            .unwrap_or(if f["hidden"].as_bool() == Some(true) {
+                                1
+                            } else {
+                                0
+                            });
+                    let value = f["value"].as_str().unwrap_or_default().to_owned();
+                    Field {
+                        name: f["name"].as_str().unwrap_or_default().to_owned(),
+                        value: Zeroizing::new(if kind == 2 && value != "true" {
+                            "false".to_owned()
+                        } else {
+                            value
+                        }),
+                        hidden: kind == 1,
+                        boolean: kind == 2,
+                    }
                 })
                 .collect(),
             folder_id: string("folderId"),
             organization_id: string("organizationId"),
             favorite: d["favorite"].as_bool().unwrap_or(false),
+            template: match (d["template"]["id"].as_str(), d["template"]["name"].as_str()) {
+                (Some(id), Some(name)) if !id.is_empty() && !name.trim().is_empty() => {
+                    Some((id.to_owned(), name.trim().to_owned()))
+                }
+                _ => None,
+            },
+            expiration: None,
         };
+        // The editor's "Expires" and "Remind me": a draft that names them
+        // sets both (no date clears them); one that doesn't keeps the item's.
+        let mut draft = draft;
+        if let Some(expires) = d.get("expires") {
+            let date =
+                match expires.as_str().map(str::trim).filter(|e| !e.is_empty()) {
+                    None => None,
+                    Some(text) => match expiration::Date::parse_iso(text) {
+                        Some(date) => Some(date),
+                        None => return failed(Error::Refused(
+                            "write the expiration date as year, month, and day, such as 2027-03-31",
+                        )),
+                    },
+                };
+            let remind = d["remind"]
+                .as_str()
+                .and_then(expiration::Remind::parse)
+                .unwrap_or_default();
+            draft.expiration = Some(crate::vault::Expiration { date, remind });
+        }
         if draft.name.trim().is_empty() {
             return failed(Error::Refused("an item needs a name"));
         }
@@ -1381,20 +3067,26 @@ pub unsafe extern "C" fn pb_save(id: *const c_char, draft: *const c_char) -> *mu
         if asks && d["grant"].as_u64() != Some(app.grant()) {
             return failed(Error::MasterPasswordFirst);
         }
-        done(app.save(
+        // Saved once the server has it: `synced` says whether the sync
+        // after it came through (App::save).
+        match app.save(
             Some(id.as_str()).filter(|i| !i.is_empty()),
             &draft,
             &collections,
-        ))
+        ) {
+            Ok(saved) => json!({ "ok": true, "id": saved.id, "synced": saved.synced }),
+            Err(e) => failed(e),
+        }
     })
 }
 
 /// # Safety
 /// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
 #[no_mangle]
-pub unsafe extern "C" fn pb_trash(id: *const c_char) -> *mut c_char {
+pub unsafe extern "C" fn pb_trash(account: *const c_char, id: *const c_char) -> *mut c_char {
+    let account = text(account);
     let id = text(id);
-    with_app_waiting(|app| done(app.trash(&id)))
+    with_app_waiting(&account, |app| done(app.trash(&id)))
 }
 
 /// A new password or passphrase (`generator::Options`, as JSON; missing
@@ -1403,9 +3095,13 @@ pub unsafe extern "C" fn pb_trash(id: *const c_char) -> *mut c_char {
 /// `{ok, password, options}`, with the choices it was made with.
 ///
 /// # Safety
-/// `options` is null or a NUL-terminated UTF-8 string, valid for the call.
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
 #[no_mangle]
-pub unsafe extern "C" fn pb_generate(options: *const c_char) -> *mut c_char {
+pub unsafe extern "C" fn pb_generate(
+    account: *const c_char,
+    options: *const c_char,
+) -> *mut c_char {
+    let account = text(account);
     let given = text(options);
     let options = match given.trim() {
         "" | "null" => None,
@@ -1414,7 +3110,7 @@ pub unsafe extern "C" fn pb_generate(options: *const c_char) -> *mut c_char {
             Err(_) => return out(failed(Error::Damaged("those choices"))),
         },
     };
-    with_app(|app| {
+    with_app(&account, |app| {
         let options = options.unwrap_or_else(|| app.generator_options());
         match app.generate(&options) {
             Ok((p, held)) => json!({ "ok": true, "password": p.as_str(), "options": held }),
@@ -1423,11 +3119,30 @@ pub unsafe extern "C" fn pb_generate(options: *const c_char) -> *mut c_char {
     })
 }
 
+/// Takes what the generator shows as its last value, which Copy then copies
+/// (`App::keep_generated`): `{ok}`.
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_keep_generated(
+    account: *const c_char,
+    shown: *const c_char,
+) -> *mut c_char {
+    let account = text(account);
+    let shown = Zeroizing::new(text(shown));
+    with_app(&account, |app| done(app.keep_generated(&shown)))
+}
+
 /// The generator's last choices on this device (`generator::Options`), held
 /// to the organizations' policy.
+///
+/// # Safety
+/// `account` is null or a NUL-terminated UTF-8 string, valid for the call.
 #[no_mangle]
-pub extern "C" fn pb_generator_options() -> *mut c_char {
-    with_app(|app| json!(app.generator_options()))
+pub unsafe extern "C" fn pb_generator_options(account: *const c_char) -> *mut c_char {
+    let account = text(account);
+    with_app(&account, |app| json!(app.generator_options()))
 }
 
 /// The organizations' "Password generator" policy (docs/core.md, "New
@@ -1435,9 +3150,87 @@ pub extern "C" fn pb_generator_options() -> *mut c_char {
 /// `uppercase`, `lowercase`, `digits`, `symbols`, `minDigits`,
 /// `minSymbols`, `minWords`, `capitalize`, and `includeNumber`. Nothing set
 /// when no organization sets it.
+///
+/// # Safety
+/// `account` is null or a NUL-terminated UTF-8 string, valid for the call.
 #[no_mangle]
-pub extern "C" fn pb_generator_policy() -> *mut c_char {
-    with_app(|app| json!(app.generator_policy()))
+pub unsafe extern "C" fn pb_generator_policy(account: *const c_char) -> *mut c_char {
+    let account = text(account);
+    with_app(&account, |app| json!(app.generator_policy()))
+}
+
+/// Updates from PassBundle's releases on Windows and Linux (src/updates), for
+/// Settings' Updates (app/lib/updates.dart): each call on a thread of the
+/// core's own, since checking and downloading wait on the network (see
+/// `with_app_waiting`). Where the app doesn't update itself this way (the
+/// Mac has its own updater), each says so.
+#[cfg(not(phone))]
+fn on_updates(call: impl FnOnce(&crate::updates::Context) -> Value + Send) -> *mut c_char {
+    let stopped = || json!({ "ok": false, "error": "The core stopped unexpectedly." });
+    out(std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                catch_unwind(AssertUnwindSafe(|| {
+                    match crate::updates::Context::for_this_app() {
+                        Some(ctx) => call(&ctx),
+                        None => json!({ "ok": false, "error": "PassBundle doesn't update itself here." }),
+                    }
+                }))
+                .unwrap_or_else(|_| stopped())
+            })
+            .join()
+            .unwrap_or_else(|_| stopped())
+    }))
+}
+
+/// This copy's version, whether it checks once a day, why it can't update
+/// itself if it can't (`installNote`), and an update that didn't happen
+/// (`failed`).
+#[cfg(not(phone))]
+#[no_mangle]
+pub extern "C" fn pb_update_status() -> *mut c_char {
+    on_updates(crate::updates::status)
+}
+
+/// Looks for a newer release: `{ok, available, version, notes}`; `quiet`
+/// is the check as the app opens, at most once a day.
+#[cfg(not(phone))]
+#[no_mangle]
+pub extern "C" fn pb_update_check(quiet: bool) -> *mut c_char {
+    on_updates(|ctx| crate::updates::check(ctx, quiet))
+}
+
+/// Downloads and checks the update the last check found, and starts
+/// putting it in place: `{ok, restart}`, and then the app quits.
+#[cfg(not(phone))]
+#[no_mangle]
+pub extern "C" fn pb_update_install() -> *mut c_char {
+    on_updates(crate::updates::install)
+}
+
+/// How far the download is: `{percent}`.
+#[cfg(not(phone))]
+#[no_mangle]
+pub extern "C" fn pb_update_progress() -> *mut c_char {
+    out(crate::updates::progress())
+}
+
+/// Turns the daily check on or off.
+#[cfg(not(phone))]
+#[no_mangle]
+pub extern "C" fn pb_update_auto(on: bool) -> *mut c_char {
+    on_updates(|ctx| {
+        crate::updates::set_auto(ctx, on);
+        json!({ "ok": true })
+    })
+}
+
+/// The app has drawn its first frame: `{updated}` or `{failed}` when an
+/// update just finished, either way.
+#[cfg(not(phone))]
+#[no_mangle]
+pub extern "C" fn pb_update_started() -> *mut c_char {
+    on_updates(crate::updates::started)
 }
 
 /// Frees a string the core returned.

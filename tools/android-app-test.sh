@@ -27,6 +27,18 @@ if [ -n "${PB_TEST_SERVER:-}" ]; then
   defines=(--dart-define="PB_TEST_SERVER=$PB_TEST_SERVER" --dart-define="PB_TEST_EMAIL=$email" --dart-define="PB_TEST_PASSWORD=$password")
 fi
 
+# Android's log while the tests run, kept on this computer when
+# PB_TEST_LOGCAT names a file: if the phone or emulator drops off adb in the
+# middle, it's what's left to read (CI prints it).
+if [ -n "${PB_TEST_LOGCAT:-}" ]; then
+  adb -s "$serial" logcat -c || true
+  adb -s "$serial" logcat -v time > "$PB_TEST_LOGCAT" 2>&1 &
+  logcat=$!
+  trap 'kill "$logcat" 2> /dev/null || true' EXIT
+fi
+
 cd app
 # The phone tests; autofill_setup_test.dart is tools/android-autofill-test.sh's.
-flutter test integration_test/phone_test.dart -d "$serial" ${defines[@]+"${defines[@]}"}
+# Each test's own output: a summary alone says nothing about one that didn't
+# finish.
+flutter test integration_test/phone_test.dart -d "$serial" --reporter expanded ${defines[@]+"${defines[@]}"}

@@ -38,8 +38,10 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
-fn lost(e: std::io::Error) -> Error {
-    Error::Network(format!("the desktop agent stopped answering ({e})"))
+/// The agent's socket failed partway: it stopped answering. (Its words are
+/// the OS's, which nobody needs to read.)
+fn lost(_: std::io::Error) -> Error {
+    Error::AgentStopped
 }
 
 /// Overwrites a user key in a message before it's dropped.
@@ -81,7 +83,7 @@ impl Agent {
         std::process::Command::new(&program)
             .spawn()
             .map(|_| true)
-            .map_err(|e| Error::Network(format!("the desktop agent didn't start ({e})")))
+            .map_err(|_| Error::NoAgent)
     }
 
     /// Connects to the agent at `address`, which must be the program at
@@ -206,7 +208,18 @@ impl Agent {
     /// Asks for Windows Hello or Touch ID and returns the user key, or None if
     /// the person cancelled (or it isn't turned on for this account).
     pub fn unlock(&mut self) -> Result<Option<SymmetricKey>> {
-        let mut reply = self.call("unlockWithBiometricsForUser", json!({}))?;
+        self.key_after("unlockWithBiometricsForUser")
+    }
+
+    /// The same key, behind a prompt that says it's to approve a sign-in
+    /// from another device (docs/core.md, "Approving a sign-in"). None if
+    /// the person cancelled.
+    pub fn unlock_to_approve(&mut self) -> Result<Option<SymmetricKey>> {
+        self.key_after("keykeeper.biometric.approve")
+    }
+
+    fn key_after(&mut self, command: &str) -> Result<Option<SymmetricKey>> {
+        let mut reply = self.call(command, json!({}))?;
         let key = match (reply["response"] == true, reply["userKeyB64"].as_str()) {
             (true, Some(b64)) => {
                 let bytes = Zeroizing::new(
@@ -220,6 +233,24 @@ impl Agent {
         };
         forget_key(&mut reply);
         Ok(key)
+    }
+
+    /// How many of this account's items expire soon and how many have
+    /// expired (expiration.rs), for the agent's tray: two numbers, never
+    /// which items; the agent makes its own words from them. Zeros clear it.
+    /// Answers the words the tray now shows, if any.
+    pub fn reminders(&mut self, counts: crate::expiration::Counts) -> Result<Option<String>> {
+        // An older agent doesn't know the command and never answers: don't
+        // wait on it for long (where the socket can say so).
+        #[cfg(unix)]
+        let _ = self
+            .stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(10)));
+        let reply = self.call(
+            "keykeeper.reminders",
+            json!({ "soon": counts.soon, "expired": counts.expired }),
+        )?;
+        Ok(reply["shown"].as_str().map(str::to_owned))
     }
 
     /// Turns it off for this account (for the extension too: it's one enrollment).

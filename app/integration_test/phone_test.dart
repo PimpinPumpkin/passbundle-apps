@@ -12,8 +12,11 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
 
+import 'package:passbundle/autofill_offer.dart';
 import 'package:passbundle/core.dart';
 import 'package:passbundle/main.dart';
+import 'package:passbundle/theme.dart';
+import 'package:passbundle/unlock_offer.dart';
 
 import 'fixtures.g.dart';
 
@@ -40,19 +43,69 @@ Future<void> pumpUntil(
 /// Taps something once the screen has stopped moving under it: it can be
 /// hit, and it's in the same place for a few frames (a keyboard closing
 /// moves the screen after a field is typed in, and a tap mid-move misses).
-Future<void> tapWhenStill(WidgetTester tester, Finder finder) async {
+///
+/// With [inList], it's a row of a list that scrolls (Settings, on CI's small
+/// screen), and it's scrolled into view whenever it can't be hit: rows above
+/// it fill in as their answers come from the phone (the autofill card, the
+/// biometric row), and each one pushes it down, out of view.
+Future<void> tapWhenStill(
+  WidgetTester tester,
+  Finder finder, {
+  bool inList = false,
+}) async {
   Offset? last;
   var still = 0;
   final end = DateTime.now().add(const Duration(seconds: 30));
   while (still < 3 && DateTime.now().isBefore(end)) {
     await tester.pump(const Duration(milliseconds: 100));
     final found = finder.hitTestable().evaluate();
+    if (found.isEmpty && inList && finder.evaluate().isNotEmpty) {
+      await tester.ensureVisible(finder);
+    }
     final at = found.isEmpty ? null : tester.getCenter(finder);
     still = at != null && at == last ? still + 1 : 0;
     last = at;
   }
-  if (still < 3) throw TestFailure('Never held still: $finder');
+  if (still < 3) {
+    final why = finder.evaluate().isEmpty
+        ? 'not there'
+        : last == null
+        ? 'there, but never where a tap reaches it'
+        : 'still moving, last at $last';
+    throw TestFailure('Never held still ($why): $finder');
+  }
   await tester.tap(finder);
+}
+
+/// Unlocks once the keyboard is away and the screen holds still: the lock
+/// screen moves as the keyboard opens for its field (iOS's slowest the
+/// first time), and a tap mid-move misses.
+Future<void> unlockWhenStill(WidgetTester tester) async {
+  FocusManager.instance.primaryFocus?.unfocus();
+  await tapWhenStill(tester, find.text('Unlock'));
+}
+
+/// Opens an item from the vault: found by searching for its name's first
+/// word, since on a phone the vault starts with its kinds, and the item may
+/// be further down than the screen.
+Future<void> openItem(WidgetTester tester, String name) async {
+  await tester.enterText(
+    find.byType(TextField),
+    name.split(' ').first.toLowerCase(),
+  );
+  FocusManager.instance.primaryFocus?.unfocus();
+  await pumpUntil(tester, find.text(name));
+  await tapWhenStill(tester, find.text(name));
+}
+
+/// After the master password, a phone with biometrics set up offers to
+/// unlock with them next time (unlock_offer.dart), and an Android phone
+/// offers to turn on autofill (autofill_offer.dart). These tests (but the
+/// ones about those) aren't about that, so they were declined just now, as
+/// "Not now" and "Later" do.
+void declinedTheOffer() {
+  declineOffer();
+  putOffAutofill();
 }
 
 // A real server the phone reaches (tools/android-app-test.sh, with
@@ -72,16 +125,17 @@ void main() {
       File('$dir/settings.json').writeAsStringSync(sampleSettings);
       File('$dir/sync.json').writeAsStringSync(sampleSync);
       await Core.openOnThisDevice();
+      declinedTheOffer();
       await tester.pumpWidget(const PassBundleApp());
       await pumpUntil(tester, find.text('Unlock PassBundle'));
 
       await tester.enterText(find.byType(TextField), samplePassword);
-      await tester.tap(find.text('Unlock'));
-      await pumpUntil(tester, find.text('Backup service'));
+      await unlockWhenStill(tester);
+      await pumpUntil(tester, find.text('Logins'));
       // No refresh token is kept yet on Android, so syncing asks to sign in again.
       await pumpUntil(tester, find.textContaining('Sign in again'));
 
-      await tester.tap(find.text('Backup service'));
+      await openItem(tester, 'Backup service');
       // The item's own page, past its slide-in.
       await pumpUntil(tester, find.byTooltip('Copy password'));
       await tester.pump(const Duration(milliseconds: 500));
@@ -102,6 +156,7 @@ void main() {
       await tester.tap(find.byTooltip('Lock'));
       await pumpUntil(tester, find.text('Unlock PassBundle'));
       expect(find.text('Backup service'), findsNothing);
+      expect(find.text('Logins'), findsNothing);
 
       // Android's own verifier checks the server's certificate: a self-signed
       // one is refused, rather than the core stopping for want of its setup.
@@ -111,7 +166,7 @@ void main() {
       final server = await HttpServer.bindSecure('localhost', 0, context);
       server.listen((request) => request.response.close());
       try {
-        await tester.tap(find.text('Sign out').first);
+        await tapWhenStill(tester, find.text('Sign out').first);
         await pumpUntil(tester, find.text('Sign out?'));
         await tester.tap(find.widgetWithText(FilledButton, 'Sign out'));
         await pumpUntil(tester, find.text('Sign in to PassBundle'));
@@ -133,8 +188,12 @@ void main() {
         FocusManager.instance.primaryFocus?.unfocus();
         await tapWhenStill(tester, find.text('Sign in'));
         await pumpUntil(tester, find.textContaining('certificate'));
+        // Said once, under the server field, with what to do.
         expect(
-          find.textContaining('Couldn\'t reach the server'),
+          find.descendant(
+            of: find.byKey(const ValueKey('server')),
+            matching: find.textContaining('isn\'t trusted on this device'),
+          ),
           findsOneWidget,
         );
       } finally {
@@ -158,6 +217,7 @@ void main() {
         kept.deleteSync(recursive: true);
       }
       await Core.openOnThisDevice();
+      declinedTheOffer();
       await tester.pumpWidget(PassBundleApp(key: UniqueKey()));
       await pumpUntil(tester, find.text('Sign in to PassBundle'));
       await tester.tap(find.text('Self-hosted?'));
@@ -170,7 +230,7 @@ void main() {
       );
       FocusManager.instance.primaryFocus?.unfocus();
       await tapWhenStill(tester, find.text('Sign in'));
-      await pumpUntil(tester, find.text('Saved before the phone signed in'));
+      await pumpUntil(tester, find.text('Logins'));
       if (Platform.isIOS) {
         // Kept where the AutoFill extension reads it too, and iOS may suggest
         // the logins with a website, by their usernames and domains (the
@@ -194,7 +254,7 @@ void main() {
 
       // Its attachment saves to the phone's own Downloads (Android) or Files
       // (iPhone): the core downloads it, opens it, and writes it there itself.
-      await tester.tap(find.text('Saved before the phone signed in'));
+      await openItem(tester, 'Saved before the phone signed in');
       // Past the way in (iOS's slides from the right), where Save can be tapped.
       await pumpUntil(tester, find.byTooltip('Save notes.txt').hitTestable());
       await tester.tap(find.byTooltip('Save notes.txt'));
@@ -213,23 +273,24 @@ void main() {
       await tester.pumpWidget(PassBundleApp(key: UniqueKey()));
       await pumpUntil(tester, find.text('Unlock PassBundle'));
       await tester.enterText(find.byType(TextField), password);
-      await tester.tap(find.text('Unlock'));
-      await pumpUntil(tester, find.text('Saved before the phone signed in'));
+      await unlockWhenStill(tester);
+      await pumpUntil(tester, find.text('Logins'));
       await pumpUntil(tester, find.byTooltip('Sync'));
+      await openItem(tester, 'Saved before the phone signed in');
       expect(find.textContaining('Sign in again'), findsNothing);
     },
     skip: server.isEmpty,
   );
 
   testWidgets(
-    'turns on biometric unlock, unlocks with it, and signing out turns it off',
+    'offers biometric unlock after the master password, turns it on with the biometric, unlocks with it, and signing out turns it off',
     (tester) async {
       // Debug builds' stand-in for the phone's prompt says yes; the real
       // prompt is checked by hand on a real phone (docs/phones.md).
       expect(await Core.useBiometricStandIn(true), isTrue);
       addTearDown(() => Core.useBiometricStandIn(false));
-      final unlockWith =
-          'Unlock with ${(await Core.biometricStatus())['method']}';
+      final method = (await Core.biometricStatus())['method'] as String;
+      final unlockWith = 'Unlock with $method';
       final dir = (await Core.platform.invokeMethod<String>('filesDir'))!;
       for (final kept in Directory(dir).listSync()) {
         kept.deleteSync(recursive: true);
@@ -238,16 +299,35 @@ void main() {
       File('$dir/sync.json').writeAsStringSync(sampleSync);
       await Core.removeBiometric();
       await Core.openOnThisDevice();
+      // The sample, carried over as the one account: biometric unlock is
+      // each account's own, kept under its id on this device.
+      final account = Core.account;
+      expect(account, hasLength(32));
+      // Not about autofill (the next test is).
+      putOffAutofill();
       await tester.pumpWidget(PassBundleApp(key: UniqueKey()));
       await pumpUntil(tester, find.text('Unlock PassBundle'));
       await tester.enterText(find.byType(TextField), samplePassword);
-      await tester.tap(find.text('Unlock'));
-      await pumpUntil(tester, find.text('Backup service'));
+      await unlockWhenStill(tester);
+      await pumpUntil(tester, find.text('Logins'));
 
-      // Turning it on: Android asks (the stand-in, here), then the user key is sealed.
+      // Unlocked with the master password and not on yet: the phone offers
+      // it. Turning it on asks for the biometric (the stand-in, here), and
+      // only then is the user key sealed.
+      await pumpUntil(tester, find.textContaining('next time?'));
+      expect((await Core.biometricStatus())['status'], 'notSetUp');
+      // Once the sheet has slid up.
+      await tapWhenStill(tester, find.text('Turn on'));
+      await pumpUntil(tester, find.text('Unlocking with $method is on.'));
+      // Sealed by the Keystore in the app's folder, or in the Keychain:
+      // this account's own.
+      if (Platform.isAndroid) {
+        expect(File('$dir/biometric-$account.sealed').existsSync(), isTrue);
+      }
+      expect((await Core.biometricStatus())['status'], 'setUp');
+
+      // Settings shows it on.
       await tester.tap(find.byTooltip('Settings'));
-      await pumpUntil(tester, find.text(unlockWith));
-      await tester.tap(find.text(unlockWith));
       await pumpUntil(
         tester,
         find.byWidgetPredicate(
@@ -257,31 +337,229 @@ void main() {
               w.value,
         ),
       );
-      // Sealed by the Keystore in the app's folder, or in the Keychain.
-      if (Platform.isAndroid) {
-        expect(File('$dir/biometric.sealed').existsSync(), isTrue);
-      }
-      expect((await Core.biometricStatus())['status'], 'setUp');
-      await tester.tap(find.text('Close'));
+      await tester.tap(find.byTooltip('Items'));
       await tester.pump(const Duration(milliseconds: 400));
 
-      // Unlocking with it: no master password.
+      // Unlocking with it: no master password, and nothing offered.
       await tester.tap(find.byTooltip('Lock'));
       await pumpUntil(tester, find.text(unlockWith));
       await tester.tap(find.text(unlockWith));
-      await pumpUntil(tester, find.text('Backup service'));
+      await pumpUntil(tester, find.text('Logins'));
+      await tester.pump(const Duration(seconds: 1));
+      expect(find.textContaining('next time?'), findsNothing);
 
       // Signing out turns it off: the core asks Kotlin to delete the key and the sealed user key.
       await tester.tap(find.byTooltip('Lock'));
       await pumpUntil(tester, find.text('Sign out'));
-      await tester.tap(find.text('Sign out').first);
+      await tapWhenStill(tester, find.text('Sign out').first);
       await pumpUntil(tester, find.text('Sign out?'));
       await tester.tap(find.widgetWithText(FilledButton, 'Sign out'));
       await pumpUntil(tester, find.text('Sign in to PassBundle'));
       if (Platform.isAndroid) {
-        expect(File('$dir/biometric.sealed').existsSync(), isFalse);
+        expect(File('$dir/biometric-$account.sealed').existsSync(), isFalse);
       }
-      expect((await Core.biometricStatus())['status'], 'notSetUp');
+      expect((await Core.biometricStatus(account))['status'], 'notSetUp');
+    },
+  );
+
+  testWidgets(
+    'on Android, offers to turn on autofill as the vault opens, and its buttons open Android\'s own prompt and passkey settings',
+    (tester) async {
+      // Debug builds record what would open instead of opening it, so this
+      // checks what's asked of Android without its real prompt
+      // (AutofillSetup.kt).
+      expect(await Core.useAutofillSetupStandIn(true), isTrue);
+      addTearDown(() => Core.useAutofillSetupStandIn(false));
+      final dir = (await Core.platform.invokeMethod<String>('filesDir'))!;
+      for (final kept in Directory(dir).listSync()) {
+        kept.deleteSync(recursive: true);
+      }
+      File('$dir/settings.json').writeAsStringSync(sampleSettings);
+      File('$dir/sync.json').writeAsStringSync(sampleSync);
+      await Core.openOnThisDevice();
+      declineOffer();
+
+      // A new install: Android has autofill, and PassBundle isn't its
+      // service yet. Android 14 and later have Credential Manager.
+      final status = AutofillStatus.from((await Core.autofillStatus())!);
+      expect(status.autofillSupported, isTrue);
+      expect(status.autofillOn, isFalse);
+      final passkeys = status.apiLevel >= passkeysSinceApi;
+      expect(status.passkeysAvailable, passkeys);
+      expect(status.passkeysOn, isFalse);
+
+      await tester.pumpWidget(PassBundleApp(key: UniqueKey()));
+      await pumpUntil(tester, find.text('Unlock PassBundle'));
+      await tester.enterText(find.byType(TextField), samplePassword);
+      await unlockWhenStill(tester);
+      await pumpUntil(tester, find.text('Logins'));
+      await pumpUntil(tester, find.text('Turn on autofill'));
+      expect(find.text('Use PassBundle for autofill'), findsOneWidget);
+      expect(
+        find.text('Use PassBundle for passkeys'),
+        passkeys ? findsOneWidget : findsNothing,
+      );
+
+      // Android's own prompt, for a result, naming this app.
+      await tapWhenStill(
+        tester,
+        find.byKey(const ValueKey('turn-on-autofill')),
+      );
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(await Core.autofillSetupOpened(), [
+        {
+          'for': 'autofill',
+          'action': 'android.settings.REQUEST_SET_AUTOFILL_SERVICE',
+          'data': 'package:com.passbundle.app',
+          'forResult': true,
+        },
+      ]);
+
+      // Android 14 and later: Credential Manager's own settings page, made by
+      // androidx.credentials for this app.
+      if (passkeys) {
+        await tapWhenStill(
+          tester,
+          find.byKey(const ValueKey('turn-on-passkeys')),
+        );
+        await tester.pump(const Duration(milliseconds: 300));
+        final opened = await Core.autofillSetupOpened();
+        expect(opened, hasLength(2));
+        expect(opened.last, {
+          'for': 'passkeys',
+          'pendingIntent': true,
+          'creator': 'com.passbundle.app',
+          'activity': true,
+        });
+      }
+
+      // Nothing turned on without the person: "Later" closes it, and
+      // Settings has the same card.
+      expect((await Core.autofillStatus())!['autofillOn'], isFalse);
+      await tapWhenStill(tester, find.text('Later'));
+      // Gone once it has slid away (what's under it can be tapped sooner).
+      for (var i = 0; i < 50; i++) {
+        await tester.pump(const Duration(milliseconds: 100));
+        if (find.text('Turn on autofill').evaluate().isEmpty) break;
+      }
+      expect(find.text('Turn on autofill'), findsNothing);
+      expect(autofillPutOff(), isTrue);
+      await tester.tap(find.byTooltip('Settings'));
+      await pumpUntil(tester, find.byKey(const ValueKey('setup-autofill')));
+      expect(find.text('Autofill'), findsOneWidget);
+      await tester.tap(find.byTooltip('Items'));
+      await tester.pump(const Duration(milliseconds: 400));
+    },
+    skip: !Platform.isAndroid,
+  );
+
+  testWidgets(
+    'on an iPhone, offers to turn on AutoFill as the vault opens, and its button opens Settings\' AutoFill page',
+    (tester) async {
+      // Debug builds record that Settings would open instead of opening it
+      // (AppDelegate.swift, AutoFillSetup); iOS's own answer says whether
+      // PassBundle is on, which it isn't on a new simulator.
+      expect(await Core.useAutofillSetupStandIn(true), isTrue);
+      addTearDown(() => Core.useAutofillSetupStandIn(false));
+      final dir = (await Core.platform.invokeMethod<String>('filesDir'))!;
+      for (final kept in Directory(dir).listSync()) {
+        kept.deleteSync(recursive: true);
+      }
+      File('$dir/settings.json').writeAsStringSync(sampleSettings);
+      File('$dir/sync.json').writeAsStringSync(sampleSync);
+      await Core.openOnThisDevice();
+      declineOffer();
+
+      final status = AutofillStatus.from((await Core.autofillStatus())!);
+      expect(status.ios, isTrue);
+      expect(status.autofillOn, isFalse);
+
+      await tester.pumpWidget(PassBundleApp(key: UniqueKey()));
+      await pumpUntil(tester, find.text('Unlock PassBundle'));
+      await tester.enterText(find.byType(TextField), samplePassword);
+      await unlockWhenStill(tester);
+      await pumpUntil(tester, find.text('Logins'));
+      await pumpUntil(tester, find.text('Turn on AutoFill'));
+      expect(find.text('Use PassBundle for AutoFill'), findsOneWidget);
+      expect(find.text('Use PassBundle for passkeys'), findsNothing);
+
+      await tapWhenStill(
+        tester,
+        find.byKey(const ValueKey('turn-on-autofill')),
+      );
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(await Core.autofillSetupOpened(), [
+        {'for': 'autofill', 'opens': 'credentialProviderSettings'},
+      ]);
+
+      // Nothing turned on without the person: "Later" closes it, and
+      // Settings has the same card.
+      expect((await Core.autofillStatus())!['autofillOn'], isFalse);
+      await tapWhenStill(tester, find.text('Later'));
+      for (var i = 0; i < 50; i++) {
+        await tester.pump(const Duration(milliseconds: 100));
+        if (find.text('Turn on AutoFill').evaluate().isEmpty) break;
+      }
+      expect(find.text('Turn on AutoFill'), findsNothing);
+      expect(autofillPutOff(), isTrue);
+      await tester.tap(find.byTooltip('Settings'));
+      await pumpUntil(tester, find.byKey(const ValueKey('setup-autofill')));
+      expect(find.text('AutoFill'), findsOneWidget);
+      await tester.tap(find.byTooltip('Items'));
+      await tester.pump(const Duration(milliseconds: 400));
+    },
+    skip: !Platform.isIOS,
+  );
+
+  // Graphite glass on the phone's own renderer: the ground's washes and the
+  // translucent cards, edges, and shadows (theme.dart), drawn on each screen.
+  testWidgets(
+    'dark mode draws the vault, an item, the editor, the generator, and settings',
+    (tester) async {
+      final dir = (await Core.platform.invokeMethod<String>('filesDir'))!;
+      for (final kept in Directory(dir).listSync()) {
+        kept.deleteSync(recursive: true);
+      }
+      File('$dir/settings.json').writeAsStringSync(sampleSettings);
+      File('$dir/sync.json').writeAsStringSync(sampleSync);
+      await Core.openOnThisDevice();
+      declinedTheOffer();
+      await tester.pumpWidget(
+        PassBundleApp(key: UniqueKey(), themeMode: ThemeMode.dark),
+      );
+      await pumpUntil(tester, find.text('Unlock PassBundle'));
+      expect(find.byType(Ground), findsNWidgets(2));
+      await tester.enterText(find.byType(TextField), samplePassword);
+      await unlockWhenStill(tester);
+      await pumpUntil(tester, find.text('Logins'));
+      await tester.pump(const Duration(seconds: 1));
+
+      await openItem(tester, 'Backup service');
+      await pumpUntil(tester, find.byTooltip('Copy password'));
+      await tester.pump(const Duration(seconds: 1));
+      await tester.pageBack();
+      await pumpUntil(tester, find.byTooltip('New item').hitTestable());
+
+      await tester.tap(find.byTooltip('New item'));
+      await pumpUntil(tester, find.text('What are you saving?'));
+      await tapWhenStill(tester, find.text('Login'));
+      await pumpUntil(tester, find.text('New login'));
+      await tester.pump(const Duration(seconds: 1));
+      await tapWhenStill(tester, find.byTooltip('Cancel'));
+      await pumpUntil(tester, find.byTooltip('Generator').hitTestable());
+
+      await tester.tap(find.byTooltip('Generator'));
+      // Its Copy is below the fold on a small screen.
+      await pumpUntil(tester, find.text('Passphrase'));
+      await tester.pump(const Duration(seconds: 1));
+      await tester.tap(find.byTooltip('Settings'));
+      await pumpUntil(tester, find.text('Lock when the phone locks'));
+      await tester.pump(const Duration(seconds: 1));
+      await tester.tap(find.byTooltip('Items'));
+      await pumpUntil(tester, find.byTooltip('Lock').hitTestable());
+      await tester.tap(find.byTooltip('Lock'));
+      await pumpUntil(tester, find.text('Unlock PassBundle'));
+      expect(tester.takeException(), isNull);
     },
   );
 
@@ -293,27 +571,42 @@ void main() {
     File('$dir/settings.json').writeAsStringSync(sampleSettings);
     File('$dir/sync.json').writeAsStringSync(sampleSync);
     await Core.openOnThisDevice();
+    declinedTheOffer();
     await tester.pumpWidget(PassBundleApp(key: UniqueKey()));
     await pumpUntil(tester, find.text('Unlock PassBundle'));
     await tester.enterText(find.byType(TextField), samplePassword);
-    await tester.tap(find.text('Unlock'));
-    await pumpUntil(tester, find.text('Backup service'));
+    await unlockWhenStill(tester);
+    await pumpUntil(tester, find.text('Logins'));
+    // No refresh token is kept yet on Android, so syncing asks to sign in
+    // again: past that notice, which moves the screen when it shows.
+    await pumpUntil(tester, find.textContaining('Sign in again'));
 
     // A phone's own words and choices: 5 minutes away by default.
     await tester.tap(find.byTooltip('Settings'));
     await pumpUntil(tester, find.text('Lock when the phone locks'));
-    expect(find.text('Away from PassBundle'), findsOneWidget);
-    // Settings scrolls on a small screen, as CI's emulator has.
-    await tester.ensureVisible(find.text('5 minutes'));
-    await tester.pump(const Duration(milliseconds: 300));
-    await tester.tap(find.text('5 minutes'));
+    // Settings fills in as Android answers: on Android, the autofill card
+    // above Locking shows once Android says whether PassBundle is its
+    // service, and pushes the rows under it down (out of view on CI's small
+    // screen, where Settings scrolls).
+    if (Platform.isAndroid) {
+      await pumpUntil(tester, find.text('Use PassBundle for autofill'));
+    }
+    // The same on an iPhone, once iOS says whether PassBundle is on for
+    // AutoFill.
+    if (Platform.isIOS) {
+      await pumpUntil(tester, find.text('Use PassBundle for AutoFill'));
+    }
+    // Tapped once it's in view and holds still: a tap while the tab is still
+    // coming in lands on what's over it, and the menu never opens.
+    await tapWhenStill(tester, find.text('5 minutes'), inList: true);
     await pumpUntil(tester, find.text('Immediately'));
-    await tester.tap(find.text('Immediately').last);
+    expect(find.text('Away from PassBundle'), findsOneWidget);
+    await tapWhenStill(tester, find.text('Immediately').last);
     await tester.pump(const Duration(milliseconds: 500));
     expect(Core().preferences()['lockAfterMinutes'], 0);
-    await tester.tap(find.text('Close'));
+    await tester.tap(find.byTooltip('Items'));
     await tester.pump(const Duration(milliseconds: 400));
-    expect(find.text('Backup service'), findsWidgets);
+    expect(find.text('Logins'), findsOneWidget);
 
     // Home, or the app switcher: the app leaves the screen. It locks right
     // then (no frame comes while it's hidden, so nothing is pumped here).
