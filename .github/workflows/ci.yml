@@ -87,6 +87,10 @@ jobs:
     # back as each browser keeps them and turns their password saving off;
     # and the browsers, started again, have it off. Never anyone's own
     # profiles: the runner is fresh, and nothing reads its real home folder.
+    # The browsers are whichever versions the runner has, on purpose (the
+    # import has to read what today's browsers write), so they change under
+    # this: the steps say which versions ran, and seed.py's failures name
+    # the browser's version and what it no longer had.
     name: Import from real Chrome and Firefox (Linux)
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -112,7 +116,9 @@ jobs:
           python3 -m venv "$RUNNER_TEMP/venv"
           "$RUNNER_TEMP/venv/bin/pip" install --quiet selenium==4.27.1
           google-chrome --version
+          "$CHROMEWEBDRIVER/chromedriver" --version
           firefox --version
+          "$GECKOWEBDRIVER/geckodriver" --version
       - name: Chrome and Firefox save made-up passwords in a throwaway home folder
         run: '"$RUNNER_TEMP/venv/bin/python" ../tools/real-browsers/seed.py "$PB_REAL_BROWSERS" ../tools/real-browsers/fakes.json seed'
       - name: The browsers crate reads them back, and turns their password saving off
