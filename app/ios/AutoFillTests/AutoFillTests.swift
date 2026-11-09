@@ -11,9 +11,11 @@ import XCTest
 /// kept as the app keeps them: each unlocks on its own, the website's logins
 /// are labeled with their account, a login fills only from its own account,
 /// nothing in the app's folder changes, and every account locks as the
-/// request ends; and a passkey signs from its own account, its answer the
-/// core's test vectors' byte for byte. The screens are drawn in the host app's window, attached to
-/// the results, and saved where PB_SHOTS says (tools/ios-autofill-screens.sh).
+/// request ends; a passkey signs from its own account, its answer the core's
+/// test vectors' byte for byte; a login search finds for a site that isn't
+/// its own asks before it fills; and nothing begun for one request lands in
+/// the next. The screens are drawn in the host app's window, attached to the
+/// results, and saved where PB_SHOTS says (tools/ios-autofill-screens.sh).
 final class AutoFillTests: XCTestCase {
   /// The sample vault's master password, and its Backup service login
   /// (app/test/sample; the core's test vectors).
@@ -22,6 +24,9 @@ final class AutoFillTests: XCTestCase {
   /// Two accounts, as the app names them on this device.
   static let work = "0123456789abcdef0123456789abcdef"
   static let personal = "fedcba9876543210fedcba9876543210"
+  /// How each of the browser extension's "Site doesn't match" questions ends
+  /// (its `loginSingleSiteDesc` and the ones beside it).
+  static let verify = "Verify you're on a trusted site before autofilling."
 
   private var folder = ""
   private var index = ""
@@ -301,5 +306,231 @@ final class AutoFillTests: XCTestCase {
       return XCTFail("Not unavailable: \(provider.screen)")
     }
     XCTAssertEqual(words, "Sign in to PassBundle in its app first.")
+  }
+
+  /// A login search finds, for a site that isn't its own: it asks first, in
+  /// the browser extension's words, with the login's website and this one,
+  /// and fills only once the person says so. The site's own logins fill as
+  /// they're picked (the first test).
+  func testALoginFoundBySearchAsksBeforeItFillsOnASiteThatIsNotItsOwn() throws {
+    let provider = Provider()
+    var filled: ASPasswordCredential?
+    var ended = false
+    provider.onFinish = { answer in
+      if case .password(let credential) = answer { filled = credential }
+      ended = true
+    }
+    try show(provider)
+    // Another site altogether: none of the sample's logins is its own.
+    provider.start(domains: ["shop.example.org"], picked: nil)
+    wait("asked to unlock") { isLocked(provider) }
+    provider.unlock(password: Self.password)
+    wait("listed the site's logins") { isLogins(provider) }
+    XCTAssertTrue(provider.logins.isEmpty)
+
+    provider.query = "backup"
+    provider.search()
+    let login = try XCTUnwrap(provider.logins.first { $0.name == "Backup service" })
+    provider.pick(login)
+    guard case .elsewhere(let asked) = provider.screen else {
+      return XCTFail("Didn't ask: \(provider.screen)")
+    }
+    XCTAssertFalse(ended)
+    XCTAssertEqual(asked.login, login)
+    XCTAssertEqual(asked.title, "Site doesn't match")
+    XCTAssertEqual(
+      asked.words, "This site doesn't match the one you have saved for this login. \(Self.verify)")
+    XCTAssertEqual(asked.savedHeading, "Saved website")
+    XCTAssertEqual(asked.saved, ["backup.example.test"])
+    XCTAssertEqual(asked.current, "shop.example.org")
+    snapshot("6-site-doesnt-match")
+
+    // Back to the logins: nothing filled, and still what was searched for.
+    provider.backToLogins()
+    XCTAssertTrue(isLogins(provider))
+    XCTAssertFalse(ended)
+    XCTAssertEqual(provider.logins.map(\.name), ["Backup service"])
+
+    // A login with no website saved says that instead.
+    provider.query = "wi-fi"
+    provider.search()
+    let wifi = try XCTUnwrap(provider.logins.first { $0.name == "Office Wi-Fi" })
+    provider.pick(wifi)
+    guard case .elsewhere(let unsaved) = provider.screen else {
+      return XCTFail("Didn't ask: \(provider.screen)")
+    }
+    XCTAssertEqual(unsaved.title, "Login has no site saved")
+    XCTAssertEqual(unsaved.words, "This login has no website saved yet. \(Self.verify)")
+    XCTAssertTrue(unsaved.saved.isEmpty)
+    XCTAssertEqual(unsaved.current, "shop.example.org")
+    XCTAssertFalse(ended)
+    provider.backToLogins()
+
+    // "Autofill" on the question fills it, from its own account.
+    provider.pick(login, anyway: true)
+    wait("filled") { ended }
+    XCTAssertEqual(filled?.user, "backup@example.test")
+    XCTAssertEqual(filled?.password, "not-a-real-password-3")
+  }
+
+  /// The question's other wordings, the browser extension's too: several
+  /// websites saved, and a website that is this very site under a rule that
+  /// doesn't fill here. And a saved website's host, however it was written.
+  func testTheSiteQuestionSaysWhatTheBrowserExtensionSays() {
+    let login = Provider.Login(
+      account: Self.work, item: Self.backup, name: "Backup service", username: "backup@example.test")
+    let several = Provider.Elsewhere(
+      login: login, saved: ["backup.example.test", "files.example.test"], current: "shop.example.org",
+      sameSite: false)
+    XCTAssertEqual(several.title, "Site doesn't match")
+    XCTAssertEqual(
+      several.words, "This site doesn't match the ones you have saved for this login. \(Self.verify)")
+    XCTAssertEqual(several.savedHeading, "Saved websites ( 2 )")
+
+    let never = Provider.Elsewhere(
+      login: login, saved: ["shop.example.org"], current: "shop.example.org", sameSite: true)
+    XCTAssertEqual(never.title, "Login doesn't match")
+    XCTAssertEqual(never.words, "This site doesn't match your saved login details. \(Self.verify)")
+
+    XCTAssertEqual(Provider.host("https://mail.example.test/login"), "mail.example.test")
+    XCTAssertEqual(Provider.host("backup.example.test"), "backup.example.test")
+    XCTAssertEqual(Provider.host("Shop.Example.org:8443/cart"), "shop.example.org")
+  }
+
+  /// A request's number is good from when it begins until it ends, and never
+  /// again: what was begun under it isn't run afterwards, and closing it
+  /// twice, or after the next request began, closes nothing.
+  func testWhatAnEndedRequestBeganIsNotRunAndClosesNothing() {
+    let requests = Requests()
+    var opened = 0
+    var closed = 0
+    var ran = 0
+    let first = requests.begin { opened += 1 }
+    XCTAssertEqual(opened, 1)
+    XCTAssertTrue(requests.has(first))
+    XCTAssertEqual(requests.run(for: first) { ran += 1 }.map { "ran" }, "ran")
+    XCTAssertEqual(ran, 1)
+
+    requests.end(first) { closed += 1 }
+    XCTAssertEqual(closed, 1)
+    XCTAssertFalse(requests.has(first))
+    XCTAssertNil(requests.run(for: first) { ran += 1 }.map { "ran" })
+    XCTAssertEqual(ran, 1)
+    requests.end(first) { closed += 1 }
+    XCTAssertEqual(closed, 1)
+
+    // A request that never ended, with the next one begun: the next one's
+    // from then on, whatever the first still does.
+    let second = requests.begin()
+    let third = requests.begin()
+    XCTAssertFalse(second == third)
+    XCTAssertFalse(requests.has(second))
+    XCTAssertNil(requests.run(for: second) { ran += 1 }.map { "ran" })
+    requests.end(second) { closed += 1 }
+    XCTAssertEqual(ran, 1)
+    XCTAssertEqual(closed, 1)
+    XCTAssertTrue(requests.has(third))
+    XCTAssertEqual(requests.run(for: third) { ran += 1 }.map { "ran" }, "ran")
+    requests.end(third) { closed += 1 }
+    XCTAssertEqual(closed, 2)
+  }
+
+  /// A core call that's running as its request ends finishes first: the
+  /// request's close (and so the next request's open) waits for it.
+  func testEndingARequestWaitsForItsRunningCall() {
+    final class Order: @unchecked Sendable {
+      var seen: [String] = []
+    }
+    let requests = Requests()
+    let order = Order()
+    let request = requests.begin()
+    let running = DispatchSemaphore(value: 0)
+    let letGo = DispatchSemaphore(value: 0)
+    let both = DispatchGroup()
+    DispatchQueue.global().async(group: both) {
+      _ = requests.run(for: request) {
+        running.signal()
+        letGo.wait()
+        order.seen.append("call")
+      }
+    }
+    running.wait()
+    DispatchQueue.global().async(group: both) {
+      requests.end(request) { order.seen.append("close") }
+    }
+    // Time for the close to get as far as it can with the call running.
+    Thread.sleep(forTimeInterval: 0.3)
+    XCTAssertTrue(order.seen.isEmpty)
+    letGo.signal()
+    XCTAssertTrue(both.wait(timeout: .now() + 30) == .success)
+    XCTAssertEqual(order.seen, ["call", "close"])
+    XCTAssertFalse(requests.has(request))
+  }
+
+  /// A master password typed for a request that ended before the core got
+  /// to it: the next request, in the same process, starts with every account
+  /// locked and stays so, and nothing answers iOS a second time.
+  func testAnUnlockLeftFromAnEndedRequestDoesNothingInTheNextOne() throws {
+    let provider = Provider()
+    // The core's slow calls wait here until the test lets them go.
+    let held = DispatchQueue(label: "com.passbundle.tests.held")
+    held.suspend()
+    var resumed = false
+    defer { if !resumed { held.resume() } }
+    provider.queue = held
+    var answers = 0
+    provider.onFinish = { _ in answers += 1 }
+    try show(provider)
+    provider.start(domains: ["backup.example.test"], picked: nil)
+    wait("asked to unlock") { isLocked(provider) }
+    provider.unlock(password: Self.password)
+    XCTAssertTrue(provider.working)
+    // Cancel, and the next request begins, before the unlock has run.
+    provider.finish(.refused(.userCanceled))
+    XCTAssertEqual(answers, 1)
+    provider.start(domains: ["backup.example.test"], picked: nil)
+    wait("asked to unlock again") { isLocked(provider) }
+
+    resumed = true
+    held.resume()
+    held.sync {}
+    RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+    // The unlock was never made: the new request's accounts are all locked.
+    XCTAssertTrue(isLocked(provider))
+    XCTAssertTrue(provider.accounts.allSatisfy { !$0.unlocked })
+    let now = Shared.answer(pb_fillable("backup.example.test")) as? [String: Any]
+    XCTAssertEqual(now?["locked"] as? Bool, true)
+    XCTAssertEqual(now?["signedOut"] as? Bool, false)
+    XCTAssertEqual(answers, 1)
+
+    // The new request goes on as any other.
+    provider.unlock(password: Self.password)
+    wait("listed the logins") { isLogins(provider) }
+    XCTAssertEqual(provider.logins.count, 2)
+  }
+
+  /// A sheet that goes away late, after the next request has begun (iOS
+  /// tells it so when it likes): its close leaves the next request's
+  /// accounts as they are.
+  func testAnEndedRequestsLateCloseLeavesTheNextRequestOpen() throws {
+    let earlier = Provider()
+    earlier.start(domains: ["backup.example.test"], picked: nil)
+    wait("asked to unlock") { isLocked(earlier) }
+
+    let provider = Provider()
+    try show(provider)
+    provider.start(domains: ["backup.example.test"], picked: nil)
+    wait("asked to unlock") { isLocked(provider) }
+    provider.unlock(password: Self.password)
+    wait("listed the logins") { isLogins(provider) }
+
+    earlier.close()
+    let now = Shared.answer(pb_fillable("backup.example.test")) as? [String: Any]
+    XCTAssertEqual(now?["locked"] as? Bool, false)
+
+    // Its own close locks them.
+    provider.close()
+    let after = Shared.answer(pb_fillable("backup.example.test")) as? [String: Any]
+    XCTAssertEqual(after?["locked"] as? Bool, true)
   }
 }

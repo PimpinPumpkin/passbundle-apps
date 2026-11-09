@@ -299,10 +299,15 @@ enum Biometric {
     let keep = {
       var length = 0
       guard let bytes = pb_user_key(account, &length) else { return done(false, "Unlock PassBundle first.") }
+      // The key is in the core's buffer, which the core wipes as it frees it,
+      // once the Keychain has it or has refused it.
       defer { pb_free_secret(bytes, length) }
       var query = Shared.biometricItem(account)
-      // Not copied: the Keychain takes it from the core's buffer, which is wiped after.
-      query[kSecValueData as String] = Data(bytesNoCopy: bytes, count: length, deallocator: .none)
+      // No copy of it is made in Swift: this CFData only points at the
+      // core's buffer (and never frees it), whatever the key's length.
+      // What iOS makes of it on the way into the Keychain is iOS's own, and
+      // can't be wiped from here.
+      query[kSecValueData as String] = CFDataCreateWithBytesNoCopy(nil, bytes, length, kCFAllocatorNull)
       if standIn {
         query[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
       } else {

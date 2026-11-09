@@ -10,7 +10,10 @@ import SwiftUI
 /// it lists the logins of each account unlocked here, labeled, and fills a
 /// login only from its own account. A password is taken from the core only
 /// once someone picks its login, a passkey signs only once someone picks it,
-/// and every account locks as the request ends, however it ends.
+/// and every account locks as the request ends, however it ends. Nothing
+/// begun for one request reaches the next (`Requests`), and a login found by
+/// search fills on a site that isn't its own only once the person says so
+/// (`Provider.Elsewhere`).
 class CredentialProviderViewController: ASCredentialProviderViewController {
   private let provider = Provider()
 
@@ -119,6 +122,61 @@ class CredentialProviderViewController: ASCredentialProviderViewController {
   }
 }
 
+/// Which AutoFill request the core is open for. The core's accounts are the
+/// whole process's: opened as a request starts, let go as it ends, and iOS
+/// may keep the process for the next request. So nothing begun for one
+/// request may land in the next: each request has a number, and whatever
+/// comes back later (from another queue, from Face ID, from iOS) carries the
+/// number it started under and does nothing once that request has ended.
+final class Requests: @unchecked Sendable {
+  /// The process's, as the core's accounts are.
+  static let core = Requests()
+
+  private let lock = NSLock()
+  /// The request the core is open for. Once it ends, its number is never
+  /// anyone's again.
+  private var front = 0
+
+  /// Starts a request, ending the one before it: `open` opens the core for
+  /// it, with none of an earlier request's core calls running. Its number.
+  func begin(_ open: () -> Void = {}) -> Int {
+    lock.lock()
+    defer { lock.unlock() }
+    front += 1
+    open()
+    return front
+  }
+
+  /// Ends `request` if it's still the one the core is open for: `close`
+  /// closes the core, with none of the request's core calls running. One
+  /// that has ended already, or that another has taken the place of, closes
+  /// nothing.
+  func end(_ request: Int, _ close: () -> Void = {}) {
+    lock.lock()
+    defer { lock.unlock() }
+    guard request == front else { return }
+    front += 1
+    close()
+  }
+
+  /// Whether `request` is still the one the core is open for.
+  func has(_ request: Int) -> Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    return request == front
+  }
+
+  /// A core call for `request`, on another queue: not made (nil) once the
+  /// request has ended. Starting and ending a request wait for one that's
+  /// running, so it never lands in the next request's accounts. `call`
+  /// mustn't start or end a request itself.
+  func run<T>(for request: Int, _ call: () -> T) -> T? {
+    lock.lock()
+    defer { lock.unlock() }
+    return request == front ? call() : nil
+  }
+}
+
 /// What the extension's screens show, and what they do with the core.
 final class Provider: ObservableObject {
   enum Screen {
@@ -132,6 +190,9 @@ final class Provider: ObservableObject {
     /// A login that asks for the master password again, before it fills or
     /// signs (docs/core.md, "Asking for the master password again").
     case reprompt(Login)
+    /// A login found by search, picked for a site that isn't its own: it
+    /// fills once the person says so.
+    case elsewhere(Elsewhere)
     /// Saving a new passkey, once the person says so.
     case saving
     case unavailable(String)
@@ -187,6 +248,40 @@ final class Provider: ObservableObject {
     var passkey = false
   }
 
+  /// A login picked for a site that isn't one of its own, which only search
+  /// finds here: what the person is shown before it fills, in the words the
+  /// browser extension asks with there. The extension can also save the site
+  /// in the login; AutoFill changes nothing in a login, so it has the one
+  /// button the extension shows someone who can't edit the login.
+  struct Elsewhere: Equatable {
+    let login: Login
+    /// The login's websites, by host (as saved, where one has no host).
+    let saved: [String]
+    /// The site iOS asked for, if it named one.
+    let current: String?
+    /// One of the login's websites is this very site, under a rule that
+    /// doesn't fill here: never, or one that needs the page's whole address
+    /// (core/src/matching.rs).
+    let sameSite: Bool
+
+    var title: String {
+      if saved.isEmpty { return "Login has no site saved" }
+      return sameSite ? "Login doesn't match" : "Site doesn't match"
+    }
+
+    var words: String {
+      let verify = "Verify you're on a trusted site before autofilling."
+      if saved.isEmpty { return "This login has no website saved yet. \(verify)" }
+      if sameSite { return "This site doesn't match your saved login details. \(verify)" }
+      let saved = saved.count == 1 ? "the one" : "the ones"
+      return "This site doesn't match \(saved) you have saved for this login. \(verify)"
+    }
+
+    var savedHeading: String {
+      saved.count == 1 ? "Saved website" : "Saved websites ( \(saved.count) )"
+    }
+  }
+
   @Published var screen = Screen.opening
   @Published var accounts: [Account] = []
   /// The account the lock screen unlocks.
@@ -208,7 +303,13 @@ final class Provider: ObservableObject {
   var onFinish: (Answer) -> Void = { _ in }
   /// Ended: nothing answers iOS twice, or after Cancel.
   private(set) var finished = false
+  /// Where the core's slow calls run (the KDF, or one that waits on the
+  /// network). The tests hold it back, to end a request with one waiting.
+  var queue = DispatchQueue.global(qos: .userInitiated)
 
+  private let requests = Requests.core
+  /// This request's number, from `start` until it ends (`Requests`).
+  private var request: Int?
   private var domains: [String] = []
   /// A suggestion picked above the keyboard: `<account>/<item>`.
   private var picked: (account: String, item: String)?
@@ -249,6 +350,8 @@ final class Provider: ObservableObject {
   /// it's on, else its master password.
   func start(domains: [String], picked: String?) {
     finished = false
+    confirmed = []
+    verified = []
     self.domains = domains
     self.picked = picked.flatMap { record in
       let parts = record.split(separator: "/", maxSplits: 1).map(String.init)
@@ -258,7 +361,8 @@ final class Provider: ObservableObject {
       screen = .unavailable("PassBundle's folder isn't there.")
       return
     }
-    let opened = Shared.answer(pb_autofill_open(dir)) as? [String: Any]
+    var opened: [String: Any]?
+    request = requests.begin { opened = Shared.answer(pb_autofill_open(dir)) as? [String: Any] }
     accounts = ((opened?["accounts"] as? [[String: Any]]) ?? []).compactMap { a in
       guard let id = a["id"] as? String else { return nil }
       let name = (a["name"] as? String).flatMap { $0.isEmpty ? nil : $0 }
@@ -285,27 +389,46 @@ final class Provider: ObservableObject {
     if automatically && biometric != nil { unlockWithBiometric() }
   }
 
+  /// A slow core call for this request, off the main queue, with the
+  /// screens waiting: `then` gets its answer on the main queue. Once the
+  /// request has ended (`finish` or `close` has run, or another request has
+  /// started), a call still waiting isn't made, and one that comes back
+  /// does nothing more.
+  private func work<T>(_ call: @escaping () -> T, then: @escaping (T) -> Void) {
+    guard let request else { return }
+    screen = .working
+    queue.async { [requests] in
+      let answer = requests.run(for: request, call)
+      DispatchQueue.main.async {
+        guard let answer, requests.has(request) else { return }
+        then(answer)
+      }
+    }
+  }
+
+  /// Face ID can be up for a while: if the request ends under it, the key
+  /// it hands over goes unused, and nothing more happens (`wanted`).
   func unlockWithBiometric() {
-    guard let account = unlocking?.id else { return }
-    Shared.unlockWithBiometric(account: account) { [weak self] unlocked, error in
-      guard let self, !self.finished else { return }
+    guard let account = unlocking?.id, let request else { return }
+    let requests = self.requests
+    Shared.unlockWithBiometric(account: account, wanted: { requests.has(request) }) { [weak self] unlocked, error in
+      guard let self, requests.has(request) else { return }
       if unlocked { return self.unlocked(account) }
       self.note = error
       if !Shared.biometricKept(account) { self.biometric = nil }
     }
   }
 
+  /// The master password comes as a Swift string, which can't be wiped:
+  /// the screens clear their field as they hand it over, it's kept here
+  /// only until the core has answered, and the copy the core makes is the
+  /// core's to wipe, which it does (`pb_unlock`).
   func unlock(password: String) {
     guard let account = unlocking?.id else { return }
-    screen = .working
-    DispatchQueue.global(qos: .userInitiated).async {
-      let answer = Shared.answer(pb_unlock(account, password)) as? [String: Any]
-      DispatchQueue.main.async {
-        guard !self.finished else { return }
-        if answer?["ok"] as? Bool == true { return self.unlocked(account) }
-        self.screen = .locked
-        self.note = answer?["error"] as? String ?? "That's not the master password."
-      }
+    work({ Shared.answer(pb_unlock(account, password)) as? [String: Any] }) { answer in
+      if answer?["ok"] as? Bool == true { return self.unlocked(account) }
+      self.screen = .locked
+      self.note = answer?["error"] as? String ?? "That's not the master password."
     }
   }
 
@@ -403,30 +526,35 @@ final class Provider: ObservableObject {
   }
 
   /// The master password, for a login that asks for it again; then it fills.
+  /// A Swift string, as in `unlock`: not wiped here, and kept only until the
+  /// core has answered.
   func confirm(_ login: Login, password: String) {
-    screen = .working
-    DispatchQueue.global(qos: .userInitiated).async {
-      let answer =
-        Shared.answer(pb_confirm_master_password(login.account, login.item, password)) as? [String: Any]
-      DispatchQueue.main.async {
-        guard !self.finished else { return }
-        guard answer?["ok"] as? Bool == true else {
-          self.screen = .reprompt(login)
-          self.note = answer?["error"] as? String ?? "That master password isn't right."
-          return
-        }
-        self.confirmed.insert(login.id)
-        login.passkey ? self.pickPasskey(login) : self.pick(login)
+    work({ Shared.answer(pb_confirm_master_password(login.account, login.item, password)) as? [String: Any] }) {
+      answer in
+      guard answer?["ok"] as? Bool == true else {
+        self.screen = .reprompt(login)
+        self.note = answer?["error"] as? String ?? "That master password isn't right."
+        return
       }
+      self.confirmed.insert(login.id)
+      login.passkey ? self.pickPasskey(login) : self.pick(login)
     }
   }
 
   /// Fills a login: its username and password, from its own account's core
-  /// only now. One that asks for the master password again asks first.
-  func pick(_ login: Login) {
+  /// only now. One that asks for the master password again asks first. Then
+  /// one that isn't the site's own (search found it) asks whether to fill it
+  /// here, as the browser extension does, unless the person just said so
+  /// (`anyway`).
+  func pick(_ login: Login, anyway: Bool = false) {
     if login.asks && !confirmed.contains(login.id) {
       note = nil
       screen = .reprompt(login)
+      return
+    }
+    if !anyway && !matching.contains(where: { $0.id == login.id }) {
+      note = nil
+      screen = .elsewhere(elsewhere(login))
       return
     }
     guard let password = value(login, "password") else {
@@ -435,6 +563,26 @@ final class Provider: ObservableObject {
       return
     }
     finish(.password(ASPasswordCredential(user: value(login, "username") ?? "", password: password)))
+  }
+
+  /// What to show before a login fills on a site that isn't its own: the
+  /// websites saved in it, from its own account, and the site iOS asked for.
+  private func elsewhere(_ login: Login) -> Elsewhere {
+    let item = Shared.answer(pb_item(login.account, login.item)) as? [String: Any]
+    let websites = item?["uris"] as? [String] ?? (item?["website"] as? String).map { [$0] } ?? []
+    let saved = websites.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+      .map(Self.host)
+    let sites = domains.map { $0.lowercased() }
+    return Elsewhere(
+      login: login, saved: saved, current: sites.first, sameSite: saved.contains(where: sites.contains))
+  }
+
+  /// A saved website's host, however it was written (with or without
+  /// `https://`, a path, or a port); the website as written if it has none.
+  static func host(_ website: String) -> String {
+    let address = website.contains("://") ? website : "https://\(website)"
+    guard let host = URLComponents(string: address)?.host, !host.isEmpty else { return website }
+    return host.lowercased()
   }
 
   /// Signs in to the site with a passkey, from its own account: the core
@@ -447,20 +595,16 @@ final class Provider: ObservableObject {
       screen = .reprompt(login)
       return
     }
-    screen = .working
     let hash = Shared.base64url(signIn.clientDataHash)
     let proved = verified.contains(login.account) ? "true" : "false"
     // The core may save the passkey's raised counter first: off the main
     // thread, with Cancel hidden until it's back.
-    DispatchQueue.global(qos: .userInitiated).async {
-      let answer =
-        Shared.answer(pb_passkey_assert(login.account, login.item, signIn.rpId, hash, proved)) as? [String: Any]
-      DispatchQueue.main.async { self.signedIn(answer, signIn) }
-    }
+    work({
+      Shared.answer(pb_passkey_assert(login.account, login.item, signIn.rpId, hash, proved)) as? [String: Any]
+    }) { answer in self.signedIn(answer, signIn) }
   }
 
   private func signedIn(_ answer: [String: Any]?, _ signIn: PasskeySignIn) {
-    guard !finished else { return }
     guard answer?["ok"] as? Bool == true,
       let data = (answer?["authenticatorData"] as? String).flatMap(Shared.fromBase64url),
       let signature = (answer?["signature"] as? String).flatMap(Shared.fromBase64url),
@@ -497,15 +641,13 @@ final class Provider: ObservableObject {
     else { return }
     // Saved over the network: off the main thread, with Cancel hidden
     // until it's back, so the site never misses a passkey the vault kept.
-    screen = .working
-    DispatchQueue.global(qos: .userInitiated).async {
-      let answer = Shared.answer(pb_passkey_create(json)) as? [String: Any]
-      DispatchQueue.main.async { self.made(answer, making, account) }
+    work({ Shared.answer(pb_passkey_create(json)) as? [String: Any] }) { answer in
+      self.made(answer, making, account)
     }
   }
 
   private func made(_ answer: [String: Any]?, _ making: PasskeyMaking, _ account: String) {
-    guard !finished else { return }
+    guard let request else { return }
     guard answer?["ok"] as? Bool == true,
       let item = answer?["itemId"] as? String,
       let credential = (answer?["credentialId"] as? String).flatMap(Shared.fromBase64url),
@@ -529,7 +671,12 @@ final class Provider: ObservableObject {
       relyingPartyIdentifier: making.rpId, userName: making.userName, credentialID: credential,
       userHandle: making.userHandle, recordIdentifier: "\(account)/\(item)")
     let store = ASCredentialIdentityStore.shared
-    let answer = { DispatchQueue.main.async { self.finish(made) } }
+    // iOS answers on a queue of its own, and later: only for this request.
+    let answer = { [requests] in
+      DispatchQueue.main.async {
+        if requests.has(request) { self.finish(made) }
+      }
+    }
     store.getState { state in
       guard state.isEnabled, state.supportsIncrementalUpdates else { return answer() }
       let identities: [any ASCredentialIdentity] = [identity]
@@ -545,17 +692,22 @@ final class Provider: ObservableObject {
 
   /// Ends the extension with its answer, or without one (Cancel), once:
   /// every account locks first. A core call that comes back after Cancel, or
-  /// after another answer, does nothing more.
+  /// after another answer, does nothing more, and one still waiting isn't
+  /// made (`work`).
   func finish(_ answer: Answer) {
     guard !finished else { return }
     close()
     onFinish(answer)
   }
 
-  /// Every account locks, and the core lets them go.
+  /// Ends this request: every account locks, and the core lets them go.
+  /// Nothing to close once it has ended, or if another request has started
+  /// since, whose accounts aren't this one's to close.
   func close() {
     finished = true
-    _ = Shared.answer(pb_autofill_close())
+    guard let request else { return }
+    self.request = nil
+    requests.end(request) { _ = Shared.answer(pb_autofill_close()) }
   }
 }
 
@@ -598,6 +750,8 @@ extension UIColor {
 /// The extension's screens, in PassBundle's look and with the app's words.
 struct ProviderView: View {
   @ObservedObject var provider: Provider
+  /// The master password as it's typed: cleared as it's handed to the
+  /// provider. A Swift string, which can't be wiped (`Provider.unlock`).
   @State private var password = ""
 
   var body: some View {
@@ -614,6 +768,8 @@ struct ProviderView: View {
           list
         case .reprompt(let login):
           reprompt(login)
+        case .elsewhere(let asked):
+          elsewhere(asked)
         case .unavailable(let words):
           Text(words).multilineTextAlignment(.center).padding()
         }
@@ -755,6 +911,37 @@ struct ProviderView: View {
           password = ""
           provider.backToLogins()
         }
+      }
+    }
+  }
+
+  /// A login found by search, for a site that isn't its own: the browser
+  /// extension's "Site doesn't match", in its words. Cancel, above, ends the
+  /// request, as everywhere here.
+  private func elsewhere(_ asked: Provider.Elsewhere) -> some View {
+    Form {
+      Section {
+        VStack(alignment: .leading, spacing: 6) {
+          Text(asked.title).font(.headline)
+          Text(asked.words)
+        }
+        .padding(.vertical, 4)
+      }
+      if !asked.saved.isEmpty {
+        Section(asked.savedHeading) {
+          ForEach(Array(asked.saved.enumerated()), id: \.offset) { website in
+            Text(website.element).font(.body.monospaced())
+          }
+        }
+      }
+      if let current = asked.current {
+        Section("Current website") {
+          Text(current).font(.body.monospaced())
+        }
+      }
+      Section {
+        Button("Autofill") { provider.pick(asked.login, anyway: true) }
+        Button("Back to the logins") { provider.backToLogins() }
       }
     }
   }
