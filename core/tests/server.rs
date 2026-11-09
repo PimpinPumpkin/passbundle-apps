@@ -1909,8 +1909,10 @@ fn a_sign_in_from_another_device_is_approved_in_the_app_and_the_key_reaches_only
 /// The person's own logins' numbers (DESIGN.md in the meta repo, "Members'
 /// own passwords"): a member of an organization's app tells the server how
 /// many of their own logins have weak or reused passwords, after each sync,
-/// and their organization's owners see those numbers, never which logins.
-/// An organization's items don't count.
+/// while the organization has "Members' own passwords" on, and its owners
+/// see those numbers, never which logins. An organization's items don't
+/// count. With it off (an organization made the upstream way, as here), the
+/// app sends nothing.
 #[test]
 fn an_apps_own_logins_numbers_reach_the_organizations_owners() {
     let Some(server) = server() else { return };
@@ -1943,6 +1945,22 @@ fn an_apps_own_logins_numbers_reach_the_organizations_owners() {
         ..ItemDraft::default()
     };
     app.save(None, &shared, &[it]).unwrap();
+    app.sync().unwrap();
+    assert_eq!(
+        app.own_health_reported(),
+        None,
+        "sent while the organization has it off"
+    );
+
+    let on = server
+        .raw(
+            &mut session,
+            "PUT",
+            &format!("/api/keykeeper/organizations/{org_id}/member-health-setting"),
+            Some(json!({ "enabled": true })),
+        )
+        .unwrap();
+    assert_eq!(on["enabled"], true, "{on}");
     app.sync().unwrap();
     let reported = app.own_health_reported().expect("the numbers were sent");
     assert_eq!((reported.logins, reported.weak, reported.reused), (3, 1, 2));

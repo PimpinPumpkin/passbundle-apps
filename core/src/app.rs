@@ -712,10 +712,11 @@ impl App {
 
     /// Tells the server how many of the person's own logins have weak or
     /// reused passwords (health.rs, `own_counts`), numbers only, for their
-    /// organizations' owners and admins: only for a confirmed member of an
-    /// organization, once each unlock and again when the numbers change, and
-    /// not again this unlock once a server says it doesn't take them. Never
-    /// fails a sync.
+    /// organizations' owners and admins: only while an organization they've
+    /// joined has "Members' own passwords" on, which the server says
+    /// (`own_health_seen_by`), once each unlock and again when the numbers
+    /// change, and not again this unlock once a server says it doesn't take
+    /// them. Never fails a sync.
     fn report_own_health(&mut self) {
         if self.own_health_unheard {
             return;
@@ -732,9 +733,21 @@ impl App {
         if self.own_health == Some(counts) {
             return;
         }
+        match server.own_health_seen_by(session) {
+            Ok(Some(seen_by)) if seen_by.is_empty() => return,
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                self.own_health_unheard = true;
+                return;
+            }
+            // Tried again at the next sync.
+            Err(_) => return,
+        }
         match server.report_own_health(session, &counts) {
-            Ok(true) => self.own_health = Some(counts),
-            Ok(false) => self.own_health_unheard = true,
+            Ok(Some(true)) => self.own_health = Some(counts),
+            // Turned off since: nothing was kept, so it's sent again later.
+            Ok(Some(false)) => {}
+            Ok(None) => self.own_health_unheard = true,
             // Tried again at the next sync.
             Err(_) => {}
         }
