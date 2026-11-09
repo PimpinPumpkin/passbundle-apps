@@ -16,10 +16,18 @@
 // With several accounts signed in (accounts.dart), it asks for every
 // unlocked one while a vault is shown, and each request is listed,
 // confirmed, and answered for its own account, which the prompt names.
+//
+// Beside them, sign-ins on new devices that the new-device check holds
+// (DESIGN.md in the meta repo, "New-device check"): the prompt shows the
+// device, where it's from, and when, and takes the number the new device
+// shows. A wrong number denies it. Approving sends no key, so it asks for no
+// confirmation first: the number is the proof. "Not now" brings it back in
+// 2 minutes if it's still waiting.
 import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import 'core.dart';
 import 'theme.dart';
@@ -85,6 +93,67 @@ class SignInRequest {
   bool get expired => left == Duration.zero;
 }
 
+/// A sign-in on a new device that the new-device check holds, waiting for
+/// an account's approval, as the core listed it. Never its number: only
+/// the new device shows that.
+class NewDeviceCheck {
+  NewDeviceCheck(Map<String, dynamic> json, {DateTime? listedAt})
+    : account = json['account'] as String?,
+      email = json['email'] as String?,
+      id = json['id'] as String,
+      device = json['device'] as String? ?? 'A device',
+      ip = json['ip'] as String? ?? '',
+      location = json['location'] as String?,
+      sourceName = (json['locationSource'] as Map?)?['name'] as String?,
+      sourceUrl = (json['locationSource'] as Map?)?['url'] as String?,
+      emailAfter = json['emailAfter'] as String?,
+      _age = Duration(seconds: (json['ageSeconds'] as num?)?.toInt() ?? 0),
+      _left = Duration(seconds: (json['secondsLeft'] as num?)?.toInt() ?? 0),
+      _listedAt = listedAt ?? signInClock();
+
+  /// The account it's for, by its id on this device, and its email. Null
+  /// for the account shown.
+  final String? account;
+  final String? email;
+  final String id;
+
+  /// The device, in the server's words ("Web vault in Firefox").
+  final String device;
+
+  /// Its address, as the server saw it.
+  final String ip;
+
+  /// Roughly where it is ("Berlin, Germany"), or null when the server
+  /// doesn't know.
+  final String? location;
+
+  /// Who the location is from, to credit beside it, and their address.
+  final String? sourceName;
+  final String? sourceUrl;
+
+  /// When a code by email may be sent for it, if someone asked for one
+  /// after the wait.
+  final String? emailAfter;
+  final Duration _age;
+  final Duration _left;
+  final DateTime _listedAt;
+
+  /// Where it's from, with its address: "Berlin, Germany (203.0.113.7)".
+  String get where {
+    final place = location ?? 'Unknown location';
+    return ip.isEmpty ? place : '$place ($ip)';
+  }
+
+  Duration get age => _age + signInClock().difference(_listedAt);
+
+  Duration get left {
+    final left = _left - signInClock().difference(_listedAt);
+    return left.isNegative ? Duration.zero : left;
+  }
+
+  bool get expired => left == Duration.zero;
+}
+
 /// The clock requests count down by (tests set it).
 DateTime Function() signInClock = DateTime.now;
 
@@ -125,6 +194,11 @@ abstract class SignInRequestSource {
 
   /// Turning it off needs a confirmation just now (`confirmFirst`).
   Answer setConfirmApprovals(bool on);
+
+  /// Approves a sign-in the new-device check holds with the [number] typed,
+  /// or denies it (null), for its [account] (the one shown when null):
+  /// `answered` is "approved", "denied", or "wrongNumber".
+  Future<Answer> answerCheck(String id, String? number, [String? account]);
 }
 
 /// The core's: every unlocked account's requests, the shown one's first,
@@ -139,6 +213,7 @@ class CoreSignInRequests implements SignInRequestSource {
           (a['id'] as String, a['email'] as String?),
     ]..sort((a, b) => (a.$1 == shown ? 0 : 1) - (b.$1 == shown ? 0 : 1));
     final requests = <Map<String, dynamic>>[];
+    final checks = <Map<String, dynamic>>[];
     Answer? failed;
     var listed = false;
     for (final (id, email) in unlocked) {
@@ -155,10 +230,22 @@ class CoreSignInRequests implements SignInRequestSource {
           'email': ?email,
         });
       }
+      for (final c in (answer.body['checks'] as List? ?? const [])) {
+        checks.add({
+          ...Map<String, dynamic>.from(c as Map),
+          'account': id,
+          'email': ?email,
+          'locationSource': answer.body['locationSource'],
+        });
+      }
     }
     if (!listed && failed != null) return failed;
-    return Answer({'ok': true, 'requests': requests});
+    return Answer({'ok': true, 'requests': requests, 'checks': checks});
   }
+
+  @override
+  Future<Answer> answerCheck(String id, String? number, [String? account]) =>
+      whileBusy(() => Core.answerNewDeviceCheck(id, number, account));
 
   @override
   Future<Answer> answer(
@@ -204,7 +291,16 @@ class SignInRequests extends ChangeNotifier {
 
   SignInRequestSource source;
   List<SignInRequest> requests = const [];
+
+  /// Sign-ins on new devices waiting for a number.
+  List<NewDeviceCheck> checks = const [];
   final _prompted = <String>{};
+
+  /// When each check was last prompted for.
+  final _promptedChecks = <String, DateTime>{};
+
+  /// How long "Not now" puts a check off.
+  static const checkAgainAfter = Duration(minutes: 2);
 
   /// When each requesting device was last prompted for.
   final _promptedDevices = <String, DateTime>{};
@@ -260,8 +356,10 @@ class SignInRequests extends ChangeNotifier {
     _skipped = false;
     pause();
     requests = const [];
+    checks = const [];
     _prompted.clear();
     _promptedDevices.clear();
+    _promptedChecks.clear();
     notifyListeners();
   }
 
@@ -282,6 +380,12 @@ class SignInRequests extends ChangeNotifier {
             in ((answer.body['requests'] as List?) ?? const [])
                 .cast<Map<String, dynamic>>())
           SignInRequest(r),
+      ];
+      checks = [
+        for (final c
+            in ((answer.body['checks'] as List?) ?? const [])
+                .cast<Map<String, dynamic>>())
+          NewDeviceCheck(c),
       ];
       notifyListeners();
     } finally {
@@ -325,7 +429,35 @@ class SignInRequests extends ChangeNotifier {
       for (final r in requests)
         if (r.id != id) r,
     ];
+    checks = [
+      for (final c in checks)
+        if (c.id != id) c,
+    ];
     notifyListeners();
+  }
+
+  /// The next new device's check to prompt for, now marked as prompted:
+  /// one not prompted for in the last 2 minutes ("Not now" puts it off
+  /// that long).
+  NewDeviceCheck? unpromptedCheck() {
+    final now = signInClock();
+    for (final c in checks) {
+      if (c.expired) continue;
+      final last = _promptedChecks[c.id];
+      if (last != null && now.difference(last) < checkAgainAfter) continue;
+      _promptedChecks[c.id] = now;
+      return c;
+    }
+    return null;
+  }
+
+  /// The check as listed now, or null once it's gone (answered elsewhere,
+  /// or ended).
+  NewDeviceCheck? stillWaiting(NewDeviceCheck check) {
+    for (final c in checks) {
+      if (c.id == check.id && !c.expired) return c;
+    }
+    return null;
   }
 }
 
@@ -360,6 +492,252 @@ Future<void> reviewSignInRequest(
       duration: const Duration(seconds: 4),
     ),
   );
+}
+
+/// Shows a sign-in the new-device check holds: approved with the number,
+/// denied, or left for later ("Not now"). Says what happened.
+Future<void> reviewNewDeviceCheck(
+  BuildContext context,
+  NewDeviceCheck check, {
+  String? email,
+  SignInRequests? requests,
+}) async {
+  final list = requests ?? signInRequests;
+  final done = await showDialog<(String, NewDeviceCheck)>(
+    context: context,
+    barrierDismissible: false,
+    builder: (_) =>
+        NewDeviceCheckDialog(check: check, email: email, requests: list),
+  );
+  if (done == null || !context.mounted) return;
+  final (what, shown) = done;
+  if (what == 'approved' || what == 'denied' || what == 'wrongNumber') {
+    list.answered(shown.id);
+  }
+  ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+    SnackBar(
+      content: Text(switch (what) {
+        'approved' => 'Approved. ${shown.device} is signing in.',
+        'denied' => 'Denied. That sign-in won\'t go ahead.',
+        'wrongNumber' =>
+          'That wasn\'t the number on the new device, so the sign-in was denied. If it was you, sign in again there.',
+        'gone' => 'That sign-in was answered on another device, or it ended.',
+        _ => 'That sign-in ended.',
+      }),
+      duration: const Duration(seconds: 5),
+    ),
+  );
+}
+
+/// The prompt for a sign-in on a new device: who's signing in, the device,
+/// where it's from, and when, then the number the new device shows.
+/// Approve sends the number (a wrong one denies it), Deny denies it, and
+/// "Not now" leaves it waiting. Pops what happened ("approved", "denied",
+/// "wrongNumber", "expired", "gone") and the check shown, or null for not
+/// now.
+class NewDeviceCheckDialog extends StatefulWidget {
+  const NewDeviceCheckDialog({
+    super.key,
+    required this.check,
+    required this.requests,
+    this.email,
+  });
+
+  final NewDeviceCheck check;
+  final SignInRequests requests;
+  final String? email;
+
+  @override
+  State<NewDeviceCheckDialog> createState() => _NewDeviceCheckDialogState();
+}
+
+class _NewDeviceCheckDialogState extends State<NewDeviceCheckDialog> {
+  late final Timer ticker;
+  late NewDeviceCheck check = widget.check;
+  final number = TextEditingController();
+  bool working = false;
+  String? error;
+
+  SignInRequestSource get source => widget.requests.source;
+
+  /// Two digits typed: Approve can send them.
+  bool get typed => RegExp(r'^[0-9]{2}$').hasMatch(number.text.trim());
+
+  @override
+  void initState() {
+    super.initState();
+    widget.requests.addListener(listed);
+    number.addListener(() {
+      if (mounted) setState(() {});
+    });
+    ticker = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted) return;
+      if (check.expired && !working) {
+        Navigator.of(context).pop(('expired', check));
+        return;
+      }
+      setState(() {});
+    });
+  }
+
+  @override
+  void dispose() {
+    widget.requests.removeListener(listed);
+    ticker.cancel();
+    number.dispose();
+    super.dispose();
+  }
+
+  /// The list changed: still waiting, or answered elsewhere or ended.
+  void listed() {
+    if (!mounted || working) return;
+    final now = widget.requests.stillWaiting(check);
+    if (now == null) {
+      Navigator.of(context).pop(('gone', check));
+      return;
+    }
+    setState(() => check = now);
+  }
+
+  Future<void> answer(bool approve) async {
+    if (working || (approve && !typed)) return;
+    setState(() {
+      working = true;
+      error = null;
+    });
+    final c = check;
+    final answer = await source.answerCheck(
+      c.id,
+      approve ? number.text.trim() : null,
+      c.account,
+    );
+    if (!mounted) return;
+    if (answer.ok) {
+      Navigator.of(context).pop((answer.body['answered'] as String? ?? 'denied', c));
+      return;
+    }
+    setState(() {
+      working = false;
+      error = answer.error ?? 'That didn\'t work. Try again.';
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = check;
+    final colors = context.colors;
+    final scheme = Theme.of(context).colorScheme;
+    // The account it's for, which may not be the one shown.
+    final email = c.email ?? widget.email;
+    Widget detail(String label, String value) => Padding(
+      padding: const EdgeInsets.only(top: 6),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 96,
+            child: Text(label, style: TextStyle(color: colors.muted)),
+          ),
+          Expanded(child: Text(value)),
+        ],
+      ),
+    );
+    final credit = c.sourceName;
+    final url = c.sourceUrl;
+    return AlertDialog(
+      title: const Text('Approve this sign-in?'),
+      content: SizedBox(
+        width: 420,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Someone is signing in to ${email ?? 'your account'} on a new device. '
+                'Approve only if it\'s you, on a device in front of you.',
+              ),
+              const SizedBox(height: 12),
+              detail('Device', c.device),
+              detail('Where', c.where),
+              detail('When', askedAgo(c.age)),
+              detail('Expires in', timeLeft(c.left)),
+              // Who the location is from, credited beside it.
+              if (c.location != null && credit != null)
+                Padding(
+                  padding: const EdgeInsets.only(top: 6, left: 96),
+                  child: InkWell(
+                    key: const ValueKey('location-source'),
+                    onTap: url == null ? null : () => Core.openWebsite(url),
+                    child: Text(
+                      credit,
+                      style: TextStyle(
+                        color: url == null ? colors.muted : scheme.primary,
+                        fontSize: 12,
+                        decoration: url == null
+                            ? null
+                            : TextDecoration.underline,
+                      ),
+                    ),
+                  ),
+                ),
+              if (c.emailAfter != null) ...[
+                const SizedBox(height: 12),
+                Text(
+                  'Someone asked for a code by email for this sign-in instead. If it isn\'t you, deny it.',
+                  style: TextStyle(
+                    color: scheme.error,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+              const SizedBox(height: 16),
+              TextField(
+                key: const ValueKey('new-device-check-number'),
+                controller: number,
+                enabled: !working,
+                autofocus: !isPhone,
+                keyboardType: TextInputType.number,
+                autocorrect: false,
+                enableSuggestions: false,
+                maxLength: 2,
+                inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                onSubmitted: (_) => answer(true),
+                decoration: InputDecoration(
+                  labelText: 'Number shown on the new device',
+                  helperText: 'Two digits. A wrong number denies the sign-in.',
+                  helperMaxLines: 2,
+                  counterText: '',
+                  errorText: error,
+                  errorMaxLines: 4,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: working ? null : () => Navigator.of(context).pop(),
+          child: const Text('Not now'),
+        ),
+        OutlinedButton(
+          onPressed: working ? null : () => answer(false),
+          child: const Text('Deny'),
+        ),
+        FilledButton(
+          onPressed: working || !typed ? null : () => answer(true),
+          child: working
+              ? const SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : const Text('Approve'),
+        ),
+      ],
+    );
+  }
 }
 
 /// The prompt: the fingerprint phrase first and largest, then the request's
@@ -713,41 +1091,68 @@ class _SignInRequestsSettingsState extends State<SignInRequestsSettings> {
       for (final r in requests.requests)
         if (!r.expired) r,
     ];
+    final checks = [
+      for (final c in requests.checks)
+        if (!c.expired) c,
+    ];
     return SettingsGroup(
       title: 'Sign-in requests',
       footer:
           note ??
-          'When you choose "Log in with device" on the web vault or in the '
-              'browser extension, approve it here.${isPhone ? ' Requests show while PassBundle is open.' : ''}',
+          'When you sign in on a new device, or choose "Log in with device" '
+              'on the web vault or in the browser extension, approve it here.${isPhone ? ' Requests show while PassBundle is open.' : ''}',
       footerColor: note == null ? null : Theme.of(context).colorScheme.error,
       children: [
-        if (waiting.isEmpty)
-          const ListTile(title: Text('None waiting'))
-        else
-          for (final r in waiting)
-            ListTile(
-              key: ValueKey('sign-in-request-${r.id}'),
-              title: Text(r.device),
-              subtitle: Text(
-                [
-                  // Another account's: which one.
-                  if (r.email case final email? when email != widget.email)
-                    email,
-                  if (r.ip.isNotEmpty) r.ip,
-                  askedAgo(r.age),
-                  'expires in ${timeLeft(r.left).toLowerCase()}',
-                ].join(' · '),
-              ),
-              trailing: TextButton(
-                onPressed: () => reviewSignInRequest(
-                  context,
-                  r,
-                  email: widget.email,
-                  requests: requests,
-                ),
-                child: const Text('Review'),
-              ),
+        if (waiting.isEmpty && checks.isEmpty)
+          const ListTile(title: Text('None waiting')),
+        for (final c in checks)
+          ListTile(
+            key: ValueKey('new-device-check-${c.id}'),
+            title: Text(c.device),
+            subtitle: Text(
+              [
+                // Another account's: which one.
+                if (c.email case final email? when email != widget.email)
+                  email,
+                'New device',
+                c.where,
+                askedAgo(c.age),
+              ].join(' · '),
             ),
+            trailing: TextButton(
+              onPressed: () => reviewNewDeviceCheck(
+                context,
+                c,
+                email: widget.email,
+                requests: requests,
+              ),
+              child: const Text('Review'),
+            ),
+          ),
+        for (final r in waiting)
+          ListTile(
+            key: ValueKey('sign-in-request-${r.id}'),
+            title: Text(r.device),
+            subtitle: Text(
+              [
+                // Another account's: which one.
+                if (r.email case final email? when email != widget.email)
+                  email,
+                if (r.ip.isNotEmpty) r.ip,
+                askedAgo(r.age),
+                'expires in ${timeLeft(r.left).toLowerCase()}',
+              ].join(' · '),
+            ),
+            trailing: TextButton(
+              onPressed: () => reviewSignInRequest(
+                context,
+                r,
+                email: widget.email,
+                requests: requests,
+              ),
+              child: const Text('Review'),
+            ),
+          ),
         SwitchListTile(
           key: const ValueKey('confirm-approvals'),
           value: confirm,

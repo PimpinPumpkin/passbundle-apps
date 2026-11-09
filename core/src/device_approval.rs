@@ -135,7 +135,7 @@ pub fn wrap_user_key(public_key: &[u8], user_key: &SymmetricKey) -> Result<EncSt
 
 /// A date the server writes (RFC 3339 in UTC, `2026-10-26T12:00:00.123456Z`),
 /// as seconds since 1970.
-fn parse_date(text: &str) -> Option<u64> {
+pub(crate) fn parse_date(text: &str) -> Option<u64> {
     let text = text.strip_suffix('Z')?;
     let (date, time) = text.split_once('T')?;
     let mut d = date.splitn(3, '-').map(|p| p.parse::<i64>().ok());

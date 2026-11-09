@@ -168,6 +168,7 @@ class TwoStepScreen extends StatefulWidget {
     required this.offer,
     required this.onSignedIn,
     required this.onStartOver,
+    this.onNewDevice,
     this.calls = const TwoStepCalls(),
   });
 
@@ -176,6 +177,10 @@ class TwoStepScreen extends StatefulWidget {
   final Map<String, dynamic> offer;
   final VoidCallback onSignedIn;
   final VoidCallback onStartOver;
+
+  /// The new-device check holds the sign-in after its second step instead
+  /// (two-step login was turned off meanwhile): its answer.
+  final ValueChanged<Map<String, dynamic>>? onNewDevice;
   final TwoStepCalls calls;
 
   @override
@@ -234,6 +239,10 @@ class _TwoStepScreenState extends State<TwoStepScreen> {
   /// Where a method's answer got to: signed in, or why not.
   Future<void> _after(Answer answer) async {
     if (!mounted) return;
+    if (answer.ok && answer.body['step'] == 'newDevice') {
+      widget.onNewDevice?.call(answer.body);
+      return;
+    }
     if (answer.ok) {
       if (method == Method.recoveryCode) await _recovered();
       if (mounted) widget.onSignedIn();

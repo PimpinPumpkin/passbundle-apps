@@ -326,8 +326,32 @@ fn step(result: crate::Result<Step>) -> Value {
             // How this device reaches a security key, or null where it can't.
             "securityKey": crate::security_key::here(),
         }),
+        Ok(Step::NewDevice(check)) => json!({
+            "ok": true,
+            "step": "newDevice",
+            "check": new_device_check(&check),
+        }),
         Err(e) => failed(e),
     }
+}
+
+/// A sign-in the new-device check holds, as the waiting screen shows it
+/// (new_device.rs): `{id, number, status ("waiting", "approved", "denied",
+/// "ended"), deniedWhy, expiresAt, approvers, email ("now", "later",
+/// "waiting", "never"), emailAfter, codeSent, emailTo}`. Never its token.
+fn new_device_check(check: &crate::new_device::Check) -> Value {
+    json!({
+        "id": check.id,
+        "number": check.number,
+        "status": check.status.name(),
+        "deniedWhy": check.denied_why,
+        "expiresAt": check.expires_at,
+        "approvers": check.approvers,
+        "email": check.email.name(),
+        "emailAfter": check.email_after,
+        "codeSent": check.code_sent,
+        "emailTo": check.email_to,
+    })
 }
 
 fn state_of(state: State) -> Value {
@@ -815,6 +839,43 @@ pub unsafe extern "C" fn pb_finish_sign_in(
     let code = text(code);
     with_accounts_waiting(|accounts| {
         let result = accounts.finish_sign_in(provider, &code, remember);
+        signed_in(accounts, result)
+    })
+}
+
+/// How the new-device check holding the sign-in stands now, asked every 3
+/// seconds while it waits: the same answer as `pb_sign_in` (`newDevice`
+/// with how it stands, or `done` once it's approved and the sign-in
+/// finished with its token).
+#[no_mangle]
+pub extern "C" fn pb_new_device_status() -> *mut c_char {
+    with_accounts_waiting(|accounts| {
+        let result = accounts.new_device_status();
+        signed_in(accounts, result)
+    })
+}
+
+/// "Email me a code" for the sign-in the new-device check holds (or, with
+/// devices that can approve, "Can't use your other devices?"): the same
+/// answer as `pb_sign_in`, with how it stands now.
+#[no_mangle]
+pub extern "C" fn pb_new_device_email() -> *mut c_char {
+    with_accounts_waiting(|accounts| {
+        let result = accounts.new_device_email();
+        signed_in(accounts, result)
+    })
+}
+
+/// Finishes the sign-in the new-device check holds with the code from the
+/// email: the same answer as `pb_sign_in`.
+///
+/// # Safety
+/// `code` is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_new_device_code(code: *const c_char) -> *mut c_char {
+    let code = text(code);
+    with_accounts_waiting(|accounts| {
+        let result = accounts.finish_new_device_with_code(&code);
         signed_in(accounts, result)
     })
 }
@@ -2425,12 +2486,17 @@ fn base64url(bytes: &[u8]) -> String {
 
 /// Sign-in requests waiting for this account's answer (docs/core.md,
 /// "Approving a sign-in"), from the server, newest first: `{ok, requests:
-/// [{id, device, ip, fingerprint, ageSeconds, secondsLeft}]}`. Only while
-/// unlocked; the app asks every few seconds then.
+/// [{id, device, ip, fingerprint, ageSeconds, secondsLeft}], checks: [{id,
+/// device, deviceType, ip, location, ageSeconds, secondsLeft, emailAfter}],
+/// locationSource: {name, url}}`, `checks` being sign-ins on new devices
+/// waiting for approval with the number they show (new_device.rs), and
+/// `locationSource` who the locations are from (null when the server has
+/// none). Only while unlocked; the app asks every few seconds then.
 ///
 /// The server is asked without holding the app, on a thread of the core's
 /// own, so the screens' reads and locking go on meanwhile. What it lists is
-/// kept with the account asked for, which alone can approve them.
+/// kept with the account asked for, which alone can approve them. A server
+/// that can't list new devices' checks lists none.
 ///
 /// # Safety
 /// `account` is null or a NUL-terminated UTF-8 string, valid for the call.
@@ -2450,10 +2516,19 @@ pub unsafe extern "C" fn pb_sign_in_requests(account: *const c_char) -> *mut c_c
                 });
                 let Some(call) = call else { return asked };
                 let fetched = call.fetch();
+                let checks = call.fetch_new_devices();
                 app_value(&account, |app| {
                     match fetched.and_then(|f| app.keep_sign_in_requests(&call, f)) {
                         Ok(requests) => {
-                            json!({ "ok": true, "requests": sign_in_requests(&requests) })
+                            let (checks, source) = app
+                                .keep_new_device_checks(&call, checks)
+                                .unwrap_or_default();
+                            json!({
+                                "ok": true,
+                                "requests": sign_in_requests(&requests),
+                                "checks": new_device_checks(&checks),
+                                "locationSource": source.map(|s| json!({ "name": s.name, "url": s.url })),
+                            })
                         }
                         Err(e) => failed(e),
                     }
@@ -2480,6 +2555,50 @@ fn sign_in_requests(requests: &[crate::device_approval::SignInRequest]) -> Vec<V
             })
         })
         .collect()
+}
+
+fn new_device_checks(checks: &[crate::new_device::Waiting]) -> Vec<Value> {
+    checks
+        .iter()
+        .map(|c| {
+            json!({
+                "id": c.id,
+                "device": c.device,
+                "deviceType": c.device_type,
+                "ip": c.ip,
+                "location": c.location,
+                "ageSeconds": c.age,
+                "secondsLeft": c.left,
+                "emailAfter": c.email_after,
+            })
+        })
+        .collect()
+}
+
+/// Approves (`approve`: "true") another device's sign-in that the new-device
+/// check holds, with the number the person typed (two digits, checked
+/// before anything is sent), or denies it: `{ok, answered}`, `answered`
+/// being "approved", "denied", or "wrongNumber" (the number wasn't the new
+/// device's, so the server denied it). No confirmation first: approving
+/// sends no key.
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_answer_new_device_check(
+    account: *const c_char,
+    id: *const c_char,
+    number: *const c_char,
+    approve: *const c_char,
+) -> *mut c_char {
+    let account = text(account);
+    let (id, number, approve) = (text(id), text(number), text(approve) == "true");
+    with_app_waiting(&account, |app| {
+        match app.answer_new_device_check(&id, approve.then_some(number.as_str())) {
+            Ok(answered) => json!({ "ok": true, "answered": answered.name() }),
+            Err(e) => failed(e),
+        }
+    })
 }
 
 /// Approves (`approve`: "true") or denies a listed sign-in request. Approving

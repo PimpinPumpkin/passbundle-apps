@@ -6,7 +6,10 @@
 //! organization's items. Set PB_TEST_SERVER to the server's URL; without it,
 //! these tests say so and pass. The security key test (with the test-hooks
 //! feature, for its software key) needs a server named localhost, since
-//! WebAuthn takes only a domain: PB_TEST_SERVER_LOCALHOST.
+//! WebAuthn takes only a domain: PB_TEST_SERVER_LOCALHOST. The new-device
+//! check's test needs a server with the check on, which the others have
+//! off (they sign in on new devices throughout): PB_TEST_SERVER_NEW_DEVICE
+//! (`NEW_DEVICE_CHECK=true tools/test-server.sh ...`).
 
 use base64::{engine::general_purpose::STANDARD, Engine};
 use passbundle_core::app::{App, State, Step};
@@ -51,6 +54,7 @@ fn sign_in(server: &Server, email: &str) -> Session {
     match server.sign_in(email, PASSWORD).unwrap() {
         SignIn::Done(session) => session,
         SignIn::NeedsTwoFactor(_) => panic!("unexpected two-step login"),
+        SignIn::NeedsApproval(_) => panic!("unexpected new-device check"),
     }
 }
 
@@ -87,6 +91,7 @@ fn signs_in_syncs_saves_edits_and_trashes() {
     {
         SignIn::Done(session) => session,
         SignIn::NeedsTwoFactor(_) => panic!("unexpected two-step login"),
+        SignIn::NeedsApproval(_) => panic!("unexpected new-device check"),
     };
     assert!(open(&server, &mut session).items.is_empty());
 
@@ -2055,4 +2060,162 @@ fn an_expiration_date_and_reminder_days_saved_in_the_app_come_back() {
     cleared.expiration = Some(Expiration::default());
     app.save(Some(&id), &cleared, &[]).unwrap();
     assert_eq!(fields(&app), vec![]);
+}
+
+/// The new-device check (DESIGN.md in the meta repo, "New-device check"),
+/// on a server with it on: the account's first sign-in isn't asked; a new
+/// device waits with a number, which the account's other device (the app,
+/// signed in) lists without, and approves by typing it; the new device
+/// finishes and keeps the device token it's given, so signing in on it
+/// again isn't asked, while the same device without its token is new
+/// again; a wrong number denies it at once, and so does Deny; and signing in
+/// again while it waits finds the same check.
+#[test]
+fn a_new_device_waits_for_its_number_from_another_and_is_known_after() {
+    use passbundle_core::new_device::{Answered, Email, Status};
+    use passbundle_core::secrets::{Secret, SecretStore};
+    use std::sync::Arc;
+    let Ok(url) = std::env::var("PB_TEST_SERVER_NEW_DEVICE") else {
+        eprintln!("PB_TEST_SERVER_NEW_DEVICE isn't set; skipping the new-device check's test (NEW_DEVICE_CHECK=true tools/test-server.sh starts one).");
+        return;
+    };
+    let server = Server::new(&url, Device::this_one(&Device::new_identifier())).unwrap();
+    let email = new_email("new-device");
+    sign_up(&server, &email);
+    // The first sign-in isn't asked: no device could approve it.
+    let mut approving = signed_in_app(&url, &email);
+
+    let dir = std::env::temp_dir().join(format!("pb-new-device-{}", uuid::Uuid::new_v4().simple()));
+    let secrets = Arc::new(MemorySecretStore::default());
+    let mut new = App::open(Store::new(&dir), Box::new(secrets.clone()));
+    let Step::NewDevice(check) = new.sign_in(&url, &email, PASSWORD).unwrap() else {
+        panic!("a new device should wait for approval");
+    };
+    assert_eq!(check.status, Status::Waiting);
+    let number: u8 = check.number.parse().unwrap();
+    assert!((10..=99).contains(&number), "{number}");
+    assert!(check.approvers);
+    // Another device can approve, so a code by email waits a day.
+    assert_eq!(check.email, Email::Later);
+    assert!(new.signing_in());
+    let Step::NewDevice(still) = new.new_device_status().unwrap() else {
+        panic!("still waiting");
+    };
+    assert_eq!(still.status, Status::Waiting);
+
+    // The other device lists it, with where it's from, and never its number.
+    let (waiting, source) = approving.new_device_checks().unwrap();
+    assert_eq!(waiting.len(), 1);
+    let listed = &waiting[0];
+    assert_eq!(listed.id, check.id);
+    assert_eq!(listed.ip, "127.0.0.1");
+    assert!(
+        listed.device.starts_with("PassBundle on "),
+        "{}",
+        listed.device
+    );
+    // This computer's address is a private one, and the test server has no
+    // location database.
+    assert_eq!(listed.location, None);
+    assert_eq!(source, None);
+    assert!(
+        listed.left > 9 * 60 && listed.left <= 10 * 60,
+        "{}",
+        listed.left
+    );
+    // Nothing is sent for a number that isn't two digits: still waiting.
+    assert!(approving
+        .answer_new_device_check(&check.id, Some("4"))
+        .is_err());
+    assert_eq!(approving.new_device_checks().unwrap().0.len(), 1);
+
+    // The number shown on the new device approves it, and it signs in.
+    assert_eq!(
+        approving.answer_new_device_check(&check.id, Some(&check.number)),
+        Ok(Answered::Approved)
+    );
+    assert!(approving.new_device_checks().unwrap().0.is_empty());
+    assert_eq!(new.new_device_status().unwrap(), Step::Done);
+    assert!(matches!(new.state(), State::Unlocked { .. }));
+    assert!(!new.signing_in());
+    // It keeps the device token it was given, beside the refresh token.
+    let token = secrets
+        .get_secret(Secret::DeviceToken, &url, &email)
+        .expect("a device token kept");
+    assert!(secrets.get(&url, &email).is_some());
+
+    // Signed out and in again, it shows its token: not asked.
+    new.sign_out();
+    assert!(secrets.get(&url, &email).is_none());
+    assert_eq!(
+        secrets
+            .get_secret(Secret::DeviceToken, &url, &email)
+            .as_deref(),
+        Some(&*token)
+    );
+    assert_eq!(new.sign_in(&url, &email, PASSWORD).unwrap(), Step::Done);
+    drop(new);
+
+    // The same device (its identifier, kept in its folder) without its
+    // token is new again.
+    let forgetful = Arc::new(MemorySecretStore::default());
+    let mut new = App::open(Store::new(&dir), Box::new(forgetful.clone()));
+    let Step::NewDevice(second) = new.sign_in(&url, &email, PASSWORD).unwrap() else {
+        panic!("a device without its token should wait for approval");
+    };
+    assert_ne!(second.id, check.id);
+    // Signing in again while it waits finds the same check, and number.
+    let Step::NewDevice(again) = new.sign_in(&url, &email, PASSWORD).unwrap() else {
+        panic!("still waiting");
+    };
+    assert_eq!((&again.id, &again.number), (&second.id, &second.number));
+
+    // A wrong number denies it at once: one try.
+    let wrong = if second.number == "10" { "11" } else { "10" };
+    assert_eq!(
+        approving.answer_new_device_check(&second.id, Some(wrong)),
+        Ok(Answered::WrongNumber)
+    );
+    assert!(approving.new_device_checks().unwrap().0.is_empty());
+    let Step::NewDevice(denied) = new.new_device_status().unwrap() else {
+        panic!("denied, not signed in");
+    };
+    assert_eq!(denied.status, Status::Denied);
+    assert_eq!(denied.denied_why.as_deref(), Some("number"));
+    assert!(!matches!(new.state(), State::Unlocked { .. }));
+    // Its number can't approve it after that.
+    assert!(matches!(
+        approving.answer_new_device_check(&second.id, Some(&second.number)),
+        Err(Error::Refused(_))
+    ));
+
+    // Starting again makes a new check, which Deny denies.
+    let Step::NewDevice(third) = new.sign_in(&url, &email, PASSWORD).unwrap() else {
+        panic!("a new check");
+    };
+    assert_ne!(third.id, second.id);
+    assert_eq!(
+        approving.answer_new_device_check(&third.id, None),
+        Ok(Answered::Denied)
+    );
+    let Step::NewDevice(denied) = new.new_device_status().unwrap() else {
+        panic!("denied, not signed in");
+    };
+    assert_eq!(denied.status, Status::Denied);
+    assert_eq!(denied.denied_why.as_deref(), Some("denied"));
+    assert!(forgetful
+        .get_secret(Secret::DeviceToken, &url, &email)
+        .is_none());
+
+    // Locked, the other device lists nothing and answers nothing.
+    let Step::NewDevice(fourth) = new.sign_in(&url, &email, PASSWORD).unwrap() else {
+        panic!("a new check");
+    };
+    approving.lock();
+    assert_eq!(approving.new_device_checks().err(), Some(Error::SignedOut));
+    assert_eq!(
+        approving.answer_new_device_check(&fourth.id, Some(&fourth.number)),
+        Err(Error::SignedOut)
+    );
+    let _ = std::fs::remove_dir_all(dir);
 }

@@ -157,6 +157,15 @@ class Core {
   late final _sendEmail = _lib.lookupFunction<_Str0, _Str0>(
     'pb_send_email_code',
   );
+  late final _newDeviceStatus = _lib.lookupFunction<_Str0, _Str0>(
+    'pb_new_device_status',
+  );
+  late final _newDeviceEmail = _lib.lookupFunction<_Str0, _Str0>(
+    'pb_new_device_email',
+  );
+  late final _newDeviceCode = _lib.lookupFunction<_Str1, _Str1>(
+    'pb_new_device_code',
+  );
   late final _duoStart = _lib.lookupFunction<_Str0, _Str0>('pb_duo_start');
   late final _duoFinish = _lib
       .lookupFunction<
@@ -180,6 +189,7 @@ class Core {
   late final _confirmMasterPassword = _lib.lookupFunction<_Str3, _Str3>('pb_confirm_master_password');
   late final _signInRequests = _lib.lookupFunction<_Str1, _Str1>('pb_sign_in_requests');
   late final _answerSignInRequest = _lib.lookupFunction<_Str4, _Str4>('pb_answer_sign_in_request');
+  late final _answerNewDeviceCheck = _lib.lookupFunction<_Str4, _Str4>('pb_answer_new_device_check');
   late final _confirmWithMasterPassword = _lib.lookupFunction<_Str2, _Str2>('pb_confirm_with_master_password');
   late final _approvals = _lib.lookupFunction<_Str1, _Str1>('pb_approvals');
   late final _setApprovals = _lib.lookupFunction<_Str2, _Str2>('pb_set_approvals');
@@ -494,6 +504,27 @@ class Core {
   static Future<Answer> sendEmailCode() =>
       _background((c, _) => c._answer(c._sendEmail()));
 
+  /// How the new-device check holding the sign-in stands now (new_device.dart,
+  /// core/src/new_device.rs), asked every 3 seconds while it waits: as
+  /// [signIn] answers, `newDevice` with its `check`, or `done` once another
+  /// device approved it and the sign-in finished.
+  static Future<Answer> newDeviceStatus() =>
+      _signedIn(_background((c, _) => c._answer(c._newDeviceStatus())));
+
+  /// "Email me a code" for the sign-in the new-device check holds (or, when
+  /// other devices can approve it, the code after a day's wait): as [signIn]
+  /// answers, with the check as it stands now.
+  static Future<Answer> newDeviceEmail() =>
+      _background((c, _) => c._answer(c._newDeviceEmail()));
+
+  /// Finishes the sign-in the new-device check holds with the code from the
+  /// email: as [signIn] answers.
+  static Future<Answer> newDeviceCode(String code) => _signedIn(
+    _background(
+      (c, _) => c._with([code], (p) => c._answer(c._newDeviceCode(p[0]))),
+    ),
+  );
+
   /// Duo's address for the sign-in waiting for its second step, for the
   /// browser (two_step.dart): `{ok, url}`, or a sign-in that went through
   /// without it, as [signIn] answers.
@@ -571,8 +602,11 @@ class Core {
 
   /// Sign-ins waiting for an account's answer (docs/core.md, "Approving a
   /// sign-in"), from the server: `requests`, each `{id, device, ip,
-  /// fingerprint, ageSeconds, secondsLeft}`, newest first. The account the
-  /// screens show, or [id].
+  /// fingerprint, ageSeconds, secondsLeft}`, newest first; `checks`, sign-ins
+  /// on new devices waiting for their number, each `{id, device, deviceType,
+  /// ip, location, ageSeconds, secondsLeft, emailAfter}`; and
+  /// `locationSource` (`{name, url}`, or null), who the locations are from.
+  /// The account the screens show, or [id].
   static Future<Answer> signInRequests([String? id]) {
     final asked = id;
     return _background(
@@ -598,6 +632,28 @@ class Core {
         fingerprint,
         approve ? 'true' : 'false',
       ], (p) => c._answer(c._answerSignInRequest(p[0], p[1], p[2], p[3]))),
+    );
+  }
+
+  /// Approves another device's sign-in that the new-device check holds,
+  /// with the [number] the person typed (two digits), or denies it (null),
+  /// for the account it was listed for ([id], or the one the screens show):
+  /// `answered` is "approved", "denied", or "wrongNumber" (it wasn't the new
+  /// device's number, so the server denied it). Sends no key, so it asks
+  /// for no confirmation.
+  static Future<Answer> answerNewDeviceCheck(
+    String checkId,
+    String? number, [
+    String? id,
+  ]) {
+    final asked = id;
+    return _background(
+      (c, a) => c._with([
+        asked ?? a,
+        checkId,
+        number ?? '',
+        number == null ? 'false' : 'true',
+      ], (p) => c._answer(c._answerNewDeviceCheck(p[0], p[1], p[2], p[3]))),
     );
   }
 
