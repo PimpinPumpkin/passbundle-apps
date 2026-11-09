@@ -204,6 +204,12 @@ fn notices(accounts: &mut Accounts) {
 fn lock_if_due(accounts: &mut Accounts) {
     #[cfg(phone)]
     {
+        // iOS's AutoFill extension holds a vault for one request, and locks
+        // every account as it ends (`pb_autofill_close`): there's no wait to
+        // count, and a policy's sign-out is the app's to do.
+        if accounts.is_beside() {
+            return;
+        }
         notices(accounts);
         let _ = accounts.tick(&autolock::readings());
     }
@@ -401,7 +407,7 @@ fn accounts_json(accounts: &Accounts) -> Value {
 /// What an item is labeled with when it's listed beside other accounts'
 /// (autofill, passkeys): its account's name, or email, while more than one
 /// account is signed in here; nothing otherwise.
-#[cfg(target_os = "android")]
+#[cfg(phone)]
 fn account_label(accounts: &Accounts, id: &str) -> Option<String> {
     (accounts.summaries().len() > 1).then(|| accounts.label(id))
 }
@@ -476,6 +482,8 @@ fn summary(vault: &Vault, item: &Item) -> Value {
         // The host its tile's icon is for (icons.rs), for a login.
         "iconHost": (item.kind == ItemKind::Login).then(|| item.uris.first().and_then(|u| crate::icons::host_of(u))).flatten(),
         "favorite": item.favorite,
+        // Asks for the master password before its secrets are used.
+        "reprompt": item.kept.reprompt != 0,
         "folderId": item.folder_id,
         "folder": item.folder_id.as_ref().and_then(|f| vault.folders.get(f)),
         "organizationId": item.organization_id,
@@ -1085,10 +1093,11 @@ pub(crate) fn value_for_copy(account: &str, id: &str, what: &str) -> Option<Zero
     on_phone(account, |app| app.value_to_copy(id, what).ok())
 }
 
-/// An item's value for Android's autofill to fill (android.rs): as for
-/// copying, except that a secret a shared folder hides still fills, as
-/// upstream's apps fill it, without the person seeing it.
-#[cfg(target_os = "android")]
+/// An item's value for Android's autofill to fill (android.rs), or iOS's
+/// AutoFill extension (`pb_fill_secret`): as for copying, except that a
+/// secret a shared folder hides still fills, as upstream's apps fill it,
+/// without the person seeing it.
+#[cfg(phone)]
 pub(crate) fn value_for_fill(account: &str, id: &str, what: &str) -> Option<Zeroizing<String>> {
     on_phone(account, |app| app.value(id, what).ok())
 }
@@ -1226,6 +1235,104 @@ pub(crate) fn remove_biometric(account: &str) {
     }
 }
 
+/// Opens the accounts the app keeps in the App Group folder `dir`, for iOS's
+/// AutoFill extension (docs/phones.md, "Autofill"): all locked, read beside
+/// the app without changing its folder (`Accounts::open_beside`), with the
+/// refresh tokens in the Keychain group the two share. Answers as
+/// `pb_accounts`. Free it with `pb_free`.
+///
+/// # Safety
+/// `dir` is a NUL-terminated UTF-8 string, valid for the call.
+#[cfg(target_os = "ios")]
+#[no_mangle]
+pub unsafe extern "C" fn pb_autofill_open(dir: *const c_char) -> *mut c_char {
+    let dir = text(dir);
+    let secrets: Arc<dyn SecretStore> = Arc::new(OsSecretStore::new(std::path::Path::new(&dir)));
+    *APP.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) =
+        Some(Accounts::open_beside(std::path::Path::new(&dir), secrets));
+    with_accounts(|accounts| opened(accounts))
+}
+
+/// Ends an AutoFill request: every account locks (its keys and everything
+/// decrypted wiped), and the accounts are let go, so nothing of the vault
+/// stays in the extension's process, which iOS may keep for the next one.
+#[cfg(target_os = "ios")]
+#[no_mangle]
+pub extern "C" fn pb_autofill_close() -> *mut c_char {
+    let mut guard = APP.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(accounts) = guard.as_mut() {
+        let ids: Vec<String> = accounts.summaries().into_iter().map(|a| a.id).collect();
+        for id in ids {
+            accounts.lock(&id);
+        }
+    }
+    *guard = None;
+    out(json!({ "ok": true }))
+}
+
+/// The logins for a website, for iOS's AutoFill extension, as `fillable`
+/// has them: from every account unlocked in the extension, names and
+/// usernames only, never a password. Free it with `pb_free`.
+///
+/// # Safety
+/// `domain` is a NUL-terminated UTF-8 string, valid for the call.
+#[cfg(target_os = "ios")]
+#[no_mangle]
+pub unsafe extern "C" fn pb_fillable(domain: *const c_char) -> *mut c_char {
+    out(fillable("", &text(domain)))
+}
+
+/// A login's value for iOS's AutoFill extension to fill ("username" or
+/// "password"), from the account named, as UTF-8 bytes; null while it's
+/// locked or busy, or if there's none. Taken only once the person picks the
+/// login. `len` gets its length. Free it with `pb_free_secret`, which wipes
+/// it first.
+///
+/// # Safety
+/// `account`, `id`, and `what` are NUL-terminated UTF-8 strings, and `len`
+/// points to writable memory, for the call.
+#[cfg(target_os = "ios")]
+#[no_mangle]
+pub unsafe extern "C" fn pb_fill_secret(
+    account: *const c_char,
+    id: *const c_char,
+    what: *const c_char,
+    len: *mut usize,
+) -> *mut u8 {
+    let Some(value) = value_for_fill(&text(account), &text(id), &text(what)) else {
+        return std::ptr::null_mut();
+    };
+    let bytes: Box<[u8]> = value.as_bytes().into();
+    *len = bytes.len();
+    Box::into_raw(bytes).cast()
+}
+
+/// What iOS may suggest above the keyboard, for the app to give iOS after
+/// each sync (docs/phones.md, "Autofill"): from every unlocked account,
+/// `[{account, id, username, domain}]`, never a password. Free it with
+/// `pb_free`.
+#[cfg(target_os = "ios")]
+#[no_mangle]
+pub extern "C" fn pb_suggestions() -> *mut c_char {
+    with_accounts(|accounts| {
+        Value::Array(
+            accounts
+                .unlocked()
+                .flat_map(|(account, vault)| {
+                    vault.suggestions().into_iter().map(move |s| {
+                        json!({
+                            "account": account,
+                            "id": s.id,
+                            "username": s.username,
+                            "domain": s.domain,
+                        })
+                    })
+                })
+                .collect(),
+        )
+    })
+}
+
 /// Opens the core on the Android app's folder, unless it's open already: the
 /// autofill service can start the app's process without its screens.
 #[cfg(target_os = "android")]
@@ -1238,14 +1345,14 @@ pub(crate) fn open_if_closed(dir: &str) {
 }
 
 /// The logins for an Android app or the page a browser shows, for its
-/// autofill (android.rs), from every unlocked account: names and usernames
-/// only, each with its account's id on this device (`account`), which
-/// filling it names, and with more than one account here, the account's
-/// name or email (`accountLabel`). `locked` while no account is unlocked
-/// (with the account the screens show, to unlock), `signedOut` with no
-/// account, and `busy` while a slow call has the app. `account` is the one
-/// the screens show.
-#[cfg(target_os = "android")]
+/// autofill (android.rs), or for a website in iOS's AutoFill extension
+/// (`pb_fillable`), from every unlocked account: names and usernames only,
+/// each with its account's id on this device (`account`), which filling it
+/// names, and with more than one account here, the account's name or email
+/// (`accountLabel`). `locked` while no account is unlocked (with the account
+/// the screens show, to unlock), `signedOut` with no account, and `busy`
+/// while a slow call has the app. `account` is the one the screens show.
+#[cfg(phone)]
 pub(crate) fn fillable(package: &str, domain: &str) -> Value {
     use crate::matching::Target;
     let Some(mut guard) = accounts_now() else {

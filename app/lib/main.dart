@@ -214,6 +214,7 @@ class _PassBundleAppState extends State<PassBundleApp> {
   }
 
   void refresh({bool withPassword = false}) {
+    final before = signedIn;
     setState(() {
       accounts = core.accounts();
       // The one the core shows, unless another is being added.
@@ -224,8 +225,16 @@ class _PassBundleAppState extends State<PassBundleApp> {
       // Shown unlocked (or signed out): an ask from before is done with.
       if (state['state'] != 'locked') biometricAsksTaken = biometricAsks;
     });
+    // An account signed out of: iOS forgets what it suggested from it.
+    if (signedIn.length < before.length) Core.suggest();
     watch();
   }
+
+  /// The accounts signed in here, by id.
+  Set<String> get signedIn => {
+    for (final a in (accounts['accounts'] as List? ?? const []))
+      (a as Map)['id'] as String,
+  };
 
   /// Shows another account, unlocked or not; the one shown stays as it is.
   void switchTo(String id) {

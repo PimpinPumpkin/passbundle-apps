@@ -150,6 +150,11 @@ pub struct Accounts {
     agent: Option<(PathBuf, PathBuf)>,
     /// Each account's name and color, by its id.
     labels: HashMap<String, Label>,
+    /// Opened beside the app by another process, iOS's AutoFill extension
+    /// (`open_beside`): it reads what the app keeps and never changes the
+    /// app's folder (no accounts.json, no folders removed, no policy's sign
+    /// out), since the app may be signing in or out in it meanwhile.
+    beside: bool,
 }
 
 /// An account's id on this device: 32 hex digits, made here.
@@ -255,6 +260,7 @@ impl Accounts {
             last: index.last.clone(),
             agent: None,
             labels: HashMap::new(),
+            beside: false,
         };
         accounts.list = kept.iter().map(|id| accounts.app_for(id)).collect();
         // Each one's name and color as kept, a color of its own where it has
@@ -273,6 +279,73 @@ impl Accounts {
         }
         accounts.save();
         accounts
+    }
+
+    /// The accounts the app keeps in its folder `dir`, all locked, for
+    /// another process that reads them beside it: iOS's AutoFill extension
+    /// (docs/phones.md, "Autofill"). Only the accounts accounts.json lists
+    /// whose vault is kept, in its order, with their names and colors; an
+    /// install from before several accounts, or a sign-in the app hasn't
+    /// finished, has none here until the app opens it. Nothing in the
+    /// folder changes: the app does all the keeping, and locking is the
+    /// only thing that ends an account's vault here.
+    pub fn open_beside(dir: &Path, secrets: Arc<dyn SecretStore>) -> Accounts {
+        let device = Store::new(dir);
+        let index: Index = device
+            .read("accounts.json")
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default();
+        let folders = dir.join("accounts");
+        let mut kept: Vec<String> = Vec::new();
+        for entry in &index.accounts {
+            let store = Store::new(folders.join(&entry.id));
+            if is_id(&entry.id)
+                && !kept.contains(&entry.id)
+                && store.settings().is_some()
+                && store.has_sync()
+            {
+                kept.push(entry.id.clone());
+            }
+        }
+        let install = index.device.clone().unwrap_or_else(Device::new_identifier);
+        let active = index
+            .active
+            .clone()
+            .filter(|a| kept.contains(a))
+            .or_else(|| kept.first().cloned());
+        let mut accounts = Accounts {
+            dir: dir.to_owned(),
+            device,
+            secrets,
+            list: Vec::new(),
+            active,
+            adding: None,
+            signing_in: None,
+            install,
+            last: None,
+            agent: None,
+            labels: HashMap::new(),
+            beside: true,
+        };
+        accounts.list = kept.iter().map(|id| accounts.app_for(id)).collect();
+        for id in &kept {
+            let entry = index.accounts.iter().find(|e| &e.id == id);
+            let name = entry
+                .and_then(|e| e.name.clone())
+                .and_then(|n| named(&n).ok().flatten());
+            let tone = entry
+                .and_then(|e| e.tone.clone())
+                .filter(|t| TONES.contains(&t.as_str()));
+            let tone = tone.unwrap_or_else(|| accounts.free_tone());
+            accounts.labels.insert(id.clone(), Label { name, tone });
+        }
+        accounts
+    }
+
+    /// Whether these are the app's accounts read by another process beside
+    /// it (`open_beside`).
+    pub fn is_beside(&self) -> bool {
+        self.beside
     }
 
     fn folders(&self) -> PathBuf {
@@ -297,6 +370,9 @@ impl Accounts {
     /// Keeps accounts.json. A failure to write it leaves the folders, which
     /// are what count, as they are: the next start finds them again.
     fn save(&self) {
+        if self.beside {
+            return;
+        }
         let index = Index {
             device: Some(self.install.clone()),
             accounts: self
@@ -794,6 +870,11 @@ impl Accounts {
 
     /// Takes off this device each account whose policy signed it out.
     fn sweep(&mut self) {
+        // Beside the app, an account it signed out of meanwhile is the
+        // app's to remove.
+        if self.beside {
+            return;
+        }
         while let Some(at) = self.list.iter().position(|a| !a.has_vault()) {
             self.remove_at(at);
         }
@@ -1138,6 +1219,66 @@ mod tests {
             .and_then(|a| a.vault())
             .map(|v| v.items.iter().map(|i| i.name.clone()).collect())
             .unwrap_or_default()
+    }
+
+    /// iOS's AutoFill extension reads the app's folder beside it: the
+    /// accounts the app lists with a vault, in its order and with their
+    /// labels, all locked, and it changes nothing there. A sign-in the app
+    /// hasn't finished, and an install from before, stay as they are for the
+    /// app; a policy's sign-out and the wait don't run beside it.
+    #[test]
+    fn opened_beside_the_app_reads_and_changes_nothing() {
+        let dir = new_dir();
+        let w = keep(&dir, work());
+        let p = keep(&dir, personal());
+        let mut app = open(&dir);
+        app.switch(&p).unwrap();
+        app.set_label(&w, Some("Work"), None).unwrap();
+        let order: Vec<String> = app.summaries().into_iter().map(|s| s.id).collect();
+        drop(app);
+        // A sign-in the app is part way through: settings, no vault yet.
+        let signing_in = new_id();
+        Store::new(dir.join("accounts").join(&signing_in))
+            .save_settings(&settings(work(), "the-install"))
+            .unwrap();
+        // Files of an install from before several accounts.
+        Store::new(&dir)
+            .save_settings(&settings(personal(), "the-install"))
+            .unwrap();
+        let index = fs::read_to_string(dir.join("accounts.json")).unwrap();
+
+        let mut beside = Accounts::open_beside(&dir, Arc::new(MemorySecretStore::default()));
+        assert!(beside.is_beside());
+        let ids: Vec<String> = beside.summaries().into_iter().map(|s| s.id).collect();
+        assert_eq!(ids, order);
+        assert_eq!(beside.active(), Some(p.as_str()));
+        assert_eq!(beside.label(&w), "Work");
+        assert_eq!(beside.label(&p), personal().email);
+        assert!(beside.summaries().iter().all(|s| !s.unlocked));
+
+        // Unlocking and finding logins, then locking, as the extension does.
+        beside.app(&w).unwrap().unlock(work().password).unwrap();
+        let found = beside.fillable(&crate::matching::Target::Website("shared.example.test"));
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].0, w);
+        let _ = beside.tick(&Readings::default());
+        beside.lock(&w);
+        beside.switch(&w).unwrap();
+        drop(beside);
+
+        // Nothing of the app's changed: its index, the sign-in part way, and
+        // the install from before.
+        assert_eq!(
+            fs::read_to_string(dir.join("accounts.json")).unwrap(),
+            index
+        );
+        assert!(dir
+            .join("accounts")
+            .join(&signing_in)
+            .join("settings.json")
+            .is_file());
+        assert!(dir.join("settings.json").is_file());
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

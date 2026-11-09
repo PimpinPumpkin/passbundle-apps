@@ -32,9 +32,10 @@ import UniformTypeIdentifiers
     let channel = FlutterMethodChannel(name: "passbundle/platform", binaryMessenger: registrar.messenger())
     channel.setMethodCallHandler { call, result in
       switch call.method {
-      // Where the core keeps the vault: the app's own Application Support folder.
+      // Where the core keeps the vault: the App Group's folder, which the
+      // AutoFill extension reads too (Shared.swift).
       case "filesDir":
-        result(Platform.filesDir())
+        result(Shared.filesDir())
       // The server an organization's MDM set (managed app configuration's
       // `server_url`, as on Android), if any.
       case "managedServer":
@@ -70,18 +71,18 @@ import UniformTypeIdentifiers
         result(nil)
       // Unlocking with Face ID or Touch ID (Biometric, below), each account its own.
       case "biometricStatus":
-        result(["status": Biometric.status(account: Platform.account(call)), "method": Biometric.method()])
+        result(["status": Biometric.status(account: Platform.account(call)), "method": Shared.biometricMethod()])
       case "biometricEnroll":
         Biometric.enroll(account: Platform.account(call)) { on, error in
           result(["ok": error == nil, "on": on, "error": error as Any])
         }
       case "biometricUnlock":
-        Biometric.unlock(account: Platform.account(call)) { unlocked, error in
+        Shared.unlockWithBiometric(account: Platform.account(call)) { unlocked, error in
           result(["ok": error == nil, "unlocked": unlocked, "error": error as Any])
         }
       // Confirming it's the person, to approve a sign-in from another device.
       case "biometricConfirmApproval":
-        Biometric.unlock(account: Platform.account(call), reason: "Approve sign-in", forApproval: true) {
+        Shared.unlockWithBiometric(account: Platform.account(call), reason: "Approve sign-in", forApproval: true) {
           confirmed, error in
           result(["ok": error == nil, "confirmed": confirmed, "error": error as Any])
         }
@@ -118,6 +119,20 @@ import UniformTypeIdentifiers
           }
           DispatchQueue.main.async { result(answer) }
         }
+      // What iOS may suggest above the keyboard, after each sync (Suggestions, below).
+      case "suggest":
+        Suggestions.update { count, stored in result(["count": count, "stored": stored]) }
+      // Whether PassBundle is on for AutoFill in Settings, and Settings'
+      // page for turning it on (AutoFillSetup, below).
+      case "autofillStatus":
+        AutoFillSetup.status { status in result(status) }
+      case "turnOnAutofill":
+        AutoFillSetup.openSettings { opened in result(opened) }
+      case "autofillSetupStandIn":
+        let on = (call.arguments as? [String: Any])?["on"] as? Bool ?? false
+        result(AutoFillSetup.useStandIn(on))
+      case "autofillSetupOpened":
+        result(AutoFillSetup.opened)
       default:
         result(FlutterMethodNotImplemented)
       }
@@ -178,17 +193,9 @@ final class DuoSession: NSObject, ASWebAuthenticationPresentationContextProvidin
   }
 }
 
-/// The iOS app's own piece (docs/phones.md): the data folder and the pasteboard.
+/// The iOS app's own piece (docs/phones.md): the pasteboard. The data
+/// folder is the App Group's (Shared.swift).
 enum Platform {
-  static func filesDir() -> String? {
-    guard let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
-      return nil
-    }
-    let dir = support.appendingPathComponent("PassBundle", isDirectory: true)
-    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-    return dir.path
-  }
-
   /// The account a call is about: its id on this device (core.dart, Core.account).
   static func account(_ call: FlutterMethodCall) -> String {
     (call.arguments as? [String: Any])?["account"] as? String ?? ""
@@ -199,11 +206,8 @@ enum Platform {
   /// enforces even if the app is suspended; a username stays.
   static func copy(account: String, id: String, what: String) -> Bool {
     var length = 0
-    guard let bytes = pb_secret(account, id, what, &length) else { return false }
-    defer { pb_free_secret(bytes, length) }
-    guard let value = String(bytes: UnsafeBufferPointer(start: bytes, count: length), encoding: .utf8) else {
-      return false
-    }
+    let bytes = pb_secret(account, id, what, &length)
+    guard let value = Shared.string(bytes, length) else { return false }
     var options: [UIPasteboard.OptionsKey: Any] = [.localOnly: true]
     if what != "username" {
       options[.expirationDate] = Date().addingTimeInterval(30)
@@ -216,8 +220,9 @@ enum Platform {
 /// Unlocking with Face ID or Touch ID (docs/phones.md, "Unlocking with
 /// biometrics"). The user key is kept in the Keychain for this device only,
 /// readable only after the person's current Face ID or Touch ID: adding a
-/// face or a finger voids it. It goes between the core and the Keychain here,
-/// never through Dart.
+/// face or a finger voids it. It goes between the core and the Keychain in
+/// Swift, never through Dart; the AutoFill extension reads it too
+/// (Shared.swift, which also unlocks with it).
 ///
 /// Each account on the phone has its own Keychain item, named by the
 /// account's id on this device (DESIGN.md in the meta repo, "Several accounts
@@ -227,7 +232,6 @@ enum Platform {
 /// keeping the key without biometrics, as on Android; release builds refuse
 /// it. Real prompts are checked by hand on real phones.
 enum Biometric {
-  private static let service = "com.passbundle.app.biometric"
   /// The one item a build from before several accounts kept.
   private static let earlier = "user-key"
 
@@ -254,61 +258,25 @@ enum Biometric {
     #endif
   }
 
-  /// "Face ID" or "Touch ID": what the screens call it.
-  static func method() -> String {
-    let context = LAContext()
-    _ = context.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: nil)
-    switch context.biometryType {
-    case .touchID: return "Touch ID"
-    case .opticID: return "Optic ID"
-    default: return "Face ID"
-    }
-  }
-
-  /// An account's id on this device, as the core makes them (accounts.rs).
-  private static func isAccount(_ account: String) -> Bool {
-    account.count == 32 && account.allSatisfy { $0.isASCII && $0.isHexDigit && !$0.isUppercase }
-  }
-
-  /// An account's own Keychain item.
-  private static func item(_ account: String) -> [String: Any] {
-    [
-      kSecClass as String: kSecClassGenericPassword,
-      kSecAttrService as String: service,
-      kSecAttrAccount as String: "user-key-" + account,
-    ]
-  }
-
-  /// Whether the account's key is kept, without asking for Face ID.
-  private static func kept(_ account: String) -> Bool {
-    guard isAccount(account) else { return false }
-    let context = LAContext()
-    context.interactionNotAllowed = true
-    var query = item(account)
-    query[kSecUseAuthenticationContext as String] = context
-    query[kSecReturnAttributes as String] = true
-    let status = SecItemCopyMatching(query as CFDictionary, nil)
-    return status == errSecSuccess || status == errSecInteractionNotAllowed
-  }
-
   /// For an account: "setUp", "notSetUp", or "unavailable" (no Face ID or Touch ID set up on this phone).
   static func status(account: String) -> String {
     if !standIn && !LAContext().canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: nil) {
       return "unavailable"
     }
-    return kept(account) ? "setUp" : "notSetUp"
+    return Shared.biometricKept(account) ? "setUp" : "notSetUp"
   }
 
   /// Turns it off for one account: its Keychain item goes, and the others'
   /// stay. The core calls this when signing out of it.
   static func remove(account: String) {
-    guard isAccount(account) else { return }
-    SecItemDelete(item(account) as CFDictionary)
+    Shared.removeBiometric(account)
   }
 
   /// Every account's, for the tests' stand-in.
   private static func removeAll() {
-    SecItemDelete([kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service] as CFDictionary)
+    SecItemDelete(
+      [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: Shared.biometricService]
+        as CFDictionary)
   }
 
   /// The item a build from before several accounts kept goes (at start).
@@ -316,7 +284,7 @@ enum Biometric {
     SecItemDelete(
       [
         kSecClass as String: kSecClassGenericPassword,
-        kSecAttrService as String: service,
+        kSecAttrService as String: Shared.biometricService,
         kSecAttrAccount as String: earlier,
       ] as CFDictionary)
   }
@@ -325,13 +293,14 @@ enum Biometric {
   /// Touch ID, then keeps its user key in its own item. `done(on, error)`:
   /// on is false if the person cancelled.
   static func enroll(account: String, _ done: @escaping (Bool, String?) -> Void) {
-    guard isAccount(account) else { return done(false, "Couldn't set up unlocking with \(method()).") }
+    let method = Shared.biometricMethod()
+    guard Shared.isAccount(account) else { return done(false, "Couldn't set up unlocking with \(method).") }
     remove(account: account)
     let keep = {
       var length = 0
       guard let bytes = pb_user_key(account, &length) else { return done(false, "Unlock PassBundle first.") }
       defer { pb_free_secret(bytes, length) }
-      var query = item(account)
+      var query = Shared.biometricItem(account)
       // Not copied: the Keychain takes it from the core's buffer, which is wiped after.
       query[kSecValueData as String] = Data(bytesNoCopy: bytes, count: length, deallocator: .none)
       if standIn {
@@ -340,74 +309,106 @@ enum Biometric {
         guard
           let access = SecAccessControlCreateWithFlags(
             nil, kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly, .biometryCurrentSet, nil)
-        else { return done(false, "Couldn't set up unlocking with \(method()).") }
+        else { return done(false, "Couldn't set up unlocking with \(method).") }
         query[kSecAttrAccessControl as String] = access
       }
       guard SecItemAdd(query as CFDictionary, nil) == errSecSuccess else {
-        return done(false, "Couldn't set up unlocking with \(method()).")
+        return done(false, "Couldn't set up unlocking with \(method).")
       }
       done(true, nil)
     }
     if standIn { return keep() }
     LAContext().evaluatePolicy(
-      .deviceOwnerAuthenticationWithBiometrics, localizedReason: "Turn on unlocking PassBundle with \(method())"
+      .deviceOwnerAuthenticationWithBiometrics, localizedReason: "Turn on unlocking PassBundle with \(method)"
     ) { agreed, error in
       DispatchQueue.main.async {
         if agreed { return keep() }
         let cancelling: [LAError.Code] = [.userCancel, .appCancel, .systemCancel]
         let cancelled = (error as? LAError).map { cancelling.contains($0.code) } ?? false
-        done(false, cancelled ? nil : "Couldn't set up unlocking with \(method()).")
+        done(false, cancelled ? nil : "Couldn't set up unlocking with \(method).")
+      }
+    }
+  }
+}
+
+/// What iOS suggests above the keyboard (docs/phones.md, "Autofill"): after
+/// each sync the app gives iOS each login's username and the domains it
+/// fills on, from every unlocked account, never a password. Each names its
+/// account and item (`<account>/<item>`), so picking one opens the AutoFill
+/// extension on that account's login. A locked account's go once another
+/// account's change replaces the list, and come back at its next unlock.
+enum Suggestions {
+  /// Gives iOS the unlocked accounts' suggestions: `done(count, stored)`, on
+  /// the main queue once iOS has them (stored is false while PassBundle is
+  /// off for AutoFill in Settings).
+  static func update(_ done: @escaping (Int, Bool) -> Void) {
+    let found = (Shared.answer(pb_suggestions()) as? [[String: Any]]) ?? []
+    let identities: [any ASCredentialIdentity] = found.compactMap { s -> ASPasswordCredentialIdentity? in
+      guard let account = s["account"] as? String, let id = s["id"] as? String,
+        let user = s["username"] as? String, let domain = s["domain"] as? String
+      else { return nil }
+      return ASPasswordCredentialIdentity(
+        serviceIdentifier: ASCredentialServiceIdentifier(identifier: domain, type: .domain),
+        user: user, recordIdentifier: "\(account)/\(id)")
+    }
+    let store = ASCredentialIdentityStore.shared
+    let answer = { (stored: Bool) in DispatchQueue.main.async { done(identities.count, stored) } }
+    // Only while PassBundle is turned on for AutoFill in Settings.
+    store.getState { state in
+      guard state.isEnabled else { return answer(false) }
+      store.replaceCredentialIdentities(identities) { stored, _ in answer(stored) }
+    }
+  }
+}
+
+/// Turning PassBundle on for AutoFill (docs/phones.md, "Autofill"): whether
+/// iOS has it on, and Settings' own page where the person switches it on
+/// (iOS 17 and later). Nothing turns on without the person, in Settings.
+///
+/// For tests, debug builds record that Settings would open instead of
+/// opening it, as Android's AutofillSetup.kt does; release builds refuse it.
+enum AutoFillSetup {
+  private static let standInKey = "autofillSetupStandIn"
+  /// What the stand-in recorded, in order.
+  private(set) static var opened: [[String: Any]] = []
+
+  private static var standIn: Bool {
+    #if DEBUG
+      return UserDefaults.standard.bool(forKey: standInKey)
+    #else
+      return false
+    #endif
+  }
+
+  /// Tests only: false in a release build.
+  static func useStandIn(_ on: Bool) -> Bool {
+    #if DEBUG
+      opened = []
+      UserDefaults.standard.set(on, forKey: standInKey)
+      return true
+    #else
+      return false
+    #endif
+  }
+
+  /// `{platform: "ios", autofillSupported, autofillOn}`, on the main queue.
+  static func status(_ done: @escaping ([String: Any]) -> Void) {
+    ASCredentialIdentityStore.shared.getState { state in
+      DispatchQueue.main.async {
+        done(["platform": "ios", "autofillSupported": true, "autofillOn": state.isEnabled])
       }
     }
   }
 
-  /// Unlocks an account: reading its key asks for Face ID or Touch ID, then
-  /// the core opens that account's kept vault with it. `done(unlocked,
-  /// error)`: unlocked is false if the person cancelled. With `forApproval`,
-  /// it's the person confirming it's them to approve a sign-in from another
-  /// device, and nothing else: the core only compares the key with that
-  /// account's open vault's (`pb_confirm_approval_with_key`), and the prompt
-  /// says `reason`.
-  static func unlock(
-    account: String, reason: String = "Unlock PassBundle", forApproval: Bool = false,
-    _ done: @escaping (Bool, String?) -> Void
-  ) {
-    guard isAccount(account) else { return done(false, "Unlocking with \(method()) is off. Use your master password.") }
-    DispatchQueue.global(qos: .userInitiated).async {
-      let context = LAContext()
-      context.localizedReason = reason
-      var query = item(account)
-      query[kSecUseAuthenticationContext as String] = context
-      query[kSecReturnData as String] = true
-      var found: CFTypeRef?
-      let status = SecItemCopyMatching(query as CFDictionary, &found)
-      DispatchQueue.main.async {
-        switch status {
-        case errSecSuccess:
-          guard var key = found as? Data else { return done(false, "Couldn't unlock with \(method()).") }
-          let why = key.withUnsafeBytes { raw -> String in
-            let bytes = raw.bindMemory(to: UInt8.self).baseAddress
-            let given =
-              forApproval
-              ? pb_confirm_approval_with_key(account, bytes, raw.count) : pb_unlock_with_key(account, bytes, raw.count)
-            guard let answer = given else {
-              return "Couldn't unlock with \(method())."
-            }
-            defer { pb_free(answer) }
-            return String(cString: answer)
-          }
-          key.resetBytes(in: 0..<key.count)
-          done(why.isEmpty, why.isEmpty ? nil : why)
-        case errSecUserCanceled:
-          done(false, nil)
-        case errSecItemNotFound:
-          // Off, or voided by a face or finger added since.
-          remove(account: account)
-          done(false, "Unlocking with \(method()) is off. Use your master password.")
-        default:
-          done(false, "Couldn't unlock with \(method()).")
-        }
-      }
+  /// Opens Settings where PassBundle is switched on for AutoFill: "settings"
+  /// once it opened, or nil if it couldn't.
+  static func openSettings(_ done: @escaping (String?) -> Void) {
+    if standIn {
+      opened.append(["for": "autofill", "opens": "credentialProviderSettings"])
+      return done("settings")
+    }
+    ASSettingsHelper.openCredentialProviderAppSettings { error in
+      DispatchQueue.main.async { done(error == nil ? "settings" : nil) }
     }
   }
 }
