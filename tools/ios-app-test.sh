@@ -87,4 +87,8 @@ done
 binaries=("$extension/AutoFill")
 [ -f "$extension/AutoFill.debug.dylib" ] && binaries+=("$extension/AutoFill.debug.dylib")
 [ "$(nm -gU "${binaries[@]}" 2> /dev/null | grep -c '_pb_fillable$')" -gt 0 ] || { echo "The extension doesn't have the core." >&2; exit 1; }
-echo "The AutoFill extension is in the app, with its entitlements and the core."
+# It provides passkeys too (iOS 17 and later), signing with the core.
+[ "$(plutil -extract NSExtension.NSExtensionAttributes.ASCredentialProviderExtensionCapabilities.ProvidesPasskeys raw "$extension/Info.plist")" = true ] \
+  || { echo "The extension doesn't say it provides passkeys." >&2; exit 1; }
+[ "$(nm -gU "${binaries[@]}" 2> /dev/null | grep -c '_pb_passkey_assert$')" -gt 0 ] || { echo "The extension can't sign with a passkey." >&2; exit 1; }
+echo "The AutoFill extension is in the app, with its entitlements and the core, for passwords and passkeys."

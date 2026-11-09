@@ -38,4 +38,16 @@ void pb_set_remove_biometric(void (*remove)(const char *account));
 // The master password, for a login that asks for it again before it fills:
 // {"ok": true} or the words to show.
 char *pb_confirm_master_password(const char *account, const char *id, const char *password);
+// A site's passkeys, from every account unlocked here (IDs in base64url):
+// {locked, account, accounts: [{id, label}], items: [{id, account, accountLabel,
+// name, userName, credentialId, userHandle, discoverable, reprompt}]}, never a key.
+char *pb_passkeys(const char *rp_id);
+// Signs in to a site with a login's passkey, from the account named:
+// {ok, authenticatorData, signature, credentialId, userHandle} or the words to show.
+char *pb_passkey_assert(const char *account, const char *id, const char *rp_id, const char *client_data_hash,
+                        const char *user_verified);
+// Makes a passkey in a new login, from {account, rpId, userHandle, userName,
+// userVerified, discoverable, exclude}, saved to the server first:
+// {ok, itemId, credentialId, attestationObject} or the words to show.
+char *pb_passkey_create(const char *request);
 void pb_free(char *ptr);
