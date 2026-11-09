@@ -1,0 +1,15 @@
+// The AutoFill extension's own code (CredentialProviderViewController.swift,
+// Shared.swift) with the core linked in, as the extension has them, tested
+// on an iPhone simulator inside a bare host app (TestHost.swift).
+// tools/ios-autofill-screens.sh runs them; tools/ios-core.sh builds the core.
+TEST_HOST = $(BUILT_PRODUCTS_DIR)/AutoFillTestHost.app/AutoFillTestHost
+OTHER_LDFLAGS[sdk=iphoneos*] = $(inherited) $(PROJECT_DIR)/PassBundleCore.xcframework/ios-arm64/libpassbundle_core.a -framework Security -framework CoreFoundation
+OTHER_LDFLAGS[sdk=iphonesimulator*] = $(inherited) $(PROJECT_DIR)/PassBundleCore.xcframework/ios-arm64-simulator/libpassbundle_core.a -framework Security -framework CoreFoundation
+SWIFT_OBJC_BRIDGING_HEADER = AutoFillTests/AutoFillTests-Bridging-Header.h
+PRODUCT_BUNDLE_IDENTIFIER = com.passbundle.app.autofilltests
+PRODUCT_NAME = $(TARGET_NAME)
+GENERATE_INFOPLIST_FILE = YES
+SWIFT_VERSION = 5.0
+IPHONEOS_DEPLOYMENT_TARGET = 17.0
+TARGETED_DEVICE_FAMILY = 1
+CODE_SIGN_STYLE = Automatic

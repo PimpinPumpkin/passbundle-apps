@@ -21,6 +21,10 @@
 		AF0000000000000000000013 /* CredentialProviderViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = AF0000000000000000000002 /* CredentialProviderViewController.swift */; };
 		AF0000000000000000000014 /* AutoFill.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = AF0000000000000000000007 /* AutoFill.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		AF0000000000000000000015 /* AutoFillUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AF0000000000000000000009 /* AutoFillUITests.swift */; };
+		AF0000000000000000000111 /* TestHost.swift in Sources */ = {isa = PBXBuildFile; fileRef = AF0000000000000000000101 /* TestHost.swift */; };
+		AF0000000000000000000112 /* AutoFillTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AF0000000000000000000102 /* AutoFillTests.swift */; };
+		AF0000000000000000000113 /* Shared.swift in Sources */ = {isa = PBXBuildFile; fileRef = AF0000000000000000000001 /* Shared.swift */; };
+		AF0000000000000000000114 /* CredentialProviderViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = AF0000000000000000000002 /* CredentialProviderViewController.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -37,6 +41,13 @@
 			proxyType = 1;
 			remoteGlobalIDString = AF0000000000000000000031;
 			remoteInfo = AutoFill;
+		};
+		AF0000000000000000000151 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 97C146E61CF9000F007C117D /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = AF0000000000000000000131;
+			remoteInfo = AutoFillTestHost;
 		};
 /* End PBXContainerItemProxy section */
 
@@ -92,6 +103,13 @@
 		AF0000000000000000000008 /* Runner.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Runner.entitlements; sourceTree = "<group>"; };
 		AF0000000000000000000009 /* AutoFillUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AutoFillUITests.swift; sourceTree = "<group>"; };
 		AF000000000000000000000A /* AutoFillUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = AutoFillUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		AF0000000000000000000101 /* TestHost.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TestHost.swift; sourceTree = "<group>"; };
+		AF0000000000000000000102 /* AutoFillTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AutoFillTests.swift; sourceTree = "<group>"; };
+		AF0000000000000000000103 /* AutoFillTests.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = AutoFillTests.xcconfig; sourceTree = "<group>"; };
+		AF0000000000000000000104 /* AutoFillTests-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "AutoFillTests-Bridging-Header.h"; sourceTree = "<group>"; };
+		AF0000000000000000000105 /* AutoFillTestHost.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = AutoFillTestHost.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		AF0000000000000000000106 /* AutoFillTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = AutoFillTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		AF0000000000000000000107 /* AutoFillTestHost.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = AutoFillTestHost.xcconfig; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -111,6 +129,20 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		AF0000000000000000000038 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		AF0000000000000000000133 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		AF0000000000000000000138 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -148,6 +180,7 @@
 				AF0000000000000000000021 /* Shared */,
 				AF0000000000000000000022 /* AutoFill */,
 				AF0000000000000000000023 /* AutoFillUITests */,
+				AF0000000000000000000121 /* AutoFillTests */,
 				97C146EF1CF9000F007C117D /* Products */,
 				331C8082294A63A400263BE5 /* RunnerTests */,
 			);
@@ -160,6 +193,8 @@
 				331C8081294A63A400263BE5 /* RunnerTests.xctest */,
 				AF0000000000000000000007 /* AutoFill.appex */,
 				AF000000000000000000000A /* AutoFillUITests.xctest */,
+				AF0000000000000000000105 /* AutoFillTestHost.app */,
+				AF0000000000000000000106 /* AutoFillTests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -207,6 +242,18 @@
 				AF0000000000000000000009 /* AutoFillUITests.swift */,
 			);
 			path = AutoFillUITests;
+			sourceTree = "<group>";
+		};
+		AF0000000000000000000121 /* AutoFillTests */ = {
+			isa = PBXGroup;
+			children = (
+				AF0000000000000000000102 /* AutoFillTests.swift */,
+				AF0000000000000000000101 /* TestHost.swift */,
+				AF0000000000000000000104 /* AutoFillTests-Bridging-Header.h */,
+				AF0000000000000000000103 /* AutoFillTests.xcconfig */,
+				AF0000000000000000000107 /* AutoFillTestHost.xcconfig */,
+			);
+			path = AutoFillTests;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -288,6 +335,41 @@
 			productReference = AF000000000000000000000A /* AutoFillUITests.xctest */;
 			productType = "com.apple.product-type.bundle.ui-testing";
 		};
+		AF0000000000000000000131 /* AutoFillTestHost */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = AF0000000000000000000141 /* Build configuration list for PBXNativeTarget "AutoFillTestHost" */;
+			buildPhases = (
+				AF0000000000000000000132 /* Sources */,
+				AF0000000000000000000133 /* Frameworks */,
+				AF0000000000000000000134 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = AutoFillTestHost;
+			productName = AutoFillTestHost;
+			productReference = AF0000000000000000000105 /* AutoFillTestHost.app */;
+			productType = "com.apple.product-type.application";
+		};
+		AF0000000000000000000136 /* AutoFillTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = AF0000000000000000000145 /* Build configuration list for PBXNativeTarget "AutoFillTests" */;
+			buildPhases = (
+				AF0000000000000000000137 /* Sources */,
+				AF0000000000000000000138 /* Frameworks */,
+				AF0000000000000000000139 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				AF0000000000000000000152 /* PBXTargetDependency */,
+			);
+			name = AutoFillTests;
+			productName = AutoFillTests;
+			productReference = AF0000000000000000000106 /* AutoFillTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -312,6 +394,13 @@
 					AF0000000000000000000036 = {
 						CreatedOnToolsVersion = 16.0;
 					};
+					AF0000000000000000000131 = {
+						CreatedOnToolsVersion = 16.0;
+					};
+					AF0000000000000000000136 = {
+						CreatedOnToolsVersion = 16.0;
+						TestTargetID = AF0000000000000000000131;
+					};
 				};
 			};
 			buildConfigurationList = 97C146E91CF9000F007C117D /* Build configuration list for PBXProject "Runner" */;
@@ -334,6 +423,8 @@
 				331C8080294A63A400263BE5 /* RunnerTests */,
 				AF0000000000000000000031 /* AutoFill */,
 				AF0000000000000000000036 /* AutoFillUITests */,
+				AF0000000000000000000131 /* AutoFillTestHost */,
+				AF0000000000000000000136 /* AutoFillTests */,
 			);
 		};
 /* End PBXProject section */
@@ -365,6 +456,20 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		AF0000000000000000000039 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		AF0000000000000000000134 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		AF0000000000000000000139 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -444,6 +549,24 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		AF0000000000000000000132 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				AF0000000000000000000111 /* TestHost.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		AF0000000000000000000137 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				AF0000000000000000000112 /* AutoFillTests.swift in Sources */,
+				AF0000000000000000000113 /* Shared.swift in Sources */,
+				AF0000000000000000000114 /* CredentialProviderViewController.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -456,6 +579,11 @@
 			isa = PBXTargetDependency;
 			target = AF0000000000000000000031 /* AutoFill */;
 			targetProxy = AF0000000000000000000051 /* PBXContainerItemProxy */;
+		};
+		AF0000000000000000000152 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = AF0000000000000000000131 /* AutoFillTestHost */;
+			targetProxy = AF0000000000000000000151 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -825,6 +953,60 @@
 			};
 			name = Profile;
 		};
+		AF0000000000000000000142 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = AF0000000000000000000107 /* AutoFillTestHost.xcconfig */;
+			buildSettings = {
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		AF0000000000000000000143 /* Release */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = AF0000000000000000000107 /* AutoFillTestHost.xcconfig */;
+			buildSettings = {
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+			};
+			name = Release;
+		};
+		AF0000000000000000000144 /* Profile */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = AF0000000000000000000107 /* AutoFillTestHost.xcconfig */;
+			buildSettings = {
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+			};
+			name = Profile;
+		};
+		AF0000000000000000000146 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = AF0000000000000000000103 /* AutoFillTests.xcconfig */;
+			buildSettings = {
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		AF0000000000000000000147 /* Release */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = AF0000000000000000000103 /* AutoFillTests.xcconfig */;
+			buildSettings = {
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+			};
+			name = Release;
+		};
+		AF0000000000000000000148 /* Profile */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = AF0000000000000000000103 /* AutoFillTests.xcconfig */;
+			buildSettings = {
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+			};
+			name = Profile;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -874,6 +1056,26 @@
 				AF0000000000000000000046 /* Debug */,
 				AF0000000000000000000047 /* Release */,
 				AF0000000000000000000048 /* Profile */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		AF0000000000000000000141 /* Build configuration list for PBXNativeTarget "AutoFillTestHost" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				AF0000000000000000000142 /* Debug */,
+				AF0000000000000000000143 /* Release */,
+				AF0000000000000000000144 /* Profile */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		AF0000000000000000000145 /* Build configuration list for PBXNativeTarget "AutoFillTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				AF0000000000000000000146 /* Debug */,
+				AF0000000000000000000147 /* Release */,
+				AF0000000000000000000148 /* Profile */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
