@@ -50,9 +50,14 @@ def firefox(folder):
     profile = firefox_root / "Profiles" / folder
     profile.mkdir(parents=True, exist_ok=True)
     options = webdriver.FirefoxOptions()
-    for arg in ["-headless", "-profile", str(profile), "-remote-allow-system-access"]:
+    for arg in ["-headless", "-profile", str(profile)]:
         options.add_argument(arg)
-    service = FirefoxService(os.path.join(os.environ["GECKOWEBDRIVER"], "geckodriver"))
+    # Firefox's own privileged scripts (Marionette's chrome context), which
+    # newer Firefox runs only when geckodriver asks for them.
+    service = FirefoxService(
+        os.path.join(os.environ["GECKOWEBDRIVER"], "geckodriver"),
+        service_args=["--allow-system-access"],
+    )
     return webdriver.Firefox(options=options, service=service)
 
 
