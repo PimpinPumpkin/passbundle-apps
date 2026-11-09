@@ -412,8 +412,10 @@ class _BrowserImportDialogState extends State<BrowserImportDialog> {
     final lines = <String>[
       if (added - toCheck > 0)
         '${added - toCheck} new ${plural(added - toCheck, 'password is', 'passwords are')} in your vault.'
+      else if (toCheck == 0 && alreadyThere > 0)
+        'No new passwords: everything was already in your vault.'
       else if (toCheck == 0)
-        'No new passwords: everything was already in your vault.',
+        'Nothing was imported.',
       if (toCheck > 0)
         '$toCheck ${plural(toCheck, 'has', 'have')} a different password from one you already have, so ${plural(toCheck, 'it\'s', 'they\'re')} in ${checkFolders.map((f) => '"$f"').join(' and ')} for you to compare.',
       if (alreadyThere > 0)

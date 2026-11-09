@@ -305,10 +305,7 @@ void main() {
         findsOneWidget,
       );
       expect(find.text('Import with its own Export'), findsOneWidget);
-      expect(
-        find.text('No new passwords: everything was already in your vault.'),
-        findsOneWidget,
-      );
+      expect(find.text('Nothing was imported.'), findsOneWidget);
     },
   );
 }
