@@ -138,6 +138,14 @@ final class AutoFillTests: XCTestCase {
     XCTAssertEqual(provider.label(Self.work), "Work")
     snapshot("2-logins")
 
+    // Asked to unlock the other account, the person can go back to the
+    // logins there are.
+    provider.askToUnlock(provider.locked[0])
+    wait("asked to unlock the personal account") { isLocked(provider) }
+    provider.backToLogins()
+    wait("went back to the logins") { isLogins(provider) }
+    XCTAssertEqual(provider.logins.count, 2)
+
     // The other account, unlocked on its own: both accounts' logins now,
     // each labeled with its own.
     provider.askToUnlock(provider.locked[0])

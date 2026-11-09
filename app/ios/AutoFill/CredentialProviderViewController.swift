@@ -221,6 +221,13 @@ final class Provider: ObservableObject {
   /// The accounts still locked here, to unlock for their logins too.
   var locked: [Account] { accounts.filter { !$0.unlocked } }
 
+  /// Back to the logins, from unlocking another account or a login's
+  /// master password, once an account is unlocked here.
+  func backToLogins() {
+    guard accounts.contains(where: \.unlocked) else { return }
+    show()
+  }
+
   /// The website's logins from each unlocked account, the one the app shows
   /// first, by name; a suggestion picked fills at once.
   private func show() {
@@ -429,6 +436,15 @@ struct ProviderView: View {
           Button("Unlock with \(method)") { provider.unlockWithBiometric() }
         }
       }
+      // Back to the logins of the accounts unlocked already.
+      if provider.accounts.contains(where: \.unlocked) {
+        Section {
+          Button("Back to the logins") {
+            password = ""
+            provider.backToLogins()
+          }
+        }
+      }
       // Another account to unlock instead, with more than one.
       let others = provider.locked.filter { $0.id != provider.unlocking?.id }
       if !others.isEmpty {
@@ -458,6 +474,12 @@ struct ProviderView: View {
       } footer: {
         if let note = provider.note {
           Text(note).foregroundStyle(.red)
+        }
+      }
+      Section {
+        Button("Back to the logins") {
+          password = ""
+          provider.backToLogins()
         }
       }
     }
