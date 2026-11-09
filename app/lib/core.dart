@@ -96,6 +96,15 @@ bool get isAndroid => debugAndroid ?? Platform.isAndroid;
 @visibleForTesting
 bool? debugAndroid;
 
+/// An iPhone, where the app helps turn on its AutoFill extension
+/// (autofill_offer.dart) and gives iOS its suggestions.
+bool get isIPhone => debugIPhone ?? Platform.isIOS;
+
+/// Tests only: an iPhone's AutoFill setup on a computer, with a stand-in for
+/// the phone's own code. Null is what this is.
+@visibleForTesting
+bool? debugIPhone;
+
 /// An answer from a call that can fail: ok, or the core's words (plain
 /// words with what to do next; core/src/error.rs).
 class Answer {
@@ -739,18 +748,22 @@ class Core {
   /// Whether PassBundle is Android's autofill service and, on Android 14 and
   /// later, a passkey provider (AutofillSetup.kt): `apiLevel`,
   /// `autofillSupported`, `autofillOn`, `passkeysAvailable`, `passkeysOn`.
+  /// On an iPhone, whether PassBundle is on for AutoFill (AppDelegate.swift,
+  /// AutoFillSetup): `platform` "ios", `autofillSupported`, `autofillOn`.
   /// Null elsewhere.
   static Future<Map<String, dynamic>?> autofillStatus() async {
-    if (!isAndroid) return null;
+    if (!isAndroid && !isIPhone) return null;
     final status = await platform.invokeMethod<Map>('autofillStatus');
     return status == null ? null : Map<String, dynamic>.from(status);
   }
 
   /// Android's own prompt to use PassBundle for autofill, or where it's
-  /// missing, the settings it's chosen in: which opened (`prompt`,
-  /// `providers`, `settings`), or null if none did.
-  static Future<String?> turnOnAutofill() async =>
-      isAndroid ? await platform.invokeMethod<String>('turnOnAutofill') : null;
+  /// missing, the settings it's chosen in; on an iPhone, Settings' page for
+  /// AutoFill: which opened (`prompt`, `providers`, `settings`), or null if
+  /// none did.
+  static Future<String?> turnOnAutofill() async => isAndroid || isIPhone
+      ? await platform.invokeMethod<String>('turnOnAutofill')
+      : null;
 
   /// Android 14 and later's list of passkey providers: true if it opened.
   static Future<bool> openPasskeySettings() async =>
@@ -841,9 +854,9 @@ class Core {
   /// unlocked account, usernames and the domains they're for, never
   /// passwords, in place of what it had (AppDelegate.swift, "Suggestions"):
   /// `count`, and whether iOS `stored` them (not while PassBundle is off for
-  /// AutoFill in Settings). After each sync, and once an account is signed
-  /// out of, so iOS forgets its logins.
-  static Future<Map<String, dynamic>> suggest() async => Platform.isIOS
+  /// AutoFill in Settings). After each sync, once AutoFill is turned on, and
+  /// once an account is signed out of, so iOS forgets its logins.
+  static Future<Map<String, dynamic>> suggest() async => isIPhone
       ? Map<String, dynamic>.from(
           await platform.invokeMethod<Map>('suggest') ?? const {},
         )

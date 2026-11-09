@@ -1,5 +1,7 @@
 // Turning on PassBundle's autofill on Android in one tap, rather than left for
-// people to find in Android's settings (docs/phones.md, "Turning it on").
+// people to find in Android's settings (docs/phones.md, "Turning it on"), and
+// its AutoFill on an iPhone, where "Turn on" opens Settings' own page for it
+// (iOS 17 and later) and the person switches PassBundle on there.
 // When the vault opens and PassBundle isn't Android's autofill service yet,
 // a sheet offers it: "Turn on" opens Android's own request to use PassBundle
 // (AutofillSetup.kt), where the person chooses it and confirms, and on
@@ -18,24 +20,30 @@ import 'package:flutter/material.dart';
 import 'core.dart';
 import 'theme.dart';
 
-/// What Android says about PassBundle here (AutofillSetup.kt).
+/// What Android says about PassBundle here (AutofillSetup.kt), or iOS
+/// (AppDelegate.swift, AutoFillSetup).
 @immutable
 class AutofillStatus {
   const AutofillStatus({
     required this.apiLevel,
+    this.ios = false,
     this.autofillSupported = true,
     this.autofillOn = false,
     this.passkeysAvailable = false,
     this.passkeysOn = false,
   });
 
-  factory AutofillStatus.from(Map<String, dynamic> android) => AutofillStatus(
-    apiLevel: android['apiLevel'] as int? ?? 0,
-    autofillSupported: android['autofillSupported'] == true,
-    autofillOn: android['autofillOn'] == true,
-    passkeysAvailable: android['passkeysAvailable'] == true,
-    passkeysOn: android['passkeysOn'] == true,
+  factory AutofillStatus.from(Map<String, dynamic> phone) => AutofillStatus(
+    apiLevel: phone['apiLevel'] as int? ?? 0,
+    ios: phone['platform'] == 'ios',
+    autofillSupported: phone['autofillSupported'] == true,
+    autofillOn: phone['autofillOn'] == true,
+    passkeysAvailable: phone['passkeysAvailable'] == true,
+    passkeysOn: phone['passkeysOn'] == true,
   );
+
+  /// An iPhone: one switch in Settings for AutoFill, and Apple's words.
+  final bool ios;
 
   /// Android's API level: 29 is Android 10, 34 is Android 14.
   final int apiLevel;
@@ -61,10 +69,13 @@ enum SetupRow { autofill, passkeys }
 const passkeysSinceApi = 34;
 
 /// The card's rows, each with whether it's on: autofill where Android has
-/// it, and passkeys on Android 14 and later where Credential Manager is.
+/// it, and passkeys on Android 14 and later where Credential Manager is. An
+/// iPhone has the one: AutoFill.
 List<(SetupRow, bool)> setupRows(AutofillStatus status) => [
   if (status.autofillSupported) (SetupRow.autofill, status.autofillOn),
-  if (status.apiLevel >= passkeysSinceApi && status.passkeysAvailable)
+  if (!status.ios &&
+      status.apiLevel >= passkeysSinceApi &&
+      status.passkeysAvailable)
     (SetupRow.passkeys, status.passkeysOn),
 ];
 
@@ -76,10 +87,10 @@ bool offersAutofill(AutofillStatus? status, {required bool putOff}) =>
     !status.autofillOn &&
     !putOff;
 
-/// Android's answer, or null off Android.
+/// Android's answer, or iOS's; null on a computer.
 Future<AutofillStatus?> readAutofillStatus() async {
-  final android = await Core.autofillStatus();
-  return android == null ? null : AutofillStatus.from(android);
+  final phone = await Core.autofillStatus();
+  return phone == null ? null : AutofillStatus.from(phone);
 }
 
 /// Where "Later" is remembered: beside the vault, in the app's own folder.
@@ -103,13 +114,15 @@ void putOffAutofill() {
 }
 
 /// What the vault says after "Later": where it is from now on (with a way
-/// to Settings).
-const autofillLater = 'You can turn on autofill in Settings any time.';
+/// to Settings). An iPhone says AutoFill, as iOS does.
+String get autofillLater =>
+    'You can turn on ${isIPhone ? 'AutoFill' : 'autofill'} in Settings any time.';
 
-/// As the vault opens on Android: the step, if [offersAutofill]. What to say
-/// once it closes ("Autofill is on.", or [autofillLater]), or null.
+/// As the vault opens on Android or an iPhone: the step, if
+/// [offersAutofill]. What to say once it closes ("Autofill is on.", or
+/// [autofillLater]), or null.
 Future<String?> offerAutofill(BuildContext context) async {
-  if (!isAndroid || autofillPutOff()) return null;
+  if (!(isAndroid || isIPhone) || autofillPutOff()) return null;
   final status = await readAutofillStatus();
   if (!context.mounted || !offersAutofill(status, putOff: false)) return null;
   final after = await showModalBottomSheet<AutofillStatus>(
@@ -121,6 +134,7 @@ Future<String?> offerAutofill(BuildContext context) async {
     putOffAutofill();
     return autofillLater;
   }
+  if (after.ios) return 'AutoFill is on.';
   final passkeys = setupRows(after).contains((SetupRow.passkeys, true));
   return passkeys ? 'Autofill and passkeys are on.' : 'Autofill is on.';
 }
@@ -182,6 +196,11 @@ class _AutofillCardState extends State<AutofillCard> {
   Future<void> refresh() async {
     final next = await readAutofillStatus();
     if (!mounted || next == null) return;
+    // Just turned on in iOS's Settings: iOS takes the logins to suggest now,
+    // rather than at the next sync.
+    if (next.ios && next.autofillOn && status?.autofillOn != true) {
+      Core.suggest();
+    }
     setState(() => status = next);
     widget.onStatus?.call(next);
   }
@@ -196,6 +215,8 @@ class _AutofillCardState extends State<AutofillCard> {
     if (!mounted || opened) return;
     setState(() {
       note = switch (row) {
+        SetupRow.autofill when status?.ios == true =>
+          "iOS didn't open its AutoFill settings. In Settings, open General, then AutoFill & Passwords, and turn on PassBundle.",
         SetupRow.autofill =>
           "Android didn't open its autofill settings. In Settings, search for Autofill service and choose PassBundle.",
         SetupRow.passkeys =>
@@ -206,6 +227,10 @@ class _AutofillCardState extends State<AutofillCard> {
 
   Widget tile(SetupRow row, bool on) {
     final (title, subtitle) = switch (row) {
+      SetupRow.autofill when status?.ios == true => (
+        'Use PassBundle for AutoFill',
+        'Fill logins in apps and Safari',
+      ),
       SetupRow.autofill => (
         'Use PassBundle for autofill',
         'Fill logins in apps and browsers',
@@ -345,15 +370,19 @@ class _AutofillOfferState extends State<AutofillOffer> {
               ),
             ),
             const SizedBox(height: 16),
-            const Text(
-              'Turn on autofill',
+            Text(
+              status.ios ? 'Turn on AutoFill' : 'Turn on autofill',
               textAlign: TextAlign.center,
-              style: TextStyle(fontSize: 22, fontWeight: FontWeight.w700),
+              style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w700),
             ),
             const SizedBox(height: 8),
             Text(
-              'Android asks which service fills your passwords: choose '
-              'PassBundle. You can also do this later in Settings.',
+              status.ios
+                  ? 'Settings opens where you choose what fills your '
+                        'passwords: turn on PassBundle. You can also do this '
+                        'later in Settings.'
+                  : 'Android asks which service fills your passwords: choose '
+                        'PassBundle. You can also do this later in Settings.',
               textAlign: TextAlign.center,
               style: TextStyle(color: c.muted, fontSize: 15, height: 1.35),
             ),

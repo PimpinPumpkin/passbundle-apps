@@ -122,6 +122,17 @@ import UniformTypeIdentifiers
       // What iOS may suggest above the keyboard, after each sync (Suggestions, below).
       case "suggest":
         Suggestions.update { count, stored in result(["count": count, "stored": stored]) }
+      // Whether PassBundle is on for AutoFill in Settings, and Settings'
+      // page for turning it on (AutoFillSetup, below).
+      case "autofillStatus":
+        AutoFillSetup.status { status in result(status) }
+      case "turnOnAutofill":
+        AutoFillSetup.openSettings { opened in result(opened) }
+      case "autofillSetupStandIn":
+        let on = (call.arguments as? [String: Any])?["on"] as? Bool ?? false
+        result(AutoFillSetup.useStandIn(on))
+      case "autofillSetupOpened":
+        result(AutoFillSetup.opened)
       default:
         result(FlutterMethodNotImplemented)
       }
@@ -346,6 +357,58 @@ enum Suggestions {
     store.getState { state in
       guard state.isEnabled else { return answer(false) }
       store.replaceCredentialIdentities(identities) { stored, _ in answer(stored) }
+    }
+  }
+}
+
+/// Turning PassBundle on for AutoFill (docs/phones.md, "Autofill"): whether
+/// iOS has it on, and Settings' own page where the person switches it on
+/// (iOS 17 and later). Nothing turns on without the person, in Settings.
+///
+/// For tests, debug builds record that Settings would open instead of
+/// opening it, as Android's AutofillSetup.kt does; release builds refuse it.
+enum AutoFillSetup {
+  private static let standInKey = "autofillSetupStandIn"
+  /// What the stand-in recorded, in order.
+  private(set) static var opened: [[String: Any]] = []
+
+  private static var standIn: Bool {
+    #if DEBUG
+      return UserDefaults.standard.bool(forKey: standInKey)
+    #else
+      return false
+    #endif
+  }
+
+  /// Tests only: false in a release build.
+  static func useStandIn(_ on: Bool) -> Bool {
+    #if DEBUG
+      opened = []
+      UserDefaults.standard.set(on, forKey: standInKey)
+      return true
+    #else
+      return false
+    #endif
+  }
+
+  /// `{platform: "ios", autofillSupported, autofillOn}`, on the main queue.
+  static func status(_ done: @escaping ([String: Any]) -> Void) {
+    ASCredentialIdentityStore.shared.getState { state in
+      DispatchQueue.main.async {
+        done(["platform": "ios", "autofillSupported": true, "autofillOn": state.isEnabled])
+      }
+    }
+  }
+
+  /// Opens Settings where PassBundle is switched on for AutoFill: "settings"
+  /// once it opened, or nil if it couldn't.
+  static func openSettings(_ done: @escaping (String?) -> Void) {
+    if standIn {
+      opened.append(["for": "autofill", "opens": "credentialProviderSettings"])
+      return done("settings")
+    }
+    ASSettingsHelper.openCredentialProviderAppSettings { error in
+      DispatchQueue.main.async { done(error == nil ? "settings" : nil) }
     }
   }
 }

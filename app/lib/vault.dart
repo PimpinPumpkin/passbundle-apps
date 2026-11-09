@@ -242,8 +242,8 @@ class VaultScreenState extends State<VaultScreen> {
           showMessage(context, 'Unlocking with $method is on.');
         }
       }
-      // Then, on Android, turning on autofill, until it's on or the person
-      // says "Later" (autofill_offer.dart).
+      // Then, on Android or an iPhone, turning on autofill, until it's on or
+      // the person says "Later" (autofill_offer.dart).
       if (!saving) {
         final said = await offerAutofill(context);
         if (!mounted) return;
