@@ -88,7 +88,8 @@ pub enum Sealed {
 pub enum FirefoxCipher {
     /// Triple DES, with the key database's newer scheme (PBES2, AES-256).
     TripleDes,
-    /// AES-256, as newer Firefox releases encrypt.
+    /// AES-256, as newer Firefox releases encrypt, and with a Primary
+    /// Password, the key database's longer salt as they write it.
     Aes,
     /// Triple DES, with the key database's older scheme (SHA-1 and Triple DES).
     OldDatabase,
@@ -482,9 +483,11 @@ fn write_login_data(path: &Path, logins: &[Fake], seal: &dyn Fn(&str) -> Vec<u8>
         .expect("a login");
         if let Some(note) = &login.note {
             let id = conn.last_insert_rowid();
+            // As Chrome writes it: the sealed bytes as a text value, in a
+            // column it declares a blob.
             conn.execute(
                 "INSERT INTO password_notes (parent_id, key, value, date_created, confidential)
-                 VALUES (?1, '', ?2, ?3, 0)",
+                 VALUES (?1, '', CAST(?2 AS TEXT), ?3, 0)",
                 params![id, seal(note), webkit(login.changed_ms)],
             )
             .expect("a note");
@@ -497,7 +500,13 @@ const SDR_ID: [u8; 16] = [0xf8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
 
 fn write_firefox(dir: &Path, profile: &FirefoxProfile<'_>) {
     let password = profile.primary_password.unwrap_or("");
-    let salt = bytes(20, &format!("global salt {}", profile.folder));
+    // As Firefox writes it today: a longer salt once a Primary Password is
+    // set. Triple DES stands for the Firefox releases before that.
+    let salt_len = match (profile.cipher, password.is_empty()) {
+        (FirefoxCipher::Aes, false) => 48,
+        _ => 20,
+    };
+    let salt = bytes(salt_len, &format!("global salt {}", profile.folder));
     let (sdr_key, cipher_oid, iv_len) = match profile.cipher {
         FirefoxCipher::Aes => (bytes(32, "sdr key aes"), AES256_CBC, 16),
         _ => (bytes(24, "sdr key 3des"), DES_EDE3_CBC, 8),
@@ -512,7 +521,7 @@ fn write_firefox(dir: &Path, profile: &FirefoxProfile<'_>) {
                 &salt,
                 password.as_bytes(),
                 label,
-                if password.is_empty() { 1 } else { 1000 },
+                if password.is_empty() { 1 } else { 10_000 },
             )
         }
     };
@@ -593,14 +602,27 @@ fn write_firefox(dir: &Path, profile: &FirefoxProfile<'_>) {
     .expect("logins.json");
 }
 
+/// The salt and the password as NSS hashes them: with SHA-384 under its
+/// 48-byte salt, with SHA-1 under its 20-byte one.
+fn salted(global_salt: &[u8], password: &[u8]) -> Vec<u8> {
+    if global_salt.len() == 48 {
+        let mut hash = sha2::Sha384::new();
+        hash.update(global_salt);
+        hash.update(password);
+        hash.finalize().to_vec()
+    } else {
+        let mut hash = sha1::Sha1::new();
+        sha1::Digest::update(&mut hash, global_salt);
+        sha1::Digest::update(&mut hash, password);
+        sha1::Digest::finalize(hash).to_vec()
+    }
+}
+
 /// NSS's newer scheme: PBES2, PBKDF2 with HMAC-SHA256, AES-256-CBC.
 fn pbe_aes(plain: &[u8], global_salt: &[u8], password: &[u8], label: &str, rounds: u32) -> Vec<u8> {
     let kdf_salt = bytes(32, &format!("kdf salt {label}"));
     let iv14 = bytes(14, &format!("iv {label}"));
-    let mut hashed = sha1::Sha1::new();
-    sha1::Digest::update(&mut hashed, global_salt);
-    sha1::Digest::update(&mut hashed, password);
-    let hashed = sha1::Digest::finalize(hashed);
+    let hashed = salted(global_salt, password);
     let mut key = [0u8; 32];
     pbkdf2::pbkdf2_hmac::<Sha256>(&hashed, &kdf_salt, rounds, &mut key);
     let iv: Vec<u8> = [&[OCTET_STRING, 14][..], &iv14].concat();
@@ -630,10 +652,7 @@ fn pbe_aes(plain: &[u8], global_salt: &[u8], password: &[u8], label: &str, round
 /// NSS's older scheme: PKCS #12's SHA-1 and Triple DES.
 fn pbe_3des(plain: &[u8], global_salt: &[u8], password: &[u8], label: &str) -> Vec<u8> {
     let entry_salt = bytes(20, &format!("entry salt {label}"));
-    let mut hashed = sha1::Sha1::new();
-    sha1::Digest::update(&mut hashed, global_salt);
-    sha1::Digest::update(&mut hashed, password);
-    let hashed = sha1::Digest::finalize(hashed);
+    let hashed = salted(global_salt, password);
     let (key, iv) = crate::nss::triple_des_key(&hashed, &entry_salt);
     let ciphertext = cbc::Encryptor::<des::TdesEde3>::new_from_slices(&key, &iv)
         .expect("a key")

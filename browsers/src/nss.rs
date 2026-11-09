@@ -8,9 +8,12 @@
 //! - `nssPrivate`: the key Firefox encrypts saved logins with (`a11`, its
 //!   value, encrypted the same way; `a102`, its id).
 //! - Encrypted the same way: PKCS #5's PBES2, a key made with PBKDF2
-//!   (HMAC-SHA256) from SHA-1 of the salt and the password, and AES-256-CBC
+//!   (HMAC-SHA256) from a hash of the salt and the password, and AES-256-CBC
 //!   (NSS writes the IV's 14 bytes, and the IV is them after their own DER
 //!   header). Older databases use PKCS #12's SHA-1 and Triple DES scheme.
+//! - The hash of the salt and the password goes by the salt's length: SHA-384
+//!   for a 48-byte salt, which NSS now makes when a Primary Password is set,
+//!   and SHA-1 for the 20-byte salt it made before and still makes for none.
 //! - A saved login's username and password: DER with the key's id, the
 //!   cipher (Triple DES or AES-256, CBC) and its IV, and the ciphertext.
 
@@ -161,10 +164,7 @@ pub(crate) fn decrypt_pbe(item: &[u8], salt: &[u8], password: &[u8]) -> Option<Z
     let mut algorithm = top.sequence()?;
     let scheme = algorithm.take(OID)?;
     let ciphertext = top.take(OCTET_STRING)?;
-    let mut password_hash = Sha1::new();
-    password_hash.update(salt);
-    password_hash.update(password);
-    let hashed = Zeroizing::new(password_hash.finalize().to_vec());
+    let hashed = password_hash(salt, password);
     if scheme == PBES2 {
         let mut params = algorithm.sequence()?;
         let mut kdf = params.sequence()?;
@@ -228,8 +228,25 @@ pub(crate) fn decrypt_pbe(item: &[u8], salt: &[u8], password: &[u8]) -> Option<Z
     }
 }
 
+/// The salt and the password, hashed as NSS hashes them before it makes a
+/// key from them (its `sftkdb_passwordToKey`): with SHA-384 when the salt is
+/// as long as a SHA-384 hash, and with SHA-1 otherwise.
+fn password_hash(salt: &[u8], password: &[u8]) -> Zeroizing<Vec<u8>> {
+    if salt.len() == 48 {
+        let mut hash = sha2::Sha384::new();
+        hash.update(salt);
+        hash.update(password);
+        Zeroizing::new(hash.finalize().to_vec())
+    } else {
+        let mut hash = Sha1::new();
+        hash.update(salt);
+        hash.update(password);
+        Zeroizing::new(hash.finalize().to_vec())
+    }
+}
+
 /// The key and IV of NSS's older scheme (as in its `sftkdb`'s PKCS #12
-/// SHA-1 key derivation for Triple DES), from SHA-1 of the salt and
+/// SHA-1 key derivation for Triple DES), from the hash of the salt and
 /// password, and the entry's own salt.
 pub(crate) fn triple_des_key(hashed: &[u8], entry_salt: &[u8]) -> (Zeroizing<Vec<u8>>, [u8; 8]) {
     let mut padded = entry_salt.to_vec();

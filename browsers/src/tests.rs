@@ -357,7 +357,11 @@ fn reads_firefox_logins_with_each_cipher_and_database_scheme() {
 
 #[test]
 fn firefox_asks_for_its_primary_password_and_refuses_a_wrong_one() {
-    for cipher in [FirefoxCipher::TripleDes, FirefoxCipher::OldDatabase] {
+    for cipher in [
+        FirefoxCipher::TripleDes,
+        FirefoxCipher::Aes,
+        FirefoxCipher::OldDatabase,
+    ] {
         let fixture = Fixture::new(Platform::this());
         // A Primary Password this test made up.
         let primary = "test-primary-password-for-this-test";
@@ -399,6 +403,44 @@ fn firefox_asks_for_its_primary_password_and_refuses_a_wrong_one() {
             .windows(primary.len())
             .any(|w| w == primary.as_bytes())));
     }
+}
+
+/// The key databases Firefox 159 itself wrote for two throwaway profiles in
+/// a container (tools/real-browsers/seed.py): each one's salt and its
+/// "password-check", under no Primary Password and under a made-up one. The
+/// fixtures are this crate's reading of the format; these are Firefox's.
+#[test]
+fn opens_the_password_check_as_firefox_itself_wrote_it() {
+    fn hex(text: &str) -> Vec<u8> {
+        (0..text.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&text[i..i + 2], 16).unwrap())
+            .collect()
+    }
+    let opens = |salt: &str, check: &str, password: &str| {
+        crate::nss::decrypt_pbe(&hex(check), &hex(salt), password.as_bytes())
+            .is_some_and(|plain| plain.as_slice() == b"password-check")
+    };
+
+    // No Primary Password: a 20-byte salt.
+    let salt = "9FD41B59ABF515AE4CA2393A0B04D0293E8B801C";
+    let check = "308181306D06092A864886F70D01050D3060304106092A864886F70D01050C30340420EE710A50\
+                 03B016106498D62B99B16E846E607AA5AED149A01823A6324933B246020101020120300A06082A\
+                 864886F70D0209301B060960864801650304012A040EEC4F86A3CE23C763F1DD6A4C034704106C\
+                 B0B9C1016FEB4C495955D7AE530CD3";
+    assert!(opens(salt, check, ""));
+    assert!(!opens(salt, check, "made-up-primary-password-for-ci-4"));
+
+    // A made-up Primary Password: a 48-byte salt.
+    let salt = "0DB495CE54517E8D41DC46E060C3B596D6C9C757BA123D1E682C23AD70F11612F6B60AAF1895BE\
+                1C2421D19D746C3DD9";
+    let check = "308182306E06092A864886F70D01050D3061304206092A864886F70D01050C30350420776998D6\
+                 93A3ED27B9DB34A15B778A347E8DDBFB1EC174E8672601FC8BA0E81202022710020120300A0608\
+                 2A864886F70D0209301B060960864801650304012A040E75AA84A97FB919D42EF1A6C9214F0410\
+                 A7BE8A5C3540F99BE8721E58E240B6D3";
+    assert!(opens(salt, check, "made-up-primary-password-for-ci-4"));
+    assert!(!opens(salt, check, ""));
+    assert!(!opens(salt, check, "not-the-primary-password"));
 }
 
 #[test]

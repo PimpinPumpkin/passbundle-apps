@@ -26,6 +26,7 @@ use aes::cipher::{block_padding::Pkcs7, BlockDecryptMut, KeyIvInit};
 use aes_gcm::aead::Aead;
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
 use base64::{engine::general_purpose::STANDARD, Engine};
+use rusqlite::types::ValueRef;
 use serde_json::Value;
 use zeroize::Zeroizing;
 
@@ -259,7 +260,7 @@ fn read_store(path: &Path) -> rusqlite::Result<Store> {
                 origin: r.get::<_, Option<String>>(1)?.unwrap_or_default(),
                 realm: r.get::<_, Option<String>>(2)?.unwrap_or_default(),
                 username: r.get::<_, Option<String>>(3)?.unwrap_or_default(),
-                value: r.get::<_, Option<Vec<u8>>>(4)?.unwrap_or_default(),
+                value: stored_bytes(r.get_ref(4)?).unwrap_or_default(),
                 never_save: r.get::<_, Option<i64>>(5)?.unwrap_or(0) != 0,
                 created: r.get::<_, Option<i64>>(6)?.unwrap_or(0),
                 changed: r.get::<_, Option<i64>>(7)?.unwrap_or(0),
@@ -268,13 +269,14 @@ fn read_store(path: &Path) -> rusqlite::Result<Store> {
         .collect::<rusqlite::Result<Vec<_>>>()?;
     // Notes saved with passwords (newer versions): the one shown in the
     // browser is the one with no name. A store without them has none.
+    // Chrome keeps a note's sealed bytes as a text value, not a blob.
     let mut notes = HashMap::new();
     if crate::sqlite::columns(&conn, "password_notes").is_ok_and(|c| !c.is_empty()) {
         if let Ok(mut statement) = conn
             .prepare("SELECT parent_id, value FROM password_notes WHERE key = '' OR key IS NULL")
         {
             let found = statement.query_map([], |r| {
-                Ok((r.get::<_, i64>(0)?, r.get::<_, Option<Vec<u8>>>(1)?))
+                Ok((r.get::<_, i64>(0)?, stored_bytes(r.get_ref(1)?)))
             });
             if let Ok(found) = found {
                 for (parent, value) in found.flatten() {
@@ -286,6 +288,16 @@ fn read_store(path: &Path) -> rusqlite::Result<Store> {
         }
     }
     Ok((rows, notes))
+}
+
+/// A sealed value's bytes as the store keeps them. Chrome writes a
+/// password's as a blob and a note's as a text value, which isn't text to
+/// read: the bytes are the same sealed bytes either way.
+fn stored_bytes(value: ValueRef<'_>) -> Option<Vec<u8>> {
+    match value {
+        ValueRef::Blob(bytes) | ValueRef::Text(bytes) => Some(bytes.to_vec()),
+        _ => None,
+    }
 }
 
 /// The site a saved password is for: its page's address (http or https),
@@ -467,6 +479,23 @@ pub(crate) fn turn_off(profile: &Profile) -> TurnOff {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_sealed_value_is_its_bytes_whether_the_store_keeps_it_as_text_or_a_blob() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        // Not text: a zero byte, and bytes that aren't UTF-8.
+        let sealed: &[u8] = b"v10\xea\xef\x92\x00\xb2\xff";
+        for sql in ["SELECT ?1", "SELECT CAST(?1 AS TEXT)"] {
+            let read = conn
+                .query_row(sql, [sealed], |r| Ok(stored_bytes(r.get_ref(0)?)))
+                .unwrap();
+            assert_eq!(read.as_deref(), Some(sealed), "{sql}");
+        }
+        let nothing = conn
+            .query_row("SELECT NULL", [], |r| Ok(stored_bytes(r.get_ref(0)?)))
+            .unwrap();
+        assert_eq!(nothing, None);
+    }
 
     #[test]
     fn sites_are_web_pages_and_android_apps_only() {
