@@ -422,6 +422,7 @@ enum Biometric {
 /// of a capture, but it says while the screen is being captured
 /// (`sceneCaptureState`, iOS 17), and for that long the cover stays, saying
 /// why. A screenshot can't be stopped on an iPhone, by any app.
+@MainActor
 enum Snapshot {
   private static var covers: [ObjectIdentifier: UIView] = [:]
   /// Scenes whose screen is being recorded, mirrored, or shared now.
@@ -430,14 +431,19 @@ enum Snapshot {
 
   static func cover() {
     let center = NotificationCenter.default
+    // On the main queue, so on the main actor.
     center.addObserver(forName: UIScene.willDeactivateNotification, object: nil, queue: .main) { note in
-      guard let scene = note.object as? UIWindowScene else { return }
-      show(scene)
+      MainActor.assumeIsolated {
+        guard let scene = note.object as? UIWindowScene else { return }
+        show(scene)
+      }
     }
     center.addObserver(forName: UIScene.didActivateNotification, object: nil, queue: .main) { note in
-      guard let scene = note.object as? UIWindowScene else { return }
-      watch(scene)
-      if !captured.contains(ObjectIdentifier(scene)) { hide(scene) }
+      MainActor.assumeIsolated {
+        guard let scene = note.object as? UIWindowScene else { return }
+        watch(scene)
+        if !captured.contains(ObjectIdentifier(scene)) { hide(scene) }
+      }
     }
   }
 
