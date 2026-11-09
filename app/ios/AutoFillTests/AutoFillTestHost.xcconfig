@@ -1,0 +1,15 @@
+// The bare app that hosts the AutoFill extension's tests (TestHost.swift).
+// Never shipped: it has none of PassBundle in it.
+PRODUCT_BUNDLE_IDENTIFIER = com.passbundle.app.autofilltests.host
+PRODUCT_NAME = $(TARGET_NAME)
+GENERATE_INFOPLIST_FILE = YES
+INFOPLIST_KEY_UILaunchScreen_Generation = YES
+INFOPLIST_KEY_UISupportedInterfaceOrientations = UIInterfaceOrientationPortrait
+SWIFT_VERSION = 5.0
+IPHONEOS_DEPLOYMENT_TARGET = 17.0
+TARGETED_DEVICE_FAMILY = 1
+SKIP_INSTALL = YES
+CODE_SIGN_STYLE = Automatic
+CURRENT_PROJECT_VERSION = 1
+MARKETING_VERSION = 1.0
+LD_RUNPATH_SEARCH_PATHS = $(inherited) @executable_path/Frameworks

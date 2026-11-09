@@ -265,19 +265,26 @@ Future<void> pumpUntilGone(
 /// biometrics as a phone with a fingerprint set up would. `enrolled` counts
 /// the times turning it on was asked for; each asks for the fingerprint, and
 /// the stand-in gives it unless [biometricAnswers] says no. With [android],
-/// it's an Android phone, which helps turn on autofill (autofill_offer.dart).
+/// it's an Android phone, which helps turn on autofill (autofill_offer.dart);
+/// with [iphone], an iPhone, which helps turn on AutoFill and is given what
+/// iOS may suggest above the keyboard.
 class PhoneStandIn {
   PhoneStandIn(
     WidgetTester tester, {
     this.status = 'notSetUp',
     this.method = 'fingerprint',
     this.android,
+    this.iphone,
   }) {
     debugPhone = true;
     addTearDown(() => debugPhone = null);
     if (android != null) {
       debugAndroid = true;
       addTearDown(() => debugAndroid = null);
+    }
+    if (iphone != null) {
+      debugIPhone = true;
+      addTearDown(() => debugIPhone = null);
     }
     final messenger = tester.binding.defaultBinaryMessenger;
     messenger.setMockMethodCallHandler(Core.platform, (call) async {
@@ -301,9 +308,11 @@ class PhoneStandIn {
           copied.add(Map<String, dynamic>.from(call.arguments as Map));
           return true;
         case 'autofillStatus':
-          return android?.status;
+          return android?.status ?? iphone?.status;
         case 'turnOnAutofill':
-          return android?.turnOnAutofill();
+          return android?.turnOnAutofill() ?? iphone?.turnOnAutofill();
+        case 'suggest':
+          return iphone?.suggest();
         case 'openPasskeySettings':
           return android?.openPasskeySettings();
         default:
@@ -329,6 +338,44 @@ class PhoneStandIn {
 
   /// Android's autofill and passkeys, on an Android phone.
   final AndroidStandIn? android;
+
+  /// iOS's AutoFill, on an iPhone.
+  final IPhoneStandIn? iphone;
+}
+
+/// What iOS says about PassBundle's AutoFill (AppDelegate.swift,
+/// AutoFillSetup), and Settings' page for it: it opens unless [opens] is
+/// false, and the person switches PassBundle on there unless [yes] is false,
+/// which iOS tells the app once it's back in front. [suggested] counts the
+/// times the app gave iOS its suggestions.
+class IPhoneStandIn {
+  IPhoneStandIn({this.autofillOn = false, this.opens = true});
+
+  bool autofillOn;
+  bool opens;
+  bool yes = true;
+  var suggested = 0;
+
+  /// What "Turn on" opened: Settings.
+  final opened = <String>[];
+
+  Map<String, dynamic> get status => {
+    'platform': 'ios',
+    'autofillSupported': true,
+    'autofillOn': autofillOn,
+  };
+
+  String? turnOnAutofill() {
+    if (!opens) return null;
+    opened.add('settings');
+    if (yes) autofillOn = true;
+    return 'settings';
+  }
+
+  Map<String, dynamic> suggest() {
+    suggested++;
+    return {'count': 0, 'stored': autofillOn};
+  }
 }
 
 /// What Android says about PassBundle's autofill and passkeys

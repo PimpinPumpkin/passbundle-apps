@@ -26,3 +26,11 @@ void pb_set_remove_biometric(void (*remove)(const char *account));
 // Saves an attachment in `dir` (the app's Documents folder): {"ok", "path"} or the words to show.
 char *pb_save_attachment_in(const char *account, const char *id, const char *attachment_id, const char *dir);
 void pb_free(char *ptr);
+
+// What iOS may suggest above the keyboard, from every unlocked account:
+// [{account, id, username, domain}], never a password (free it with pb_free).
+char *pb_suggestions(void);
+// And the passkeys iOS may list in its passkey sheet, from every unlocked
+// account: [{account, id, rpId, userName, credentialId, userHandle}], never a
+// key (free it with pb_free).
+char *pb_passkey_suggestions(void);

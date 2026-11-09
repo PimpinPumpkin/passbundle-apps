@@ -4,8 +4,8 @@
 // PhoneStandIn and AndroidStandIn). The step offers autofill until it's on or
 // the person says "Later"; "Turn on" opens Android's own prompt, and a row
 // says On once Android says so, when the app is back in front; Android 14 and
-// later have a row for passkeys too; Settings has the same card. Nowhere but
-// Android.
+// later have a row for passkeys too; Settings has the same card. On an
+// iPhone, the same step and card turn on AutoFill in Settings.
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -347,7 +347,115 @@ void main() {
     expect(find.text('Autofill'), findsNothing);
   });
 
-  testWidgets('nowhere but Android: an iPhone has neither', (tester) async {
+  group('on an iPhone', () {
+    const iosStep = 'Turn on AutoFill';
+    test('one row, for AutoFill, never passkeys', () {
+      expect(
+        setupRows(
+          AutofillStatus.from(const {
+            'platform': 'ios',
+            'autofillSupported': true,
+            'autofillOn': false,
+          }),
+        ),
+        [(SetupRow.autofill, false)],
+      );
+      expect(
+        offersAutofill(
+          const AutofillStatus(apiLevel: 0, ios: true, autofillOn: true),
+          putOff: false,
+        ),
+        isFalse,
+      );
+    });
+
+    testWidgets(
+      'as the vault opens, the step offers AutoFill; Turn on opens Settings, and once iOS says it\'s on, the step closes and iOS gets the suggestions',
+      (tester) async {
+        await phoneSize(tester);
+        final iphone = IPhoneStandIn();
+        PhoneStandIn(tester, status: 'unavailable', iphone: iphone);
+        openSample();
+        await tester.pumpWidget(const PassBundleApp());
+        await unlockWithPassword(tester);
+        expect(find.text(iosStep), findsOneWidget);
+        expect(find.text('Use PassBundle for AutoFill'), findsOneWidget);
+        expect(find.byKey(passkeysRow), findsNothing);
+        final before = iphone.suggested;
+
+        await tester.tap(find.byKey(turnOnAutofill));
+        await tester.pump();
+        expect(iphone.opened, ['settings']);
+        expect(isOn(autofillRow), findsNothing);
+
+        await comeBack(tester);
+        await pumpUntil(tester, find.text('AutoFill is on.'));
+        await tester.pumpAndSettle();
+        expect(find.text(iosStep), findsNothing);
+        // iOS takes the logins to suggest once it's on, not only at the next sync.
+        expect(iphone.suggested, greaterThan(before));
+
+        await lock(tester);
+        await unlockWithPassword(tester);
+        expect(find.text(iosStep), findsNothing);
+      },
+    );
+
+    testWidgets(
+      '"Later" isn\'t asked again, says Settings has it, and Settings has the card',
+      (tester) async {
+        await phoneSize(tester);
+        final iphone = IPhoneStandIn();
+        PhoneStandIn(tester, status: 'unavailable', iphone: iphone);
+        openSample();
+        await tester.pumpWidget(const PassBundleApp());
+        await unlockWithPassword(tester);
+        await tester.tap(find.text('Later'));
+        await tester.pumpAndSettle();
+        expect(find.text(iosStep), findsNothing);
+        expect(autofillPutOff(), isTrue);
+        expect(
+          find.text('You can turn on AutoFill in Settings any time.'),
+          findsOneWidget,
+        );
+        expect(iphone.opened, isEmpty);
+
+        await tester.tap(find.byTooltip('Settings'));
+        await pumpUntil(tester, find.byKey(autofillRow));
+        expect(find.text('AutoFill'), findsOneWidget);
+        await tester.tap(find.byKey(turnOnAutofill));
+        await tester.pump();
+        expect(iphone.opened, ['settings']);
+        await comeBack(tester);
+        await tester.pumpAndSettle();
+        expect(isOn(autofillRow), findsOneWidget);
+      },
+    );
+
+    testWidgets('where Settings doesn\'t open, the step says where to look', (
+      tester,
+    ) async {
+      await phoneSize(tester);
+      PhoneStandIn(
+        tester,
+        status: 'unavailable',
+        iphone: IPhoneStandIn(opens: false),
+      );
+      openSample();
+      await tester.pumpWidget(const PassBundleApp());
+      await unlockWithPassword(tester);
+      await tester.tap(find.byKey(turnOnAutofill));
+      await tester.pumpAndSettle();
+      expect(
+        find.textContaining('then AutoFill & Passwords, and turn on PassBundle'),
+        findsOneWidget,
+      );
+    });
+  });
+
+  testWidgets('nowhere else: neither the step nor the card', (
+    tester,
+  ) async {
     await phoneSize(tester);
     PhoneStandIn(tester, status: 'unavailable');
     openSample();
