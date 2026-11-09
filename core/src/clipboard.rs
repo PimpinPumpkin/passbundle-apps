@@ -32,14 +32,11 @@ static GENERATION: AtomicU64 = AtomicU64::new(0);
 fn with_clipboard<T>(
     f: impl FnOnce(&mut Clipboard) -> std::result::Result<T, arboard::Error>,
 ) -> Result<T> {
-    let mut guard = CLIPBOARD
-        .lock()
-        .map_err(|_| Error::Damaged("the clipboard"))?;
+    let mut guard = CLIPBOARD.lock().map_err(|_| Error::Clipboard)?;
     if guard.is_none() {
-        *guard = Some(Clipboard::new().map_err(|e| Error::Network(format!("no clipboard ({e})")))?);
+        *guard = Some(Clipboard::new().map_err(|_| Error::Clipboard)?);
     }
-    f(guard.as_mut().expect("just made"))
-        .map_err(|e| Error::Network(format!("the clipboard refused ({e})")))
+    f(guard.as_mut().expect("just made")).map_err(|_| Error::Clipboard)
 }
 
 /// Copies a secret, and clears it after `clear_after` if nothing replaced it.

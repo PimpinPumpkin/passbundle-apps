@@ -185,6 +185,7 @@ mod tests {
             identity: None,
             ssh_key: None,
             attachments: Vec::new(),
+            passkey: None,
             kept: Default::default(),
             id: "id".into(),
             kind: ItemKind::Login,
@@ -202,6 +203,11 @@ mod tests {
             totp: None,
             fields: vec![],
             revision_date: None,
+            creation_date: None,
+            editable: true,
+            view_password: true,
+            deletable: true,
+            details: Vec::new(),
         }
     }
 

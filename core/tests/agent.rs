@@ -141,6 +141,44 @@ fn turns_on_unlocks_keeps_accounts_apart_cancels_and_turns_off() {
     assert_eq!(later.status().unwrap(), Status::NotSetUp);
 }
 
+/// Expiration reminders (src/expiration.rs): each account tells the agent
+/// how many of its items expire soon and have expired; the agent adds them
+/// up in its own words, and zeros take an account's away.
+#[test]
+fn tells_the_agent_how_many_items_expire_and_zeros_clear_them() {
+    use passbundle_core::expiration::Counts;
+    let Some(agent) = TestAgent::start() else {
+        return;
+    };
+    let mut ana = agent.connect("ana-user-id");
+    assert_eq!(
+        ana.reminders(Counts {
+            soon: 2,
+            expired: 0
+        })
+        .unwrap()
+        .as_deref(),
+        Some("2 items expire soon")
+    );
+    let mut ben = agent.connect("ben-user-id");
+    assert_eq!(
+        ben.reminders(Counts {
+            soon: 0,
+            expired: 1
+        })
+        .unwrap()
+        .as_deref(),
+        Some("3 items expire soon or have expired")
+    );
+    assert_eq!(
+        ana.reminders(Counts::default()).unwrap().as_deref(),
+        Some("1 item has expired")
+    );
+    assert_eq!(ben.reminders(Counts::default()).unwrap(), None);
+    // Nobody was asked for Windows Hello or Touch ID.
+    assert_eq!(agent.prompts(), "");
+}
+
 #[test]
 fn refuses_a_program_pretending_to_be_the_agent() {
     if std::env::var_os("PB_TEST_AGENT").is_none() {
@@ -225,6 +263,25 @@ fn the_app_turns_it_on_unlocks_with_it_and_signing_out_turns_it_off() {
         v["opened"]["items"].as_object().unwrap().len()
     );
 
+    // Confirming it's the person, to approve a sign-in from another device
+    // (or turn off asking): the agent's own prompt for it, and the key must
+    // be this vault's. Unlocking isn't confirming; cancelling confirms
+    // nothing.
+    assert_eq!(
+        app.set_confirm_approvals(false),
+        Err(passbundle_core::Error::ConfirmFirst)
+    );
+    agent.answers(&[true]);
+    assert!(app.confirm_approval_with_biometric().unwrap());
+    app.set_confirm_approvals(false).unwrap();
+    app.set_confirm_approvals(true).unwrap();
+    agent.answers(&[false]);
+    assert!(!app.confirm_approval_with_biometric().unwrap());
+    assert_eq!(
+        app.set_confirm_approvals(false),
+        Err(passbundle_core::Error::ConfirmFirst)
+    );
+
     app.sign_out();
     assert_eq!(
         Agent::connect(
@@ -236,6 +293,129 @@ fn the_app_turns_it_on_unlocks_with_it_and_signing_out_turns_it_off() {
         .status()
         .unwrap(),
         Status::NotSetUp
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Two accounts on one computer (DESIGN.md in the meta repo, "Several
+/// accounts in the apps"): the agent keeps each one's key by its id on the
+/// server, so each turns it on, unlocks with its own, and signing out of one
+/// turns off only its own.
+#[test]
+fn each_account_has_its_own_and_signing_out_of_one_leaves_the_other() {
+    use passbundle_core::accounts::Accounts;
+    use passbundle_core::app::State;
+    use passbundle_core::crypto::PrivateKey;
+    use passbundle_core::kdf::{Kdf, MasterKey};
+    use passbundle_core::secrets::MemorySecretStore;
+    use passbundle_core::store::{Settings, Store};
+
+    let Some(agent) = TestAgent::start() else {
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!(
+        "pb-core-accounts-agent-{}",
+        uuid::Uuid::new_v4().simple()
+    ));
+    // The vectors' sample vault, and a second account's of its own.
+    let v: serde_json::Value = serde_json::from_str(include_str!("vectors/core-v1.json")).unwrap();
+    let pre = &v["account"]["pbkdf2"]["prelogin"];
+    let keep = |id: &str, email: &str, iterations: u32, sync: &str| {
+        let store = Store::new(dir.join("accounts").join(id));
+        store
+            .save_settings(&Settings {
+                server: "https://vault.example.test".into(),
+                email: email.into(),
+                kdf: 0,
+                kdf_iterations: iterations,
+                kdf_memory: None,
+                kdf_parallelism: None,
+                device_identifier: "d".into(),
+            })
+            .unwrap();
+        store.save_sync(sync).unwrap();
+    };
+    let a = "a".repeat(32);
+    let b = "b".repeat(32);
+    keep(
+        &a,
+        v["account"]["salt"].as_str().unwrap(),
+        pre["kdfIterations"].as_u64().unwrap() as u32,
+        &v["sync"].to_string(),
+    );
+    let (email, password) = ("ben@home.example.test", "ben's own password 1");
+    let master = MasterKey::derive(
+        password,
+        email,
+        &Kdf::Pbkdf2 {
+            iterations: 600_000,
+        },
+    )
+    .unwrap();
+    let user = SymmetricKey::generate();
+    let private = PrivateKey::generate().unwrap();
+    let ben = serde_json::json!({
+        "profile": {
+            "id": uuid::Uuid::new_v4().to_string(),
+            "email": email,
+            "key": master.stretch().encrypt(&user.to_bytes()).to_string(),
+            "privateKey": user.encrypt(&private.to_pkcs8_der()).to_string(),
+        },
+        "ciphers": [],
+    });
+    keep(&b, email, 600_000, &ben.to_string());
+
+    let mut accounts = Accounts::open(&dir, std::sync::Arc::new(MemorySecretStore::default()));
+    accounts.use_agent_at(agent.address.clone(), agent.program.clone());
+    accounts
+        .app(&a)
+        .unwrap()
+        .unlock(v["account"]["password"].as_str().unwrap())
+        .unwrap();
+    accounts.app(&b).unwrap().unlock(password).unwrap();
+    // Each turns it on for itself.
+    assert_eq!(
+        accounts.app(&a).unwrap().biometric_status().unwrap(),
+        Status::NotSetUp
+    );
+    agent.answers(&[true, true]);
+    assert!(accounts.app(&a).unwrap().enroll_biometric().unwrap());
+    assert_eq!(
+        accounts.app(&b).unwrap().biometric_status().unwrap(),
+        Status::NotSetUp
+    );
+    assert!(accounts.app(&b).unwrap().enroll_biometric().unwrap());
+    accounts.lock(&a);
+    accounts.lock(&b);
+
+    // Each unlocks with its own key: the other's stays locked.
+    agent.answers(&[true]);
+    assert!(accounts.app(&b).unwrap().unlock_with_biometric().unwrap());
+    assert!(matches!(accounts.state(&b), State::Unlocked { .. }));
+    assert!(matches!(accounts.state(&a), State::Locked { .. }));
+    agent.answers(&[true]);
+    assert!(accounts.app(&a).unwrap().unlock_with_biometric().unwrap());
+    assert!(matches!(accounts.state(&a), State::Unlocked { .. }));
+
+    // Signing out of one turns off its own only.
+    accounts.sign_out(&a);
+    let status = |user_id: &str| {
+        Agent::connect(&agent.address, &agent.program, user_id)
+            .unwrap()
+            .status()
+            .unwrap()
+    };
+    assert_eq!(
+        status(v["sync"]["profile"]["id"].as_str().unwrap()),
+        Status::NotSetUp
+    );
+    assert_eq!(
+        status(ben["profile"]["id"].as_str().unwrap()),
+        Status::SetUp
+    );
+    assert_eq!(
+        accounts.app(&b).unwrap().biometric_status().unwrap(),
+        Status::SetUp
     );
     let _ = std::fs::remove_dir_all(dir);
 }

@@ -5,13 +5,14 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 
 use tao::event::{Event, StartCause};
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
-use crate::{brand, config::Config, version::Version};
+use crate::{brand, config::Config, reminders::Reminders, version::Version};
 
 #[cfg(target_os = "macos")]
 const ICON: &[u8] = include_bytes!("../../brand/agent/tray-macos.png");
@@ -20,9 +21,19 @@ const ICON: &[u8] = include_bytes!("../../brand/agent/tray-windows.png");
 
 enum UserEvent {
     Menu(MenuEvent),
+    /// What the tray says about items expiring changed (reminders.rs).
+    Reminders(Option<String>),
 }
 
-pub fn run(config: Config) -> ! {
+/// The tooltip: the name, and the reminder when there is one.
+fn tooltip(reminder: Option<&str>) -> String {
+    match reminder {
+        Some(words) => format!("{}: {words}", brand::NAME),
+        None => brand::NAME.to_owned(),
+    }
+}
+
+pub fn run(config: Config, reminders: Arc<Reminders>) -> ! {
     #[allow(unused_mut)]
     let mut event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
     #[cfg(target_os = "macos")]
@@ -32,9 +43,13 @@ pub fn run(config: Config) -> ! {
         event_loop.set_activation_policy(ActivationPolicy::Accessory);
     }
     let proxy = event_loop.create_proxy();
+    let told = proxy.clone();
     MenuEvent::set_event_handler(Some(move |event| {
         let _ = proxy.send_event(UserEvent::Menu(event));
     }));
+    reminders.listen(move |words| {
+        let _ = told.send_event(UserEvent::Reminders(words));
+    });
 
     let title = MenuItem::new(
         format!("{} {}", brand::NAME, Version::current()),
@@ -49,7 +64,29 @@ pub fn run(config: Config) -> ! {
     let open_app = MenuItem::new(format!("Open {}", brand::NAME), true, None);
     let open = MenuItem::new("Open web vault", true, None);
     let quit = MenuItem::new(format!("Quit {}", brand::NAME), true, None);
+    // "2 items expire soon", first in the menu while there's something to
+    // say; it opens the app (or the web vault, where there's no app).
+    let reminder = MenuItem::new("", true, None);
+    let reminder_id = reminder.id().clone();
+    let mut reminding = false;
+    let mut menu_shown: Option<Menu> = None;
     let mut tray: Option<TrayIcon> = None;
+    let mut remind = move |menu: &Menu, tray: &TrayIcon, words: Option<String>| {
+        match &words {
+            Some(text) => {
+                reminder.set_text(text);
+                if !reminding && menu.prepend(&reminder).is_ok() {
+                    reminding = true;
+                }
+            }
+            None => {
+                if reminding && menu.remove(&reminder).is_ok() {
+                    reminding = false;
+                }
+            }
+        }
+        let _ = tray.set_tooltip(Some(tooltip(words.as_deref())));
+    };
 
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
@@ -64,17 +101,33 @@ pub fn run(config: Config) -> ! {
                 }
                 menu.append_items(&[&open, &quit]).expect("tray menu");
                 let builder = TrayIconBuilder::new()
-                    .with_menu(Box::new(menu))
+                    .with_menu(Box::new(menu.clone()))
                     .with_tooltip(brand::NAME);
                 // macOS draws template icons in the menu bar's own colors.
                 #[cfg(target_os = "macos")]
                 let builder = builder.with_icon_templated(icon());
                 #[cfg(not(target_os = "macos"))]
                 let builder = builder.with_icon(icon());
-                tray = Some(builder.build().expect("tray icon"));
+                let built = builder.build().expect("tray icon");
+                // Anything the app said before the tray was there.
+                if let Some(words) = reminders.shown() {
+                    remind(&menu, &built, Some(words));
+                }
+                tray = Some(built);
+                menu_shown = Some(menu);
+            }
+            Event::UserEvent(UserEvent::Reminders(words)) => {
+                if let (Some(menu), Some(tray)) = (&menu_shown, &tray) {
+                    remind(menu, tray, words);
+                }
             }
             Event::UserEvent(UserEvent::Menu(event)) => {
-                if event.id == open_app.id() {
+                if event.id == reminder_id {
+                    match &app {
+                        Some(app) => launch_app(app),
+                        None => open_url(&config.server_url),
+                    }
+                } else if event.id == open_app.id() {
                     if let Some(app) = &app {
                         launch_app(app);
                     }
@@ -173,6 +226,15 @@ mod tests {
         assert_eq!(
             app_next_to(agent),
             Path::new("/Applications/PassBundle.app/Contents/MacOS/passbundle")
+        );
+    }
+
+    #[test]
+    fn the_tooltip_says_the_reminder_after_the_name() {
+        assert_eq!(tooltip(None), brand::NAME);
+        assert_eq!(
+            tooltip(Some("2 items expire soon")),
+            format!("{}: 2 items expire soon", brand::NAME)
         );
     }
 

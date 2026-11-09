@@ -4,4 +4,6 @@
     <item name="password" type="id" />
     <item name="sign_in" type="id" />
     <item name="result" type="id" />
+    <item name="make_passkey" type="id" />
+    <item name="sign_in_passkey" type="id" />
 </resources>

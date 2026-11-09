@@ -45,9 +45,9 @@ pub mod flags {
 /// Anything else is refused.
 pub fn credential_id(stored: &str) -> Result<Vec<u8>> {
     if let Some(encoded) = stored.strip_prefix("b64.") {
-        let id = URL_SAFE_NO_PAD
-            .decode(encoded.trim_end_matches('='))
-            .map_err(|_| Error::Damaged("a passkey's credential ID that isn't base64url"))?;
+        let id = base64_either(encoded).ok_or(Error::Damaged(
+            "a passkey's credential ID that isn't base64",
+        ))?;
         if id.is_empty() || id.len() > 1023 {
             return Err(Error::Damaged(
                 "a passkey's credential ID of the wrong length",
@@ -58,6 +58,22 @@ pub fn credential_id(stored: &str) -> Result<Vec<u8>> {
     uuid::Uuid::try_parse(stored)
         .map(|id| id.as_bytes().to_vec())
         .map_err(|_| Error::Damaged("a passkey's credential ID that isn't a UUID"))
+}
+
+/// Base64url or standard base64, padded or not: upstream writes base64url,
+/// and passkeys imported from elsewhere can come in either.
+pub fn base64_either(text: &str) -> Option<Vec<u8>> {
+    let url: String = text
+        .trim()
+        .trim_end_matches('=')
+        .chars()
+        .map(|c| match c {
+            '+' => '-',
+            '/' => '_',
+            c => c,
+        })
+        .collect();
+    URL_SAFE_NO_PAD.decode(url).ok()
 }
 
 /// A new credential ID, as upstream makes them: a random UUID.
@@ -303,6 +319,9 @@ mod tests {
             AAGUID.to_vec()
         );
         assert_eq!(credential_id("b64.AQID").unwrap(), vec![1, 2, 3]);
+        // Standard base64, padded, from an import, reads the same.
+        assert_eq!(credential_id("b64.+/8=").unwrap(), vec![0xfb, 0xff]);
+        assert_eq!(credential_id("b64.-_8").unwrap(), vec![0xfb, 0xff]);
         assert!(credential_id("b64.").is_err());
         assert!(credential_id("not an id").is_err());
         let new = new_credential_id();

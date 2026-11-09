@@ -11,8 +11,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
 
+import 'package:passbundle/autofill_offer.dart';
 import 'package:passbundle/core.dart';
 import 'package:passbundle/main.dart';
+import 'package:passbundle/unlock_offer.dart';
 import 'package:passbundle/widgets.dart';
 
 const server = String.fromEnvironment('PB_TEST_SERVER');
@@ -54,10 +56,11 @@ void main() {
       for (final kept in Directory(dir).listSync()) {
         kept.deleteSync(recursive: true);
       }
-      // The Keychain keeps items across installs on the simulator: a Face ID
-      // item left by an earlier run would stand in the way.
-      await Core.removeBiometric();
       await Core.openOnThisDevice();
+      // Face ID is turned on below, and AutoFill by the script: neither
+      // offer is asked for after signing in.
+      declineOffer();
+      putOffAutofill();
       await tester.pumpWidget(PassBundleApp(key: UniqueKey()));
       await pumpUntil(tester, find.text('Sign in to PassBundle'));
       if (find.text('Self-hosted?').evaluate().isNotEmpty) {
@@ -70,8 +73,10 @@ void main() {
         find.widgetWithText(TextField, 'Master password'),
         password,
       );
+      FocusManager.instance.primaryFocus?.unfocus();
+      await tester.pump(const Duration(seconds: 1));
       await tester.tap(find.text('Sign in'));
-      await pumpUntil(tester, find.text('Saved before the phone signed in'));
+      await pumpUntil(tester, find.text('Logins'));
 
       // Face ID on, with debug builds' stand-in, so the extension unlocks
       // with the Keychain item without a prompt.

@@ -15,7 +15,7 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::{json, Value};
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::channel::SessionKey;
+use crate::{channel::SessionKey, reminders::Reminders};
 
 /// Both sides ignore messages more than this far from their own clock.
 const MESSAGE_VALID_MS: i64 = 10_000;
@@ -118,6 +118,8 @@ pub struct Connection<'a> {
     /// Session keys by the extension's `appId`.
     sessions: HashMap<String, SessionKey>,
     now_ms: Box<dyn Fn() -> i64 + Send + 'a>,
+    /// What the tray says about items expiring, which the app tells it.
+    reminders: Option<&'a Reminders>,
 }
 
 impl<'a> Connection<'a> {
@@ -133,7 +135,14 @@ impl<'a> Connection<'a> {
                     .map(|d| d.as_millis() as i64)
                     .unwrap_or(0)
             }),
+            reminders: None,
         }
+    }
+
+    /// Where the app's expiration reminders go: the tray.
+    pub fn with_reminders(mut self, reminders: &'a Reminders) -> Self {
+        self.reminders = Some(reminders);
+        self
     }
 
     #[cfg(test)]
@@ -261,10 +270,18 @@ impl<'a> Connection<'a> {
                     json!(matches!(answer, Answer::Approved(()))),
                 );
             }
-            "unlockWithBiometricsForUser" => {
+            // Keykeeper: our app confirming it's the person, to approve a
+            // sign-in from another device: the same key, behind the same
+            // prompt, which says so where the OS shows our words (not
+            // Windows Hello's key prompt, which has its own).
+            "unlockWithBiometricsForUser" | "keykeeper.biometric.approve" => {
                 let mut unlocked = false;
                 if self.biometrics.is_enrolled(user_id) {
-                    let reason = format!("Unlock {} in {browser}", crate::brand::NAME);
+                    let reason = if command == "keykeeper.biometric.approve" {
+                        format!("Approve a sign-in to {}", crate::brand::NAME)
+                    } else {
+                        format!("Unlock {} in {browser}", crate::brand::NAME)
+                    };
                     match self
                         .gate
                         .prompt(now, || self.biometrics.unlock(user_id, &reason))
@@ -316,6 +333,22 @@ impl<'a> Connection<'a> {
                     .and_then(Value::as_str)
                     .unwrap_or(user_id);
                 self.biometrics.remove(target);
+                reply.insert("response".into(), json!(true));
+            }
+            // Keykeeper: the app saying how many of an account's items expire
+            // soon and have expired, for the tray (reminders.rs): two numbers,
+            // from which the agent makes its own words.
+            "keykeeper.reminders" => {
+                let counts = crate::reminders::parse(message);
+                let (Some(reminders), Some(counts)) = (self.reminders, counts) else {
+                    reply.insert("response".into(), json!(false));
+                    return Some(reply);
+                };
+                if user_id.is_empty() {
+                    reply.insert("response".into(), json!(false));
+                    return Some(reply);
+                }
+                reply.insert("shown".into(), json!(reminders.set(user_id, counts)));
                 reply.insert("response".into(), json!(true));
             }
             // As upstream: unknown commands get no reply.
@@ -507,6 +540,52 @@ mod tests {
         (0u8..64).collect()
     }
 
+    #[test]
+    fn the_app_says_how_many_items_expire_and_the_tray_makes_its_own_words() {
+        let fake = Fake::new(&[]);
+        let gate = PromptGate::default();
+        let reminders = Reminders::default();
+        let mut connection = Connection::new(&fake, &gate, context())
+            .with_clock(|| NOW)
+            .with_reminders(&reminders);
+        let mut extension = Extension::new();
+        extension.setup(&mut connection, NOW).unwrap();
+
+        let told = extension
+            .call(
+                &mut connection,
+                json!({ "command": "keykeeper.reminders", "soon": 2, "expired": 1 }),
+            )
+            .unwrap();
+        assert_eq!(told["response"], true);
+        assert_eq!(told["shown"], "3 items expire soon or have expired");
+        assert_eq!(
+            reminders.shown().as_deref(),
+            Some("3 items expire soon or have expired")
+        );
+        // Words from the socket are never shown; numbers that aren't are refused.
+        let refused = extension
+            .call(
+                &mut connection,
+                json!({ "command": "keykeeper.reminders", "soon": "lots", "words": "Visit example.test" }),
+            )
+            .unwrap();
+        assert_eq!(refused["response"], false);
+        assert_eq!(
+            reminders.shown().as_deref(),
+            Some("3 items expire soon or have expired")
+        );
+        let cleared = extension
+            .call(
+                &mut connection,
+                json!({ "command": "keykeeper.reminders", "soon": 0, "expired": 0 }),
+            )
+            .unwrap();
+        assert_eq!(cleared["response"], true);
+        assert!(cleared["shown"].is_null());
+        assert_eq!(reminders.shown(), None);
+    }
+
     fn enroll_message() -> Value {
         json!({
             "command": "keykeeper.biometric.enroll",
@@ -552,6 +631,29 @@ mod tests {
                 format!("Unlock {} in Chrome", crate::brand::NAME),
             ]
         );
+    }
+
+    #[test]
+    fn approving_a_sign_in_asks_with_its_own_words_and_returns_the_key() {
+        let fake = Fake::new(&["yes", "yes", "no"]);
+        let gate = PromptGate::default();
+        let mut connection = Connection::new(&fake, &gate, context()).with_clock(|| NOW);
+        let mut extension = Extension::new();
+        extension.setup(&mut connection, NOW).unwrap();
+        extension.call(&mut connection, enroll_message()).unwrap();
+
+        let approve = json!({ "command": "keykeeper.biometric.approve" });
+        let confirmed = extension.call(&mut connection, approve.clone()).unwrap();
+        assert_eq!(confirmed["response"], true);
+        assert_eq!(confirmed["userKeyB64"], STANDARD.encode(user_key()));
+        assert_eq!(
+            fake.reasons.lock().unwrap().last().unwrap(),
+            &format!("Approve a sign-in to {}", crate::brand::NAME)
+        );
+        // Declined, nothing comes back.
+        let declined = extension.call(&mut connection, approve).unwrap();
+        assert_eq!(declined["response"], false);
+        assert!(declined.get("userKeyB64").is_none());
     }
 
     #[test]

@@ -1,6 +1,7 @@
 # Measures a built app on Windows, as tools/measure.sh does on Linux and
 # macOS: size, compressed size, time to the first frame, unlock time, memory
-# once the vault is open, and a screenshot.
+# once the vault is open, and a screenshot. It needs a build with test hooks,
+# as CI's are (tools/measure.sh says how); a release ignores its settings.
 #
 #   tools/measure.ps1 -Exe <passbundle.exe> -Bundle <Release folder> -Shot <screenshot.png>
 param(
@@ -22,6 +23,8 @@ $env:PB_MEASURE_FILE = $lines
 $env:PB_MEASURE_PASSWORD = 'correct horse battery staple 1'
 $env:PB_DATA_DIR = $data
 $env:PB_SECRETS = 'memory'
+# The window in the screenshot: Windows otherwise leaves it out.
+$env:PB_ALLOW_SCREENSHOTS = '1'
 $started = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() * 1000
 $app = Start-Process -FilePath $Exe -PassThru
 $ready = $false

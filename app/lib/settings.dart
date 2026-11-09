@@ -1,24 +1,32 @@
 // Settings: unlocking with Windows Hello or Touch ID, through the desktop
 // agent and shared with the browser extension (docs/core.md, "Unlock with
-// Windows Hello or Touch ID"), and when the app locks by itself ("Locking by
+// Windows Hello or Touch ID"), only where it can work (Windows, and phones'
+// own biometrics: the Mac's Touch ID waits on code signing, and Linux has no
+// agent), and when the app locks by itself ("Locking by
 // itself"), within what an organization's policy allows ("Locking by
-// policy").
+// policy"). On Android, turning on autofill and passkeys (autofill_offer.dart).
+// The account shown, and signing out of it, which says which; on a phone,
+// importing and exporting in the web vault.
+// Sign-ins from other devices waiting for an answer
+// (sign_in_requests.dart). On Android and the Mac, updates from PassBundle's
+// releases (updates.dart). On macOS and Windows, whether screenshots of
+// PassBundle are allowed (window_chrome.dart).
 import 'package:flutter/material.dart';
 
+import 'accounts.dart';
+import 'autofill_offer.dart';
 import 'core.dart';
+import 'icons.dart';
+import 'sign_in_requests.dart';
 import 'theme.dart';
+import 'unlock_offer.dart';
+import 'updates.dart';
 import 'widgets.dart';
-
-class SettingsDialog extends StatefulWidget {
-  const SettingsDialog({super.key});
-
-  @override
-  State<SettingsDialog> createState() => _SettingsDialogState();
-}
+import 'window_chrome.dart';
 
 /// The waits offered, in minutes: -1 is "when the app closes", and on phones
 /// 0 is "Immediately" (when the app leaves the screen).
-final lockChoices = [if (isPhone) 0, 1, 5, 15, 30, 60, 240, -1];
+List<int> get lockChoices => [if (isPhone) 0, 1, 5, 15, 30, 60, 240, -1];
 
 String lockAfterName(int minutes) => switch (minutes) {
   -1 => 'When the app closes',
@@ -48,13 +56,65 @@ String? policyWait(Map<String, dynamic> policy) {
   return null;
 }
 
-class _SettingsDialogState extends State<SettingsDialog> {
+String themeName(ThemeMode mode) => switch (mode) {
+  ThemeMode.system => 'Follow the system',
+  ThemeMode.light => 'Light',
+  ThemeMode.dark => 'Dark',
+};
+
+/// Every setting, as groups in a column: a heading, rows on a card, and what
+/// a policy does under them. On a phone (or a phone-wide window) they're a tab
+/// of their own beside the vault ([SettingsPage]); on a computer, a dialog
+/// from the sidebar's gear ([SettingsDialog]), which scrolls them.
+class SettingsList extends StatefulWidget {
+  const SettingsList({
+    super.key,
+    this.email,
+    this.server,
+    this.menu,
+    this.named,
+    this.mode,
+    this.onMode,
+    this.onSignOut,
+  });
+
+  /// On a computer, signing out of the account shown ([email]), once the
+  /// person says so (main.dart asks): a phone's [menu] has it.
+  final VoidCallback? onSignOut;
+
+  /// With more than one account signed in, the one these settings are for:
+  /// its name and color are set here (accounts.dart).
+  final AccountEntry? named;
+
+  /// Who's signed in, and where, shown on a phone (a computer's sidebar has it).
+  final String? email;
+  final String? server;
+
+  /// On a phone, the accounts signed in here (accounts.dart).
+  final AccountsMenu? menu;
+
+  /// Light, dark, or following the system, where the screen has no menu for it.
+  final ThemeMode? mode;
+  final ValueChanged<ThemeMode>? onMode;
+
+  @override
+  State<SettingsList> createState() => _SettingsListState();
+}
+
+class _SettingsListState extends State<SettingsList> {
   final core = Core();
   late Map<String, dynamic> preferences = core.preferences();
   late final Map<String, dynamic> policy = core.lockPolicy();
   Map<String, dynamic>? status;
+
+  /// Whether PassBundle's windows may be in screenshots (macOS and Windows).
+  late bool screenshots = keepsOutOfScreenshots && core.screenshotsAllowed();
+
+  /// Browsers trusted for Android's autofill (none elsewhere).
+  List<Map<String, String>> browsers = const [];
   bool working = false;
   String? note;
+  late ThemeMode? mode = widget.mode;
 
   void choose(Map<String, dynamic> changes) {
     final next = {...preferences, ...changes};
@@ -69,53 +129,6 @@ class _SettingsDialogState extends State<SettingsDialog> {
     });
   }
 
-  Widget lockAfter() {
-    final chosen = (preferences['lockAfterMinutes'] as int?) ?? -1;
-    // What it locks by, as the core holds the person's choice to the policy;
-    // their own choice is kept as it is.
-    final immediately = policy['immediately'] == true;
-    final max = policy['maxMinutes'] as int?;
-    final minutes = immediately
-        ? 0
-        : max == null
-        ? chosen
-        : chosen < 0
-        ? max
-        : chosen < max
-        ? chosen
-        : max;
-    final allowed = lockChoices.where(
-      (m) => immediately ? m == 0 : max == null || (m >= 0 && m <= max),
-    );
-    // A wait chosen or set some other way still shows as it is.
-    final choices = {...allowed, minutes}.toList()
-      ..sort((a, b) => (a < 0 ? 1 << 30 : a).compareTo(b < 0 ? 1 << 30 : b));
-    final note = policyWait(policy);
-    return ListTile(
-      leading: const Icon(Icons.lock_clock_outlined),
-      title: const Text('Lock after'),
-      subtitle: Text(
-        [
-          isPhone ? 'Away from PassBundle' : 'Without using the computer',
-          ?note,
-        ].join('\n'),
-      ),
-      trailing: DropdownButton<int>(
-        value: minutes,
-        underline: const SizedBox.shrink(),
-        onChanged: choices.length < 2
-            ? null
-            : (m) =>
-                  choose({'lockAfterMinutes': m == null || m < 0 ? null : m}),
-        items: [
-          for (final m in choices)
-            DropdownMenuItem(value: m, child: Text(lockAfterName(m))),
-        ],
-      ),
-      contentPadding: EdgeInsets.zero,
-    );
-  }
-
   @override
   void initState() {
     super.initState();
@@ -124,7 +137,19 @@ class _SettingsDialogState extends State<SettingsDialog> {
 
   Future<void> refresh() async {
     final next = await Core.biometricStatus();
-    if (mounted) setState(() => status = next);
+    final trusted = await Core.trustedBrowsers();
+    if (mounted) {
+      setState(() {
+        status = next;
+        browsers = trusted;
+      });
+    }
+  }
+
+  Future<void> untrust(String package) async {
+    await Core.untrustBrowser(package);
+    final trusted = await Core.trustedBrowsers();
+    if (mounted) setState(() => browsers = trusted);
   }
 
   Future<void> turn(bool on, String method) async {
@@ -156,15 +181,18 @@ class _SettingsDialogState extends State<SettingsDialog> {
       working = true;
       note = null;
     });
-    // A slow call already running (the sync after signing in, say) has the
-    // core, and turning it on needs the user key from it: wait for that call,
-    // or it answers that PassBundle is locked.
-    for (var i = 0; i < 600 && busy.value; i++) {
-      await Future<void>.delayed(const Duration(milliseconds: 100));
+    final Answer answer;
+    if (on) {
+      // The biometric first; only then is the user key sealed behind it.
+      answer = await turnOnBiometric();
+    } else {
+      for (var i = 0; i < 600 && busy.value; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+      }
+      answer = await whileBusy(Core.removeBiometric);
+      // Turned off on purpose: the vault doesn't offer it again for a while.
+      if (answer.ok) declineOffer();
     }
-    final answer = await whileBusy(
-      on ? Core.enrollBiometric : Core.removeBiometric,
-    );
     if (!mounted) return;
     setState(() {
       working = false;
@@ -177,14 +205,17 @@ class _SettingsDialogState extends State<SettingsDialog> {
     await refresh();
   }
 
-  @override
-  Widget build(BuildContext context) {
+  /// Whether unlocking with biometrics can work here at all: not on the
+  /// Mac (yet) or Linux, where the core says it's unsupported.
+  bool get unlockOffered => status?['status'] != 'unsupported';
+
+  Widget unlock() {
     final status = this.status;
     final method = (status?['method'] as String?) ?? 'Windows Hello';
-    final Widget unlock;
     if (status == null) {
-      unlock = const Padding(
-        padding: EdgeInsets.all(16),
+      return const SizedBox(
+        key: ValueKey('unlock-loading'),
+        height: 72,
         child: Center(
           child: SizedBox(
             width: 20,
@@ -193,99 +224,481 @@ class _SettingsDialogState extends State<SettingsDialog> {
           ),
         ),
       );
-    } else if (status['status'] == 'setUp' || status['status'] == 'notSetUp') {
-      unlock = SwitchListTile(
+    }
+    if (status['status'] == 'setUp' || status['status'] == 'notSetUp') {
+      return SwitchListTile(
         key: const ValueKey('biometric'),
         value: status['status'] == 'setUp',
         onChanged: working ? null : (on) => turn(on, method),
-        secondary: const Icon(Icons.fingerprint_rounded),
         title: Text('Unlock with $method'),
         subtitle: Text(
           isPhone
               ? 'Instead of your master password'
-              : 'Also in your browser extension, which shares it.',
+              : 'Also in your browser extension, which shares it',
         ),
-        contentPadding: EdgeInsets.zero,
-      );
-    } else {
-      unlock = ListTile(
-        leading: Icon(Icons.fingerprint_rounded, color: context.colors.muted),
-        title: Text('Unlock with $method'),
-        subtitle: Text(
-          status['status'] == 'noAgent'
-              ? 'Needs PassBundle\'s desktop agent, which isn\'t running.'
-              : '${method[0].toUpperCase()}${method.substring(1)} isn\'t set up on this ${isPhone ? 'phone' : 'computer'}.',
-        ),
-        contentPadding: EdgeInsets.zero,
       );
     }
+    return ListTile(
+      title: Text(
+        'Unlock with $method',
+        style: TextStyle(color: context.colors.muted),
+      ),
+      subtitle: Text(
+        status['status'] == 'noAgent'
+            ? 'Needs PassBundle\'s desktop agent, which isn\'t running'
+            : '${method[0].toUpperCase()}${method.substring(1)} isn\'t set up on this ${isPhone ? 'phone' : 'computer'}',
+      ),
+    );
+  }
+
+  Widget lockAfter() {
+    final chosen = (preferences['lockAfterMinutes'] as int?) ?? -1;
+    // What it locks by, as the core holds the person's choice to the policy;
+    // their own choice is kept as it is.
+    final immediately = policy['immediately'] == true;
+    final max = policy['maxMinutes'] as int?;
+    final minutes = immediately
+        ? 0
+        : max == null
+        ? chosen
+        : chosen < 0
+        ? max
+        : chosen < max
+        ? chosen
+        : max;
+    final allowed = lockChoices.where(
+      (m) => immediately ? m == 0 : max == null || (m >= 0 && m <= max),
+    );
+    // A wait chosen or set some other way still shows as it is.
+    final choices = {...allowed, minutes}.toList()
+      ..sort((a, b) => (a < 0 ? 1 << 30 : a).compareTo(b < 0 ? 1 << 30 : b));
+    return ListTile(
+      title: const Text('Lock after'),
+      subtitle: Text(lockAfterName(minutes)),
+      enabled: choices.length > 1,
+      onTap: () async {
+        final m = await chooseOne<int>(
+          context,
+          title: 'Lock after',
+          description: isPhone
+              ? 'Away from PassBundle'
+              : 'Without using the computer',
+          selected: minutes,
+          choices: [for (final m in choices) (m, lockAfterName(m))],
+        );
+        if (m != null && mounted) {
+          choose({'lockAfterMinutes': m < 0 ? null : m});
+        }
+      },
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
     final sleepNote = [
       if (!isPhone) 'Or when its screen locks',
       if (policy['onSystemLock'] == true) 'Your organization keeps this on',
     ].join('\n');
-    return AlertDialog(
-      title: const Text('Settings'),
-      // Scrolls on a small phone, or with the keyboard up.
-      content: SizedBox(
-        width: 420,
-        child: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              unlock,
-              const Divider(height: 24),
-              lockAfter(),
-              SwitchListTile(
-                value:
-                    preferences['lockOnSleep'] == true ||
-                    policy['onSystemLock'] == true,
-                onChanged: policy['onSystemLock'] == true
-                    ? null
-                    : (on) => choose({'lockOnSleep': on}),
-                secondary: const Icon(Icons.bedtime_outlined),
-                title: Text(
-                  isPhone
-                      ? 'Lock when the phone locks'
-                      : 'Lock when the computer sleeps',
-                ),
-                subtitle: sleepNote.isEmpty ? null : Text(sleepNote),
-                contentPadding: EdgeInsets.zero,
+    final mode = this.mode;
+    final onMode = widget.onMode;
+    final email = widget.email;
+    final webVault = widget.server;
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (unlockOffered)
+          SettingsGroup(
+            title: 'Unlock',
+            footer: note,
+            footerColor: scheme.error,
+            children: [unlock()],
+          )
+        else if (note != null)
+          // What didn't change, where the Unlock group would have said it.
+          Padding(
+            padding: const EdgeInsets.fromLTRB(4, 20, 4, 0),
+            child: Text(
+              note!,
+              style: TextStyle(color: scheme.error, fontSize: 13),
+            ),
+          ),
+        // The same card the vault offers as it opens, on or not.
+        if (isAndroid) const AutofillCard(heading: 'Autofill'),
+        SettingsGroup(
+          title: 'Locking',
+          footer: policyWait(policy),
+          children: [
+            lockAfter(),
+            SwitchListTile(
+              value:
+                  preferences['lockOnSleep'] == true ||
+                  policy['onSystemLock'] == true,
+              onChanged: policy['onSystemLock'] == true
+                  ? null
+                  : (on) => choose({'lockOnSleep': on}),
+              title: Text(
+                isPhone
+                    ? 'Lock when the phone locks'
+                    : 'Lock when the computer sleeps',
               ),
-              if (note != null) ...[
+              subtitle: sleepNote.isEmpty ? null : Text(sleepNote),
+            ),
+          ],
+        ),
+        SignInRequestsSettings(email: email),
+        SettingsGroup(
+          title: 'Appearance',
+          children: [
+            // Each icon tells the server a website the person has a login
+            // for; upstream's apps let them turn that off.
+            SwitchListTile(
+              key: const ValueKey('show-icons'),
+              value: siteIcons.on,
+              onChanged: (on) {
+                final answer = core.setAppearance({'showIcons': on});
+                if (!answer.ok) return;
+                setState(() => siteIcons.turn(on));
+              },
+              title: const Text('Show website icons'),
+              subtitle: const Text('From your server, beside each login'),
+            ),
+            if (mode != null && onMode != null)
+              ListTile(
+                title: const Text('Theme'),
+                subtitle: Text(themeName(mode)),
+                onTap: () async {
+                  final chosen = await chooseOne<ThemeMode>(
+                    context,
+                    title: 'Theme',
+                    selected: mode,
+                    choices: [
+                      for (final m in ThemeMode.values) (m, themeName(m)),
+                    ],
+                  );
+                  if (chosen == null || !mounted) return;
+                  setState(() => this.mode = chosen);
+                  onMode(chosen);
+                },
+              ),
+            // Out of screenshots, recordings, and screen sharing by default,
+            // where the OS can keep a window out (window_chrome.dart).
+            if (keepsOutOfScreenshots)
+              SwitchListTile(
+                key: const ValueKey('allow-screenshots'),
+                value: screenshots,
+                onChanged: (on) async {
+                  final answer = core.setScreenshotsAllowed(on);
+                  if (!answer.ok) return;
+                  await allowScreenshots(on);
+                  if (mounted) setState(() => screenshots = on);
+                },
+                title: const Text('Allow screenshots of PassBundle'),
+                subtitle: const Text(
+                  'When off, PassBundle stays out of screenshots, recordings, and screen sharing',
+                ),
+              ),
+          ],
+        ),
+        if (browsers.isNotEmpty)
+          SettingsGroup(
+            title: 'Browsers you trust for autofill',
+            footer: "PassBundle fills a website's logins in these too.",
+            children: [
+              for (final b in browsers)
+                ListTile(
+                  title: Text(b['name']!),
+                  subtitle: Text(
+                    b['package']!,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  trailing: TextButton(
+                    onPressed: () => untrust(b['package']!),
+                    child: const Text('Stop trusting'),
+                  ),
+                ),
+            ],
+          ),
+        if (updates case final updates?) UpdatesSection(updates: updates),
+        // On a phone, which has no menu for them: importing and exporting
+        // are the web vault's, which opens in the browser.
+        if (isPhone && webVault != null)
+          SettingsGroup(
+            title: 'Web vault',
+            footer: 'These open in your browser.',
+            children: [
+              for (final (key, label, path) in [
+                ('web-import', 'Import', '/#/tools/import'),
+                ('web-export', 'Export', '/#/tools/export'),
+                ('web-vault', 'Open the web vault', '/#/vault'),
+              ])
+                ListTile(
+                  key: ValueKey(key),
+                  title: Text(label),
+                  trailing: const Icon(Icons.open_in_new_rounded, size: 20),
+                  onTap: () async {
+                    final opened = await Core.openWebsite('$webVault$path');
+                    if (!opened && mounted) {
+                      setState(() => note = 'Couldn\'t open the web vault.');
+                    }
+                  },
+                ),
+            ],
+          ),
+        // With more than one account: what this one's called where they're
+        // listed together, and its color.
+        if (widget.named ?? _shownOf(widget.menu) case final entry?)
+          SettingsGroup(
+            title: 'This account',
+            footer: 'Its name and color label its items where accounts are listed together. Kept on this device.',
+            children: [AccountLabelEditor(key: ValueKey(entry.id), entry: entry)],
+          ),
+        // On a phone: each account (the one these settings are for marked),
+        // adding one, and signing out of this one.
+        if (widget.menu case final menu?)
+          SettingsGroup(
+            title: 'Accounts',
+            footer: menu.several
+                ? 'These settings are for ${email ?? 'the account shown'}. Each account has its own.'
+                : null,
+            children: [AccountsList(menu: menu)],
+          )
+        else if (email != null)
+          SettingsGroup(
+            title: 'Account',
+            children: [
+              ListTile(
+                title: Text(
+                  email,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                subtitle: widget.server == null
+                    ? null
+                    : Text(
+                        Uri.tryParse(widget.server!)?.host ?? widget.server!,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+              ),
+              // Signing out of this account, by name; the others stay.
+              if (widget.onSignOut case final signOut?)
+                ListTile(
+                  key: const ValueKey('settings-sign-out'),
+                  leading: const Icon(Icons.logout_rounded),
+                  title: Text(
+                    'Sign out of $email',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  onTap: signOut,
+                ),
+            ],
+          ),
+        // About: the logo, and this version where the app knows it.
+        Padding(
+          padding: const EdgeInsets.fromLTRB(4, 32, 4, 8),
+          child: Column(
+            children: [
+              const Wordmark(size: 28),
+              if (updates?.version case final version?) ...[
                 const SizedBox(height: 8),
                 Text(
-                  note!,
-                  style: TextStyle(color: Theme.of(context).colorScheme.error),
+                  'Version $version',
+                  style: TextStyle(color: context.colors.muted, fontSize: 13),
                 ),
               ],
             ],
           ),
-        ),
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(context),
-          child: const Text('Close'),
         ),
       ],
     );
   }
 }
 
+/// The account shown, when more than one is signed in.
+AccountEntry? _shownOf(AccountsMenu? menu) =>
+    (menu?.several ?? false) ? menu!.entry(menu.shown) : null;
+
+/// Settings as a tab of its own, on a phone.
+class SettingsPage extends StatelessWidget {
+  const SettingsPage({
+    super.key,
+    this.email,
+    this.server,
+    this.menu,
+    this.mode,
+    this.onMode,
+  });
+
+  final String? email;
+  final String? server;
+  final AccountsMenu? menu;
+  final ThemeMode? mode;
+  final ValueChanged<ThemeMode>? onMode;
+
+  @override
+  Widget build(BuildContext context) => Column(
+    crossAxisAlignment: CrossAxisAlignment.stretch,
+    children: [
+      const PageTitle('Settings'),
+      Expanded(
+        child: ListView(
+          padding: const EdgeInsets.fromLTRB(16, 0, 16, 32),
+          children: [
+            SettingsList(
+              email: email,
+              server: server,
+              menu: menu,
+              mode: mode,
+              onMode: onMode,
+            ),
+          ],
+        ),
+      ),
+    ],
+  );
+}
+
+/// Settings over the vault, on a computer.
+class SettingsDialog extends StatelessWidget {
+  const SettingsDialog({
+    super.key,
+    this.account,
+    this.named,
+    this.email,
+    this.server,
+    this.onSignOut,
+  });
+
+  /// With more than one account signed in, the one these settings are for.
+  final String? account;
+
+  /// And its name and color, which are set here.
+  final AccountEntry? named;
+
+  /// The account shown, and where, with signing out of it: Settings closes,
+  /// then main.dart asks.
+  final String? email;
+  final String? server;
+  final VoidCallback? onSignOut;
+
+  @override
+  Widget build(BuildContext context) => Dialog(
+    backgroundColor: context.colors.dialogGround,
+    clipBehavior: Clip.antiAlias,
+    child: ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 480, maxHeight: 760),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(24, 22, 24, 0),
+            child: Text(
+              'Settings',
+              style: Theme.of(context).textTheme.headlineSmall,
+            ),
+          ),
+          if (account case final account?)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(24, 4, 24, 0),
+              child: Text(
+                'For $account. Each account has its own.',
+                style: TextStyle(color: context.colors.muted, fontSize: 13),
+              ),
+            ),
+          // Scrolls on a small screen, or with a large text size.
+          Flexible(
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
+              child: SettingsList(
+                named: named,
+                email: email,
+                server: server,
+                onSignOut: onSignOut == null
+                    ? null
+                    : () {
+                        Navigator.pop(context);
+                        onSignOut!();
+                      },
+              ),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(24, 4, 16, 12),
+            child: Align(
+              alignment: Alignment.centerRight,
+              child: TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('Close'),
+              ),
+            ),
+          ),
+        ],
+      ),
+    ),
+  );
+}
+
 /// The gear that opens Settings.
 class SettingsButton extends StatelessWidget {
-  const SettingsButton({super.key, this.color});
+  const SettingsButton({
+    super.key,
+    this.color,
+    this.account,
+    this.named,
+    this.email,
+    this.server,
+    this.onSignOut,
+  });
 
   final Color? color;
+
+  /// With more than one account signed in, the one Settings is for.
+  final String? account;
+
+  /// And its name and color, which are set there.
+  final AccountEntry? named;
+
+  /// The account shown, and signing out of it ([SettingsDialog]).
+  final String? email;
+  final String? server;
+  final VoidCallback? onSignOut;
 
   @override
   Widget build(BuildContext context) => IconButton(
     tooltip: 'Settings',
     icon: Icon(Icons.settings_outlined, color: color),
-    onPressed: () => showDialog<void>(
-      context: context,
-      builder: (_) => const SettingsDialog(),
+    onPressed: () => showSettingsDialog(
+      context,
+      account: account,
+      named: named,
+      email: email,
+      server: server,
+      onSignOut: onSignOut,
     ),
   );
 }
+
+/// Settings over the vault, on a computer: from the gear, and the Mac's
+/// PassBundle menu (Settings…, Command-comma).
+Future<void> showSettingsDialog(
+  BuildContext context, {
+  String? account,
+  AccountEntry? named,
+  String? email,
+  String? server,
+  VoidCallback? onSignOut,
+}) => showDialog<void>(
+  context: context,
+  builder: (_) => SettingsDialog(
+    account: account,
+    named: named,
+    email: email,
+    server: server,
+    onSignOut: onSignOut,
+  ),
+);

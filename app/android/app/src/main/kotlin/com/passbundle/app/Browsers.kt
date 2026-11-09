@@ -78,6 +78,21 @@ object Browsers {
         return write(context, readTrusted(context).put(packageName, JSONArray(signers)))
     }
 
+    /** The browsers the person trusted on this device, by name, for Settings. */
+    @Synchronized
+    fun trusted(context: Context): List<Map<String, String>> {
+        val all = readTrusted(context)
+        return all.keys().asSequence().sorted().map { mapOf("package" to it, "name" to label(context, it)) }.toList()
+    }
+
+    /** Stops trusting a browser: its pages' domains count no more. */
+    @Synchronized
+    fun untrust(context: Context, packageName: String): Boolean {
+        val all = readTrusted(context)
+        all.remove(packageName)
+        return write(context, all)
+    }
+
     /**
      * The app's name, as the launcher shows it, made safe to show: one line,
      * without characters that change how it reads, and not too long. Its
@@ -178,6 +193,32 @@ object Browsers {
                 }
             }
         }.getOrDefault(emptyMap()).also { listed = it }
+
+    /**
+     * The list as Android's Credential Manager takes it (CallingAppInfo's
+     * getOrigin), with only the certificates that count here: release ones
+     * the list doesn't also name for a debug build.
+     */
+    fun privilegedJson(context: Context): String {
+        val apps = JSONArray()
+        for ((name, fingerprints) in list(context)) {
+            if (fingerprints.isEmpty()) continue
+            val signatures = JSONArray()
+            for (hash in fingerprints) {
+                signatures.put(
+                    JSONObject()
+                        .put("build", "release")
+                        .put("cert_fingerprint_sha256", hash.joinToString(":") { "%02X".format(it) }),
+                )
+            }
+            apps.put(
+                JSONObject()
+                    .put("type", "android")
+                    .put("info", JSONObject().put("package_name", name).put("signatures", signatures)),
+            )
+        }
+        return JSONObject().put("apps", apps).toString()
+    }
 
     private fun fromHex(text: String): ByteArray =
         text.replace(":", "").chunked(2).map { it.toInt(16).toByte() }.toByteArray()

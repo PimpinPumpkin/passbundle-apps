@@ -5,6 +5,12 @@
 //! and the extension), and the strictest of each part wins. The core locks by
 //! the stricter of this and the person's own choice, which it keeps as they
 //! chose it.
+//!
+//! With it, upstream's "Remove Unlock with PIN" policy, type 14, which has no
+//! data: an organization that turns it on doesn't want quicker ways than the
+//! master password pushed on its members, so the phone apps don't offer
+//! unlocking with biometrics on their own (they still let the person turn it
+//! on in Settings, as upstream's apps do).
 
 use std::collections::HashSet;
 
@@ -15,6 +21,9 @@ use crate::autolock::{Preferences, MAX_MINUTES};
 
 /// Upstream's number for the policy.
 const VAULT_LOCK: i64 = 9;
+
+/// Upstream's number for "Remove Unlock with PIN".
+const REMOVE_UNLOCK_WITH_PIN: i64 = 14;
 
 /// Upstream's number for an organization's owner.
 const OWNER: i64 = 0;
@@ -30,6 +39,9 @@ pub struct LockPolicy {
     pub on_system_lock: bool,
     /// Sign out instead of locking, when it's time.
     pub sign_out: bool,
+    /// An organization's "Remove Unlock with PIN" is on: the apps don't
+    /// offer quicker unlocking on their own.
+    pub remove_unlock_with_pin: bool,
 }
 
 impl LockPolicy {
@@ -52,10 +64,17 @@ impl LockPolicy {
         let policies = sync.get("policies").and_then(Value::as_array);
         for p in policies.into_iter().flatten() {
             let org = p.get("organizationId").and_then(Value::as_str);
-            if p.get("type").and_then(Value::as_i64) != Some(VAULT_LOCK)
-                || p.get("enabled").and_then(Value::as_bool) != Some(true)
+            let kind = p.get("type").and_then(Value::as_i64);
+            if p.get("enabled").and_then(Value::as_bool) != Some(true)
                 || org.is_some_and(|org| owned.contains(org))
             {
+                continue;
+            }
+            if kind == Some(REMOVE_UNLOCK_WITH_PIN) {
+                policy.remove_unlock_with_pin = true;
+                continue;
+            }
+            if kind != Some(VAULT_LOCK) {
                 continue;
             }
             let Some(data) = p.get("data").filter(|d| d.is_object()) else {
@@ -208,9 +227,41 @@ mod tests {
                 max_minutes: Some(15),
                 immediately: false,
                 on_system_lock: true,
-                sign_out: true
+                sign_out: true,
+                remove_unlock_with_pin: false,
             }
         );
+    }
+
+    #[test]
+    fn reads_remove_unlock_with_pin_for_everyone_but_owners() {
+        let pin = |org: &str, enabled: bool| json!({ "id": format!("pin-{org}"), "organizationId": org, "type": 14, "enabled": enabled, "data": null, "object": "policy" });
+        let read = |policies: Value| LockPolicy::from_sync(&sync(policies));
+        assert_eq!(
+            read(json!([pin("member", true)])),
+            LockPolicy {
+                remove_unlock_with_pin: true,
+                ..Default::default()
+            }
+        );
+        assert!(read(json!([pin("admin", true)])).remove_unlock_with_pin);
+        // Off, or the person's own organization: nothing.
+        assert_eq!(read(json!([pin("member", false)])), LockPolicy::default());
+        assert_eq!(read(json!([pin("owned", true)])), LockPolicy::default());
+        // Beside a vault lock policy, both are read.
+        let both = read(json!([
+            pin("member", true),
+            vault_lock("b", json!({ "type": "custom", "minutes": 15 })),
+        ]));
+        assert!(both.remove_unlock_with_pin);
+        assert_eq!(both.max_minutes, Some(15));
+        // It changes nothing about when the vault locks.
+        let chose = Preferences {
+            lock_after_minutes: Some(30),
+            lock_on_sleep: false,
+        };
+        assert_eq!(both.apply(&chose).lock_after_minutes, Some(15));
+        assert_eq!(read(json!([pin("member", true)])).apply(&chose), chose);
     }
 
     #[test]

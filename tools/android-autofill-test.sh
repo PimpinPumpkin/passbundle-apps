@@ -18,7 +18,13 @@
 #      PassBundle; accepting opens PassBundle's editor, filled in, and the
 #      app's half saves it;
 #   5. signing in again with a new password for it, accepting opens that
-#      login, with the new password, and the app's half saves it.
+#      login, with the new password, and the app's half saves it;
+#   6. the app's Settings lists the test app as a trusted browser, and
+#      stopping trusting it there means the website's login isn't offered
+#      on its screen again (Android 11 and later, as for trusting it);
+#   7. locked with biometric unlock off, "Unlock PassBundle" asks for the
+#      master password in PassBundle's own dialog (a wrong one says so),
+#      then offers the login, which fills once it's picked.
 #
 # Needs an emulator, a test server (PB_TEST_SERVER, tools/test-server.sh), and
 # what tools/android-app-test.sh needs.
@@ -82,6 +88,51 @@ tap() {
   return 1
 }
 
+# A web page's Email field (WebSignInActivity), however this Android's
+# WebView shows it, tapped.
+web_field() {
+  local at
+  for _ in $(seq 30); do
+    at=$(where "id=username")
+    [ -n "$at" ] || at=$(where "^Email$")
+    if [ -n "$at" ]; then
+      # shellcheck disable=SC2086
+      a shell input tap $at
+      return 0
+    fi
+    sleep 1
+  done
+  echo "The page's Email field never showed up." >&2
+  screen | grep -oE '(text|resource-id|content-desc)="[^"]+"' | sort -u | head -40 >&2
+  return 1
+}
+
+# Picks an entry in Android's autofill list ($1) and waits for what it fills
+# ($2). The list can still be settling when it first shows, and Android 10
+# drops a tap that lands then, so it waits a moment before tapping. If
+# nothing was filled, it opens the list again from the field ($3) and retries.
+pick() {
+  local at
+  for _ in 1 2 3; do
+    shown "$1" || return 1
+    sleep 1
+    at=$(where "$1")
+    if [ -n "$at" ]; then
+      # shellcheck disable=SC2086
+      a shell input tap $at
+    fi
+    for _ in $(seq 8); do
+      [ -n "$(where "$2")" ] && return 0
+      sleep 1
+    done
+    echo "Picking $1 filled nothing; opening the list again." >&2
+    tap "$3" || return 1
+  done
+  echo "Picking $1 never filled $2" >&2
+  screen | grep -oE '(text|resource-id)="[^"]+"' | sort -u | head -40 >&2
+  return 1
+}
+
 # Waits up to 30 seconds for something to be on screen.
 shown() {
   for _ in $(seq 30); do
@@ -132,6 +183,21 @@ for _ in $(seq 300); do
 done
 marker autofill-ready || { cat "$setup_log" >&2; echo "The app's half never got ready." >&2; exit 1; }
 
+# The test sites' asset links, as a debug build of PassBundle takes them from
+# a file instead of the network: linked.test (sign-ins) and
+# passkeys.example.test (passkeys) name the test app; unlinked.test
+# names another key.
+apksigner=$(ls -d "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)
+cert=$("$apksigner" verify --print-certs app/build/autofilltest/outputs/apk/debug/autofilltest-debug.apk |
+  grep -m1 'SHA-256 digest' | awk '{print $NF}' | tr 'a-f' 'A-F' | sed 's/../&:/g; s/:$//')
+other="AB:CD:${cert#??:??:}"
+[ "$other" != "$cert" ] || other="CD:AB:${cert#??:??:}"
+names() {
+  printf '[{"relation":["delegate_permission/common.get_login_creds"],"target":{"namespace":"android_app","package_name":"com.passbundle.autofilltest","sha256_cert_fingerprints":["%s"]}}]' "$1"
+}
+printf '{"linked.test":%s,"passkeys.example.test":%s,"unlinked.test":%s}' "$(names "$cert")" "$(names "$cert")" "$(names "$other")" |
+  a exec-in run-as com.passbundle.app sh -c 'cat > files/test-asset-links.json'
+
 echo "PassBundle as the phone's autofill service"
 a shell settings put secure autofill_service com.passbundle.app/.PassBundleAutofill
 [ "$(a shell settings get secure autofill_service | tr -d '\r')" = com.passbundle.app/.PassBundleAutofill ]
@@ -148,6 +214,47 @@ shown "^autofill@example.test$"
 tap "id=com.passbundle.autofilltest:id/sign_in"
 shown "^Signed in as autofill@example.test, password 28 characters$"
 echo "Filled: signed in as autofill@example.test, with the 28-character password from the vault."
+
+echo "A sign-in form on a web page in an app's own WebView"
+a shell am force-stop com.passbundle.autofilltest
+a shell am start -W -n com.passbundle.autofilltest/.WebSignInActivity --es site https://elsewhere.test/ > /dev/null
+web_field
+# PassBundle reads the page's form, attributes without values and all: the
+# app's own login, never a website's for a page an app shows.
+shown "^Autofill test app"
+[ -z "$(where '^Bank website')" ] || { echo "A website's login was offered to a page in an app's WebView." >&2; exit 1; }
+# Nor the logins of the sites that name the app: this page isn't one.
+[ -z "$(where '^Linked website')" ] || { echo "A page in the app's WebView got a linked website's login." >&2; exit 1; }
+[ -n "$(a shell pidof com.passbundle.app | tr -d '\r')" ] || { echo "PassBundle stopped while reading the page." >&2; exit 1; }
+a shell am force-stop com.passbundle.autofilltest
+echo "Offered: the app's own login on a web page in it, and PassBundle kept running."
+
+echo "The test app's own website, when both say so"
+a shell am force-stop com.passbundle.autofilltest
+a shell am start -W -n com.passbundle.autofilltest/.SignInActivity > /dev/null
+tap "id=com.passbundle.autofilltest:id/username"
+# The website whose asset links name the app: offered after the app's own
+# login. The one whose name another key isn't, nor a website the app
+# doesn't name.
+shown "^Autofill test app"
+pick "^Linked website" "^linked@example.test$" "id=com.passbundle.autofilltest:id/username"
+tap "id=com.passbundle.autofilltest:id/sign_in"
+shown "^Signed in as linked@example.test, password 26 characters$"
+a shell am force-stop com.passbundle.autofilltest
+a shell am start -W -n com.passbundle.autofilltest/.SignInActivity > /dev/null
+tap "id=com.passbundle.autofilltest:id/username"
+shown "^Linked website"
+[ -z "$(where '^Unlinked website')" ] || { echo "A website whose asset links name another key was offered to the app." >&2; exit 1; }
+[ -z "$(where '^Bank website')" ] || { echo "A website the app doesn't name was offered to it." >&2; exit 1; }
+a shell am force-stop com.passbundle.autofilltest
+echo "Filled: the website that names the app back; never one that doesn't."
+
+echo "The linked website's own page, in the test app's WebView"
+a shell am start -W -n com.passbundle.autofilltest/.WebSignInActivity --es site https://linked.test/ > /dev/null
+web_field
+shown "^Linked website"
+a shell am force-stop com.passbundle.autofilltest
+echo "Offered: a linked website's login on its own page in the app, never on another's."
 
 # Android 10 doesn't pass autofill a web domain an app sets on its own views
 # (there only a WebView gives one), so this screen can't say it's a website
@@ -232,6 +339,151 @@ echo "Saving a new password for it"
 sign_in_and_save new@example.test not-a-real-password-changed
 reached autofill-updated "PassBundle never updated the sign-in."
 echo "Updated: the same login has the new password."
+
+# Only where the test app was trusted (Android 11 and later, above).
+if [ "$(a shell getprop ro.build.version.sdk | tr -d '\r')" -ge 30 ]; then
+  echo "Stopping trusting the test app as a browser, in Settings"
+  # PassBundle in front and the screen on, so its screens aren't covered.
+  a shell input keyevent KEYCODE_WAKEUP
+  a shell wm dismiss-keyguard
+  a shell am start -n com.passbundle.app/.MainActivity > /dev/null
+  a shell run-as com.passbundle.app touch files/autofill-untrust
+  reached autofill-untrusted "PassBundle's Settings never stopped trusting the test app."
+  a shell am force-stop com.passbundle.autofilltest
+  a shell am start -W -n com.passbundle.autofilltest/.ClaimsWebsiteActivity > /dev/null
+  tap "id=com.passbundle.autofilltest:id/username"
+  shown "^Trust Autofill test as a browser first"
+  [ -z "$(where '^Bank website')" ] || { echo "The website's login was still offered after the app stopped being trusted." >&2; exit 1; }
+  echo "Untrusted: the website's login isn't offered there again."
+fi
+
+# Passkeys (Android 14 and later): the test app makes one in PassBundle
+# through Android's Credential Manager, then signs in with it, checking what
+# comes back as a site would (PasskeySiteActivity). Android's own sheets come
+# between, which differ by version: step through them by their buttons until
+# PassBundle's dialog or the result shows.
+through() {
+  local want=$1
+  shift
+  for _ in $(seq 40); do
+    [ -n "$(where "$want")" ] && return 0
+    local button
+    for button in "$@" "^(Create|CREATE)$" "^(Continue|CONTINUE)$" "^Sign in$" "^(Use passkey|USE PASSKEY)$" "^PassBundle$" "^(Save|SAVE)$"; do
+      if [ -n "$(where "$button")" ]; then
+        tap "$button"
+        break
+      fi
+    done
+    sleep 1
+  done
+  echo "Never got to: $want" >&2
+  screen | grep -oE '(text|resource-id)="[^"]+"' | sort -u | head -60 >&2
+  return 1
+}
+if [ "$(a shell getprop ro.build.version.sdk | tr -d '\r')" -ge 34 ]; then
+  echo "Passkeys: the test app makes one in PassBundle, then signs in with it"
+  # The test site lets the test app use its passkeys (its asset links, above).
+  a shell settings put secure credential_service com.passbundle.app/com.passbundle.app.PasskeyProvider
+  a shell settings put secure credential_service_primary com.passbundle.app/com.passbundle.app.PasskeyProvider
+  a shell am force-stop com.passbundle.autofilltest
+  a shell am start -W -n com.passbundle.autofilltest/.PasskeySiteActivity > /dev/null
+  tap "id=com.passbundle.autofilltest:id/make_passkey"
+  through "^Save a passkey in PassBundle\?"
+  # Save can't be tapped for its first moment.
+  sleep 2
+  tap "^(Save|SAVE)$"
+  shown "^Made a passkey for passkeys.example.test$"
+  echo "Made: Credential Manager has a passkey from PassBundle, attested for the test app."
+  tap "id=com.passbundle.autofilltest:id/sign_in_passkey"
+  through "^Signed in with a passkey" "^ana@passkeys\.example\.test$"
+  shown "^Signed in with a passkey, signature checked$"
+  echo "Signed in: the signature checks with the passkey's public key, for the test app's origin."
+fi
+
+# "Immediately" (docs/phones.md, "Locking"): with it chosen, a vault that
+# autofill or a passkey unlocked locks as soon as the fill or the passkey is
+# handed back, without waiting for the screen to go off (the app's half
+# turns that off here, so only the hand-back can lock it).
+ask() {
+  a shell run-as com.passbundle.app rm -f "files/$2" > /dev/null 2>&1 || true
+  a shell run-as com.passbundle.app touch "files/$1"
+  reached "$2" "$3"
+}
+# The test app stopped, from the home screen. Stopping it while it's in front
+# would show what's under it, which can be PassBundle's own screen, and that
+# leaving again locks the vault with "Immediately", which isn't what's tested.
+away() {
+  a shell input keyevent KEYCODE_HOME
+  a shell am force-stop com.passbundle.autofilltest
+}
+sign_in_form() {
+  away
+  a shell am start -W -n com.passbundle.autofilltest/.SignInActivity > /dev/null
+  tap "id=com.passbundle.autofilltest:id/username"
+}
+# PassBundle offers to unlock on the sign-in form: it's locked.
+offers_unlock() {
+  sign_in_form
+  shown "^Unlock PassBundle" || { echo "$1" >&2; exit 1; }
+  [ -z "$(where '^Autofill test app')" ] || { echo "$1" >&2; exit 1; }
+}
+screen_offs() { a logcat -d -s PassBundle:D 2> /dev/null | grep -c 'screen off' || true; }
+a shell input keyevent KEYCODE_WAKEUP
+a shell wm dismiss-keyguard
+ask autofill-immediately autofill-immediately-chosen "PassBundle never chose Immediately."
+offs=$(screen_offs)
+if [ "$(a shell getprop ro.build.version.sdk | tr -d '\r')" -ge 34 ]; then
+  echo "Chosen Immediately: a passkey's sign-in handed back locks the vault"
+  # On the test app's passkey page, still in front with the passkey it made:
+  # it keeps that only while it runs, so it isn't stopped first. Unlocked as
+  # the app's screens would.
+  ask autofill-unlock autofill-unlocked "PassBundle never unlocked."
+  tap "id=com.passbundle.autofilltest:id/sign_in_passkey"
+  through "^Signed in with a passkey" "^ana@passkeys\.example\.test$"
+  shown "^Signed in with a passkey, signature checked$"
+  offers_unlock "The vault stayed unlocked after a passkey's sign-in with Immediately chosen."
+  echo "Locked: as the passkey was handed back."
+fi
+echo "Chosen Immediately: a fill handed back locks the vault"
+# Unlocked as the app's screens would, then filled from the list.
+away
+ask autofill-unlock autofill-unlocked "PassBundle never unlocked."
+sign_in_form
+pick "^Autofill test app" "^autofill@example.test$" "id=com.passbundle.autofilltest:id/username"
+offers_unlock "The vault stayed unlocked after a fill with Immediately chosen."
+# Unlocked from autofill itself, then filled: the pick after unlocking still
+# fills, and locks it.
+tap "^Unlock PassBundle"
+pick "^Autofill test app" "^autofill@example.test$" "id=com.passbundle.autofilltest:id/username"
+offers_unlock "The vault stayed unlocked after unlocking from autofill and filling, with Immediately chosen."
+echo "Locked: as each fill was handed back."
+# Never the screen going off (which doesn't lock it here anyway).
+[ "$(screen_offs)" = "$offs" ] || echo "The screen went off meanwhile (PassBundle: screen off), which isn't what locked it."
+
+# Locked with no biometric unlock (docs/phones.md, "Autofill"): autofill asks
+# for the master password in PassBundle's own dialog, a wrong one says so and
+# asks again, and the right one unlocks, then offers the logins: nothing fills
+# until one is picked, and the pick fills it (and, with "Immediately", locks).
+echo "Locked without biometric unlock: the master password in PassBundle's own dialog, then the login"
+away
+ask autofill-no-biometric autofill-no-biometric-done "PassBundle never turned biometric unlock off."
+sign_in_form
+tap "^Unlock PassBundle"
+shown "^Enter your master password to fill this in" || exit 1
+[ -z "$(where '^autofill@example.test$')" ] || { echo "Something filled before the master password was given." >&2; exit 1; }
+# Typed, then Enter, as the keyboard's Go would (its Unlock button can sit
+# under the keyboard on a small screen).
+type_in "not%sthe%spassword"
+a shell input keyevent KEYCODE_ENTER
+shown "^That master password isn't right" || exit 1
+type_in "${password// /%s}"
+a shell input keyevent KEYCODE_ENTER
+shown "^Autofill test app" || exit 1
+# Unlocked, and only offered: nothing is filled until it's picked.
+[ -z "$(where '^autofill@example.test$')" ] || { echo "Unlocking filled a login nobody picked." >&2; exit 1; }
+pick "^Autofill test app" "^autofill@example.test$" "id=com.passbundle.autofilltest:id/username"
+offers_unlock "The vault stayed unlocked after unlocking with the master password from autofill and filling, with Immediately chosen."
+echo "Filled: unlocked with the master password from autofill, then the login picked."
 
 # The app's half can end now.
 a shell run-as com.passbundle.app touch files/autofill-done

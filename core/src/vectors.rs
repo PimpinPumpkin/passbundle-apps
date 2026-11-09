@@ -364,6 +364,52 @@ fn a_wrong_password_is_wrong_and_weak_settings_are_refused_before_deriving() {
 }
 
 #[test]
+fn opens_a_shared_folders_icon_with_its_organizations_key_and_leaves_the_rest_plain() {
+    let v = vectors();
+    let org_key = key(&v["keys"]["organizationKey"]);
+    let user_key = key(&v["keys"]["userKey"]);
+    let collection = v["ids"]["collection"].as_str().unwrap();
+    let open = |look: Option<String>| {
+        let mut sync_json = v["sync"].clone();
+        sync_json["collections"][0]["keykeeperLook"] = look.map_or(Value::Null, Value::String);
+        let sync = Sync::from_json(&sync_json.to_string()).unwrap();
+        let vault = Vault::unlock(
+            &sync,
+            &prelogin(&v["account"]["pbkdf2"]["prelogin"]),
+            v["account"]["password"].as_str().unwrap(),
+        )
+        .unwrap();
+        assert_opens_as_the_vectors_say(&vault, &v);
+        vault.collection_looks.get(collection).cloned()
+    };
+    let bank = org_key
+        .encrypt_str(r#"{"icon":"bank","tone":"emerald"}"#)
+        .to_string();
+    assert_eq!(
+        open(Some(bank)),
+        Some(crate::places::Look {
+            icon: "bank".into(),
+            tone: "emerald".into()
+        })
+    );
+    // As the web vault writes it (app/test: a fixed IV, made with Node).
+    let web = "2.8PHy8/T19vf4+fr7/P3+/w==|7B2Xuy93y0k1VHyOmkaIZFJ1l+9fFGvVYvutgOtS52GmO5NUPQdukvfgtk97QTqs|+kucnDW/LO2A98uZpe97d1zs6+5fwou5+ex2ANjDLmo=";
+    assert_eq!(open(Some(web.into())).map(|l| l.icon), Some("bank".into()));
+    // None, one under another key, one that isn't a look, and one that isn't
+    // encrypted are each the plain folder, and the vault still opens.
+    assert_eq!(open(None), None);
+    let wrong_key = user_key
+        .encrypt_str(r#"{"icon":"bank","tone":"emerald"}"#)
+        .to_string();
+    assert_eq!(open(Some(wrong_key)), None);
+    assert_eq!(open(Some(org_key.encrypt_str("bank").to_string())), None);
+    assert_eq!(
+        open(Some(r#"{"icon":"bank","tone":"emerald"}"#.into())),
+        None
+    );
+}
+
+#[test]
 fn an_item_that_doesnt_open_is_damaged_and_the_rest_still_open() {
     let v = vectors();
     let mut sync_json = v["sync"].clone();
@@ -449,4 +495,155 @@ fn search_matches_every_word_in_names_usernames_websites_and_details() {
         ["Ana at home", "Example Mail"]
     );
     assert!(names("4111").is_empty() && names("123-45").is_empty());
+}
+
+/// Passkeys: a login's passkey opens (its private key only when asked), and
+/// signing in with it gives the vectors' authenticator data and signature to
+/// the byte. The vectors' signatures come from their own RFC 6979 signer, so
+/// two implementations agree, and Node's crypto verifies them.
+#[test]
+fn a_passkey_opens_and_signs_as_the_vectors_say() {
+    use crate::passkey::{authenticator_data, credential_id, flags};
+    let v = vectors();
+    let sync = Sync::from_json(&v["sync"].to_string()).unwrap();
+    let vault = Vault::unlock(
+        &sync,
+        &prelogin(&v["account"]["pbkdf2"]["prelogin"]),
+        v["account"]["password"].as_str().unwrap(),
+    )
+    .unwrap();
+    let mut seen = 0;
+    for (id, want) in v["opened"]["items"].as_object().unwrap() {
+        let item = vault.item(id).unwrap();
+        let Some(want) = want.get("passkey") else {
+            assert!(item.passkey.is_none(), "{id}");
+            continue;
+        };
+        let passkey = item.passkey.as_ref().unwrap();
+        assert_eq!(
+            passkey.credential_id,
+            want["credentialId"].as_str().unwrap()
+        );
+        assert_eq!(passkey.rp_id, want["rpId"].as_str().unwrap());
+        assert_eq!(passkey.rp_name.as_deref(), want["rpName"].as_str());
+        assert_eq!(passkey.user_handle.as_deref(), want["userHandle"].as_str());
+        assert_eq!(passkey.user_name.as_deref(), want["userName"].as_str());
+        assert_eq!(
+            passkey.user_display_name.as_deref(),
+            want["userDisplayName"].as_str()
+        );
+        assert_eq!(
+            u64::from(passkey.counter),
+            want["counter"].as_u64().unwrap()
+        );
+        assert_eq!(
+            passkey.discoverable,
+            want["discoverable"].as_bool().unwrap()
+        );
+        assert_eq!(
+            passkey.creation_date.as_deref(),
+            want["creationDate"].as_str()
+        );
+        assert!(passkey.usable);
+        let (x, y) = passkey.key().unwrap().public();
+        assert_eq!(x.to_vec(), b64(&v["passkeyPublic"]["x"]));
+        assert_eq!(y.to_vec(), b64(&v["passkeyPublic"]["y"]));
+        seen += 1;
+    }
+    assert_eq!(seen, 1);
+
+    for a in v["passkeyAssertions"].as_array().unwrap() {
+        let item = vault.item(a["itemId"].as_str().unwrap()).unwrap();
+        let passkey = item.passkey.as_ref().unwrap();
+        let mut set = flags::USER_PRESENT | flags::BACKUP_ELIGIBLE | flags::BACKED_UP;
+        if a["userVerified"].as_bool().unwrap() {
+            set |= flags::USER_VERIFIED;
+        }
+        let data = authenticator_data(a["rpId"].as_str().unwrap(), set, passkey.counter, None);
+        assert_eq!(data, b64(&a["authenticatorData"]));
+        let hash: [u8; 32] = b64(&a["clientDataHash"]).try_into().unwrap();
+        assert_eq!(
+            passkey.key().unwrap().sign(&data, &hash),
+            b64(&a["signature"])
+        );
+        assert_eq!(
+            credential_id(&passkey.credential_id).unwrap(),
+            b64(&a["credentialId"])
+        );
+    }
+}
+
+/// Making an account (docs/core.md, "Making an account"): from the vectors'
+/// password, keys, and IVs, the core makes exactly the account the vectors
+/// have, which upstream's crypto opens (docs/vectors/check-core-vectors.mjs),
+/// with each KDF.
+#[test]
+fn a_new_account_is_made_as_the_vectors_say() {
+    use crate::signup::NewAccount;
+    let v = vectors();
+    let account = &v["account"];
+    let user_key = key(&v["keys"]["userKey"]);
+    let private = PrivateKey::from_pkcs8_der(&b64(&v["keys"]["privateKey"])).unwrap();
+    let iv = |start: u8| -> [u8; 16] { std::array::from_fn(|i| start + i as u8) };
+    let password = account["password"].as_str().unwrap();
+    let email = account["emailAsTyped"].as_str().unwrap();
+
+    let made = NewAccount::with(
+        email,
+        None,
+        password,
+        None,
+        &Kdf::from_prelogin(&prelogin(&account["pbkdf2"]["prelogin"])).unwrap(),
+        &user_key,
+        &private,
+        Some((iv(0x80), iv(0xa0))),
+    )
+    .unwrap();
+    assert_eq!(made.email, account["salt"].as_str().unwrap());
+    assert_eq!(
+        *made.login_hash,
+        account["pbkdf2"]["loginHash"].as_str().unwrap()
+    );
+    assert_eq!(
+        made.user_key.to_string(),
+        account["pbkdf2"]["protectedUserKey"].as_str().unwrap()
+    );
+    assert_eq!(
+        made.private_key.to_string(),
+        v["keys"]["encryptedPrivateKey"].as_str().unwrap()
+    );
+    assert_eq!(
+        STANDARD.encode(&made.public_key),
+        v["keys"]["publicKey"].as_str().unwrap()
+    );
+
+    let made = NewAccount::with(
+        email,
+        None,
+        password,
+        None,
+        &Kdf::from_prelogin(&prelogin(&account["argon2id"]["prelogin"])).unwrap(),
+        &user_key,
+        &private,
+        Some((iv(0x90), iv(0xa0))),
+    )
+    .unwrap();
+    assert_eq!(
+        *made.login_hash,
+        account["argon2id"]["loginHash"].as_str().unwrap()
+    );
+    assert_eq!(
+        made.user_key.to_string(),
+        account["argon2id"]["protectedUserKey"].as_str().unwrap()
+    );
+    let body = made.finish_body("token");
+    assert_eq!(
+        (
+            body["kdf"].as_u64(),
+            body["kdfIterations"].as_u64(),
+            body["kdfMemory"].as_u64(),
+            body["kdfParallelism"].as_u64()
+        ),
+        (Some(1), Some(3), Some(64), Some(4))
+    );
 }

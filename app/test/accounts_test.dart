@@ -1,0 +1,513 @@
+// Several accounts side by side (accounts.dart; DESIGN.md in the meta repo,
+// "Several accounts in the apps"), against the real core (PB_CORE_LIB): the
+// account menu at the foot of the computer's menu and in a phone's Settings
+// switches between a work account and a personal one, each unlocked and
+// locked on its own and showing only its own items; adding one goes to the
+// sign-in screen and back; signing out of one leaves the other; at five,
+// adding waits; and an install from before several accounts is carried over.
+// Then "All accounts": every unlocked account's items together, each labeled
+// with its account's name and color, searched together; picking another
+// account's item opens it in its own account; a new item asks which account;
+// and an account is named and colored in its Settings. Each account's menu
+// shows its own shared folders' icons and colors.
+import 'dart:io';
+
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+
+import 'package:passbundle/accounts.dart';
+import 'package:passbundle/core.dart';
+import 'package:passbundle/glyphs.dart';
+import 'package:passbundle/main.dart';
+import 'package:passbundle/settings.dart';
+import 'package:passbundle/theme.dart';
+import 'package:passbundle/unlock_offer.dart';
+import 'package:passbundle/vault.dart';
+import 'package:passbundle/widgets.dart';
+
+import 'support.dart';
+
+const work = 'ana.lopez@example.test';
+const home = 'ana@home.example.test';
+
+void wideWindow(WidgetTester tester) {
+  tester.view.physicalSize = const Size(1280, 800);
+  tester.view.devicePixelRatio = 1;
+  addTearDown(tester.view.reset);
+}
+
+void phoneWindow(WidgetTester tester) {
+  tester.view.physicalSize = const Size(390, 844);
+  tester.view.devicePixelRatio = 1;
+  addTearDown(tester.view.reset);
+}
+
+/// Each account's state, by its id, as the core has it.
+Map<String, String> states() => {
+  for (final a in (Core().accounts()['accounts'] as List).cast<Map>())
+    a['id'] as String: a['state'] as String,
+};
+
+Future<void> unlock(WidgetTester tester, String shows) async {
+  await tester.enterText(find.byType(TextField), samplePassword);
+  await tester.tap(find.text('Unlock'));
+  await opened(tester, shows);
+}
+
+/// A vault showing [shows], past the sync on opening (there's no server
+/// behind the sample): each time a vault shows, unlocked just now or
+/// switched to.
+Future<void> opened(WidgetTester tester, String shows) async {
+  await pumpUntil(tester, find.text(shows));
+  await pumpUntil(tester, find.textContaining('Sign in again to get changes'));
+  await tester.pumpAndSettle();
+}
+
+/// The account menu, from the email at the foot of the menu.
+Future<void> openMenu(WidgetTester tester) async {
+  await tester.tap(find.byTooltip('Accounts'));
+  await tester.pumpAndSettle();
+}
+
+/// Both accounts unlocked, named Work and Personal, the personal one
+/// shown; their ids, work's first. Their shared folders (by id) have the
+/// fields in [work] and [personal] set as given.
+Future<List<String>> unlockBoth(
+  WidgetTester tester, {
+  Map<String, Map<String, dynamic>> work = const {},
+  Map<String, Map<String, dynamic>> personal = const {},
+}) async {
+  final [w, p] = openAccounts(work: work, personal: personal);
+  expect(Core().setAccountLabel('Work', null, w).ok, isTrue);
+  expect(Core().setAccountLabel('Personal', null, p).ok, isTrue);
+  await tester.pumpWidget(const PassBundleApp());
+  await unlock(tester, 'Example Mail');
+  await openMenu(tester);
+  await tester.tap(find.byKey(ValueKey('account-$p')));
+  await tester.pumpAndSettle();
+  await unlock(tester, 'Gate code');
+  expect(states(), {w: 'unlocked', p: 'unlocked'});
+  return [w, p];
+}
+
+/// An account as the core lists it now.
+Map<String, dynamic> accountOf(String id) =>
+    (Core().accounts()['accounts'] as List).cast<Map<String, dynamic>>().firstWhere(
+      (a) => a['id'] == id,
+    );
+
+void main() {
+  setUpAll(loadFonts);
+
+  testWidgets(
+    'the account menu switches between two accounts, each unlocked and locked on its own, each with only its own items',
+    (tester) async {
+      wideWindow(tester);
+      final [w, p] = openAccounts();
+      await tester.pumpWidget(const PassBundleApp());
+      // The one shown last, locked, with the way to the other.
+      expect(find.text('Unlock PassBundle'), findsOneWidget);
+      expect(find.text(work), findsOneWidget);
+      expect(find.text('Switch account'), findsOneWidget);
+
+      await unlock(tester, 'Example Mail');
+      expect(find.text('Gate code'), findsNothing);
+      expect(states(), {w: 'unlocked', p: 'locked'});
+
+      // The menu lists both, the one shown marked, the other locked.
+      await openMenu(tester);
+      expect(find.text(home), findsOneWidget);
+      expect(find.text('vault.home.example.test · Locked'), findsOneWidget);
+      expect(find.text('Add account'), findsOneWidget);
+      // Signing out names the account it's for: the one shown.
+      expect(find.text('Sign out of $work'), findsOneWidget);
+      await tester.tap(find.text(home));
+      await tester.pumpAndSettle();
+      // The personal account, locked; the work one stays open.
+      expect(find.text('Unlock PassBundle'), findsOneWidget);
+      expect(find.text(home), findsOneWidget);
+      expect(find.text('Example Mail'), findsNothing);
+      expect(Core.account, p);
+      expect(states(), {w: 'unlocked', p: 'locked'});
+
+      await unlock(tester, 'Gate code');
+      expect(find.text('Example Mail'), findsNothing);
+      expect(find.text('Backup service'), findsNothing);
+      expect(states(), {w: 'unlocked', p: 'unlocked'});
+
+      // Back to work: still open, no master password.
+      await openMenu(tester);
+      await tester.tap(find.text(work).last);
+      await opened(tester, 'Example Mail');
+      expect(find.text('Gate code'), findsNothing);
+      expect(Core.account, w);
+
+      // Lock locks the one shown; the other stays open.
+      await tester.tap(find.text('Lock'));
+      await tester.pumpAndSettle();
+      expect(find.text('Unlock PassBundle'), findsOneWidget);
+      expect(states(), {w: 'locked', p: 'unlocked'});
+
+      // From the lock screen, the open one is a switch away.
+      await tester.tap(find.text('Switch account'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text(home).last);
+      await opened(tester, 'Gate code');
+      expect(Core.account, p);
+    },
+  );
+
+  testWidgets(
+    'adding an account goes to the sign-in screen, and back to the one shown as it was',
+    (tester) async {
+      wideWindow(tester);
+      final [w, p] = openAccounts();
+      await tester.pumpWidget(const PassBundleApp());
+      await unlock(tester, 'Example Mail');
+      await openMenu(tester);
+      await tester.tap(find.text('Add account'));
+      await tester.pumpAndSettle();
+      expect(find.text('Add an account'), findsOneWidget);
+      expect(find.widgetWithText(TextField, 'Email'), findsOneWidget);
+      // Nothing of the one shown is on the sign-in screen.
+      expect(find.text('Example Mail'), findsNothing);
+      expect(Core.account, '');
+
+      await tester.tap(find.text('Cancel'));
+      await opened(tester, 'Example Mail');
+      expect(Core.account, w);
+      expect(states(), {w: 'unlocked', p: 'locked'});
+    },
+  );
+
+  testWidgets('signing out of one account leaves the other', (tester) async {
+    wideWindow(tester);
+    final [w, p] = openAccounts();
+    await tester.pumpWidget(const PassBundleApp());
+    await unlock(tester, 'Example Mail');
+    await openMenu(tester);
+    await tester.tap(find.text('Sign out of $work'));
+    // It asks the agent whether biometric unlock is on first.
+    await pumpUntil(tester, find.text('Sign out?'));
+    await tester.pumpAndSettle();
+    // It says which account's vault leaves.
+    expect(find.textContaining('the vault of $work'), findsOneWidget);
+    expect(
+      find.textContaining('Your other accounts stay signed in.'),
+      findsOneWidget,
+    );
+    await tester.tap(find.widgetWithText(FilledButton, 'Sign out'));
+    await pumpUntil(tester, find.text('Unlock PassBundle'));
+    await tester.pumpAndSettle();
+    // The personal account is the one shown now, and the only one.
+    expect(find.text(home), findsOneWidget);
+    expect(find.text('Switch account'), findsNothing);
+    expect(states(), {p: 'locked'});
+    expect(Core.account, p);
+    expect(Directory('${Core.folder}/accounts/$w').existsSync(), isFalse);
+    await unlock(tester, 'Gate code');
+  });
+
+  testWidgets('with five accounts, adding one waits for signing out of one', (
+    tester,
+  ) async {
+    wideWindow(tester);
+    openAccounts(more: 3);
+    await tester.pumpWidget(const PassBundleApp());
+    await unlock(tester, 'Example Mail');
+    await openMenu(tester);
+    expect(find.text('more3@example.test'), findsOneWidget);
+    expect(find.text('Add account'), findsNothing);
+    expect(find.text('Up to 5 accounts on this device'), findsOneWidget);
+    // It can't be chosen.
+    await tester.tap(find.text('Up to 5 accounts on this device'));
+    await tester.pumpAndSettle();
+    expect(find.text('Add an account'), findsNothing);
+  });
+
+  testWidgets(
+    'on a phone, Settings lists the accounts, and the vault\'s header switches between them',
+    (tester) async {
+      phoneWindow(tester);
+      PhoneStandIn(tester);
+      final [w, p] = openAccounts();
+      // Not about biometric unlock (unlock_offer_test.dart is).
+      declineOffer();
+      await tester.pumpWidget(const PassBundleApp());
+      await tester.enterText(find.byType(TextField), samplePassword);
+      await tester.tap(find.text('Unlock'));
+      await pumpUntil(tester, find.text('Logins'));
+      await pumpUntil(
+        tester,
+        find.textContaining('Sign in again to get changes'),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byTooltip('Settings'));
+      await tester.pumpAndSettle();
+      // Down Settings to its accounts, then each held in view to be read
+      // and tapped (a small screen shows a few rows at a time).
+      await tester.scrollUntilVisible(
+        find.text(home),
+        200,
+        scrollable: find
+            .descendant(
+              of: find.byType(SettingsPage),
+              matching: find.byType(Scrollable),
+            )
+            .first,
+      );
+      await tester.pumpAndSettle();
+      expect(find.text(work), findsOneWidget);
+      expect(find.text('Add account'), findsOneWidget);
+      expect(
+        find.textContaining('These settings are for $work'),
+        findsOneWidget,
+      );
+      await tester.ensureVisible(find.text(home));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text(home));
+      await tester.pumpAndSettle();
+      expect(find.text('Unlock PassBundle'), findsOneWidget);
+      expect(find.text(home), findsOneWidget);
+      expect(states(), {w: 'unlocked', p: 'locked'});
+
+      // Back to work, from the lock screen: open as it was.
+      await tester.tap(find.text('Switch account'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text(work).last);
+      await opened(tester, 'Logins');
+      // The header's account button has them too.
+      await tester.tap(find.byTooltip('Accounts'));
+      await tester.pumpAndSettle();
+      expect(find.text(home), findsOneWidget);
+      expect(find.text('Add account'), findsOneWidget);
+    },
+  );
+
+  testWidgets(
+    'an install from before several accounts is carried over as its one account',
+    (tester) async {
+      wideWindow(tester);
+      // As an earlier build kept it: in the app's own folder.
+      final dir = openSample();
+      expect(File('$dir/settings.json').existsSync(), isFalse);
+      expect(File('$dir/sync.json').existsSync(), isFalse);
+      final folders = Directory('$dir/accounts').listSync();
+      expect(folders, hasLength(1));
+      expect(File('${folders.single.path}/sync.json').existsSync(), isTrue);
+      expect(Core().accounts()['accounts'], hasLength(1));
+      await tester.pumpWidget(const PassBundleApp());
+      expect(find.text(work), findsOneWidget);
+      // One account: nothing to switch to.
+      expect(find.text('Switch account'), findsNothing);
+      await unlock(tester, 'Gate code');
+    },
+  );
+
+  testWidgets(
+    'All accounts lists every unlocked account\'s items, each labeled with its account, and searches them together',
+    (tester) async {
+      wideWindow(tester);
+      final [w, p] = await unlockBoth(tester);
+      await tester.tap(find.text('All accounts'));
+      await tester.pumpAndSettle();
+      // The personal account's own, and the work account's, side by side.
+      expect(find.text('Gate code'), findsOneWidget);
+      expect(find.text('Example Mail'), findsOneWidget);
+      expect(find.widgetWithText(AccountBadge, 'Personal'), findsOneWidget);
+      expect(find.widgetWithText(AccountBadge, 'Work'), findsWidgets);
+      // Searched together.
+      await tester.enterText(
+        find.widgetWithText(TextField, 'Search items'),
+        'gate',
+      );
+      await tester.pump();
+      expect(find.text('Gate code'), findsOneWidget);
+      expect(find.text('Example Mail'), findsNothing);
+      await tester.enterText(
+        find.widgetWithText(TextField, 'Search items'),
+        'mail',
+      );
+      await tester.pump();
+      expect(find.text('Example Mail'), findsOneWidget);
+      expect(find.text('Gate code'), findsNothing);
+      await tester.enterText(find.widgetWithText(TextField, 'Search items'), '');
+      await tester.pump();
+
+      // A locked account's items go from the list as it locks (the app
+      // hears it within two seconds).
+      Core().lock(w);
+      await tester.pump(const Duration(seconds: 2));
+      await tester.pump();
+      expect(find.text('Gate code'), findsOneWidget);
+      expect(find.text('Example Mail'), findsNothing);
+      expect(states(), {w: 'locked', p: 'unlocked'});
+    },
+  );
+
+  testWidgets(
+    'picking another account\'s item in All accounts opens it in its own account',
+    (tester) async {
+      wideWindow(tester);
+      final [w, p] = await unlockBoth(tester);
+      expect(Core.account, p);
+      await tester.tap(find.text('All accounts'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Example Mail'));
+      await opened(tester, 'Example Mail');
+      // The work account's vault, with the item open, still in All accounts.
+      expect(Core.account, w);
+      expect(find.widgetWithText(OutlinedButton, 'Edit'), findsOneWidget);
+      expect(find.text('Gate code'), findsOneWidget);
+      expect(states(), {w: 'unlocked', p: 'unlocked'});
+    },
+  );
+
+  testWidgets(
+    'each account\'s menu shows its own shared folders\' icons and colors, and an item opened from All accounts shows its own account\'s',
+    (tester) async {
+      wideWindow(tester);
+      // The same shared folder, IT, with a look of each account's own,
+      // encrypted with the sample's organization key (as the web vault
+      // writes them): a green bank for work, a red server for personal.
+      const it = '2c3d4e5f-6071-4829-9ab0-c1d2e3f40516';
+      const bank =
+          '2.8PHy8/T19vf4+fr7/P3+/w==|7B2Xuy93y0k1VHyOmkaIZFJ1l+9fFGvVYvutgOtS52GmO5NUPQdukvfgtk97QTqs|+kucnDW/LO2A98uZpe97d1zs6+5fwou5+ex2ANjDLmo=';
+      const server =
+          '2.8PHy8/T19vf4+fr7/P3+/w==|zhPgMG7iSsXHqsO++n/jMeuDiZg6hl7GL8XEyo/QSWVCsdRhEGOpeNNynxsReu33|wFtImNv1knBWT7jUvALw67oUuDL6rkjDKXmp8eA9OeQ=';
+      final [w, p] = await unlockBoth(
+        tester,
+        work: {
+          it: {'keykeeperLook': bank},
+        },
+        personal: {
+          it: {'keykeeperLook': server},
+        },
+      );
+      final menu = find.byType(Sidebar);
+      List<Jewel> tiles() => tester
+          .widgetList<JewelTile>(
+            find.descendant(of: menu, matching: find.byType(JewelTile)),
+          )
+          .map((t) => t.jewel)
+          .where((j) => j.glyph == Glyphs.bank || j.glyph == Glyphs.server)
+          .toList();
+      // The personal account, shown: its own red server.
+      expect(Core.account, p);
+      expect(tiles().map((j) => (j.glyph, j.light)), [
+        (Glyphs.server, const Color(0xFFA8291F)),
+      ]);
+
+      // A work item from All accounts opens in the work account, whose menu
+      // shows work's green bank.
+      await tester.tap(find.text('All accounts'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Example Mail'));
+      await opened(tester, 'Example Mail');
+      expect(Core.account, w);
+      expect(tiles().map((j) => (j.glyph, j.light)), [
+        (Glyphs.bank, const Color(0xFF0E7A47)),
+      ]);
+    },
+  );
+
+  testWidgets(
+    'a new item asks which account it goes in, and is made in the one chosen',
+    (tester) async {
+      wideWindow(tester);
+      final [w, p] = await unlockBoth(tester);
+      expect(Core.account, p);
+      await tester.tap(find.byTooltip('New item'));
+      await tester.pumpAndSettle();
+      expect(find.text('Save it in which account?'), findsOneWidget);
+      await tester.tap(find.byKey(ValueKey('choose-account-$w')));
+      // The work account's vault, and New item's picker there.
+      await pumpUntil(tester, find.text('What are you saving?'));
+      expect(Core.account, w);
+      expect(states(), {w: 'unlocked', p: 'unlocked'});
+    },
+  );
+
+  testWidgets('with one account unlocked, a new item asks nothing', (
+    tester,
+  ) async {
+    wideWindow(tester);
+    openAccounts();
+    await tester.pumpWidget(const PassBundleApp());
+    await unlock(tester, 'Example Mail');
+    await tester.tap(find.byTooltip('New item'));
+    await tester.pumpAndSettle();
+    expect(find.text('Save it in which account?'), findsNothing);
+    expect(find.text('What are you saving?'), findsOneWidget);
+  });
+
+  testWidgets(
+    'an account is named and colored in its own Settings, and the menu shows it',
+    (tester) async {
+      wideWindow(tester);
+      final [w, p] = await unlockBoth(tester);
+      await tester.tap(find.byTooltip('Settings'));
+      await tester.pump();
+      // Its first line waits on the desktop agent (a real call): a spinner
+      // until it answers.
+      await pumpUntil(tester, find.text('Lock after'));
+      await pumpUntilGone(tester, find.byKey(const ValueKey('unlock-loading')));
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(find.textContaining('For $home'), findsOneWidget);
+      final name = find.byKey(const ValueKey('account-name'));
+      await tester.ensureVisible(name);
+      await tester.pump();
+      await tester.enterText(name, 'Home');
+      await tester.pump();
+      expect(accountOf(p)['name'], 'Home');
+      final garnet = find.byKey(const ValueKey('account-tone-garnet'));
+      await tester.ensureVisible(garnet);
+      await tester.pump();
+      await tester.tap(garnet);
+      await tester.pump();
+      expect(accountOf(p)['tone'], 'garnet');
+      // The other account's stay its own.
+      expect(accountOf(w)['name'], 'Work');
+      expect(accountOf(w)['tone'], isNot('garnet'));
+      await tester.tap(find.text('Close'));
+      await tester.pumpAndSettle();
+      // The menu says so.
+      expect(find.text('Home'), findsOneWidget);
+    },
+  );
+
+  testWidgets(
+    'on a phone, All accounts is a place of its own, each item labeled with its account',
+    (tester) async {
+      phoneWindow(tester);
+      PhoneStandIn(tester);
+      final [w, p] = openAccounts();
+      declineOffer();
+      expect(Core().setAccountLabel('Work', null, w).ok, isTrue);
+      expect(Core().setAccountLabel('Personal', null, p).ok, isTrue);
+      await tester.pumpWidget(const PassBundleApp());
+      await tester.enterText(find.byType(TextField), samplePassword);
+      await tester.tap(find.text('Unlock'));
+      await opened(tester, 'Logins');
+      await tester.tap(find.byTooltip('Accounts'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(ValueKey('account-$p')));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField), samplePassword);
+      await tester.tap(find.text('Unlock'));
+      // The personal account has only its note.
+      await opened(tester, 'Gate code');
+      final every = find.byKey(const ValueKey('every-account'));
+      await tester.ensureVisible(every);
+      await tester.pumpAndSettle();
+      await tester.tap(every);
+      await tester.pumpAndSettle();
+      expect(find.text('All accounts'), findsOneWidget);
+      expect(find.text('Gate code'), findsOneWidget);
+      expect(find.text('Example Mail'), findsOneWidget);
+      expect(find.widgetWithText(AccountBadge, 'Personal'), findsOneWidget);
+      expect(find.widgetWithText(AccountBadge, 'Work'), findsWidgets);
+    },
+  );
+}

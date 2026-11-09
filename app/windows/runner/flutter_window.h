@@ -22,6 +22,8 @@ class FlutterWindow : public Win32Window {
   void OnDestroy() override;
   LRESULT MessageHandler(HWND window, UINT const message, WPARAM const wparam,
                          LPARAM const lparam) noexcept override;
+  void OnFrameChanged() override;
+  void OnButtonsChanged(Button hovered, Button pressed) override;
 
  private:
   // The project to run.
@@ -33,6 +35,16 @@ class FlutterWindow : public Win32Window {
   // Tells the app the computer is about to sleep, so it can lock first
   // (docs/core.md, "Locking by itself").
   std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>> computer_;
+
+  // The window, and the app's top edge in it (app/lib/window_chrome.dart):
+  // the app's look for the frame (SystemBars in app/lib/theme.dart), where
+  // its band and buttons are, and the buttons pressed from the keyboard;
+  // the window maximized or not, active or not, and the mouse over the
+  // buttons, the other way.
+  std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>> window_;
+
+  // The window's state, as the app hears it (|window_|'s "frame").
+  flutter::EncodableValue Frame() const;
 };
 
 #endif  // RUNNER_FLUTTER_WINDOW_H_
