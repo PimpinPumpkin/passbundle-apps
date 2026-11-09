@@ -7,3 +7,5 @@ OTHER_LDFLAGS[sdk=iphoneos*] = $(inherited) -force_load $(PROJECT_DIR)/PassBundl
 OTHER_LDFLAGS[sdk=iphonesimulator*] = $(inherited) -force_load $(PROJECT_DIR)/PassBundleCore.xcframework/ios-arm64-simulator/libpassbundle_core.a -framework Security -framework CoreFoundation
 // Release builds keep the names of the core's functions, which Dart looks up.
 STRIP_STYLE = non-global
+// The App Group and Keychain group the app shares with its AutoFill extension.
+CODE_SIGN_ENTITLEMENTS = Runner/Runner.entitlements

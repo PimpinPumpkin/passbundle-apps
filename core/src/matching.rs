@@ -14,7 +14,12 @@
 //!
 //! An Android app matches only an item's own `androidapp://<package>` website,
 //! never a lookalike name.
+//!
+//! iOS suggests logins above the keyboard from a list the app gives it of
+//! usernames and the domains they're for, never passwords (`suggestions`), by
+//! the same rules; and passkeys by their site's ID (`passkey_suggestions`).
 
+use std::collections::HashSet;
 use std::net::IpAddr;
 
 use crate::vault::{Item, ItemKind, Vault};
@@ -107,6 +112,15 @@ pub fn matches(item: &Item, target: &Target) -> bool {
             .any(|(at, uri)| fits(uri, item.uri_matches.get(at).copied().flatten(), target))
 }
 
+/// A login iOS may suggest above the keyboard (docs/phones.md, "Autofill"):
+/// its username, and a domain its websites fill on. Never its password.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Suggestion<'a> {
+    pub id: &'a str,
+    pub username: &'a str,
+    pub domain: String,
+}
+
 impl Vault {
     /// The logins for the target, by name.
     pub fn matching(&self, target: &Target) -> Vec<&Item> {
@@ -114,6 +128,97 @@ impl Vault {
         found.sort_by_key(|i| i.name.to_lowercase());
         found
     }
+
+    /// What iOS may suggest, for every login (`suggested`).
+    pub fn suggestions(&self) -> Vec<Suggestion<'_>> {
+        self.items.iter().flat_map(suggested).collect()
+    }
+
+    /// The passkeys iOS may suggest (`passkey_suggested`).
+    pub fn passkey_suggestions(&self) -> Vec<PasskeySuggestion<'_>> {
+        self.items.iter().filter_map(passkey_suggested).collect()
+    }
+}
+
+/// A passkey iOS may suggest in its passkey sheet (docs/phones.md,
+/// "Passkeys"): the site's ID, the account's name, and the IDs a site and
+/// iOS know it by. Never its key.
+#[derive(Debug, PartialEq, Eq)]
+pub struct PasskeySuggestion<'a> {
+    pub id: &'a str,
+    pub rp_id: &'a str,
+    /// The account's name on the site, or the site's ID without one (never
+    /// the login's own name, which iOS would show with it).
+    pub user_name: &'a str,
+    pub credential_id: Vec<u8>,
+    /// Empty when none is stored.
+    pub user_handle: Vec<u8>,
+}
+
+/// What iOS may suggest of an item's passkey: one the core can sign with,
+/// that a site can find by itself (discoverable), in a login not in the
+/// trash.
+pub fn passkey_suggested(item: &Item) -> Option<PasskeySuggestion<'_>> {
+    let passkey = item.passkey.as_ref()?;
+    if item.deleted || item.kind != ItemKind::Login || !passkey.usable || !passkey.discoverable {
+        return None;
+    }
+    let credential_id = crate::passkey::credential_id(&passkey.credential_id).ok()?;
+    let user_handle = match &passkey.user_handle {
+        Some(handle) => crate::passkey::base64_either(handle)?,
+        None => Vec::new(),
+    };
+    Some(PasskeySuggestion {
+        id: &item.id,
+        rp_id: &passkey.rp_id,
+        user_name: passkey
+            .user_name
+            .as_deref()
+            .filter(|u| !u.is_empty())
+            .unwrap_or(&passkey.rp_id),
+        credential_id,
+        user_handle,
+    })
+}
+
+/// What iOS may suggest for one item: a login with a username, once for each
+/// domain its websites fill on (the registrable domain by default, the host
+/// when matched by host). Websites that need a page's whole address, never
+/// fill, or are an Android app's give none.
+pub fn suggested(item: &Item) -> Vec<Suggestion<'_>> {
+    let mut found = Vec::new();
+    let username = match item.username.as_deref() {
+        Some(u) if !u.is_empty() && item.kind == ItemKind::Login && !item.deleted => u,
+        _ => return found,
+    };
+    let mut domains = HashSet::new();
+    for (at, uri) in item.uris.iter().enumerate() {
+        if uri.trim().starts_with("androidapp://") {
+            continue;
+        }
+        let Some((host, port)) = host_and_port(uri) else {
+            continue;
+        };
+        let domain = match item
+            .uri_matches
+            .get(at)
+            .copied()
+            .flatten()
+            .unwrap_or(DOMAIN)
+        {
+            DOMAIN => registrable(&host),
+            HOST if port.is_none() => host,
+            _ => continue,
+        };
+        if domains.insert(domain.clone()) {
+            found.push(Suggestion {
+                id: &item.id,
+                username,
+                domain,
+            });
+        }
+    }
+    found
 }
 
 #[cfg(test)]
@@ -266,5 +371,52 @@ mod tests {
         ]);
         assert!(matches(&item, &Target::Website("www.example.net")));
         assert!(!matches(&item, &Target::Website("example.com")));
+    }
+
+    #[test]
+    fn suggestions_name_each_login_once_per_domain_never_a_password() {
+        let item = Item {
+            id: "a".into(),
+            ..login(&[
+                ("https://accounts.example.com/login", None),
+                ("https://www.example.com", Some(0)),
+                ("https://mail.example.net", Some(1)),
+                ("https://intranet.example.org:8443", Some(1)),
+                ("https://example.biz/start", Some(2)),
+                ("^https://.*$", Some(4)),
+                ("https://never.example.info", Some(5)),
+                ("androidapp://com.example.mail", None),
+            ])
+        };
+        assert_eq!(
+            suggested(&item),
+            vec![
+                Suggestion {
+                    id: "a",
+                    username: "ana@example.test",
+                    domain: "example.com".into()
+                },
+                Suggestion {
+                    id: "a",
+                    username: "ana@example.test",
+                    domain: "mail.example.net".into()
+                },
+            ]
+        );
+        let no_username = Item {
+            username: None,
+            ..login(&[("https://example.com", None)])
+        };
+        let deleted = Item {
+            deleted: true,
+            ..login(&[("https://example.com", None)])
+        };
+        let note = Item {
+            kind: ItemKind::SecureNote,
+            ..login(&[("https://example.com", None)])
+        };
+        for item in [no_username, deleted, note] {
+            assert!(suggested(&item).is_empty());
+        }
     }
 }

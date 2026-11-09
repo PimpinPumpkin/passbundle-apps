@@ -22,6 +22,9 @@ if [ -n "${PB_TEST_SERVER:-}" ]; then
   (cd core && cargo run --locked --quiet --example test_account -- "$PB_TEST_SERVER" "$email" "$password") > /dev/null
   defines=(--dart-define="PB_TEST_SERVER=$PB_TEST_SERVER" --dart-define="PB_TEST_EMAIL=$email" --dart-define="PB_TEST_PASSWORD=$password")
 fi
+# Where the test saves the screens it draws, for looking at (CI's artifacts).
+mkdir -p app/build/ios-screens
+defines+=(--dart-define="PB_SHOTS=$PWD/app/build/ios-screens")
 
 cd app
 # The simulator sometimes never finishes installing or launching the app
@@ -60,4 +63,35 @@ for _ in 1 2 3; do
   status=0
   try || status=$?
 done
-exit "$status"
+[ "$status" = 0 ] || exit "$status"
+
+# The AutoFill extension, inside the app the tests ran: iOS's credential
+# provider, with the entitlements it needs (AutoFill, the App Group and
+# Keychain group it shares with the app), and the core linked in.
+built=$(find build/ios -path '*iphonesimulator*' -name Runner.app -type d | head -1)
+[ -n "$built" ] || { echo "No built app under app/build/ios." >&2; exit 1; }
+extension="$built/PlugIns/AutoFill.appex"
+[ "$(plutil -extract NSExtension.NSExtensionPointIdentifier raw "$extension/Info.plist")" = com.apple.authentication-services-credential-provider-ui ] \
+  || { echo "The extension isn't iOS's credential provider." >&2; exit 1; }
+# The extension's are in its code signature, where the simulator's Settings
+# and AutoFill read them (ENTITLEMENTS_DESTINATION in AutoFill.xcconfig); the
+# app's are in its binary, as simulator builds keep them.
+needed=(com.apple.developer.authentication-services.autofill-credential-provider group.com.passbundle.app com.passbundle.app.shared)
+entitlements=$(codesign -d --entitlements - --xml "$extension" 2> /dev/null || true)
+for one in "${needed[@]}"; do
+  grep -q "$one" <<< "$entitlements" || {
+    echo "The extension's signature is missing $one:" >&2
+    codesign -d --entitlements - "$extension" >&2 || true
+    exit 1
+  }
+  grep -aq "$one" "$built/Runner" || { echo "The app is missing the entitlement $one." >&2; exit 1; }
+done
+# Xcode's debug builds keep an executable's code in a .debug.dylib beside it.
+binaries=("$extension/AutoFill")
+[ -f "$extension/AutoFill.debug.dylib" ] && binaries+=("$extension/AutoFill.debug.dylib")
+[ "$(nm -gU "${binaries[@]}" 2> /dev/null | grep -c '_pb_fillable$')" -gt 0 ] || { echo "The extension doesn't have the core." >&2; exit 1; }
+# It provides passkeys too (iOS 17 and later), signing with the core.
+[ "$(plutil -extract NSExtension.NSExtensionAttributes.ASCredentialProviderExtensionCapabilities.ProvidesPasskeys raw "$extension/Info.plist")" = true ] \
+  || { echo "The extension doesn't say it provides passkeys." >&2; exit 1; }
+[ "$(nm -gU "${binaries[@]}" 2> /dev/null | grep -c '_pb_passkey_assert$')" -gt 0 ] || { echo "The extension can't sign with a passkey." >&2; exit 1; }
+echo "The AutoFill extension is in the app, with its entitlements and the core, for passwords and passkeys."

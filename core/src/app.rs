@@ -131,6 +131,11 @@ pub struct App {
     /// When the person last confirmed it's them (biometrics or the master
     /// password) to approve a sign-in; one confirmation, one approval.
     confirmed: Option<Instant>,
+    /// Opened beside the app by iOS's AutoFill extension
+    /// (`Accounts::open_beside`): it never syncs, which would write the
+    /// app's kept vault in the folder the app keeps it in. A passkey it saves
+    /// goes to the server, and the app's next sync brings it.
+    beside: bool,
     /// With "Immediately": autofill or a passkey unlocked the vault away
     /// from the app's screens and showed what there is to pick (`offered`).
     /// It locks when the pick's answer is handed back (`left`), or at this
@@ -212,6 +217,7 @@ impl App {
             icon_session: 0,
             sign_in_requests: None,
             confirmed: None,
+            beside: false,
             pick_by: None,
             own_health: None,
             own_health_unheard: false,
@@ -242,6 +248,12 @@ impl App {
         self.settings
             .as_ref()
             .map(|s| (s.server.as_str(), s.email.as_str()))
+    }
+
+    /// Opened beside the app by another process (iOS's AutoFill extension):
+    /// it never syncs (`sync`).
+    pub(crate) fn read_beside(&mut self) {
+        self.beside = true;
     }
 
     /// The device identifier a sign-in uses when this account has none kept.
@@ -780,7 +792,13 @@ impl App {
 
     /// Brings the vault up to date from the server and keeps the new sync.
     /// Signed out (the session ended) leaves the kept vault open, to read.
+    /// Never beside the app (`beside`).
     pub fn sync(&mut self) -> Result<()> {
+        if self.beside {
+            return Err(Error::Refused(
+                "PassBundle's app brings this account up to date",
+            ));
+        }
         // The account the vault kept here is (its id on the server).
         let kept = self.user_id().ok();
         let (Some(server), Some(settings)) = (&self.server, &self.settings) else {

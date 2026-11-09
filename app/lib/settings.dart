@@ -327,6 +327,7 @@ class _SettingsListState extends State<SettingsList> {
           ),
         // The same card the vault offers as it opens, on or not.
         if (isAndroid) const AutofillCard(heading: 'Autofill'),
+        if (isIPhone) const AutofillCard(heading: 'AutoFill'),
         SettingsGroup(
           title: 'Locking',
           footer: policyWait(policy),

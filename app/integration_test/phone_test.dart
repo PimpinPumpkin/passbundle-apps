@@ -108,6 +108,25 @@ void declinedTheOffer() {
   putOffAutofill();
 }
 
+/// Where an iPhone's test saves the screens it draws (tools/ios-app-test.sh),
+/// for looking at: CI's artifacts.
+const shots = String.fromEnvironment('PB_SHOTS');
+
+/// The screen as it is, saved where [shots] says, on an iPhone. Never fails
+/// a test: a screen that can't be saved is only said.
+Future<void> shot(WidgetTester tester, String name) async {
+  if (!Platform.isIOS || shots.isEmpty) return;
+  try {
+    await tester.pump(const Duration(milliseconds: 600));
+    final bytes = await IntegrationTestWidgetsFlutterBinding.instance
+        .takeScreenshot(name);
+    Directory(shots).createSync(recursive: true);
+    File('$shots/app-$name.png').writeAsBytesSync(bytes);
+  } catch (e) {
+    debugPrint('Couldn\'t save the screen $name: $e');
+  }
+}
+
 // A real server the phone reaches (tools/android-app-test.sh, with
 // PB_TEST_SERVER), and an account on it with one login.
 const server = String.fromEnvironment('PB_TEST_SERVER');
@@ -231,6 +250,14 @@ void main() {
       FocusManager.instance.primaryFocus?.unfocus();
       await tapWhenStill(tester, find.text('Sign in'));
       await pumpUntil(tester, find.text('Logins'));
+      if (Platform.isIOS) {
+        // Kept where the AutoFill extension reads it too, and iOS may suggest
+        // the logins with a website, by their usernames and domains (the
+        // test account's other tests add more).
+        expect(dir, contains('/Shared/AppGroup/'));
+        expect((await Core.suggest())['count'], greaterThanOrEqualTo(1));
+        await shot(tester, '1-vault');
+      }
 
       if (Platform.isAndroid) {
         // Kept sealed by the Keystore: one file, of the IV, ciphertext, and
@@ -336,6 +363,7 @@ void main() {
       // Unlocking with it: no master password, and nothing offered.
       await tester.tap(find.byTooltip('Lock'));
       await pumpUntil(tester, find.text(unlockWith));
+      await shot(tester, '2-lock-screen');
       await tester.tap(find.text(unlockWith));
       await pumpUntil(tester, find.text('Logins'));
       await tester.pump(const Duration(seconds: 1));
@@ -446,6 +474,66 @@ void main() {
     skip: !Platform.isAndroid,
   );
 
+  testWidgets(
+    'on an iPhone, offers to turn on AutoFill as the vault opens, and its button opens Settings\' AutoFill page',
+    (tester) async {
+      // Debug builds record that Settings would open instead of opening it
+      // (AppDelegate.swift, AutoFillSetup); iOS's own answer says whether
+      // PassBundle is on, which it isn't on a new simulator.
+      expect(await Core.useAutofillSetupStandIn(true), isTrue);
+      addTearDown(() => Core.useAutofillSetupStandIn(false));
+      final dir = (await Core.platform.invokeMethod<String>('filesDir'))!;
+      for (final kept in Directory(dir).listSync()) {
+        kept.deleteSync(recursive: true);
+      }
+      File('$dir/settings.json').writeAsStringSync(sampleSettings);
+      File('$dir/sync.json').writeAsStringSync(sampleSync);
+      await Core.openOnThisDevice();
+      declineOffer();
+
+      final status = AutofillStatus.from((await Core.autofillStatus())!);
+      expect(status.ios, isTrue);
+      expect(status.autofillOn, isFalse);
+
+      await tester.pumpWidget(PassBundleApp(key: UniqueKey()));
+      await pumpUntil(tester, find.text('Unlock PassBundle'));
+      await tester.enterText(find.byType(TextField), samplePassword);
+      await unlockWhenStill(tester);
+      await pumpUntil(tester, find.text('Logins'));
+      await pumpUntil(tester, find.text('Turn on AutoFill'));
+      expect(find.text('Use PassBundle for AutoFill'), findsOneWidget);
+      await shot(tester, '3-turn-on-autofill');
+      expect(find.text('Use PassBundle for passkeys'), findsNothing);
+
+      await tapWhenStill(
+        tester,
+        find.byKey(const ValueKey('turn-on-autofill')),
+      );
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(await Core.autofillSetupOpened(), [
+        {'for': 'autofill', 'opens': 'credentialProviderSettings'},
+      ]);
+
+      // Nothing turned on without the person: "Later" closes it, and
+      // Settings has the same card.
+      expect((await Core.autofillStatus())!['autofillOn'], isFalse);
+      await tapWhenStill(tester, find.text('Later'));
+      for (var i = 0; i < 50; i++) {
+        await tester.pump(const Duration(milliseconds: 100));
+        if (find.text('Turn on AutoFill').evaluate().isEmpty) break;
+      }
+      expect(find.text('Turn on AutoFill'), findsNothing);
+      expect(autofillPutOff(), isTrue);
+      await tester.tap(find.byTooltip('Settings'));
+      await pumpUntil(tester, find.byKey(const ValueKey('setup-autofill')));
+      expect(find.text('AutoFill'), findsOneWidget);
+      await shot(tester, '4-settings');
+      await tester.tap(find.byTooltip('Items'));
+      await tester.pump(const Duration(milliseconds: 400));
+    },
+    skip: !Platform.isIOS,
+  );
+
   // Graphite glass on the phone's own renderer: the ground's washes and the
   // translucent cards, edges, and shadows (theme.dart), drawn on each screen.
   testWidgets(
@@ -468,10 +556,12 @@ void main() {
       await unlockWhenStill(tester);
       await pumpUntil(tester, find.text('Logins'));
       await tester.pump(const Duration(seconds: 1));
+      await shot(tester, '5-dark-vault');
 
       await openItem(tester, 'Backup service');
       await pumpUntil(tester, find.byTooltip('Copy password'));
       await tester.pump(const Duration(seconds: 1));
+      await shot(tester, '6-dark-item');
       await tester.pageBack();
       await pumpUntil(tester, find.byTooltip('New item').hitTestable());
 
@@ -525,6 +615,11 @@ void main() {
     // screen, where Settings scrolls).
     if (Platform.isAndroid) {
       await pumpUntil(tester, find.text('Use PassBundle for autofill'));
+    }
+    // The same on an iPhone, once iOS says whether PassBundle is on for
+    // AutoFill.
+    if (Platform.isIOS) {
+      await pumpUntil(tester, find.text('Use PassBundle for AutoFill'));
     }
     // Tapped once it's in view and holds still: a tap while the tab is still
     // coming in lands on what's over it, and the menu never opens.

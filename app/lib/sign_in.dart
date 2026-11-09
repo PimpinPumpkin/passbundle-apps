@@ -716,7 +716,13 @@ class _UnlockScreenState extends State<UnlockScreen> {
         const SizedBox(height: 10),
         OutlinedButton.icon(
           onPressed: working ? null : unlockWithBiometric,
-          icon: const Icon(Icons.fingerprint_rounded),
+          // Face ID (or a phone's face unlock) by its face, as the offer
+          // to turn it on shows it; a fingerprint otherwise.
+          icon: Icon(
+            method!.toLowerCase().contains('face')
+                ? Icons.face_unlock_outlined
+                : Icons.fingerprint_rounded,
+          ),
           label: Text('Unlock with $method'),
         ),
       ],
