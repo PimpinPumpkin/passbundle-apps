@@ -127,6 +127,10 @@ mod os {
     use crate::Browser;
 
     const SERVICE: &str = "org.freedesktop.secrets";
+
+    /// A secret as the Secret Service hands it over: its session, its
+    /// parameters, its value, and its content type.
+    type Secret = (Path<'static>, Vec<u8>, Vec<u8>, String);
     const WAIT: Duration = Duration::from_secs(5);
 
     pub fn safe_storage(browser: Browser) -> Result<Zeroizing<Vec<u8>>, KeyError> {
@@ -158,7 +162,7 @@ mod os {
             )
             .map_err(|_| KeyError::Unavailable)?;
         let proxy = bus.with_proxy(SERVICE, item, WAIT);
-        let answer: Result<((Path<'static>, Vec<u8>, Vec<u8>, String),), _> = proxy.method_call(
+        let answer: Result<(Secret,), _> = proxy.method_call(
             "org.freedesktop.Secret.Item",
             "GetSecret",
             (session.clone(),),
@@ -179,7 +183,7 @@ mod os {
 pub(crate) mod os {
     use windows_sys::Win32::Foundation::LocalFree;
     use windows_sys::Win32::Security::Cryptography::{
-        CryptProtectData, CryptUnprotectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB,
+        CryptUnprotectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB,
     };
     use zeroize::{Zeroize, Zeroizing};
 
@@ -232,6 +236,7 @@ pub(crate) mod os {
     /// that make a Windows profile with the real data protection.
     #[cfg(any(test, feature = "fixtures"))]
     pub fn protect(bytes: &[u8]) -> Vec<u8> {
+        use windows_sys::Win32::Security::Cryptography::CryptProtectData;
         let input = CRYPT_INTEGER_BLOB {
             cbData: bytes.len() as u32,
             pbData: bytes.as_ptr().cast_mut(),

@@ -16,6 +16,7 @@ own privileged scripts (Marionette's chrome context).
 import json
 import os
 import pathlib
+import sqlite3
 import sys
 
 from selenium import webdriver
@@ -57,6 +58,7 @@ def firefox(folder):
 
 def run(driver, script, *args):
     """Runs an async script; it calls done(null) or done(<what went wrong>)."""
+    driver.set_script_timeout(60)
     problem = driver.execute_async_script(script, *args)
     if problem:
         raise SystemExit(problem)
@@ -70,8 +72,15 @@ const [logins, done] = arguments;
       url: l.url, username: l.username, password: l.password, note: l.note, useAccountStore: false,
     });
   }
-  const saved = await chrome.passwordsPrivate.getSavedPasswordList();
-  if (saved.length !== logins.length) throw new Error(`Chrome has ${saved.length} saved`);
+  // The list catches up with the store on its own time.
+  let saved = [];
+  for (let i = 0; i < 100 && saved.length < logins.length; i++) {
+    saved = await chrome.passwordsPrivate.getSavedPasswordList();
+    if (saved.length < logins.length) await new Promise((r) => setTimeout(r, 200));
+  }
+  if (saved.length !== logins.length) {
+    throw new Error(`Chrome has ${saved.length} saved (its API: ${Object.keys(chrome.passwordsPrivate).join(", ")})`);
+  }
 })().then(() => done(null), (e) => done(String(e && e.message || e)));
 """
 
@@ -113,6 +122,11 @@ def seed():
         run(driver, SAVE_CHROME, fakes["chrome"])
     finally:
         driver.quit()
+        for name in ["Login Data", "Login Data For Account"]:
+            store = chrome_dir / "Default" / name
+            if store.exists():
+                rows = sqlite3.connect(f"file:{store}?mode=ro", uri=True).execute("SELECT count(*) FROM logins").fetchone()[0]
+                print(f"Chrome's {name}: {rows} saved")
     firefox_root.mkdir(parents=True, exist_ok=True)
     (firefox_root / "profiles.ini").write_text(
         "[Profile0]\nName=default-release\nIsRelative=1\nPath=Profiles/plain.default-release\nDefault=1\n\n"
