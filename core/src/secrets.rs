@@ -224,7 +224,8 @@ impl OsSecretStore {
 /// the Mac keeps refresh tokens sealed in each account's folder instead
 /// (`seal_refresh_token`), and never touches the keychain for one. The
 /// device token is read and written only when signing in with the master
-/// password.
+/// password. It's the core's rule for the Mac, not the app's: whatever is
+/// built on the core there (today, the app alone) is signed the same way.
 #[cfg(not(target_os = "android"))]
 fn kept_here(secret: Secret) -> bool {
     !(cfg!(target_os = "macos") && secret == Secret::RefreshToken)

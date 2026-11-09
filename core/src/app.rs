@@ -2212,7 +2212,20 @@ fn keep_refresh_token(
         secrets.keep(&settings.server, &settings.email, &session.refresh_token);
     } else {
         let sealed = crate::secrets::seal_refresh_token(session.user_key(), &session.refresh_token);
-        let _ = store.save_sealed_refresh_token(&sealed);
+        if let Err(e) = store.save_sealed_refresh_token(&sealed) {
+            // Nothing to stop for: the session goes on, and at worst the
+            // next unlock asks to sign in again. Said on standard error,
+            // without the token, so a run from a terminal shows why.
+            use std::io::Write;
+            let why = match e {
+                Error::Disk { full: true } => "this device is out of space",
+                _ => "its folder couldn't be written",
+            };
+            let _ = writeln!(
+                std::io::stderr(),
+                "PassBundle: the session wasn't kept for next time ({why}), so the next unlock may ask to sign in again."
+            );
+        }
     }
 }
 

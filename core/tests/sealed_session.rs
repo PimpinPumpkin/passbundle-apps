@@ -4,8 +4,8 @@
 //! folder (the meta repo's docs/core.md, "The Mac without an Apple developer
 //! account"): on the vectors' sample vault, unlocking opens it, the sync
 //! after uses it and seals the new one the server gives, and it never
-//! reaches the store. One that doesn't open is no session, and signing out
-//! forgets it.
+//! reaches the store. One that doesn't open is no session, signing out
+//! forgets it, and a new one that can't be written doesn't fail the sync.
 
 use std::sync::{Arc, Mutex};
 
@@ -168,4 +168,33 @@ fn a_sealed_token_that_doesnt_open_is_no_session() {
     app.unlock(&sample.password).unwrap();
     assert_eq!(app.sync(), Err(Error::SignedOut));
     assert!(sent.lock().unwrap().is_empty());
+}
+
+#[test]
+fn a_new_token_that_cant_be_written_doesnt_fail_the_sync() {
+    let (url, sent) = stand_in();
+    let sample = Sample::new(&url);
+    sample
+        .store()
+        .save_sealed_refresh_token(&seal_refresh_token(&user_key(), "refresh-1"))
+        .unwrap();
+    let mut app = sample.open();
+    app.unlock(&sample.password).unwrap();
+
+    // Something in the way of the file: a folder that isn't empty.
+    let file = sample.dir.join("session.sealed");
+    std::fs::remove_file(&file).unwrap();
+    std::fs::create_dir(&file).unwrap();
+    std::fs::write(file.join("in-the-way"), "").unwrap();
+
+    // The sync is done all the same, and the session goes on (the core
+    // says on standard error that the new token wasn't kept).
+    app.sync().unwrap();
+    app.sync().unwrap();
+    assert_eq!(*sent.lock().unwrap(), vec!["refresh-1".to_owned()]);
+
+    // At worst, the next unlock has no session, and asks to sign in again.
+    app.lock();
+    app.unlock(&sample.password).unwrap();
+    assert_eq!(app.sync(), Err(Error::SignedOut));
 }
