@@ -94,12 +94,12 @@ jobs:
       run:
         shell: bash
         working-directory: browsers
-    env:
-      PB_REAL_BROWSERS: ${{ runner.temp }}/real-browsers
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: The throwaway home folder, the run's own
+        run: echo "PB_REAL_BROWSERS=$RUNNER_TEMP/real-browsers" >> "$GITHUB_ENV"
       - name: The OS secret store's headers
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libdbus-1-dev pkg-config
       - name: Install the pinned Rust toolchain
