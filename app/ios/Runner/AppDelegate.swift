@@ -416,24 +416,77 @@ enum Biometric {
 /// "Locking"): a plain cover over the window while the app isn't active.
 /// Scene notifications, since Flutter's scene delegate handles the scene's
 /// own calls.
+///
+/// And out of screen recordings, mirroring, and AirPlay, as Android's
+/// FLAG_SECURE keeps it out of them: iOS doesn't let an app leave itself out
+/// of a capture, but it says while the screen is being captured
+/// (`sceneCaptureState`, iOS 17), and for that long the cover stays, saying
+/// why. A screenshot can't be stopped on an iPhone, by any app.
 enum Snapshot {
   private static var covers: [ObjectIdentifier: UIView] = [:]
+  /// Scenes whose screen is being recorded, mirrored, or shared now.
+  private static var captured: Set<ObjectIdentifier> = []
+  private static var watched: Set<ObjectIdentifier> = []
 
   static func cover() {
     let center = NotificationCenter.default
     center.addObserver(forName: UIScene.willDeactivateNotification, object: nil, queue: .main) { note in
-      guard let scene = note.object as? UIWindowScene, let window = scene.windows.first,
-        covers[ObjectIdentifier(scene)] == nil
-      else { return }
-      let view = UIView(frame: window.bounds)
-      view.backgroundColor = .systemBackground
-      view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-      window.addSubview(view)
-      covers[ObjectIdentifier(scene)] = view
+      guard let scene = note.object as? UIWindowScene else { return }
+      show(scene)
     }
     center.addObserver(forName: UIScene.didActivateNotification, object: nil, queue: .main) { note in
-      guard let scene = note.object as? UIScene else { return }
-      covers.removeValue(forKey: ObjectIdentifier(scene))?.removeFromSuperview()
+      guard let scene = note.object as? UIWindowScene else { return }
+      watch(scene)
+      if !captured.contains(ObjectIdentifier(scene)) { hide(scene) }
     }
+  }
+
+  /// Hears when the scene's screen starts or stops being captured.
+  private static func watch(_ scene: UIWindowScene) {
+    guard watched.insert(ObjectIdentifier(scene)).inserted else { return }
+    scene.registerForTraitChanges([UITraitSceneCaptureState.self]) { (scene: UIWindowScene, _: UITraitCollection) in
+      capturing(scene)
+    }
+    capturing(scene)
+  }
+
+  private static func capturing(_ scene: UIWindowScene) {
+    let id = ObjectIdentifier(scene)
+    if scene.traitCollection.sceneCaptureState == .active {
+      captured.insert(id)
+      hide(scene)
+      show(scene, saying: "PassBundle is hidden while your screen is recorded or shared.")
+    } else if captured.remove(id) != nil {
+      hide(scene)
+      if scene.activationState != .foregroundActive { show(scene) }
+    }
+  }
+
+  private static func show(_ scene: UIWindowScene, saying words: String? = nil) {
+    guard let window = scene.windows.first, covers[ObjectIdentifier(scene)] == nil else { return }
+    let view = UIView(frame: window.bounds)
+    view.backgroundColor = .systemBackground
+    view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+    if let words {
+      let label = UILabel()
+      label.text = words
+      label.textColor = .secondaryLabel
+      label.font = .preferredFont(forTextStyle: .body)
+      label.numberOfLines = 0
+      label.textAlignment = .center
+      label.translatesAutoresizingMaskIntoConstraints = false
+      view.addSubview(label)
+      NSLayoutConstraint.activate([
+        label.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+        label.leadingAnchor.constraint(equalTo: view.layoutMarginsGuide.leadingAnchor),
+        label.trailingAnchor.constraint(equalTo: view.layoutMarginsGuide.trailingAnchor),
+      ])
+    }
+    window.addSubview(view)
+    covers[ObjectIdentifier(scene)] = view
+  }
+
+  private static func hide(_ scene: UIWindowScene) {
+    covers.removeValue(forKey: ObjectIdentifier(scene))?.removeFromSuperview()
   }
 }
