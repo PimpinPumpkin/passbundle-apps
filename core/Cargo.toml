@@ -23,7 +23,9 @@ test-trust = []
 # store), for CI's builds that tools/measure.sh, tools/measure.ps1, and
 # tools/mac-update-test.sh --launch open. Never in a release
 # (.github/workflows/macos-release.yml checks): a release reads neither.
-test-hooks = []
+# With it, the app's tests can point the core at made-up browser profiles
+# (src/browser_import.rs, the browsers crate's fixtures), never the real ones.
+test-hooks = ["passbundle-browsers/fixtures"]
 
 # Signs in, prints what it reads, and saves an item: the e2e suite checks the
 # web vault and the core read each other's items.
@@ -70,6 +72,9 @@ zxcvbn = "3"
 # The clipboard on computers; phones copy through the app (docs/phones.md, "Copying").
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 arboard = { version = "3", default-features = false }
+# The browsers on a computer, to import the passwords saved in the profiles
+# a person chooses (src/browser_import.rs; ../browsers). Never on phones.
+passbundle-browsers = { path = "../browsers" }
 # Windows and Linux test releases (src/updates): each release's manifest is
 # signed with Ed25519, and names a zip (Windows) or a tarball (Linux).
 ed25519-dalek = "2"
@@ -131,6 +136,11 @@ serde_json = "1"
 # A stand-in for GitHub's releases, for the updater's tests (src/updates).
 [dev-dependencies]
 tiny_http = "0.12"
+
+# Made-up browser profiles with known fake passwords, for the import's tests
+# (tests/browser_import.rs). Never the real ones.
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dev-dependencies]
+passbundle-browsers = { path = "../browsers", features = ["fixtures"] }
 
 # The KDFs at full strength in tests, so they take milliseconds, not minutes.
 [profile.dev.package."*"]

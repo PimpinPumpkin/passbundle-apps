@@ -281,6 +281,19 @@ impl Store {
         )
     }
 
+    /// Whether importing from the browsers on this computer was offered to
+    /// this account here already (browser_import.rs): it's offered once by
+    /// itself, and from the menu after that.
+    pub fn browser_import_offered(&self) -> bool {
+        self.read("browser-import.json")
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+            .is_some_and(|v| v["offered"] == true)
+    }
+
+    pub fn save_browser_import_offered(&self) -> Result<()> {
+        self.write("browser-import.json", "{\"offered\":true}")
+    }
+
     /// Its folder; None for `Store::none`.
     pub fn dir(&self) -> Option<&Path> {
         self.dir.as_deref()

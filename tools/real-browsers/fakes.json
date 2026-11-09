@@ -1,0 +1,15 @@
+{
+  "chrome": [
+    { "url": "https://mail.example.test/login", "username": "ana@example.test", "password": "real-chrome-pass-1", "note": "A note saved in Chrome" },
+    { "url": "https://crm.example.test/", "username": "ana", "password": "real-chrome-pass-2", "note": "" }
+  ],
+  "firefox": [
+    { "url": "https://wiki.example.test", "username": "ana", "password": "real-firefox-pass-3" }
+  ],
+  "firefoxPrimary": {
+    "password": "made-up-primary-password-for-ci-4",
+    "logins": [
+      { "url": "https://bank.example.test", "username": "ana", "password": "real-firefox-pass-5" }
+    ]
+  }
+}

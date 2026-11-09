@@ -233,6 +233,24 @@ class Core {
   late final _testExpiration = _lib.lookupFunction<_Str1, _Str1>(
     'pb_test_expiration',
   );
+  late final _browserProfiles = _lib.lookupFunction<_Str1, _Str1>(
+    'pb_browser_profiles',
+  );
+  late final _browserImportOffer = _lib.lookupFunction<_Str1, _Str1>(
+    'pb_browser_import_offer',
+  );
+  late final _browserImport = _lib.lookupFunction<_Str2, _Str2>(
+    'pb_browser_import',
+  );
+  late final _browserTurnOff = _lib.lookupFunction<_Str2, _Str2>(
+    'pb_browser_turn_off',
+  );
+  late final _testBrowsers = _lib.lookupFunction<_Str3, _Str3>(
+    'pb_test_browsers',
+  );
+  late final _testBrowsersRead = _lib.lookupFunction<_Str0, _Str0>(
+    'pb_test_browsers_read',
+  );
   late final _history = _lib.lookupFunction<_Str2, _Str2>('pb_history');
   late final _itemVersion = _lib.lookupFunction<_Str4, _Str4>('pb_item_version');
   late final _restoreVersion = _lib.lookupFunction<_Str3, _Str3>('pb_restore_version');
@@ -995,6 +1013,75 @@ class Core {
   @visibleForTesting
   void testExpiration(Map<String, Map<String, String>> items) =>
       _with([jsonEncode(items)], (p) => _answer(_testExpiration(p[0])));
+
+  // Importing from this computer's browsers (browser_import.dart; the
+  // core's browser_import.rs). Computers only.
+
+  /// The browser profiles here, chosen by the rules for the account shown
+  /// (`profiles`, `guided`, `ask`, `keepsItemsOut`). Reads no passwords.
+  /// Away from the screens, since a sync may have the core.
+  static Future<Answer> browserProfiles() => _background(
+    (c, a) => c._with([a], (p) => c._answer(c._browserProfiles(p[0]))),
+  );
+
+  /// Whether to offer importing from the browsers by itself now: once per
+  /// account on this device, when there's a profile to import from. Saying
+  /// yes counts as offered.
+  static Future<bool> browserImportOffer() async =>
+      (await _background(
+        (c, a) =>
+            c._with([a], (p) => c._answer(c._browserImportOffer(p[0]))),
+      )).body['offer'] ==
+      true;
+
+  /// Imports from the profiles the person chose just now ([ids]), with the
+  /// Firefox Primary Passwords they typed for this import, by profile id.
+  /// The bridge's copies are wiped after the call; the request's Dart string
+  /// can't be, as with the master password (docs/core.md, "Memory").
+  static Future<Answer> browserImport(
+    List<String> ids, [
+    Map<String, String> primaryPasswords = const {},
+  ]) {
+    final request = jsonEncode({
+      'profiles': ids,
+      'primaryPasswords': primaryPasswords,
+    });
+    return _background(
+      (c, a) => c._with([
+        a,
+        request,
+      ], (p) => c._answer(c._browserImport(p[0], p[1]))),
+    );
+  }
+
+  /// Turns off the chosen profiles' own password saving: `profiles`, each
+  /// with its `result`.
+  static Future<Answer> browserTurnOff(List<String> ids) {
+    final list = jsonEncode(ids);
+    return _background(
+      (c, a) => c._with([
+        a,
+        list,
+      ], (p) => c._answer(c._browserTurnOff(p[0], p[1]))),
+    );
+  }
+
+  /// Made-up browsers for [email] in [root], laid out for [platform]
+  /// ('windows', 'mac', 'linux', or '' for this computer's), which the core
+  /// then looks at instead of none: for tests, with a core built with its
+  /// test hooks (which never looks at the real ones). An empty [root] takes
+  /// them away. Answers the made-up Firefox profile's Primary Password.
+  @visibleForTesting
+  String testBrowsers(String root, {String platform = '', String email = ''}) =>
+      (_with([root, platform, email], (p) => _answer(_testBrowsers(p[0], p[1], p[2])))
+              as Map<String, dynamic>)['primaryPassword']
+          as String;
+
+  /// The browser profiles read since this was last asked, by id: tests.
+  @visibleForTesting
+  List<String> testBrowsersRead() =>
+      ((_answer(_testBrowsersRead()) as Map<String, dynamic>)['read'] as List)
+          .cast<String>();
 
   /// Copies what the generator shows: the core takes it as the generator's
   /// last value, then copies that as it copies any secret, which clears in

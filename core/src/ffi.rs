@@ -3261,6 +3261,305 @@ pub extern "C" fn pb_update_started() -> *mut c_char {
     on_updates(crate::updates::started)
 }
 
+// Importing from the browsers on this computer (browser_import.rs; meta
+// repo DESIGN.md, "Automatic import"). Computers only.
+
+/// Where this person's browsers are, and the OS's keys for them. Builds with
+/// test hooks never look at the real ones: only at the made-up browsers a
+/// test points them at (`pb_test_browsers`), else at none. Nor do the core's
+/// own tests.
+#[cfg(not(phone))]
+fn browsers_here() -> Option<(
+    passbundle_browsers::Home,
+    Box<dyn passbundle_browsers::Keys>,
+)> {
+    #[cfg(feature = "test-hooks")]
+    {
+        crate::browser_import::test_hooks::home().map(|home| {
+            let keys: Box<dyn passbundle_browsers::Keys> =
+                Box::new(passbundle_browsers::fixtures::TestKeys::default());
+            (home, keys)
+        })
+    }
+    #[cfg(all(not(feature = "test-hooks"), test))]
+    {
+        None
+    }
+    #[cfg(all(not(feature = "test-hooks"), not(test)))]
+    {
+        passbundle_browsers::Home::this_person().map(|home| {
+            let keys: Box<dyn passbundle_browsers::Keys> =
+                Box::new(passbundle_browsers::SystemKeys);
+            (home, keys)
+        })
+    }
+}
+
+#[cfg(not(phone))]
+fn profile_json(profile: &passbundle_browsers::Profile) -> Value {
+    json!({
+        "id": profile.id,
+        "browser": profile.browser.key(),
+        "browserName": profile.browser.name(),
+        "browserShort": profile.browser.short(),
+        "name": profile.name,
+        "email": profile.email,
+        "managedBy": profile.managed_by,
+        "default": profile.default,
+    })
+}
+
+/// The browser profiles on this computer, for the import screen, chosen by
+/// the rules for this account (DESIGN.md, "Which browser profiles"): `{ok,
+/// profiles: [{id, browser, browserName, browserShort, name, email,
+/// managedBy, default, chosen, rule, personal, open, savingOn}], guided:
+/// [{browser, browserName, words}], ask, keepsItemsOut}`. `rule` is
+/// "yourEmail", "workDomain", "browserDefault", or null; `ask` that no rule
+/// chose any. Reads no passwords. Unlocked only.
+///
+/// # Safety
+/// `account` is null or a NUL-terminated UTF-8 string, valid for the call.
+#[cfg(not(phone))]
+#[no_mangle]
+pub unsafe extern "C" fn pb_browser_profiles(account: *const c_char) -> *mut c_char {
+    let account = text(account);
+    with_app(&account, |app| {
+        let Some((home, _)) = browsers_here() else {
+            return json!({ "ok": true, "profiles": [], "guided": [], "ask": false, "keepsItemsOut": null });
+        };
+        match app.browser_profiles(&home) {
+            Ok(found) => json!({
+                "ok": true,
+                "profiles": found.profiles.iter().map(|listed| {
+                    let mut p = profile_json(&listed.profile);
+                    p["chosen"] = json!(listed.choice.chosen);
+                    p["rule"] = json!(listed.choice.rule.map(|r| match r {
+                        crate::browser_import::Rule::YourEmail => "yourEmail",
+                        crate::browser_import::Rule::WorkDomain => "workDomain",
+                        crate::browser_import::Rule::BrowserDefault => "browserDefault",
+                    }));
+                    p["personal"] = json!(listed.choice.personal);
+                    p["open"] = json!(listed.open);
+                    p["savingOn"] = json!(listed.saving_on);
+                    p
+                }).collect::<Vec<_>>(),
+                "guided": found.guided.iter().map(|b| json!({
+                    "browser": b.key(),
+                    "browserName": b.name(),
+                    "words": crate::browser_import::guided_words(*b, crate::browser_import::Why::OnlyTheBrowser),
+                })).collect::<Vec<_>>(),
+                "ask": found.ask,
+                "keepsItemsOut": found.organizations.keeps_items_out,
+            }),
+            Err(e) => failed(e),
+        }
+    })
+}
+
+/// Whether to offer importing from the browsers now, by itself: once per
+/// account on this device, after unlocking, when there's a browser profile
+/// to import from. Answering yes counts as offered. `{ok, offer}`.
+///
+/// # Safety
+/// `account` is null or a NUL-terminated UTF-8 string, valid for the call.
+#[cfg(not(phone))]
+#[no_mangle]
+pub unsafe extern "C" fn pb_browser_import_offer(account: *const c_char) -> *mut c_char {
+    let account = text(account);
+    with_app(&account, |app| {
+        if app.browser_import_offered() || app.vault().is_none() {
+            return json!({ "ok": true, "offer": false });
+        }
+        let any = browsers_here()
+            .is_some_and(|(home, _)| !passbundle_browsers::find_profiles(&home).is_empty());
+        if !any {
+            return json!({ "ok": true, "offer": false });
+        }
+        // Offered once, even if keeping that fails (then maybe again).
+        let _ = app.set_browser_import_offered();
+        json!({ "ok": true, "offer": true })
+    })
+}
+
+/// Imports from the browser profiles the person chose just now, and no
+/// others: `request` is `{profiles: [id], primaryPasswords: {id: password}}`
+/// (Firefox's, typed for this import only). Answers `{ok, added, toCheck,
+/// alreadyThere, empty, neverSave, unreadable, checkFolders, synced,
+/// profiles: [{id, browser, browserName, browserShort, name, outcome,
+/// logins, words}]}`, `outcome` one of "read", "needsPrimaryPassword",
+/// "wrongPrimaryPassword", "guided" (with `words`: why, and what to do), or
+/// "gone". Each new login is encrypted here with the account's keys before
+/// it's sent.
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+#[cfg(not(phone))]
+#[no_mangle]
+pub unsafe extern "C" fn pb_browser_import(
+    account: *const c_char,
+    request: *const c_char,
+) -> *mut c_char {
+    use crate::browser_import::Outcome;
+    let account = text(account);
+    let request = Zeroizing::new(text(request));
+    with_app_waiting(&account, |app| {
+        let Ok(asked) = serde_json::from_str::<Value>(&request) else {
+            return failed(Error::Malformed(
+                "an import request the core can't read".into(),
+            ));
+        };
+        let chosen: Vec<String> = asked["profiles"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|id| id.as_str().map(str::to_owned))
+            .collect();
+        let primary: std::collections::HashMap<String, Zeroizing<String>> = asked
+            ["primaryPasswords"]
+            .as_object()
+            .into_iter()
+            .flatten()
+            .filter_map(|(id, p)| Some((id.clone(), Zeroizing::new(p.as_str()?.to_owned()))))
+            .collect();
+        drop(asked);
+        let Some((home, keys)) = browsers_here() else {
+            return failed(Error::Refused(
+                "PassBundle found no browsers on this computer",
+            ));
+        };
+        match app.import_from_browsers(&home, keys.as_ref(), &chosen, &primary) {
+            Ok(imported) => json!({
+                "ok": true,
+                "added": imported.added,
+                "toCheck": imported.to_check,
+                "alreadyThere": imported.already_there,
+                "empty": imported.empty,
+                "neverSave": imported.never_save,
+                "unreadable": imported.unreadable,
+                "checkFolders": imported.check_folders,
+                "synced": imported.synced,
+                "profiles": imported.profiles.iter().map(|(id, profile, outcome)| {
+                    let mut p = match profile {
+                        Some(profile) => profile_json(profile),
+                        None => json!({ "id": id }),
+                    };
+                    let (name, logins, words) = match outcome {
+                        Outcome::Read { logins } => ("read", Some(*logins), None),
+                        Outcome::NeedsPrimaryPassword => ("needsPrimaryPassword", None, None),
+                        Outcome::WrongPrimaryPassword => ("wrongPrimaryPassword", None, None),
+                        Outcome::Guided(why) => (
+                            "guided",
+                            None,
+                            profile.as_ref().map(|p| crate::browser_import::guided_words(p.browser, *why)),
+                        ),
+                        Outcome::Gone => ("gone", None, None),
+                    };
+                    p["outcome"] = json!(name);
+                    p["logins"] = json!(logins);
+                    p["words"] = json!(words);
+                    p
+                }).collect::<Vec<_>>(),
+            }),
+            Err(e) => failed(e),
+        }
+    })
+}
+
+/// Turns off the chosen profiles' own password saving, leaving what they
+/// saved: `ids` is a JSON list of profile ids. `{ok, profiles: [{id,
+/// browser, browserName, browserShort, name, result, byHand}]}`, `result`
+/// one of "done", "alreadyOff", "closeFirst" (the browser is open), or
+/// "failed", and `byHand` how to do it in the browser itself.
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+#[cfg(not(phone))]
+#[no_mangle]
+pub unsafe extern "C" fn pb_browser_turn_off(
+    account: *const c_char,
+    ids: *const c_char,
+) -> *mut c_char {
+    use crate::browser_import::TurnOff;
+    let account = text(account);
+    let ids: Vec<String> = serde_json::from_str(&text(ids)).unwrap_or_default();
+    with_app(&account, |app| {
+        let Some((home, _)) = browsers_here() else {
+            return json!({ "ok": true, "profiles": [] });
+        };
+        match app.turn_off_browser_saving(&home, &ids) {
+            Ok(results) => json!({
+                "ok": true,
+                "profiles": results.iter().map(|(id, profile, result)| {
+                    let mut p = match profile {
+                        Some(profile) => profile_json(profile),
+                        None => json!({ "id": id }),
+                    };
+                    p["result"] = json!(match result {
+                        TurnOff::Done => "done",
+                        TurnOff::AlreadyOff => "alreadyOff",
+                        TurnOff::CloseFirst => "closeFirst",
+                        TurnOff::Failed => "failed",
+                    });
+                    p["byHand"] = json!(profile
+                        .as_ref()
+                        .map(|p| crate::browser_import::turn_off_by_hand(p.browser)));
+                    p
+                }).collect::<Vec<_>>(),
+            }),
+            Err(e) => failed(e),
+        }
+    })
+}
+
+/// For the app's tests (test hooks only): makes the sample browsers
+/// (browser_import.rs, `make_sample`) for `email` in the folder `root`, laid
+/// out as `platform` ("windows", "mac", "linux", or "" for this computer's)
+/// lays one out, and points the core at them. An empty `root` points it at
+/// none. `{ok, primaryPassword}`, the sample Firefox profile's made-up one.
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+#[cfg(all(feature = "test-hooks", not(phone)))]
+#[no_mangle]
+pub unsafe extern "C" fn pb_test_browsers(
+    root: *const c_char,
+    platform: *const c_char,
+    email: *const c_char,
+) -> *mut c_char {
+    use passbundle_browsers::Platform;
+    let (root, platform, email) = (text(root), text(platform), text(email));
+    let platform = match platform.as_str() {
+        "windows" => Platform::Windows,
+        "mac" => Platform::Mac,
+        "linux" => Platform::Linux,
+        _ => Platform::this(),
+    };
+    let hooks = &crate::browser_import::test_hooks::HOME;
+    if root.is_empty() {
+        *hooks.lock().unwrap_or_else(|p| p.into_inner()) = None;
+    } else {
+        let root = std::path::PathBuf::from(root);
+        crate::browser_import::test_hooks::make_sample(&root, platform, &email);
+        *hooks.lock().unwrap_or_else(|p| p.into_inner()) = Some((root, platform));
+    }
+    out(
+        json!({ "ok": true, "primaryPassword": crate::browser_import::test_hooks::PRIMARY_PASSWORD }),
+    )
+}
+
+/// For the app's tests (test hooks only): the browser profiles read since
+/// the last time this was asked, by id. `{ok, read: [id]}`.
+#[cfg(all(feature = "test-hooks", not(phone)))]
+#[no_mangle]
+pub extern "C" fn pb_test_browsers_read() -> *mut c_char {
+    let read = std::mem::take(
+        &mut *crate::browser_import::test_hooks::READ
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()),
+    );
+    out(json!({ "ok": true, "read": read }))
+}
+
 /// Frees a string the core returned.
 ///
 /// # Safety

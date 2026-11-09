@@ -1,0 +1,63 @@
+[package]
+name = "passbundle-browsers"
+version = "0.1.0"
+description = "The browsers on this computer: their profiles, the passwords saved in the ones a person chooses, and turning their own password saving off"
+license = "GPL-3.0-only"
+edition = "2021"
+rust-version = "1.89"
+publish = false
+
+# Its own workspace, for its own tests; the core uses it by path. Built from
+# the browsers' own documentation and file formats (Chromium's and Firefox's
+# open-source code), never another password manager's importer, and it links
+# no Bitwarden SDK or desktop_native crates (meta repo, CLEAN_ROOM.md).
+[workspace]
+
+[features]
+# Writes made-up browser profiles with known fake passwords (src/fixtures.rs),
+# for the core's and the app's tests. Never in a release: the core turns it
+# on only with its own test-hooks feature.
+fixtures = []
+
+[dependencies]
+aes = "0.8"
+aes-gcm = "0.10"
+base64 = "0.22"
+cbc = { version = "0.1", features = ["alloc"] }
+des = "0.8"
+# Where each OS keeps a person's app data.
+dirs = "6"
+hmac = "0.12"
+pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
+# SQLite, built in: Chromium's Login Data and Firefox's key4.db are SQLite
+# files, opened read-only and as they are on disk.
+rusqlite = { version = "0.41", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha1 = "0.10"
+sha2 = "0.10"
+zeroize = { version = "1", features = ["derive"] }
+
+# Windows: the person's own key for Chromium's passwords, which Windows
+# keeps for them (DPAPI), and whether a browser has its profile open.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Security_Cryptography",
+  "Win32_Storage_FileSystem",
+] }
+
+# macOS: a Chromium browser's key in the person's login keychain, which macOS
+# asks them about first.
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3"
+
+# Linux: a Chromium browser's key in the desktop's keyring (the Secret
+# Service), over the session's D-Bus.
+[target.'cfg(target_os = "linux")'.dependencies]
+dbus = "0.9"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+

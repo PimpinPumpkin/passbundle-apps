@@ -939,6 +939,39 @@ impl Server {
         }
     }
 
+    /// Saves new items to the person's own vault in one request, as
+    /// upstream's importers do (`POST /api/ciphers/import`): each already
+    /// encrypted by `Vault::encrypt_item`, and `folder_of` putting some of
+    /// them (by their place in `ciphers`) in `folders`, each an existing
+    /// folder's id (with its encrypted name) or a new folder's encrypted name.
+    pub fn import_items(
+        &self,
+        session: &mut Session,
+        ciphers: &[Value],
+        folders: &[(Option<String>, String)],
+        folder_of: &[(usize, usize)],
+    ) -> Result<()> {
+        let folders: Vec<Value> = folders
+            .iter()
+            .map(|(id, name)| json!({ "id": id, "name": name }))
+            .collect();
+        let relationships: Vec<Value> = folder_of
+            .iter()
+            .map(|(item, folder)| json!({ "key": item, "value": folder }))
+            .collect();
+        self.call(
+            session,
+            "POST",
+            "/api/ciphers/import",
+            Some(json!({
+                "ciphers": ciphers,
+                "folders": folders,
+                "folderRelationships": relationships,
+            })),
+        )
+        .map(|_| ())
+    }
+
     /// Puts an organization's item in these of its shared folders (and out
     /// of the others the person reaches), as upstream's apps do.
     pub fn set_item_collections(
