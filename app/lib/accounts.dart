@@ -413,7 +413,8 @@ Future<void> showAccounts(BuildContext context, AccountsMenu menu) =>
     );
 
 /// Asks before signing out of an account: its vault leaves this device, and
-/// so does its biometric unlock (on a computer, the browser extension's too).
+/// so does its biometric unlock (through the desktop agent, the browser
+/// extension's too).
 /// True if the person says so. [method] is its biometric unlock's name, when
 /// it's on; [email] names the account it's for (the one shown), and that the
 /// others stay.
@@ -434,6 +435,8 @@ Future<bool> askToSignOut(
                 ? 'This removes $what from this device. Signing in again brings it back from the server.'
                 : isPhone
                 ? 'This removes $what from this phone and turns off unlocking with $method. Signing in again brings the vault back from the server.'
+                : isMac
+                ? 'This removes $what from this Mac and turns off unlocking with $method. Signing in again brings the vault back from the server.'
                 : 'This removes $what from this device and turns off unlocking with $method, in your browser extension too. Signing in again brings the vault back from the server.') +
             rest,
       ),

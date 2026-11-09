@@ -1,0 +1,32 @@
+{
+  "about": "What the Mac app keeps on the Mac while it has no Apple developer account (docs/core.md, \"The Mac without an Apple developer account\"). Made by make-mac-local-v1.mjs. All binary values are base64.",
+  "refreshToken": {
+    "about": "The session's refresh token, kept in the account's folder (session.sealed) as a type 2 string under its own key: HKDF-Expand-SHA256 of the user key (the 64 bytes as the PRK) with `info`, 64 bytes (32 for AES-256-CBC, then 32 for HMAC-SHA256).",
+    "userKey": "QEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaW1xdXl9gYWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXp7fH1+fw==",
+    "info": "keykeeper refresh token v1",
+    "key": "59T+Id4QfLD1felxRXixm9NCYzybLG+SIGlNsIoXRM2SxBN/P240Mytb76ueDflQRuP+a7Fpc9lOxVBpTKUyRA==",
+    "token": "a-refresh-token-from-the-server.4f6c2a9e",
+    "iv": "oKGio6SlpqeoqaqrrK2urw==",
+    "sealed": "2.oKGio6SlpqeoqaqrrK2urw==|Vyg2krGCUn0yNFk137vZ691tvrhU+aQPEYDUI6TWGoD8TxVbcJTPFGTSF6D8t3wc|aXXOY6W/j1dBfxBYSD4rki/YD1Ai9dGqqTgkDLVCrUc=",
+    "tampered": "2.oKGio6SlpqeoqaqrrK2urw==|Vyg2krGCUn0yNFk137vZ691tvrhU+aQPEYDUI6TWGoD8TxVbcJTPFGTSF6D8t3wd|aXXOY6W/j1dBfxBYSD4rki/YD1Ai9dGqqTgkDLVCrUc=",
+    "tamperedAbout": "The last byte of the ciphertext changed after sealing: its MAC fails, and it's refused.",
+    "underUserKey": "2.oKGio6SlpqeoqaqrrK2urw==|C0Etne7gyxUOcHmHhcy0CyWY/C2O1ED4q+BLVdWTD8OEEoWCb4IxEu2pxS/QheKo|hstBZQV/dgoXZiP0kT+mYVzxdDkQnXgmdD4sO+aWkew=",
+    "underUserKeyAbout": "The same token under the user key itself, as an item's field would be: refused, since the token's key isn't the user key."
+  },
+  "touchId": {
+    "about": "The user key for Touch ID, sealed to a key in the Secure Enclave (this software key stands in for it). The shared secret is ECDH on P-256 of the ephemeral key and the enclave's public key; the key is HKDF-SHA256 of it with salt ephemeralPublicKey || enclavePublicKey and `info`, 32 bytes; sealed is AES-256-GCM's nonce || ciphertext || tag (CryptoKit's combined form), authenticating `info`, a zero byte, and the account's id.",
+    "enclavePrivateKey": "ERITFBUWFxgZGhscHR4fICEiIyQlJicoKSorLC0uLzA=",
+    "enclavePublicKey": "BExjNuO4s953G2E6HHoXNINM1pwaT1/+yyQMY7wN2xV09olsXRTKROADd5HCMAMzJZpxuQHlJYV10QfluKxItCQ=",
+    "ephemeralPrivateKey": "IiMkJSYnKCkqKywtLi8wMTIzNDU2Nzg5Ojs8PT4/QEE=",
+    "ephemeralPublicKey": "BAFsx6Zvn+JZQYK3zaqNZhzLetUQaqKaOFZDtLQC2r5qBf8oNZ94zp7RjP9HAgdp2TSCyQsTL0gFyZe3eBXXlvE=",
+    "sharedSecret": "09B0pl343mErRXBUdBDvjDdfeHA1evfO2A0qUWIWHes=",
+    "info": "keykeeper Touch ID v1",
+    "key": "AjWUeY0Ng1FBSg+7hb4tZTMU2xCfclwIxku88jLi4AU=",
+    "account": "0123456789abcdef0123456789abcdef",
+    "nonce": "MzQ1Njc4OTo7PD0+",
+    "userKey": "gIGCg4SFhoeIiYqLjI2Oj5CRkpOUlZaXmJmam5ydnp+goaKjpKWmp6ipqqusra6vsLGys7S1tre4ubq7vL2+vw==",
+    "sealed": "MzQ1Njc4OTo7PD0++F4fiHTbFMhc96RWlMaEzMm82E5V0irLYaD6xTd9q+S3aYysYA/AIUwU2NMwviZH7Pwo+GYk7/FkL7ux5BSX4sVeWVSREwRWYs76FR+fnsQ=",
+    "otherAccount": "fedcba9876543210fedcba9876543210",
+    "otherAccountAbout": "Opening `sealed` as this account's is refused: the tag covers the account's id."
+  }
+}

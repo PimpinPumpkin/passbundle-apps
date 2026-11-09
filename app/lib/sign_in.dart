@@ -592,10 +592,11 @@ class _UnlockScreenState extends State<UnlockScreen> {
     super.dispose();
   }
 
-  /// The phone's own prompt, by itself, when the app asks for it (it opened
-  /// or came back locked): once. Cancelling it leaves the master password.
+  /// The phone's own prompt, or the Mac's Touch ID, by itself, when the app
+  /// asks for it (it opened or came back locked): once. Cancelling it leaves
+  /// the master password.
   void promptIfAsked() {
-    if (!isPhone ||
+    if (!ownBiometrics ||
         !widget.promptBiometric ||
         method == null ||
         working ||
@@ -636,7 +637,8 @@ class _UnlockScreenState extends State<UnlockScreen> {
     );
   }
 
-  /// Unlocks with the phone's biometrics, or the desktop agent's. Asked
+  /// Unlocks with the phone's biometrics, the Mac's Touch ID, or the
+  /// desktop agent's Windows Hello. Asked
   /// for [byItself] (the app opened or came back locked), the field stays
   /// as it is meanwhile, and a cancel brings up the keyboard for the master
   /// password instead.
