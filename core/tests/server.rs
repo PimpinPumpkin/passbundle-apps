@@ -2226,3 +2226,124 @@ fn a_new_device_waits_for_its_number_from_another_and_is_known_after() {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// Importing from a computer's browsers (browser_import.rs), into a real
+/// account on a real server, from made-up profiles with known fake passwords
+/// in a throwaway folder: the new logins come back through a sync, the
+/// password that differs from one already saved in its "Check these"
+/// folder, and the server's own copy has none of their values as they are.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[test]
+fn importing_from_a_computers_browsers_saves_what_the_server_has_only_encrypted() {
+    use passbundle_browsers::fixtures::{ChromiumProfile, Fake, FirefoxProfile, Fixture, TestKeys};
+    use passbundle_browsers::{Browser, Platform};
+    use passbundle_core::browser_import::Outcome;
+
+    let Some(server) = server() else { return };
+    let url = std::env::var("PB_TEST_SERVER").unwrap();
+    let email = new_email("browser-import");
+    sign_up(&server, &email);
+    let mut app = signed_in_app(&url, &email);
+    // Saved before: the same site and username with another password.
+    app.save(
+        None,
+        &ItemDraft {
+            name: "Old CRM".into(),
+            username: Some("ana".into()),
+            password: Some(Zeroizing::new("crm-old-pass-1".into())),
+            uris: vec!["https://crm.example.test/".into()],
+            ..ItemDraft::default()
+        },
+        &[],
+    )
+    .unwrap();
+
+    let fixture = Fixture::new(Platform::this());
+    fixture.chromium(ChromiumProfile {
+        email: Some(&email),
+        logins: vec![
+            Fake::new("https://crm.example.test/login", "ana", "crm-new-pass-2"),
+            Fake::new("https://mail.example.test/", &email, "mail-pass-3")
+                .with_note("Recovery codes in the safe"),
+        ],
+        ..ChromiumProfile::new(Browser::Chrome, "Profile 1", "Work")
+    });
+    // A Primary Password this test made up.
+    let primary = "made-up-primary-password-4";
+    fixture.firefox(FirefoxProfile {
+        default: true,
+        logins: vec![Fake::new("https://wiki.example.test", "ana", "wiki-pass-5")],
+        primary_password: Some(primary),
+        ..FirefoxProfile::new("abc.default-release", "default-release")
+    });
+    let chosen: Vec<String> = app
+        .browser_profiles(&fixture.home)
+        .unwrap()
+        .profiles
+        .into_iter()
+        .filter(|l| l.choice.chosen)
+        .map(|l| l.profile.id)
+        .collect();
+    assert_eq!(chosen.len(), 2);
+    let passwords =
+        std::collections::HashMap::from([(chosen[1].clone(), Zeroizing::new(primary.to_owned()))]);
+    let imported = app
+        .import_from_browsers(&fixture.home, &TestKeys::default(), &chosen, &passwords)
+        .unwrap();
+    assert_eq!(
+        imported
+            .profiles
+            .iter()
+            .map(|(_, _, o)| o)
+            .collect::<Vec<_>>(),
+        [&Outcome::Read { logins: 2 }, &Outcome::Read { logins: 1 }]
+    );
+    assert_eq!((imported.added, imported.to_check), (3, 1));
+    assert!(imported.synced);
+
+    let vault = app.vault().unwrap();
+    let find = |name: &str| vault.items.iter().find(|i| i.name == name).unwrap();
+    let crm = find("crm.example.test");
+    assert_eq!(
+        app.value(&crm.id, "password").unwrap().as_str(),
+        "crm-new-pass-2"
+    );
+    assert_eq!(
+        vault.folders[crm.folder_id.as_ref().unwrap()],
+        "Check these: from Google Chrome"
+    );
+    let mail = find("mail.example.test");
+    assert_eq!(mail.username.as_deref(), Some(email.as_str()));
+    assert_eq!(
+        app.value(&mail.id, "password").unwrap().as_str(),
+        "mail-pass-3"
+    );
+    assert_eq!(
+        mail.notes.as_ref().unwrap().as_str(),
+        "Recovery codes in the safe"
+    );
+    let wiki = find("wiki.example.test");
+    assert_eq!(
+        app.value(&wiki.id, "password").unwrap().as_str(),
+        "wiki-pass-5"
+    );
+
+    // The server's copy, as any client gets it: nothing as it was typed.
+    let mut session = sign_in(&server, &email);
+    let raw = server
+        .raw(&mut session, "GET", "/api/sync?excludeDomains=true", None)
+        .unwrap()
+        .to_string();
+    for plain in [
+        "crm-new-pass-2",
+        "mail-pass-3",
+        "wiki-pass-5",
+        "Recovery codes",
+        "crm.example.test",
+        "wiki.example.test",
+        "Check these",
+        primary,
+    ] {
+        assert!(!raw.contains(plain), "the server has {plain} as it is");
+    }
+}

@@ -148,6 +148,11 @@ pub struct App {
     told_agent: bool,
 }
 
+/// Importing from the browsers, when an organization keeps items out of
+/// Personal (upstream's personal ownership policy), as the guided import says it.
+#[cfg(not(phone))]
+const KEEPS_ITEMS_OUT: &str = "your organization keeps items out of Personal, so PassBundle can't import your browsers' passwords there. Ask an admin for a shared folder you can add to, then export from your browser and import that file into the shared folder in the web vault";
+
 /// How long a list that autofill or a passkey showed, having unlocked the
 /// vault with "Immediately" chosen, waits to be picked from (`App::offered`).
 pub const PICK_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
@@ -1700,6 +1705,151 @@ impl App {
         };
         server.delete_folder(session, id)?;
         self.sync()
+    }
+
+    /// The profiles in the browsers on this computer, chosen by the rules
+    /// for this account (browser_import.rs, DESIGN.md's "Which browser
+    /// profiles"). Unlocked only; reads no passwords.
+    #[cfg(not(phone))]
+    pub fn browser_profiles(
+        &self,
+        home: &passbundle_browsers::Home,
+    ) -> Result<crate::browser_import::Found> {
+        let vault = self.vault.as_ref().ok_or(Error::SignedOut)?;
+        Ok(crate::browser_import::find(
+            home,
+            &vault.email,
+            self.store.sync().as_deref(),
+        ))
+    }
+
+    /// Imports the passwords saved in the browser profiles the person just
+    /// chose (`chosen`, by id), and no others (browser_import.rs): each new
+    /// login is encrypted here with this account's keys, as any new item
+    /// is, and saved to Personal, at most `BATCH` to a request; the ones to
+    /// compare go in their browser's "Check these" folder, made first if the
+    /// vault doesn't have it. Then syncs. Firefox's Primary Passwords, by
+    /// profile id, are used for this read only. Nothing is read when the
+    /// account is locked, has no session, or an organization keeps its items
+    /// out of Personal. A request the server refuses partway leaves the
+    /// batches before it saved: importing again leaves those out.
+    #[cfg(not(phone))]
+    pub fn import_from_browsers(
+        &mut self,
+        home: &passbundle_browsers::Home,
+        keys: &dyn passbundle_browsers::Keys,
+        chosen: &[String],
+        primary_passwords: &std::collections::HashMap<String, Zeroizing<String>>,
+    ) -> Result<crate::browser_import::Imported> {
+        use crate::browser_import::{self as import, Organizations, BATCH};
+        if self.vault.is_none() || self.server.is_none() || self.session.is_none() {
+            return Err(Error::SignedOut);
+        }
+        if Organizations::from_sync(self.store.sync().as_deref())
+            .keeps_items_out
+            .is_some()
+        {
+            return Err(Error::Refused(KEEPS_ITEMS_OUT));
+        }
+        let gathered = import::gather(home, keys, chosen, primary_passwords);
+        let vault = self.vault.as_ref().ok_or(Error::SignedOut)?;
+        let plan = import::plan(vault, gathered.logins);
+        let check_browsers = plan.check_browsers();
+        let check_folders: Vec<String> = check_browsers
+            .iter()
+            .map(|b| import::check_folder(*b))
+            .collect();
+        let mut kept: Vec<Option<String>> = check_folders
+            .iter()
+            .map(|name| {
+                vault
+                    .folders
+                    .iter()
+                    .find(|(_, n)| *n == name)
+                    .map(|(id, _)| id.clone())
+            })
+            .collect();
+        let names: Vec<String> = check_folders
+            .iter()
+            .map(|n| vault.user_key().encrypt_str(n).to_string())
+            .collect();
+        let ciphers = plan
+            .new
+            .iter()
+            .map(|new| vault.encrypt_item(&new.draft, None))
+            .collect::<Result<Vec<_>>>()?;
+        let (Some(server), Some(session)) = (&self.server, self.session.as_mut()) else {
+            return Err(Error::SignedOut);
+        };
+        // The folders first, so every request puts its items in the same ones.
+        for (id, name) in kept.iter_mut().zip(&names) {
+            if id.is_none() && !ciphers.is_empty() {
+                *id = Some(server.create_folder(session, name)?);
+            }
+        }
+        let folders: Vec<(Option<String>, String)> = kept.into_iter().zip(names).collect();
+        let mut sent = Ok(());
+        for (n, batch) in ciphers.chunks(BATCH).enumerate() {
+            let first = n * BATCH;
+            let folder_of: Vec<(usize, usize)> = plan.new[first..first + batch.len()]
+                .iter()
+                .enumerate()
+                .filter(|(_, new)| new.to_check)
+                .filter_map(|(i, new)| {
+                    check_browsers
+                        .iter()
+                        .position(|b| *b == new.browser)
+                        .map(|folder| (i, folder))
+                })
+                .collect();
+            sent = server.import_items(session, batch, &folders, &folder_of);
+            if sent.is_err() {
+                break;
+            }
+        }
+        let synced = self.sync().is_ok();
+        sent?;
+        Ok(import::Imported {
+            profiles: gathered.profiles,
+            added: plan.new.len(),
+            to_check: plan.to_check(),
+            already_there: plan.already_there,
+            empty: gathered.empty,
+            never_save: gathered.never_save,
+            unreadable: gathered.unreadable,
+            check_folders,
+            synced,
+        })
+    }
+
+    /// Turns off the chosen browser profiles' own password saving, leaving
+    /// what they saved (browser_import.rs). Unlocked only.
+    #[cfg(not(phone))]
+    pub fn turn_off_browser_saving(
+        &self,
+        home: &passbundle_browsers::Home,
+        chosen: &[String],
+    ) -> Result<
+        Vec<(
+            String,
+            Option<passbundle_browsers::Profile>,
+            crate::browser_import::TurnOff,
+        )>,
+    > {
+        if self.vault.is_none() {
+            return Err(Error::SignedOut);
+        }
+        Ok(crate::browser_import::turn_off(home, chosen))
+    }
+
+    /// Whether importing from this computer's browsers was offered to this
+    /// account here already: once by itself, then from the menu.
+    pub fn browser_import_offered(&self) -> bool {
+        self.store.browser_import_offered()
+    }
+
+    pub fn set_browser_import_offered(&self) -> Result<()> {
+        self.store.save_browser_import_offered()
     }
 
     /// A folder's name, trimmed; refused when empty.

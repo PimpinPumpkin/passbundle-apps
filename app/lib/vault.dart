@@ -15,6 +15,7 @@ import 'package:flutter/services.dart';
 
 import 'accounts.dart';
 import 'autofill_offer.dart';
+import 'browser_import.dart';
 import 'core.dart';
 import 'editor.dart';
 import 'generator.dart';
@@ -258,6 +259,17 @@ class VaultScreenState extends State<VaultScreen> {
           showMessage(context, said);
         }
       }
+      // Then, on a computer, importing from its browsers: offered once per
+      // account here, when there's a browser profile to import from.
+      if (!saving && !isPhone && widget.syncOnOpen && mounted) {
+        await offerBrowserImport(
+          context,
+          email: widget.email,
+          server: widget.server,
+        );
+        if (mounted) reload();
+      }
+      if (!mounted) return;
       // Then sign-ins waiting for this account's answer, while the vault is
       // open (not while measuring, which has no server).
       if (widget.syncOnOpen) {
@@ -573,6 +585,17 @@ class VaultScreenState extends State<VaultScreen> {
     ),
   );
 
+  /// Importing the passwords saved in this computer's browsers
+  /// (browser_import.dart); the vault shows what came in.
+  Future<void> importFromBrowsers() async {
+    await showBrowserImport(
+      context,
+      email: widget.email,
+      server: widget.server,
+    );
+    if (mounted) reload();
+  }
+
   /// Import, export, and the trash are the web vault's: each opens there,
   /// at [path] ("/#/tools/import").
   Future<void> openWebVault(String path) async {
@@ -801,6 +824,7 @@ class VaultScreenState extends State<VaultScreen> {
                   items: everything,
                   toFix: health.length,
                   onGenerator: openGeneratorTool,
+                  onBrowsers: isPhone ? null : importFromBrowsers,
                   onImport: () => openWebVault('/#/tools/import'),
                   onExport: () => openWebVault('/#/tools/export'),
                   onChoose: choose,
@@ -1632,6 +1656,7 @@ class Sidebar extends StatelessWidget {
     required this.items,
     this.toFix = 0,
     this.onGenerator,
+    this.onBrowsers,
     this.onImport,
     this.onExport,
     required this.onChoose,
@@ -1666,6 +1691,9 @@ class Sidebar extends StatelessWidget {
   /// The Tools: the generator, and import and export (the web vault's,
   /// which open there).
   final VoidCallback? onGenerator;
+
+  /// Importing from this computer's browsers (browser_import.dart).
+  final VoidCallback? onBrowsers;
   final VoidCallback? onImport;
   final VoidCallback? onExport;
   final void Function(Filter, [String?]) onChoose;
@@ -1891,7 +1919,7 @@ class Sidebar extends StatelessWidget {
                           )
                         : null,
                   ),
-                if (onGenerator != null || onImport != null) ...[
+                if (onGenerator != null || onImport != null || onBrowsers != null) ...[
                   const Padding(
                     padding: EdgeInsets.symmetric(horizontal: 6, vertical: 10),
                     child: Divider(),
@@ -1918,6 +1946,13 @@ class Sidebar extends StatelessWidget {
                       on: false,
                       tap: onExport!,
                       trailing: webVaultMark,
+                    ),
+                  if (onBrowsers != null)
+                    entry(
+                      tile: outline(Glyphs.download),
+                      label: 'Import from browsers',
+                      on: false,
+                      tap: onBrowsers!,
                     ),
                 ],
                 const SizedBox(height: 8),
