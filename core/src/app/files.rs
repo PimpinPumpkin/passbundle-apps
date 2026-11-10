@@ -204,10 +204,15 @@ pub fn read_file(path: &Path, progress: &Progress) -> Result<FileToEncrypt> {
     let unread = Error::Refused(
         "PassBundle couldn't read that file. Check that it's still there and that you may open it",
     );
+    let not_a_file = Error::Refused("that isn't a file PassBundle can attach");
+    // Asked before it's opened too: Windows won't open a folder as a file.
+    if std::fs::metadata(path).is_ok_and(|about| !about.is_file()) {
+        return Err(not_a_file);
+    }
     let mut file = std::fs::File::open(path).map_err(|_| unread.clone())?;
     let about = file.metadata().map_err(|_| unread.clone())?;
     if !about.is_file() {
-        return Err(Error::Refused("that isn't a file PassBundle can attach"));
+        return Err(not_a_file);
     }
     let len = about.len();
     if len > MAX_FILE {
