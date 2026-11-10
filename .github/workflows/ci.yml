@@ -532,11 +532,13 @@ jobs:
       - name: Build the server
         working-directory: server
         run: cargo build --features sqlite
-      - name: Start it, another named localhost for security keys (WebAuthn takes only a domain), and one with the new-device check on
+      - name: Start it, another named localhost for security keys (WebAuthn takes only a domain), one with the new-device check on, one that takes no new accounts, and one that takes them only from some addresses
         run: |
           echo "PB_TEST_SERVER=$(tools/test-server.sh server/target/debug/vaultwarden 8591 "$RUNNER_TEMP/server")" >> "$GITHUB_ENV"
           echo "PB_TEST_SERVER_LOCALHOST=$(tools/test-server.sh server/target/debug/vaultwarden 8593 "$RUNNER_TEMP/server-localhost" localhost)" >> "$GITHUB_ENV"
           echo "PB_TEST_SERVER_NEW_DEVICE=$(NEW_DEVICE_CHECK=true tools/test-server.sh server/target/debug/vaultwarden 8594 "$RUNNER_TEMP/server-new-device")" >> "$GITHUB_ENV"
+          echo "PB_TEST_SERVER_CLOSED=$(SIGNUPS_ALLOWED=false INVITATIONS_ALLOWED=false tools/test-server.sh server/target/debug/vaultwarden 8595 "$RUNNER_TEMP/server-closed")" >> "$GITHUB_ENV"
+          echo "PB_TEST_SERVER_SOME_ADDRESSES=$(SIGNUPS_DOMAINS_WHITELIST=core.example.test tools/test-server.sh server/target/debug/vaultwarden 8596 "$RUNNER_TEMP/server-some-addresses")" >> "$GITHUB_ENV"
       - name: The core against it (test-hooks for the software security key, core/src/security_key/soft.rs)
         working-directory: core
         run: cargo test --locked --features test-hooks --test server
@@ -546,6 +548,8 @@ jobs:
           cat "$RUNNER_TEMP/server/server.log" || true
           cat "$RUNNER_TEMP/server-localhost/server.log" || true
           cat "$RUNNER_TEMP/server-new-device/server.log" || true
+          cat "$RUNNER_TEMP/server-closed/server.log" || true
+          cat "$RUNNER_TEMP/server-some-addresses/server.log" || true
 
   app:
     if: ${{ !inputs.ios_only }}
