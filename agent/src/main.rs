@@ -95,8 +95,11 @@ fn run_serve() -> ExitCode {
     }
 }
 
-/// Run by the installer's scheduled task (Windows) or launch daemon (macOS),
-/// with the rights to replace the installed agent.
+/// On Windows, run by the scheduled task the meta repo's installer makes
+/// (`Install-PassBundle.ps1`: as SYSTEM, daily and at startup), with the
+/// rights to replace the installed agent. Nothing runs it on macOS: the
+/// agent is inside the app there, so it's updated with the app. A build
+/// with no update key compiled in says so and does nothing.
 fn run_update() -> ExitCode {
     let config = Config::load();
     if !config.updates {
