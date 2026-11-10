@@ -1,10 +1,11 @@
-// Settings: unlocking with Windows Hello or Touch ID, through the desktop
-// agent and shared with the browser extension (docs/core.md, "Unlock with
-// Windows Hello or Touch ID"), only where it can work (Windows, and phones'
-// own biometrics: the Mac's Touch ID waits on code signing, and Linux has no
-// agent), and when the app locks by itself ("Locking by
-// itself"), within what an organization's policy allows ("Locking by
-// policy"). On Android, turning on autofill and passkeys (autofill_offer.dart).
+// Settings: unlocking with Windows Hello, through the desktop agent and
+// shared with the browser extension (docs/core.md, "Unlock with Windows
+// Hello or Touch ID"), or with the app's own Touch ID on the Mac and
+// biometrics on phones ("The Mac without an Apple developer account",
+// docs/phones.md), only where it can work (not on a Mac without Touch ID,
+// and not on Linux, which has no agent), and when the app locks by itself
+// ("Locking by itself"), within what an organization's policy allows
+// ("Locking by policy"). On Android, turning on autofill and passkeys (autofill_offer.dart).
 // The account shown, and signing out of it, which says which; on a phone,
 // importing and exporting in the web vault.
 // Sign-ins from other devices waiting for an answer
@@ -159,7 +160,7 @@ class _SettingsListState extends State<SettingsList> {
         builder: (context) => AlertDialog(
           title: Text('Turn off unlocking with $method?'),
           content: Text(
-            isPhone
+            ownBiometrics
                 ? 'You can turn it on again here any time.'
                 : 'It turns off in your browser extension too.',
           ),
@@ -205,8 +206,8 @@ class _SettingsListState extends State<SettingsList> {
     await refresh();
   }
 
-  /// Whether unlocking with biometrics can work here at all: not on the
-  /// Mac (yet) or Linux, where the core says it's unsupported.
+  /// Whether unlocking with biometrics can work here at all: not on a Mac
+  /// without Touch ID, or on Linux, which say it's unsupported.
   bool get unlockOffered => status?['status'] != 'unsupported';
 
   Widget unlock() {
@@ -232,7 +233,7 @@ class _SettingsListState extends State<SettingsList> {
         onChanged: working ? null : (on) => turn(on, method),
         title: Text('Unlock with $method'),
         subtitle: Text(
-          isPhone
+          ownBiometrics
               ? 'Instead of your master password'
               : 'Also in your browser extension, which shares it',
         ),
@@ -348,7 +349,10 @@ class _SettingsListState extends State<SettingsList> {
             ),
           ],
         ),
-        SignInRequestsSettings(email: email),
+        SignInRequestsSettings(
+          email: email,
+          touchIdOn: isMac && status?['status'] == 'setUp',
+        ),
         SettingsGroup(
           title: 'Appearance',
           children: [

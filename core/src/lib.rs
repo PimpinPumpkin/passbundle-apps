@@ -7,6 +7,8 @@ pub mod agent;
 pub mod app;
 pub mod asset_links;
 pub mod autolock;
+#[cfg(not(phone))]
+pub mod browser_import;
 pub mod clipboard;
 pub mod crypto;
 pub mod device_approval;

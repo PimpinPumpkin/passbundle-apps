@@ -267,17 +267,25 @@ Future<void> pumpUntilGone(
 /// the stand-in gives it unless [biometricAnswers] says no. With [android],
 /// it's an Android phone, which helps turn on autofill (autofill_offer.dart);
 /// with [iphone], an iPhone, which helps turn on AutoFill and is given what
-/// iOS may suggest above the keyboard.
+/// iOS may suggest above the keyboard. With [mac], it's the Mac app instead,
+/// a computer whose Touch ID is its own (MainFlutterWindow.swift,
+/// TouchID.swift), answering the same calls.
 class PhoneStandIn {
   PhoneStandIn(
     WidgetTester tester, {
     this.status = 'notSetUp',
-    this.method = 'fingerprint',
+    String? method,
     this.android,
     this.iphone,
-  }) {
-    debugPhone = true;
-    addTearDown(() => debugPhone = null);
+    bool mac = false,
+  }) : method = method ?? (mac ? 'Touch ID' : 'fingerprint') {
+    if (mac) {
+      debugMac = true;
+      addTearDown(() => debugMac = null);
+    } else {
+      debugPhone = true;
+      addTearDown(() => debugPhone = null);
+    }
     if (android != null) {
       debugAndroid = true;
       addTearDown(() => debugAndroid = null);
@@ -290,7 +298,7 @@ class PhoneStandIn {
     messenger.setMockMethodCallHandler(Core.platform, (call) async {
       switch (call.method) {
         case 'biometricStatus':
-          return {'status': status, 'method': method};
+          return {'status': status, 'method': this.method};
         case 'biometricEnroll':
           enrolled++;
           final yes = biometricAnswers.isEmpty || biometricAnswers.removeAt(0);
@@ -304,6 +312,9 @@ class PhoneStandIn {
         case 'biometricUnlock':
           unlockPrompts++;
           return {'ok': true, 'unlocked': false};
+        case 'biometricConfirmApproval':
+          confirmPrompts++;
+          return {'ok': true, 'confirmed': false};
         case 'copy':
           copied.add(Map<String, dynamic>.from(call.arguments as Map));
           return true;
@@ -329,6 +340,10 @@ class PhoneStandIn {
 
   /// The times unlocking with it was asked for (each one cancelled).
   var unlockPrompts = 0;
+
+  /// The times confirming an approval with it was asked for (each one
+  /// cancelled).
+  var confirmPrompts = 0;
 
   /// What the person does at each biometric prompt: true gives it.
   final biometricAnswers = <bool>[];

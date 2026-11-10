@@ -44,8 +44,9 @@ env:
   # The test certificate (the PASSBUNDLE_MAC_CERT_* secrets): a release is
   # published only signed with it, through and through. Its SHA-1 is how a
   # code requirement names it: the app's designated requirement, which each
-  # update must meet (Updater.swift), and which keeps the keychain trusting
-  # the app from one release to the next.
+  # update must meet (Updater.swift). (The login keychain names each build
+  # of an app without an Apple team by its own hash, so the Mac app keeps its
+  # session out of it: the meta repo's docs/core.md.)
   IDENTITY: PassBundle test builds
   TEST_CERT_SHA256: 0158113951f63b39bac06ba43d9dc838ade6cde2dae8bc55608fd4297d3d24ac
   TEST_CERT_SHA1: 5833cb215225bb004aa67e200cb6c64bd95fc479

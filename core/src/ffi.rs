@@ -219,7 +219,7 @@ fn lock_if_due(accounts: &mut Accounts) {
 
 /// The accounts, for a phone's native code: None while a slow call has
 /// them, or before the core is open.
-#[cfg(phone)]
+#[cfg(any(phone, target_os = "macos"))]
 fn accounts_now() -> Option<MutexGuard<'static, Option<Accounts>>> {
     match APP.try_lock() {
         Ok(guard) => Some(guard),
@@ -1073,7 +1073,7 @@ pub unsafe extern "C" fn pb_lock(account: *const c_char) -> *mut c_char {
 /// An account's app, for a phone's native code, after locking each account
 /// whose time is up: None while a slow call has the app, before the core is
 /// open, or for an account that isn't here.
-#[cfg(phone)]
+#[cfg(any(phone, target_os = "macos"))]
 fn on_phone<T>(account: &str, call: impl FnOnce(&mut App) -> Option<T>) -> Option<T> {
     let mut guard = accounts_now()?;
     let accounts = guard.as_mut()?;
@@ -1127,12 +1127,12 @@ pub unsafe extern "C" fn pb_secret(
     Box::into_raw(bytes).cast()
 }
 
-/// Wipes and frees what `pb_secret` returned.
+/// Wipes and frees what `pb_secret` or `pb_user_key` returned.
 ///
 /// # Safety
-/// `bytes` and `len` are what `pb_secret` returned and set, or null, and
-/// aren't used after.
-#[cfg(target_os = "ios")]
+/// `bytes` and `len` are what `pb_secret` or `pb_user_key` returned and set,
+/// or null, and aren't used after.
+#[cfg(any(target_os = "ios", target_os = "macos"))]
 #[no_mangle]
 pub unsafe extern "C" fn pb_free_secret(bytes: *mut u8, len: usize) {
     if bytes.is_null() {
@@ -1142,16 +1142,18 @@ pub unsafe extern "C" fn pb_free_secret(bytes: *mut u8, len: usize) {
     zeroize::Zeroize::zeroize(&mut *owned);
 }
 
-/// An unlocked account's user key, for the iOS app's Swift to keep in the
-/// Keychain for unlocking that account with Face ID or Touch ID
-/// (docs/phones.md, "Unlocking with biometrics"), without passing through
-/// Dart; null while it's locked or busy. `len` gets its length. Free it with
+/// An unlocked account's user key, for the app's Swift to keep for
+/// unlocking that account with Face ID or Touch ID, without passing through
+/// Dart: on iOS in the Keychain (docs/phones.md, "Unlocking with
+/// biometrics"), on the Mac sealed to a Secure Enclave key (the meta repo's
+/// docs/core.md, "The Mac without an Apple developer account"); null while
+/// it's locked or busy. `len` gets its length. Free it with
 /// `pb_free_secret`, which wipes it.
 ///
 /// # Safety
 /// `account` is a NUL-terminated UTF-8 string, and `len` points to writable
 /// memory, for the call.
-#[cfg(target_os = "ios")]
+#[cfg(any(target_os = "ios", target_os = "macos"))]
 #[no_mangle]
 pub unsafe extern "C" fn pb_user_key(account: *const c_char, len: *mut usize) -> *mut u8 {
     let Some(key) = user_key_for_biometric(&text(account)) else {
@@ -1162,15 +1164,16 @@ pub unsafe extern "C" fn pb_user_key(account: *const c_char, len: *mut usize) ->
     Box::into_raw(bytes).cast()
 }
 
-/// Opens an account's kept vault with the user key Swift read from that
-/// account's Keychain item after Face ID or Touch ID: "" if it opened, else
+/// Opens an account's kept vault with the user key Swift opened after Face
+/// ID or Touch ID (the account's Keychain item on iOS, its Secure Enclave
+/// seal on the Mac): "" if it opened, else
 /// the words to show. A key that no longer opens it means biometric unlock
 /// is out of date, and is turned off. Free the answer with `pb_free`.
 ///
 /// # Safety
 /// `account` is a NUL-terminated UTF-8 string, and `key` points to `len`
 /// readable bytes, for the call.
-#[cfg(target_os = "ios")]
+#[cfg(any(target_os = "ios", target_os = "macos"))]
 #[no_mangle]
 pub unsafe extern "C" fn pb_unlock_with_key(
     account: *const c_char,
@@ -1185,15 +1188,15 @@ pub unsafe extern "C" fn pb_unlock_with_key(
     CString::new(why).unwrap_or_default().into_raw()
 }
 
-/// The user key Swift read from an account's Keychain item after Face ID or
-/// Touch ID, given back to confirm it's the person approving a sign-in to
-/// that account, never to unlock: "" if it's that account's open vault's,
-/// else the words to show. Free the answer with `pb_free`.
+/// The user key Swift opened after Face ID or Touch ID, as for
+/// `pb_unlock_with_key`, given back to confirm it's the person approving a
+/// sign-in to that account, never to unlock: "" if it's that account's open
+/// vault's, else the words to show. Free the answer with `pb_free`.
 ///
 /// # Safety
 /// `account` is a NUL-terminated UTF-8 string, and `key` points to `len`
 /// readable bytes, for the call.
-#[cfg(target_os = "ios")]
+#[cfg(any(target_os = "ios", target_os = "macos"))]
 #[no_mangle]
 pub unsafe extern "C" fn pb_confirm_approval_with_key(
     account: *const c_char,
@@ -1209,23 +1212,24 @@ pub unsafe extern "C" fn pb_confirm_approval_with_key(
 }
 
 /// What Swift does when the core turns an account's biometric unlock off
-/// (signing out, or a key that's out of date): it deletes that account's
-/// Keychain item. Swift sets it at start.
-#[cfg(target_os = "ios")]
+/// (signing out, or a key that's out of date): it deletes what it keeps for
+/// that account (its Keychain item on iOS, its sealed key on the Mac). Swift
+/// sets it at start.
+#[cfg(any(target_os = "ios", target_os = "macos"))]
 static REMOVE_BIOMETRIC: std::sync::OnceLock<extern "C" fn(*const c_char)> =
     std::sync::OnceLock::new();
 
 /// Swift's function to turn an account's biometric unlock off (it's given
 /// the account's id on this device), set once at start.
-#[cfg(target_os = "ios")]
+#[cfg(any(target_os = "ios", target_os = "macos"))]
 #[no_mangle]
 pub extern "C" fn pb_set_remove_biometric(remove: extern "C" fn(*const c_char)) {
     let _ = REMOVE_BIOMETRIC.set(remove);
 }
 
-/// Turns an account's biometric unlock off on iOS: Swift deletes its
-/// Keychain item.
-#[cfg(target_os = "ios")]
+/// Turns an account's biometric unlock off on iOS and the Mac: Swift
+/// deletes what it keeps for it.
+#[cfg(any(target_os = "ios", target_os = "macos"))]
 pub(crate) fn remove_biometric(account: &str) {
     let Some(remove) = REMOVE_BIOMETRIC.get() else {
         return;
@@ -1454,7 +1458,7 @@ pub(crate) fn unlock_with_master_password(account: &str, password: &str) -> Valu
 /// An unlocked account's user key, for the phone app to seal for that
 /// account's biometric unlock (android.rs, or `pb_user_key` for iOS's
 /// Keychain). None while it's locked or busy.
-#[cfg(phone)]
+#[cfg(any(phone, target_os = "macos"))]
 pub(crate) fn user_key_for_biometric(account: &str) -> Option<Zeroizing<Vec<u8>>> {
     on_phone(account, |app| {
         Some(Zeroizing::new(app.vault()?.user_key().to_bytes().to_vec()))
@@ -1463,7 +1467,7 @@ pub(crate) fn user_key_for_biometric(account: &str) -> Option<Zeroizing<Vec<u8>>
 
 /// The account a phone's biometric key is given back to, after its prompt:
 /// the error's words when it isn't here or the core is busy.
-#[cfg(phone)]
+#[cfg(any(phone, target_os = "macos"))]
 fn for_biometric(
     account: &str,
     key: &[u8],
@@ -1495,7 +1499,7 @@ fn for_biometric(
 /// `pb_confirm_approval_with_key` for iOS): never to unlock. The error's
 /// words otherwise; a key that isn't that account's open vault's turns its
 /// biometric unlock off, as unlocking does.
-#[cfg(phone)]
+#[cfg(any(phone, target_os = "macos"))]
 pub(crate) fn confirm_approval_with_key_for_biometric(
     account: &str,
     key: &[u8],
@@ -1507,7 +1511,7 @@ pub(crate) fn confirm_approval_with_key_for_biometric(
 /// biometric unlock opened, from that account's own Keystore key or Keychain
 /// item (android.rs, or `pb_unlock_with_key` for iOS); the error's words
 /// otherwise.
-#[cfg(phone)]
+#[cfg(any(phone, target_os = "macos"))]
 pub(crate) fn unlock_with_key_for_biometric(account: &str, key: &[u8]) -> Result<(), String> {
     for_biometric(account, key, App::unlock_with_key)
 }
@@ -3310,6 +3314,305 @@ pub extern "C" fn pb_update_auto(on: bool) -> *mut c_char {
 #[no_mangle]
 pub extern "C" fn pb_update_started() -> *mut c_char {
     on_updates(crate::updates::started)
+}
+
+// Importing from the browsers on this computer (browser_import.rs; meta
+// repo DESIGN.md, "Automatic import"). Computers only.
+
+/// Where this person's browsers are, and the OS's keys for them. Builds with
+/// test hooks never look at the real ones: only at the made-up browsers a
+/// test points them at (`pb_test_browsers`), else at none. Nor do the core's
+/// own tests.
+#[cfg(not(phone))]
+fn browsers_here() -> Option<(
+    passbundle_browsers::Home,
+    Box<dyn passbundle_browsers::Keys>,
+)> {
+    #[cfg(feature = "test-hooks")]
+    {
+        crate::browser_import::test_hooks::home().map(|home| {
+            let keys: Box<dyn passbundle_browsers::Keys> =
+                Box::new(passbundle_browsers::fixtures::TestKeys::default());
+            (home, keys)
+        })
+    }
+    #[cfg(all(not(feature = "test-hooks"), test))]
+    {
+        None
+    }
+    #[cfg(all(not(feature = "test-hooks"), not(test)))]
+    {
+        passbundle_browsers::Home::this_person().map(|home| {
+            let keys: Box<dyn passbundle_browsers::Keys> =
+                Box::new(passbundle_browsers::SystemKeys);
+            (home, keys)
+        })
+    }
+}
+
+#[cfg(not(phone))]
+fn profile_json(profile: &passbundle_browsers::Profile) -> Value {
+    json!({
+        "id": profile.id,
+        "browser": profile.browser.key(),
+        "browserName": profile.browser.name(),
+        "browserShort": profile.browser.short(),
+        "name": profile.name,
+        "email": profile.email,
+        "managedBy": profile.managed_by,
+        "default": profile.default,
+    })
+}
+
+/// The browser profiles on this computer, for the import screen, chosen by
+/// the rules for this account (DESIGN.md, "Which browser profiles"): `{ok,
+/// profiles: [{id, browser, browserName, browserShort, name, email,
+/// managedBy, default, chosen, rule, personal, open, savingOn}], guided:
+/// [{browser, browserName, words}], ask, keepsItemsOut}`. `rule` is
+/// "yourEmail", "workDomain", "browserDefault", or null; `ask` that no rule
+/// chose any. Reads no passwords. Unlocked only.
+///
+/// # Safety
+/// `account` is null or a NUL-terminated UTF-8 string, valid for the call.
+#[cfg(not(phone))]
+#[no_mangle]
+pub unsafe extern "C" fn pb_browser_profiles(account: *const c_char) -> *mut c_char {
+    let account = text(account);
+    with_app(&account, |app| {
+        let Some((home, _)) = browsers_here() else {
+            return json!({ "ok": true, "profiles": [], "guided": [], "ask": false, "keepsItemsOut": null });
+        };
+        match app.browser_profiles(&home) {
+            Ok(found) => json!({
+                "ok": true,
+                "profiles": found.profiles.iter().map(|listed| {
+                    let mut p = profile_json(&listed.profile);
+                    p["chosen"] = json!(listed.choice.chosen);
+                    p["rule"] = json!(listed.choice.rule.map(|r| match r {
+                        crate::browser_import::Rule::YourEmail => "yourEmail",
+                        crate::browser_import::Rule::WorkDomain => "workDomain",
+                        crate::browser_import::Rule::BrowserDefault => "browserDefault",
+                    }));
+                    p["personal"] = json!(listed.choice.personal);
+                    p["open"] = json!(listed.open);
+                    p["savingOn"] = json!(listed.saving_on);
+                    p
+                }).collect::<Vec<_>>(),
+                "guided": found.guided.iter().map(|b| json!({
+                    "browser": b.key(),
+                    "browserName": b.name(),
+                    "words": crate::browser_import::guided_words(*b, crate::browser_import::Why::OnlyTheBrowser),
+                })).collect::<Vec<_>>(),
+                "ask": found.ask,
+                "keepsItemsOut": found.organizations.keeps_items_out,
+            }),
+            Err(e) => failed(e),
+        }
+    })
+}
+
+/// Whether to offer importing from the browsers now, by itself: once per
+/// account on this device, after unlocking, when there's a browser profile
+/// to import from. Answering yes counts as offered. `{ok, offer}`.
+///
+/// # Safety
+/// `account` is null or a NUL-terminated UTF-8 string, valid for the call.
+#[cfg(not(phone))]
+#[no_mangle]
+pub unsafe extern "C" fn pb_browser_import_offer(account: *const c_char) -> *mut c_char {
+    let account = text(account);
+    with_app(&account, |app| {
+        if app.browser_import_offered() || app.vault().is_none() {
+            return json!({ "ok": true, "offer": false });
+        }
+        let any = browsers_here()
+            .is_some_and(|(home, _)| !passbundle_browsers::find_profiles(&home).is_empty());
+        if !any {
+            return json!({ "ok": true, "offer": false });
+        }
+        // Offered once, even if keeping that fails (then maybe again).
+        let _ = app.set_browser_import_offered();
+        json!({ "ok": true, "offer": true })
+    })
+}
+
+/// Imports from the browser profiles the person chose just now, and no
+/// others: `request` is `{profiles: [id], primaryPasswords: {id: password}}`
+/// (Firefox's, typed for this import only). Answers `{ok, added, toCheck,
+/// alreadyThere, empty, neverSave, unreadable, checkFolders, synced,
+/// profiles: [{id, browser, browserName, browserShort, name, outcome,
+/// logins, words}]}`, `outcome` one of "read", "needsPrimaryPassword",
+/// "wrongPrimaryPassword", "guided" (with `words`: why, and what to do), or
+/// "gone". Each new login is encrypted here with the account's keys before
+/// it's sent.
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+#[cfg(not(phone))]
+#[no_mangle]
+pub unsafe extern "C" fn pb_browser_import(
+    account: *const c_char,
+    request: *const c_char,
+) -> *mut c_char {
+    use crate::browser_import::Outcome;
+    let account = text(account);
+    let request = Zeroizing::new(text(request));
+    with_app_waiting(&account, |app| {
+        let Ok(asked) = serde_json::from_str::<Value>(&request) else {
+            return failed(Error::Malformed(
+                "an import request the core can't read".into(),
+            ));
+        };
+        let chosen: Vec<String> = asked["profiles"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|id| id.as_str().map(str::to_owned))
+            .collect();
+        let primary: std::collections::HashMap<String, Zeroizing<String>> = asked
+            ["primaryPasswords"]
+            .as_object()
+            .into_iter()
+            .flatten()
+            .filter_map(|(id, p)| Some((id.clone(), Zeroizing::new(p.as_str()?.to_owned()))))
+            .collect();
+        drop(asked);
+        let Some((home, keys)) = browsers_here() else {
+            return failed(Error::Refused(
+                "PassBundle found no browsers on this computer",
+            ));
+        };
+        match app.import_from_browsers(&home, keys.as_ref(), &chosen, &primary) {
+            Ok(imported) => json!({
+                "ok": true,
+                "added": imported.added,
+                "toCheck": imported.to_check,
+                "alreadyThere": imported.already_there,
+                "empty": imported.empty,
+                "neverSave": imported.never_save,
+                "unreadable": imported.unreadable,
+                "checkFolders": imported.check_folders,
+                "synced": imported.synced,
+                "profiles": imported.profiles.iter().map(|(id, profile, outcome)| {
+                    let mut p = match profile {
+                        Some(profile) => profile_json(profile),
+                        None => json!({ "id": id }),
+                    };
+                    let (name, logins, words) = match outcome {
+                        Outcome::Read { logins } => ("read", Some(*logins), None),
+                        Outcome::NeedsPrimaryPassword => ("needsPrimaryPassword", None, None),
+                        Outcome::WrongPrimaryPassword => ("wrongPrimaryPassword", None, None),
+                        Outcome::Guided(why) => (
+                            "guided",
+                            None,
+                            profile.as_ref().map(|p| crate::browser_import::guided_words(p.browser, *why)),
+                        ),
+                        Outcome::Gone => ("gone", None, None),
+                    };
+                    p["outcome"] = json!(name);
+                    p["logins"] = json!(logins);
+                    p["words"] = json!(words);
+                    p
+                }).collect::<Vec<_>>(),
+            }),
+            Err(e) => failed(e),
+        }
+    })
+}
+
+/// Turns off the chosen profiles' own password saving, leaving what they
+/// saved: `ids` is a JSON list of profile ids. `{ok, profiles: [{id,
+/// browser, browserName, browserShort, name, result, byHand}]}`, `result`
+/// one of "done", "alreadyOff", "closeFirst" (the browser is open), or
+/// "failed", and `byHand` how to do it in the browser itself.
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+#[cfg(not(phone))]
+#[no_mangle]
+pub unsafe extern "C" fn pb_browser_turn_off(
+    account: *const c_char,
+    ids: *const c_char,
+) -> *mut c_char {
+    use crate::browser_import::TurnOff;
+    let account = text(account);
+    let ids: Vec<String> = serde_json::from_str(&text(ids)).unwrap_or_default();
+    with_app(&account, |app| {
+        let Some((home, _)) = browsers_here() else {
+            return json!({ "ok": true, "profiles": [] });
+        };
+        match app.turn_off_browser_saving(&home, &ids) {
+            Ok(results) => json!({
+                "ok": true,
+                "profiles": results.iter().map(|(id, profile, result)| {
+                    let mut p = match profile {
+                        Some(profile) => profile_json(profile),
+                        None => json!({ "id": id }),
+                    };
+                    p["result"] = json!(match result {
+                        TurnOff::Done => "done",
+                        TurnOff::AlreadyOff => "alreadyOff",
+                        TurnOff::CloseFirst => "closeFirst",
+                        TurnOff::Failed => "failed",
+                    });
+                    p["byHand"] = json!(profile
+                        .as_ref()
+                        .map(|p| crate::browser_import::turn_off_by_hand(p.browser)));
+                    p
+                }).collect::<Vec<_>>(),
+            }),
+            Err(e) => failed(e),
+        }
+    })
+}
+
+/// For the app's tests (test hooks only): makes the sample browsers
+/// (browser_import.rs, `make_sample`) for `email` in the folder `root`, laid
+/// out as `platform` ("windows", "mac", "linux", or "" for this computer's)
+/// lays one out, and points the core at them. An empty `root` points it at
+/// none. `{ok, primaryPassword}`, the sample Firefox profile's made-up one.
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+#[cfg(all(feature = "test-hooks", not(phone)))]
+#[no_mangle]
+pub unsafe extern "C" fn pb_test_browsers(
+    root: *const c_char,
+    platform: *const c_char,
+    email: *const c_char,
+) -> *mut c_char {
+    use passbundle_browsers::Platform;
+    let (root, platform, email) = (text(root), text(platform), text(email));
+    let platform = match platform.as_str() {
+        "windows" => Platform::Windows,
+        "mac" => Platform::Mac,
+        "linux" => Platform::Linux,
+        _ => Platform::this(),
+    };
+    let hooks = &crate::browser_import::test_hooks::HOME;
+    if root.is_empty() {
+        *hooks.lock().unwrap_or_else(|p| p.into_inner()) = None;
+    } else {
+        let root = std::path::PathBuf::from(root);
+        crate::browser_import::test_hooks::make_sample(&root, platform, &email);
+        *hooks.lock().unwrap_or_else(|p| p.into_inner()) = Some((root, platform));
+    }
+    out(
+        json!({ "ok": true, "primaryPassword": crate::browser_import::test_hooks::PRIMARY_PASSWORD }),
+    )
+}
+
+/// For the app's tests (test hooks only): the browser profiles read since
+/// the last time this was asked, by id. `{ok, read: [id]}`.
+#[cfg(all(feature = "test-hooks", not(phone)))]
+#[no_mangle]
+pub extern "C" fn pb_test_browsers_read() -> *mut c_char {
+    let read = std::mem::take(
+        &mut *crate::browser_import::test_hooks::READ
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()),
+    );
+    out(json!({ "ok": true, "read": read }))
 }
 
 /// Frees a string the core returned.

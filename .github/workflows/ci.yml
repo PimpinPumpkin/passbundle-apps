@@ -58,6 +58,7 @@ jobs:
           workspaces: |
             core
             agent
+            browsers
       - name: The agent's test build, for the core's agent tests
         working-directory: agent
         run: cargo build --locked --features test-authenticator
@@ -77,6 +78,61 @@ jobs:
           [ -n "$PB_TEST_CLIPBOARD" ] || unset PB_TEST_CLIPBOARD
           export PB_TEST_AGENT="$GITHUB_WORKSPACE/agent/target/debug/passbundle-agent$( [ "$RUNNER_OS" = Windows ] && echo .exe)"
           cargo test --locked
+      - name: The browsers crate (../browsers), on made-up profiles only, each platform's layout on each computer, and Windows' own data protection on Windows
+        working-directory: browsers
+        run: |
+          cargo fmt --check
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo clippy --locked --all-targets --features fixtures -- -D warnings
+          cargo test --locked
+
+  real-browsers:
+    # Importing from real browsers (browsers/tests/real_browsers.rs): the
+    # runner's own Chrome and Firefox each save made-up passwords
+    # (tools/real-browsers/fakes.json) in profiles in a throwaway home folder
+    # of the run's own (tools/real-browsers/seed.py), one Firefox profile
+    # behind a Primary Password made up for it; the browsers crate reads them
+    # back as each browser keeps them and turns their password saving off;
+    # and the browsers, started again, have it off. Never anyone's own
+    # profiles: the runner is fresh, and nothing reads its real home folder.
+    # The browsers are whichever versions the runner has, on purpose (the
+    # import has to read what today's browsers write), so they change under
+    # this: the steps say which versions ran, and seed.py's failures name
+    # the browser's version and what it no longer had.
+    name: Import from real Chrome and Firefox (Linux)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+        working-directory: browsers
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: The throwaway home folder, the run's own
+        run: echo "PB_REAL_BROWSERS=$RUNNER_TEMP/real-browsers" >> "$GITHUB_ENV"
+      - name: The OS secret store's headers
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libdbus-1-dev pkg-config
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: browsers
+      - name: Selenium, to drive the runner's own Chrome and Firefox
+        run: |
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install --quiet selenium==4.27.1
+          google-chrome --version
+          "$CHROMEWEBDRIVER/chromedriver" --version
+          firefox --version
+          "$GECKOWEBDRIVER/geckodriver" --version
+      - name: Chrome and Firefox save made-up passwords in a throwaway home folder
+        run: '"$RUNNER_TEMP/venv/bin/python" ../tools/real-browsers/seed.py "$PB_REAL_BROWSERS" ../tools/real-browsers/fakes.json seed'
+      - name: The browsers crate reads them back, and turns their password saving off
+        run: PB_REAL_BROWSERS_FAKES="$GITHUB_WORKSPACE/tools/real-browsers/fakes.json" cargo test --locked --test real_browsers -- --nocapture
+      - name: Started again, Chrome and Firefox have their password saving off
+        run: '"$RUNNER_TEMP/venv/bin/python" ../tools/real-browsers/seed.py "$PB_REAL_BROWSERS" ../tools/real-browsers/fakes.json check'
 
   vectors:
     # The test vectors in core/tests/vectors are copies of the meta repo's
@@ -113,7 +169,7 @@ jobs:
           persist-credentials: false
       - name: Each copy is the meta repo's
         run: |
-          for name in core-v1.json desktop-update-v1.json device-approval-v1.json; do
+          for name in core-v1.json desktop-update-v1.json device-approval-v1.json mac-local-v1.json; do
             cmp "core/tests/vectors/$name" "meta/docs/vectors/$name"
           done
 
@@ -651,6 +707,9 @@ jobs:
       - name: The Mac updater against signed bundles, and this build signed as the releases are (tools/mac-update-test.sh)
         if: matrix.platform == 'macos'
         run: tools/mac-update-test.sh --launch "${{ matrix.bundle }}"
+      - name: Touch ID's seal against the vectors, its files, and the core's functions for it (tools/mac-touch-id-test.sh; the Secure Enclave where the runner has one)
+        if: matrix.platform == 'macos'
+        run: tools/mac-touch-id-test.sh "${{ matrix.lib }}"
       - name: Measure (Linux)
         if: matrix.platform == 'linux'
         run: |

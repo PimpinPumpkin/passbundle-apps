@@ -87,6 +87,9 @@ pub struct Screenshots {
     pub allow: bool,
 }
 
+/// The account's sealed refresh token, on the Mac (secrets.rs).
+const SEALED_REFRESH_TOKEN: &str = "session.sealed";
+
 impl Store {
     /// The app's own folder: the OS's local app data folder (AppData\Local on
     /// Windows, Application Support on macOS, ~/.local/share on Linux), in
@@ -211,10 +214,26 @@ impl Store {
         std::time::SystemTime::now().duration_since(modified).ok()
     }
 
+    /// The account's refresh token, sealed (secrets.rs, `seal_refresh_token`),
+    /// where the OS's store doesn't keep one (the Mac's).
+    pub fn sealed_refresh_token(&self) -> Option<String> {
+        self.read(SEALED_REFRESH_TOKEN)
+    }
+
+    pub fn save_sealed_refresh_token(&self, sealed: &str) -> Result<()> {
+        self.write(SEALED_REFRESH_TOKEN, sealed)
+    }
+
+    pub fn forget_sealed_refresh_token(&self) {
+        if let Some(path) = self.path(SEALED_REFRESH_TOKEN) {
+            let _ = fs::remove_file(path);
+        }
+    }
+
     /// Signing out forgets the vault, and the reminders shown for its items;
     /// the server and email stay, to sign in again.
     pub fn forget_vault(&self) {
-        for name in ["sync.json", "reminders.json"] {
+        for name in ["sync.json", "reminders.json", SEALED_REFRESH_TOKEN] {
             if let Some(path) = self.path(name) {
                 let _ = fs::remove_file(path);
             }
@@ -279,6 +298,19 @@ impl Store {
             "screenshots.json",
             &serde_json::to_string_pretty(screenshots).expect("screenshots always serialize"),
         )
+    }
+
+    /// Whether importing from the browsers on this computer was offered to
+    /// this account here already (browser_import.rs): it's offered once by
+    /// itself, and from the menu after that.
+    pub fn browser_import_offered(&self) -> bool {
+        self.read("browser-import.json")
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+            .is_some_and(|v| v["offered"] == true)
+    }
+
+    pub fn save_browser_import_offered(&self) -> Result<()> {
+        self.write("browser-import.json", "{\"offered\":true}")
     }
 
     /// Its folder; None for `Store::none`.

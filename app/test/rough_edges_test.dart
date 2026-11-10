@@ -109,7 +109,9 @@ void main() {
           findsOneWidget,
         );
       } else {
-        // The Mac's Touch ID waits on code signing; Linux has no agent.
+        // Linux has no agent. The Mac app's Touch ID is its own, and has
+        // tests of its own (mac_touch_id_test.dart): without its stand-in,
+        // a Mac here goes the computer's way, as Linux does.
         expect(find.textContaining('Unlock with'), findsNothing);
         expect(find.textContaining('Touch ID'), findsNothing);
         expect(find.text('Unlock'), findsNothing);

@@ -1050,9 +1050,18 @@ class _ConfirmWithMasterPasswordState
 /// Settings' group: the requests waiting, each to review, and whether
 /// approving asks the person to confirm it's them.
 class SignInRequestsSettings extends StatefulWidget {
-  const SignInRequestsSettings({super.key, this.email, this.requests});
+  const SignInRequestsSettings({
+    super.key,
+    this.email,
+    this.requests,
+    this.touchIdOn = false,
+  });
 
   final String? email;
+
+  /// On the Mac, whether unlocking with Touch ID is on for this account,
+  /// which is what confirming asks for when it is (Settings knows).
+  final bool touchIdOn;
 
   /// The app's ([signInRequests]) unless a test gives its own.
   final SignInRequests? requests;
@@ -1168,12 +1177,16 @@ class _SignInRequestsSettingsState extends State<SignInRequestsSettings> {
             });
           },
           title: const Text('Confirm before approving'),
-          // How it asks here: the phone's biometrics, Windows Hello (the
-          // only computer's that works yet), or the master password.
+          // How it asks here: the phone's biometrics, the Mac's Touch ID
+          // once it's on, Windows Hello, or the master password. Whether
+          // it's the Mac's way is asked before what this computer is: the
+          // Mac's tests run on Windows too.
           subtitle: Text(
             isPhone
                 ? 'With your fingerprint or face, or your master password'
-                : Platform.isWindows
+                : isMac && widget.touchIdOn
+                ? 'With Touch ID or your master password'
+                : !isMac && Platform.isWindows
                 ? 'With Windows Hello or your master password'
                 : 'With your master password',
           ),
