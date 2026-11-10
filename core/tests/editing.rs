@@ -8,7 +8,7 @@
 use passbundle_core::crypto::{EncString, SymmetricKey};
 use passbundle_core::kdf::Prelogin;
 use passbundle_core::matching::{matches, Target};
-use passbundle_core::vault::{Card, ItemDraft, Sync, Vault};
+use passbundle_core::vault::{Card, Field, ItemDraft, Sync, Vault};
 use zeroize::Zeroizing;
 
 #[test]
@@ -313,6 +313,140 @@ fn our_own_fields_stay_out_of_the_editor_and_through_an_edit() {
         .map(|h| opened(&item_key, &h["password"]))
         .collect();
     assert_eq!(history, ["API key: k-123"]);
+}
+
+/// Nobody names a custom field `keykeeper.…` in the editor, as a new field or
+/// a rename (DESIGN.md, "Item templates"): such a field would turn into our
+/// own data, a fill rule or a template's definition, and leave the editor.
+/// Any case, any spaces around, as the web vault refuses it. The item's own
+/// `keykeeper.*` fields stay as they are through an edit.
+#[test]
+fn nobody_names_a_field_as_our_own_data() {
+    let (mut v, prelogin, password) = sample();
+    let id = v["ids"]["withKey"].as_str().unwrap().to_owned();
+    let item_key = open(&v, &prelogin, &password)
+        .item(&id)
+        .unwrap()
+        .kept
+        .item_key
+        .clone()
+        .unwrap();
+    let enc = |text: &str| serde_json::Value::from(item_key.encrypt_str(text).to_string());
+    let rule = r#"{"v":1,"host":"backup.example.test","field":{"id":"custno"},"fill":{"from":"username"}}"#;
+    // The item has one of our own fields, and one another app left that
+    // only looks like ours: the capital makes it the person's own field.
+    let fields = cipher(&mut v, &id)["fields"].as_array_mut().unwrap();
+    fields.push(serde_json::json!({ "name": enc("keykeeper.fill"), "value": enc(rule), "type": 1, "linkedId": null }));
+    fields.push(serde_json::json!({ "name": enc("Keykeeper.old"), "value": enc("kept"), "type": 0, "linkedId": null }));
+    let vault = open(&v, &prelogin, &password);
+    let item = vault.item(&id).unwrap();
+    let field = |name: &str| Field {
+        name: name.into(),
+        value: Zeroizing::new("anything".to_owned()),
+        hidden: false,
+        boolean: false,
+    };
+    let refused = |saved: passbundle_core::Result<serde_json::Value>, name: &str| {
+        let said = saved
+            .err()
+            .unwrap_or_else(|| panic!("a field named {name:?} was saved"))
+            .to_string();
+        assert_eq!(
+            said, "Field names starting with \"keykeeper.\" are reserved.",
+            "{name:?}"
+        );
+    };
+
+    let names = [
+        "keykeeper.fill",
+        "keykeeper.template.definition",
+        "keykeeper.expires",
+        "keykeeper.",
+        "keykeeper.anything else",
+        "Keykeeper.Fill",
+        "KEYKEEPER.TEMPLATE",
+        "  keykeeper.fill",
+        "\tkeykeeper.expires ",
+    ];
+    for name in names {
+        // On a new item.
+        let new = ItemDraft {
+            name: "New".into(),
+            fields: vec![field("Ticket"), field(name)],
+            ..ItemDraft::default()
+        };
+        refused(vault.encrypt_item(&new, None), name);
+        // Added to an item.
+        let mut draft = ItemDraft::of(item);
+        draft.fields.push(field(name));
+        refused(vault.encrypt_item(&draft, Some(item)), name);
+        // One of the item's fields, renamed.
+        let mut draft = ItemDraft::of(item);
+        assert_eq!(draft.fields[0].name, "API key");
+        draft.fields[0].name = name.into();
+        refused(vault.encrypt_item(&draft, Some(item)), name);
+    }
+    // Names that only have the word in them are the person's to give.
+    for name in ["keykeeper", "keykeeper notes", "my keykeeper.fill", "Fill"] {
+        let new = ItemDraft {
+            name: "New".into(),
+            fields: vec![field(name)],
+            ..ItemDraft::default()
+        };
+        let body = vault.encrypt_item(&new, None).unwrap();
+        assert_eq!(body["fields"].as_array().unwrap().len(), 1, "{name:?}");
+    }
+
+    // An edit that names nothing new goes through: the field another app
+    // left keeps its name, and our own field is sent back as it was.
+    let mut draft = ItemDraft::of(item);
+    let theirs: Vec<&str> = draft.fields.iter().map(|f| f.name.as_str()).collect();
+    assert_eq!(theirs, ["API key", "Keykeeper.old"]);
+    draft.name = "Renamed".into();
+    draft.fields[1].value = Zeroizing::new("changed".to_owned());
+    let body = vault.encrypt_item(&draft, Some(item)).unwrap();
+    let sent: Vec<(String, String, u64)> = body["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| {
+            (
+                opened(&item_key, &f["name"]),
+                opened(&item_key, &f["value"]),
+                f["type"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        sent,
+        [
+            ("API key".to_owned(), "k-123".to_owned(), 1),
+            ("keykeeper.fill".to_owned(), rule.to_owned(), 1),
+            ("Keykeeper.old".to_owned(), "changed".to_owned(), 0),
+        ]
+    );
+    // But a second field with that name is a new one, so it's refused.
+    let mut draft = ItemDraft::of(item);
+    draft.fields.push(field("Keykeeper.old"));
+    refused(vault.encrypt_item(&draft, Some(item)), "Keykeeper.old");
+
+    // Restoring a version puts back the fields it had, that one too, after
+    // it's gone from the item.
+    cipher(&mut v, &id)["fields"]
+        .as_array_mut()
+        .unwrap()
+        .truncate(2);
+    let now = open(&v, &prelogin, &password);
+    let current = now.item(&id).unwrap();
+    assert_eq!(ItemDraft::of(current).fields.len(), 1);
+    let body = now.encrypt_restore(item, current).unwrap();
+    let restored: Vec<String> = body["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| opened(&item_key, &f["name"]))
+        .collect();
+    assert_eq!(restored, ["API key", "keykeeper.fill", "Keykeeper.old"]);
 }
 
 #[test]
@@ -728,11 +862,27 @@ fn restoring_a_version_keeps_our_own_fields_as_they_are_now() {
 #[test]
 fn template_groups_never_name_who_a_copy_came_from() {
     let (mut v, prelogin, password) = sample();
-    let field = |name: &str, value: &str| passbundle_core::vault::Field {
-        name: name.into(),
-        value: Zeroizing::new(value.into()),
-        hidden: false,
-        boolean: false,
+    let org = v["ids"]["organization"].as_str().unwrap().to_owned();
+    // The definition, as the web vault's template editor stores it: the
+    // app's own editor never names a field that (`Field::reserved_name`).
+    let definition = {
+        let vault = open(&v, &prelogin, &password);
+        let key = vault
+            .value_key(
+                &ItemDraft {
+                    organization_id: Some(org.clone()),
+                    ..ItemDraft::default()
+                },
+                None,
+            )
+            .unwrap();
+        let enc = |text: &str| serde_json::Value::from(key.encrypt_str(text).to_string());
+        serde_json::json!({
+            "name": enc(passbundle_core::templates::DEFINITION_FIELD),
+            "value": enc(r#"{"id":"office-router","base":"note","v":1,"from":"Your MSP (trust us)"}"#),
+            "type": 0,
+            "linkedId": null,
+        })
     };
     let (vault, _) = shared_as(
         &mut v,
@@ -741,21 +891,19 @@ fn template_groups_never_name_who_a_copy_came_from() {
         ItemDraft {
             note: true,
             name: "Router".into(),
-            fields: vec![
-                field("Model", "not-a-real-model"),
-                field(
-                    passbundle_core::templates::DEFINITION_FIELD,
-                    r#"{"id":"office-router","base":"note","v":1,"from":"Your MSP (trust us)"}"#,
-                ),
-            ],
+            fields: vec![Field {
+                name: "Model".into(),
+                value: Zeroizing::new("not-a-real-model".into()),
+                hidden: false,
+                boolean: false,
+            }],
             ..ItemDraft::default()
         },
-        |_| {},
+        |c| c["fields"].as_array_mut().unwrap().push(definition),
     );
     let groups = passbundle_core::templates::groups(&vault, |_| true);
     let names: Vec<&str> = groups.iter().map(|g| g.name.as_str()).collect();
-    let org = v["ids"]["organization"].as_str().unwrap();
-    let org_name = vault.organizations.get(org).unwrap();
+    let org_name = vault.organizations.get(&org).unwrap();
     assert_eq!(names, [org_name.as_str(), "Built-in"]);
     assert_eq!(groups[0].templates[0].id, "office-router");
     assert!(!serde_json::to_string(&groups).unwrap().contains("trust us"));

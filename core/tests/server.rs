@@ -1559,21 +1559,20 @@ fn a_shared_folders_permissions_hold_in_the_app() {
         fields: vec![
             field("Model", "not-a-real-model", false),
             field("Admin PIN", "not-a-real-pin", true),
-            field(
-                passbundle_core::templates::DEFINITION_FIELD,
-                r#"{"id":"office-router","base":"note","v":1}"#,
-                false,
-            ),
         ],
         ..ItemDraft::default()
     };
+    // The definition, as the web vault's template editor stores it: the
+    // app's own editor never names a field that (`Field::reserved_name`).
+    let mut template = vault.encrypt_item(&template, None).unwrap();
+    template["fields"].as_array_mut().unwrap().push(json!({
+        "name": org_key.encrypt_str(passbundle_core::templates::DEFINITION_FIELD).to_string(),
+        "value": org_key.encrypt_str(r#"{"id":"office-router","base":"note","v":1}"#).to_string(),
+        "type": 0,
+        "linkedId": null,
+    }));
     server
-        .save_item(
-            &mut session,
-            None,
-            vault.encrypt_item(&template, None).unwrap(),
-            std::slice::from_ref(&it),
-        )
+        .save_item(&mut session, None, template, std::slice::from_ref(&it))
         .unwrap();
     for (name, password, folder) in [
         ("Office Wi-Fi", "not-a-real-password-it", &it),

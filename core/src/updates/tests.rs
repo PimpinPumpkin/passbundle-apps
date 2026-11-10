@@ -36,9 +36,11 @@ fn temp(name: &str) -> PathBuf {
 }
 
 /// A release's folder at `dir`: everything a release has, at `version`.
-/// Its `passbundle-update` is a script that notes how it was run; on
-/// Windows, which runs only programs, this test program (which, given
-/// `finish <folder>`, runs no tests, taking them for test names).
+/// Its `passbundle-update` is a script that notes how it was run, under
+/// another name first, so `helper-ran` is never there half-written for a
+/// test to read; on Windows, which runs only programs, this test program
+/// (which, given `finish <folder>`, runs no tests, taking them for test
+/// names).
 fn release_folder(dir: &Path, version: &str) {
     for name in bundle::required() {
         let path = dir.join(&name);
@@ -48,7 +50,8 @@ fn release_folder(dir: &Path, version: &str) {
             continue;
         }
         let body = if name == swap::helper_name() {
-            "#!/bin/sh\necho \"$@\" > \"$2/helper-ran\"\n".to_owned()
+            "#!/bin/sh\necho \"$@\" > \"$2/helper-ran.part\" && mv \"$2/helper-ran.part\" \"$2/helper-ran\"\n"
+                .to_owned()
         } else {
             format!("{name} {version}")
         };
@@ -348,6 +351,8 @@ fn an_offered_update_downloads_unpacks_and_starts_its_updater() {
     // This copy's updater, copied out, started on the work folder.
     #[cfg(unix)]
     {
+        // The stand-in moves its note into place whole (release_folder), so
+        // once it's there it's all there.
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         while !work.join("helper-ran").exists() && std::time::Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(50));

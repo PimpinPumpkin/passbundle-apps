@@ -414,6 +414,17 @@ impl Field {
         self.name.starts_with(RESERVED_FIELD_PREFIX)
     }
 
+    /// Whether a name is one nobody gives a custom field, as a new field or
+    /// a rename: such a field would turn into our own data, a template's
+    /// definition for instance, and leave the editor (DESIGN.md, "Item
+    /// templates"). Any case, any spaces around, as the web vault has it
+    /// (passbundle-clients, reserved-fields.ts).
+    pub fn reserved_name(name: &str) -> bool {
+        name.trim()
+            .to_lowercase()
+            .starts_with(RESERVED_FIELD_PREFIX)
+    }
+
     /// Whether the app's editor edits it: a named text, hidden, or yes-or-no
     /// field of the person's own (`kind`, upstream's field type, from
     /// `Kept`). Linked fields, nameless ones (or blank), and our own data stay as they are.
@@ -1464,6 +1475,32 @@ impl Vault {
                 return Err(Error::Refused(
                     "moving an item between owners is for the web vault",
                 ));
+            }
+        }
+        // Nobody names a field `keykeeper.…`, as a new field or a rename
+        // (`Field::reserved_name`). A field the item already has under such
+        // a name, which another app left in another case or with spaces
+        // around, keeps it: once for each the item (or the version being
+        // restored) has, so one more by that name is a new field.
+        let mut had: Vec<&str> = source
+            .into_iter()
+            .flat_map(|item| item.fields.iter().zip(&item.kept.field_kinds))
+            .filter(|(field, (kind, _))| field.edited_by_the_app(*kind))
+            .map(|(field, _)| field.name.as_str())
+            .collect();
+        for field in &draft.fields {
+            if !Field::reserved_name(&field.name) {
+                continue;
+            }
+            match had.iter().position(|name| *name == field.name) {
+                Some(at) => {
+                    had.swap_remove(at);
+                }
+                None => {
+                    return Err(Error::Refused(
+                        "field names starting with \"keykeeper.\" are reserved",
+                    ))
+                }
             }
         }
         // Someone who can't see the item's passwords can't change its
