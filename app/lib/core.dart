@@ -215,6 +215,12 @@ class Core {
   );
   late final _unlock = _lib.lookupFunction<_Str2, _Str2>('pb_unlock');
   late final _saveAttachment = _lib.lookupFunction<_Str3, _Str3>('pb_save_attachment');
+  late final _attachFile = _lib.lookupFunction<_Str4, _Str4>('pb_attach_file');
+  late final _uploadProgress = _lib.lookupFunction<_Str0, _Str0>('pb_upload_progress');
+  late final _uploadGo = _lib.lookupFunction<Void Function(Uint64), void Function(int)>('pb_upload_go');
+  late final _uploadCancel = _lib.lookupFunction<Void Function(), void Function()>('pb_upload_cancel');
+  late final _attachLimit = _lib.lookupFunction<_Str0, _Str0>('pb_attach_limit');
+  late final _deleteAttachment = _lib.lookupFunction<_Str3, _Str3>('pb_delete_attachment');
   late final _confirmMasterPassword = _lib.lookupFunction<_Str3, _Str3>('pb_confirm_master_password');
   late final _signInRequests = _lib.lookupFunction<_Str1, _Str1>('pb_sign_in_requests');
   late final _answerSignInRequest = _lib.lookupFunction<_Str4, _Str4>('pb_answer_sign_in_request');
@@ -634,6 +640,66 @@ class Core {
             attachmentId,
           ], (p) => c._answer(c._saveAttachment(p[0], p[1], p[2]))),
         );
+
+  /// Attaches the file at [path] to an item, named [name] (docs/core.md,
+  /// "Attachments"), with the keys of the account the screens show now:
+  /// `{ok, id, synced}`, or the words to show (`canceled` when the person
+  /// stopped it). One file at a time; [uploadProgress] says how far it is,
+  /// [cancelUpload] stops it. Not under [whileBusy]: the file travels with
+  /// the screens reading from the core, and attaching.dart raises the busy
+  /// flag for the moments the upload has the app.
+  static Future<Answer> attachFile(String id, String path, String name) =>
+      _background(
+        (c, a) => c._with([
+          a,
+          id,
+          path,
+          name,
+        ], (p) => c._answer(c._attachFile(p[0], p[1], p[2], p[3]))),
+      );
+
+  /// How far the upload under way is: `{phase, done, total, wantsApp}`
+  /// (core/src/ffi.rs, `pb_upload_progress`). Never waits for the core.
+  Map<String, dynamic> uploadProgress() => _map(_uploadProgress());
+
+  /// The screens have stopped reading from the core for the upload's step
+  /// numbered [step] (`wantsApp`): it may go on.
+  void uploadGo(int step) => _uploadGo(step);
+
+  /// Stops the upload under way; the server keeps nothing of it, unless it
+  /// already has the whole file, which is then attached.
+  void cancelUpload() => _uploadCancel();
+
+  /// The largest file the app attaches on this device: `{bytes, refusal}`,
+  /// the words for a larger one.
+  Map<String, dynamic> attachLimit() => _map(_attachLimit());
+
+  /// Deletes one of an item's attachments, then syncs: `{ok, synced}`.
+  static Future<Answer> deleteAttachment(String id, String attachmentId) =>
+      _background(
+        (c, a) => c._with([
+          a,
+          id,
+          attachmentId,
+        ], (p) => c._answer(c._deleteAttachment(p[0], p[1], p[2]))),
+      );
+
+  /// Asks the person for a file to attach, with the device's own picker:
+  /// `{path, name}`, `{tooLarge: true}` for one larger than [limit] bytes,
+  /// or null when they chose none. A phone copies the file into the app's
+  /// cache (docs/phones.md, "Attachments"), for [forgetPicked] to delete
+  /// once it's uploaded; a computer answers the file where it is.
+  static Future<Map<String, dynamic>?> pickFile(int limit) async {
+    final picked = await platform.invokeMethod<Map>('pickFile', {
+      'limit': limit,
+    });
+    return picked == null ? null : Map<String, dynamic>.from(picked);
+  }
+
+  /// Deletes the copies a phone's picker made in the app's cache.
+  static Future<void> forgetPicked() async {
+    if (isPhone) await platform.invokeMethod<void>('forgetPicked');
+  }
 
   /// The master password, for an item that asks for it again (docs/core.md,
   /// "Asking for the master password again"): then its secrets may be used.

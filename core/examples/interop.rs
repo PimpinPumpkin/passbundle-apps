@@ -17,12 +17,21 @@
 //! with that phrase, after confirming with the master password as the app
 //! asks (`{"confirm": false}` skips confirming, to see it refused).
 //!
+//! Attachments too, through the app's own calls (the same spec): `{"action":
+//! "attach", item, path, name?}` attaches the file at `path` to the item
+//! with that name, `{"action": "readAttachment", item, name}` downloads and
+//! opens the item's attachment with that name (its contents in base64), and
+//! `{"action": "deleteAttachment", item, name}` deletes it.
+//!
 //!   cargo run --release --features test-trust --example interop -- \
 //!     <server> <certificate.pem> <email> <password> [<draft.json>]
 //!
 //! Test data only: it prints the secrets it reads.
 
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use base64::{
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+    Engine,
+};
 use passbundle_core::app::{App, NewPasskey};
 use passbundle_core::secrets::MemorySecretStore;
 use passbundle_core::server::{Device, Server, SignIn};
@@ -58,6 +67,7 @@ fn main() {
                 "uris": i.uris,
                 "organizationId": i.organization_id,
                 "fields": i.fields.iter().map(|f| json!({ "name": f.name, "value": f.value.as_str(), "hidden": f.hidden })).collect::<Vec<_>>(),
+                "attachments": i.attachments.iter().map(|a| json!({ "id": a.id, "name": a.name, "size": a.size })).collect::<Vec<_>>(),
                 "passkey": i.passkey.as_ref().map(|p| json!({
                     "rpId": p.rp_id,
                     "userName": p.user_name,
@@ -78,6 +88,11 @@ fn main() {
             if matches!(action, "signInRequests" | "approveSignIn" | "denySignIn") {
                 let answer = sign_in_request(action, &d, server_url, &pem, email, password);
                 println!("{}", json!({ "items": items, "signIn": answer }));
+                return;
+            }
+            if matches!(action, "attach" | "readAttachment" | "deleteAttachment") {
+                let answer = attachment(action, &d, server_url, &pem, email, password);
+                println!("{}", json!({ "items": items, "attachment": answer }));
                 return;
             }
             let answer = passkey(action, &d, server_url, &pem, email, password);
@@ -246,4 +261,51 @@ fn sign_in_request(
     }
     let _ = std::fs::remove_dir_all(dir);
     answer
+}
+
+/// An attachment action, through the app's own calls, signed in afresh: a
+/// file attached to the item with the given name, or that item's attachment
+/// with the given name opened or deleted. What the app refuses comes back
+/// as `refused`, in its words.
+fn attachment(
+    action: &str,
+    d: &Value,
+    server: &str,
+    pem: &[u8],
+    email: &str,
+    password: &str,
+) -> Value {
+    passbundle_core::server::trust_only_for_tests(pem);
+    let dir = std::env::temp_dir().join(format!("pb-interop-{}", uuid::Uuid::new_v4().simple()));
+    let mut app = App::open(Store::new(&dir), Box::new(MemorySecretStore::default()));
+    app.sign_in(server, email, password).expect("signing in");
+    let text = |key: &str| d[key].as_str().unwrap_or_default().to_owned();
+    let vault = app.vault().expect("the vault");
+    let item = vault
+        .items
+        .iter()
+        .find(|i| i.name == text("item"))
+        .expect("an item with that name");
+    let id = item.id.clone();
+    let named = item
+        .attachments
+        .iter()
+        .find(|a| a.name == text("name"))
+        .map(|a| a.id.clone());
+    let done = match action {
+        "attach" => app
+            .attach(&id, std::path::Path::new(&text("path")), &text("name"))
+            .map(|attached| json!({ "id": attached.id, "synced": attached.synced })),
+        "readAttachment" => app
+            .attachment(&id, &named.expect("an attachment with that name"))
+            .map(
+                |(name, contents)| json!({ "name": name, "contents": STANDARD.encode(&*contents) }),
+            ),
+        "deleteAttachment" => app
+            .delete_attachment(&id, &named.expect("an attachment with that name"))
+            .map(|synced| json!({ "synced": synced })),
+        other => panic!("no such action: {other}"),
+    };
+    let _ = std::fs::remove_dir_all(dir);
+    done.unwrap_or_else(|e| json!({ "refused": e.to_string() }))
 }

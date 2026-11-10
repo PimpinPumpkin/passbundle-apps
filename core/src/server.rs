@@ -216,6 +216,151 @@ impl Download {
     }
 }
 
+/// How long the server gets to answer once a file is with it: it writes the
+/// file before it says so.
+const UPLOAD_ANSWER_TIME: Duration = Duration::from_secs(5 * 60);
+
+/// A file's upload, ready to go (`Server::start_attachment`): where the
+/// encrypted file goes, and the name it's sent under (its encrypted name, as
+/// the other apps send it). Sending needs nothing else of the server, the
+/// session, or the app, so the file can travel while the app does other
+/// things, as a `Download` does.
+pub struct Upload {
+    agent: Agent,
+    url: String,
+    auth: Zeroizing<String>,
+    file_name: String,
+}
+
+/// A multipart form with one file in it, read piece by piece, so the file
+/// isn't copied to send it: what comes before the file, the file, and what
+/// closes the form. `sent` hears how much of the file has gone before each
+/// piece, and stops the upload by answering false.
+struct FormBody<'a> {
+    parts: [&'a [u8]; 3],
+    part: usize,
+    at: usize,
+    sent: &'a mut dyn FnMut(u64) -> bool,
+    canceled: bool,
+}
+
+impl std::io::Read for FormBody<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        /// The most handed over at once, so progress is said often.
+        const PIECE: usize = 64 * 1024;
+        loop {
+            let Some(part) = self.parts.get(self.part) else {
+                return Ok(0);
+            };
+            if self.part == 1 && !(self.sent)(self.at as u64) {
+                self.canceled = true;
+                return Err(std::io::Error::other("canceled"));
+            }
+            let left = &part[self.at..];
+            if left.is_empty() {
+                self.part += 1;
+                self.at = 0;
+                continue;
+            }
+            let n = left.len().min(buf.len()).min(PIECE);
+            buf[..n].copy_from_slice(&left[..n]);
+            self.at += n;
+            return Ok(n);
+        }
+    }
+}
+
+impl Upload {
+    /// Sends the encrypted file. `sent` hears how many of its bytes have
+    /// gone, and stops the upload by answering false (`Error::Canceled`).
+    /// The file may take up to half an hour to go, as a download may; the
+    /// server's refusal comes back in plain words (`file_refusal`).
+    pub fn send(&self, file: &[u8], sent: &mut dyn FnMut(u64) -> bool) -> Result<()> {
+        let boundary = format!("PassBundle-{}", uuid::Uuid::new_v4().simple());
+        let head = format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"data\"; filename=\"{}\"\r\nContent-Type: application/octet-stream\r\n\r\n",
+            self.file_name
+        );
+        let tail = format!("\r\n--{boundary}--\r\n");
+        let length = head.len() + file.len() + tail.len();
+        let mut body = FormBody {
+            parts: [head.as_bytes(), file, tail.as_bytes()],
+            part: 0,
+            at: 0,
+            sent,
+            canceled: false,
+        };
+        // The length is said up front, as the server checks it against the
+        // one the upload was started with before it reads the file.
+        let response = self
+            .agent
+            .post(&self.url)
+            .header("Authorization", self.auth.as_str())
+            .header(
+                "Content-Type",
+                format!("multipart/form-data; boundary={boundary}"),
+            )
+            .header("Content-Length", length.to_string())
+            .config()
+            .timeout_global(None)
+            .timeout_connect(Some(Duration::from_secs(30)))
+            .timeout_send_request(Some(Duration::from_secs(30)))
+            .timeout_send_body(Some(ATTACHMENT_TIME))
+            .timeout_recv_response(Some(UPLOAD_ANSWER_TIME))
+            .timeout_recv_body(Some(Duration::from_secs(30)))
+            .build()
+            .send(ureq::SendBody::from_reader(&mut body));
+        if body.canceled {
+            return Err(Error::Canceled);
+        }
+        let mut response = response.map_err(|e| Error::unreached(&self.url, &e))?;
+        let status = response.status().as_u16();
+        if (200..300).contains(&status) {
+            return Ok(());
+        }
+        let text = response.body_mut().read_to_string().unwrap_or_default();
+        let body: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+        // The session was good when the upload started, so a 401 here is
+        // the server's refusal, not a reason to sign the person out.
+        Err(file_refusal(
+            message_of(&body).map_or(Error::Status(status), Error::Server),
+        ))
+    }
+}
+
+/// The server's refusals of a file, in plain words (upstream's sentences
+/// say "cipher", shout, or give numbers nobody asked for). Anything else
+/// stays as it is.
+fn file_refusal(error: Error) -> Error {
+    let Error::Server(said) = &error else {
+        return error;
+    };
+    let said = said.to_lowercase();
+    let has = |words: &str| said.contains(words);
+    if has("storage limit reached") {
+        Error::Refused("your server's room for files is full. Delete some attachments, or ask whoever runs it for more room")
+    } else if has("storage limit exceeded") {
+        Error::Refused("your server doesn't have room for this file. Delete some attachments, or ask whoever runs it for more room")
+    } else if has("max file size") {
+        Error::Refused("that file is larger than your server takes")
+    } else if has("attachments are disabled") {
+        Error::Refused("whoever runs your server has turned attachments off")
+    } else if has("not write accessible") || has("cannot be deleted by user") {
+        Error::Refused(
+            "you can view this item but not change it, so you can't change its attachments",
+        )
+    } else if has("size mismatch") {
+        Error::Refused("the file didn't arrive whole. Try again")
+    } else if has("attachment doesn't exist")
+        || has("attachment doesn't belong")
+        || has("attachment from other cipher")
+    {
+        Error::Damaged("no such attachment")
+    } else {
+        error
+    }
+}
+
 #[derive(Clone)]
 pub struct Server {
     base: String,
@@ -1104,6 +1249,84 @@ impl Server {
             agent: self.agent.clone(),
             url,
         })
+    }
+
+    /// Starts an attachment (upstream's two-step upload): the server makes
+    /// its record and answers its id, and the file follows (`Upload::send`).
+    /// `key` and `file_name` are encrypted already, and `size` is the
+    /// encrypted file's length. The file goes to this server at the path
+    /// the other apps use, never to an address the answer names; an answer
+    /// that asks for anything else (another kind of storage) is refused,
+    /// and the record it made is deleted.
+    pub fn start_attachment(
+        &self,
+        session: &mut Session,
+        cipher_id: &str,
+        key: &str,
+        file_name: &str,
+        size: u64,
+    ) -> Result<(String, Upload)> {
+        let cipher_id = path_id(cipher_id)?;
+        // The name goes into a header's quotes: an encrypted string has
+        // nothing that could end them, and anything else isn't sent.
+        if file_name
+            .bytes()
+            .any(|b| b == b'"' || b == b'\\' || b.is_ascii_control())
+        {
+            return Err(Error::Damaged("a file name that isn't encrypted"));
+        }
+        let answer = self
+            .call(
+                session,
+                "POST",
+                &format!("/api/ciphers/{cipher_id}/attachment/v2"),
+                Some(json!({
+                    "key": key,
+                    "fileName": file_name,
+                    "fileSize": size,
+                    "adminRequest": false,
+                })),
+            )
+            .map_err(file_refusal)?;
+        let id = answer["attachmentId"]
+            .as_str()
+            .ok_or_else(|| Error::Malformed("an attachment answer with no id".into()))?
+            .to_owned();
+        let direct = answer["fileUploadType"].as_u64() == Some(0);
+        if path_id(&id).is_err() || !direct {
+            // Its record is made already; it never gets a file.
+            let _ = self.delete_attachment(session, cipher_id, &id);
+            return Err(Error::Malformed(
+                "a way to upload a file that PassBundle doesn't know".into(),
+            ));
+        }
+        Ok((
+            id.clone(),
+            Upload {
+                agent: self.agent.clone(),
+                url: self.url(&format!("/api/ciphers/{cipher_id}/attachment/{id}")),
+                auth: Zeroizing::new(format!("Bearer {}", session.access_token.as_str())),
+                file_name: file_name.to_owned(),
+            },
+        ))
+    }
+
+    /// Deletes an attachment: its record, and its file if it has one.
+    pub fn delete_attachment(
+        &self,
+        session: &mut Session,
+        cipher_id: &str,
+        attachment_id: &str,
+    ) -> Result<()> {
+        let (cipher_id, attachment_id) = (path_id(cipher_id)?, path_id(attachment_id)?);
+        self.call(
+            session,
+            "DELETE",
+            &format!("/api/ciphers/{cipher_id}/attachment/{attachment_id}"),
+            None,
+        )
+        .map(|_| ())
+        .map_err(file_refusal)
     }
 
     /// Makes a folder; `name` is already encrypted. Answers its id.
@@ -2064,5 +2287,271 @@ mod tests {
             assert!(!allowed(refused), "{refused}");
         }
         assert!(Server::new("http://vault.example.test", Device::this_one("x")).is_err());
+    }
+
+    /// A request whole: its head as text, and its body's bytes.
+    type Asked = (String, Vec<u8>);
+
+    /// A server on this computer that answers each request with the next of
+    /// `answers`, and gives back each request whole.
+    fn answering_whole(answers: Vec<Vec<u8>>) -> (String, std::thread::JoinHandle<Vec<Asked>>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let served = std::thread::spawn(move || {
+            let mut asked = Vec::new();
+            for answer in answers {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    break;
+                };
+                let mut request = Vec::new();
+                let mut byte = [0u8; 1];
+                while !request.ends_with(b"\r\n\r\n") && stream.read(&mut byte).unwrap_or(0) == 1 {
+                    request.push(byte[0]);
+                }
+                let head = String::from_utf8_lossy(&request).into_owned();
+                let length = head
+                    .lines()
+                    .find_map(|h| {
+                        let (name, value) = h.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().ok())?
+                    })
+                    .unwrap_or(0);
+                let mut body = vec![0u8; length];
+                let _ = stream.read_exact(&mut body);
+                asked.push((head, body));
+                let _ = stream.write_all(&answer);
+            }
+            asked
+        });
+        (url, served)
+    }
+
+    fn a_session() -> Session {
+        Session {
+            access_token: Zeroizing::new("access".into()),
+            refresh_token: Zeroizing::new("refresh".into()),
+            expires_at: now() + 3600,
+            user_key: SymmetricKey::generate(),
+            device_token: None,
+        }
+    }
+
+    const ITEM: &str = "0b6f4a4e-7d1c-4e7e-9d57-3d8a5a1c2f10";
+    const FILE: &str = "8Qv2kLm4TzYp1WcXn0Rs";
+
+    fn started() -> Vec<u8> {
+        answer(
+            "200 OK",
+            "",
+            json!({
+                "object": "attachment-fileUpload",
+                "attachmentId": FILE,
+                "url": "https://elsewhere.example.test/upload",
+                "fileUploadType": 0,
+                "cipherResponse": {},
+            })
+            .to_string()
+            .as_bytes(),
+        )
+    }
+
+    #[test]
+    fn a_file_goes_up_in_two_steps_as_one_form_with_its_length_said_first() {
+        let (url, served) = answering_whole(vec![started(), answer("200 OK", "", b"")]);
+        let server = Server::new(&url, Device::this_one("attaching")).unwrap();
+        let mut session = a_session();
+        let file: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
+        let name =
+            "2.AAAAAAAAAAAAAAAAAAAAAA==|bmFtZQ==|AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+        let (id, upload) = server
+            .start_attachment(&mut session, ITEM, "2.key", name, file.len() as u64)
+            .unwrap();
+        assert_eq!(id, FILE);
+        let mut heard = Vec::new();
+        upload
+            .send(&file, &mut |sent| {
+                heard.push(sent);
+                true
+            })
+            .unwrap();
+        // Progress only ever grows, in pieces, and ends at the whole file.
+        assert!(heard.len() > 3, "{heard:?}");
+        assert!(heard.windows(2).all(|w| w[0] <= w[1]), "{heard:?}");
+        assert_eq!(heard.first(), Some(&0));
+        assert_eq!(heard.last(), Some(&(file.len() as u64)));
+
+        let asked = served.join().unwrap();
+        let (head, body) = &asked[0];
+        assert!(head.starts_with(&format!("POST /api/ciphers/{ITEM}/attachment/v2 ")));
+        let sent: Value = serde_json::from_slice(body).unwrap();
+        assert_eq!(
+            sent,
+            json!({"key": "2.key", "fileName": name, "fileSize": 200_000, "adminRequest": false})
+        );
+        // The file goes to this server, at the other apps' path, whatever
+        // address the answer named.
+        let (head, body) = &asked[1];
+        assert!(
+            head.starts_with(&format!("POST /api/ciphers/{ITEM}/attachment/{FILE} ")),
+            "{head}"
+        );
+        let lower = head.to_lowercase();
+        assert!(lower.contains("authorization: bearer access\r\n"), "{head}");
+        assert!(!lower.contains("transfer-encoding"), "{head}");
+        let boundary = lower
+            .lines()
+            .find_map(|l| l.strip_prefix("content-type: multipart/form-data; boundary="))
+            .expect("a multipart form")
+            .to_owned();
+        let boundary = &head[lower.find(&boundary).unwrap()..][..boundary.len()];
+        let before = format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"data\"; filename=\"{name}\"\r\nContent-Type: application/octet-stream\r\n\r\n"
+        );
+        let after = format!("\r\n--{boundary}--\r\n");
+        assert_eq!(body.len(), before.len() + file.len() + after.len());
+        assert!(body.starts_with(before.as_bytes()));
+        assert!(body.ends_with(after.as_bytes()));
+        assert_eq!(&body[before.len()..before.len() + file.len()], &file[..]);
+    }
+
+    #[test]
+    fn a_canceled_upload_stops_partway_and_says_so() {
+        let (url, _served) = answering_whole(vec![started(), answer("200 OK", "", b"")]);
+        let server = Server::new(&url, Device::this_one("attaching")).unwrap();
+        let mut session = a_session();
+        let file = vec![7u8; 4_000_000];
+        let (_, upload) = server
+            .start_attachment(&mut session, ITEM, "2.key", "2.name", file.len() as u64)
+            .unwrap();
+        let mut last = 0;
+        let result = upload.send(&file, &mut |sent| {
+            last = sent;
+            sent < 1_000_000
+        });
+        assert_eq!(result, Err(Error::Canceled));
+        assert!((1_000_000..4_000_000).contains(&last), "{last}");
+    }
+
+    #[test]
+    fn the_servers_refusals_of_a_file_are_said_in_plain_words() {
+        let refusal = |words: &str| {
+            answer(
+                "400 Bad Request",
+                "",
+                json!({"message": words, "errorModel": {"message": words}})
+                    .to_string()
+                    .as_bytes(),
+            )
+        };
+        let (url, _served) = answering_whole(vec![
+            refusal("Attachment storage limit reached! Delete some attachments to free up space"),
+            refusal("Attachment storage limit exceeded with this file"),
+            refusal("Attachments are disabled"),
+            refusal("Cipher is not write accessible"),
+            started(),
+            refusal("Attachment size mismatch (expected within [1, 2], got 3)"),
+            started(),
+            answer("413 Payload Too Large", "", b"<html>too large</html>"),
+            refusal("Attachment doesn't exist"),
+            refusal("Attachment from other cipher"),
+            refusal("Cipher cannot be deleted by user"),
+        ]);
+        let server = Server::new(&url, Device::this_one("attaching")).unwrap();
+        let mut session = a_session();
+        let mut start = || {
+            server
+                .start_attachment(&mut session, ITEM, "2.key", "2.name", 100)
+                .map(|(_, upload)| upload)
+        };
+        let said = |e: Error| e.to_string();
+        assert_eq!(
+            said(start().err().unwrap()),
+            "Your server's room for files is full. Delete some attachments, or ask whoever runs it for more room."
+        );
+        assert_eq!(
+            said(start().err().unwrap()),
+            "Your server doesn't have room for this file. Delete some attachments, or ask whoever runs it for more room."
+        );
+        assert_eq!(
+            said(start().err().unwrap()),
+            "Whoever runs your server has turned attachments off."
+        );
+        assert_eq!(
+            said(start().err().unwrap()),
+            "You can view this item but not change it, so you can't change its attachments."
+        );
+        let upload = start().unwrap();
+        assert_eq!(
+            said(upload.send(&[1; 100], &mut |_| true).unwrap_err()),
+            "The file didn't arrive whole. Try again."
+        );
+        let upload = start().unwrap();
+        assert_eq!(
+            said(upload.send(&[1; 100], &mut |_| true).unwrap_err()),
+            "That's larger than your server takes (error 413)."
+        );
+        assert_eq!(
+            said(
+                server
+                    .delete_attachment(&mut session, ITEM, FILE)
+                    .unwrap_err()
+            ),
+            "That attachment isn't here anymore. Sync to see what's there now."
+        );
+        // The server's words when deleting: another item's attachment, and
+        // an item the person may only view.
+        assert_eq!(
+            said(
+                server
+                    .delete_attachment(&mut session, ITEM, FILE)
+                    .unwrap_err()
+            ),
+            "That attachment isn't here anymore. Sync to see what's there now."
+        );
+        assert_eq!(
+            said(
+                server
+                    .delete_attachment(&mut session, ITEM, FILE)
+                    .unwrap_err()
+            ),
+            "You can view this item but not change it, so you can't change its attachments."
+        );
+    }
+
+    #[test]
+    fn an_upload_the_app_doesnt_know_is_refused_and_its_record_deleted() {
+        let elsewhere = answer(
+            "200 OK",
+            "",
+            json!({"attachmentId": FILE, "url": "https://blob.example.test/x", "fileUploadType": 1})
+                .to_string()
+                .as_bytes(),
+        );
+        let (url, served) = answering_whole(vec![elsewhere, answer("200 OK", "", b"{}")]);
+        let server = Server::new(&url, Device::this_one("attaching")).unwrap();
+        let mut session = a_session();
+        assert!(matches!(
+            server.start_attachment(&mut session, ITEM, "2.key", "2.name", 100),
+            Err(Error::Malformed(_))
+        ));
+        let asked = served.join().unwrap();
+        assert!(asked[1]
+            .0
+            .starts_with(&format!("DELETE /api/ciphers/{ITEM}/attachment/{FILE} ")));
+        // Ids and names that could change the path or the form are never sent.
+        let (url, _) = answering_whole(vec![]);
+        let server = Server::new(&url, Device::this_one("attaching")).unwrap();
+        assert!(server
+            .start_attachment(&mut session, "../x", "2.key", "2.name", 1)
+            .is_err());
+        assert!(server
+            .start_attachment(&mut session, ITEM, "2.key", "a\"b", 1)
+            .is_err());
+        assert!(server
+            .start_attachment(&mut session, ITEM, "2.key", "a\r\nb", 1)
+            .is_err());
+        assert!(server.delete_attachment(&mut session, ITEM, "a/b").is_err());
     }
 }

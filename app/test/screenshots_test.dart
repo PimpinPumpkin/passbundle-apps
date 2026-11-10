@@ -15,6 +15,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:passbundle/attaching.dart';
 import 'package:passbundle/core.dart';
 import 'package:passbundle/icons.dart';
 import 'package:passbundle/main.dart';
@@ -196,6 +197,9 @@ class _Updates implements UpdatePlatform {
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
+
+/// The sample vault's login with an attachment.
+const exampleMail = '3d4e5f60-7182-4930-abc1-d2e3f4051627';
 
 /// The switch for unlocking with Windows Hello or Touch ID, in Settings.
 const biometric = ValueKey('biometric');
@@ -472,6 +476,68 @@ void main() {
       await shoot('sign-in-request-phone-$b', tester);
       await tester.tap(find.text('Later'));
       await tester.pumpAndSettle();
+    });
+
+    // An item's attachments, with Attach a file and each one's Delete, then
+    // a file on its way to it, with how far it is and Cancel.
+    shots('attachments, desktop, $b', (tester) async {
+      await size(tester, const Size(1280, 800));
+      onComputer(tester, windows);
+      openShowcase();
+      await tester.pumpWidget(PassBundleApp(themeMode: theme));
+      await precacheIcons(tester);
+      await unlock(tester);
+      await tester.tap(find.text('Example Mail').first);
+      await tester.pump();
+      await tester.ensureVisible(find.byKey(const ValueKey('attach-file')));
+      await tester.pumpAndSettle();
+      await shoot('attachments-desktop-$b', tester);
+      addTearDown(() => uploading.value = null);
+      uploading.value = Uploading(
+        account: Core.account,
+        item: exampleMail,
+        name: 'tax-return-2025.pdf',
+        phase: 'sending',
+        done: 1300000,
+        total: 3400000,
+      );
+      await tester.pump();
+      await tester.ensureVisible(find.text('Attaching'));
+      await tester.pumpAndSettle();
+      await shoot('attach-progress-desktop-$b', tester);
+    });
+
+    shots('attachments, phone, $b', (tester) async {
+      await size(tester, const Size(390, 844));
+      PhoneStandIn(tester);
+      openShowcase();
+      await tester.pumpWidget(PassBundleApp(themeMode: theme));
+      await precacheIcons(tester);
+      await unlock(tester, phone: true);
+      await pumpUntil(tester, find.text('Unlock with fingerprint next time?'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Not now'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField), 'mail');
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Example Mail').first);
+      await tester.pumpAndSettle();
+      await tester.ensureVisible(find.byKey(const ValueKey('attach-file')));
+      await tester.pumpAndSettle();
+      await shoot('attachments-phone-$b', tester);
+      addTearDown(() => uploading.value = null);
+      uploading.value = Uploading(
+        account: Core.account,
+        item: exampleMail,
+        name: 'tax-return-2025.pdf',
+        phase: 'sending',
+        done: 1300000,
+        total: 3400000,
+      );
+      await tester.pump();
+      await tester.ensureVisible(find.text('Attaching'));
+      await tester.pumpAndSettle();
+      await shoot('attach-progress-phone-$b', tester);
     });
 
     shots('vault, item, editor, and the offer, phone, $b', (tester) async {

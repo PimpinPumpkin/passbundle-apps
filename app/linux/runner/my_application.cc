@@ -30,6 +30,9 @@ struct _MyApplication {
   FlView* view;
   gboolean own_frame;
   FlMethodChannel* chrome;
+  // What only the desktop's own code does for the app (app/lib/core.dart,
+  // Core.platform): a file to attach, with the desktop's picker.
+  FlMethodChannel* platform;
   // The app's band along the top, and what in it takes clicks, in its
   // logical pixels from its view's top left: [left, top, right, bottom].
   gdouble band[4];
@@ -425,6 +428,44 @@ static void chrome_call_cb(FlMethodChannel* channel, FlMethodCall* call,
   fl_method_call_respond_success(call, answer, nullptr);
 }
 
+// The file the person chose to attach to an item (app/lib/attaching.dart):
+// its path and name, or null when they chose none. The core reads the file
+// where it is, so nothing is copied.
+static void picked_cb(GtkNativeDialog* dialog, gint response,
+                      gpointer user_data) {
+  g_autoptr(FlMethodCall) call = FL_METHOD_CALL(user_data);
+  g_autoptr(FlValue) answer = nullptr;
+  if (response == GTK_RESPONSE_ACCEPT) {
+    g_autofree gchar* path =
+        gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dialog));
+    if (path != nullptr) {
+      g_autofree gchar* name = g_path_get_basename(path);
+      answer = fl_value_new_map();
+      fl_value_set_string_take(answer, "path", fl_value_new_string(path));
+      fl_value_set_string_take(answer, "name", fl_value_new_string(name));
+    }
+  }
+  fl_method_call_respond_success(call, answer, nullptr);
+  g_object_unref(dialog);
+}
+
+static void platform_call_cb(FlMethodChannel* channel, FlMethodCall* call,
+                             gpointer user_data) {
+  MyApplication* self = MY_APPLICATION(user_data);
+  if (g_strcmp0(fl_method_call_get_name(call), "pickFile") == 0) {
+    GtkFileChooserNative* dialog = gtk_file_chooser_native_new(
+        "Attach a file", self->window, GTK_FILE_CHOOSER_ACTION_OPEN, "Attach",
+        "Cancel");
+    gtk_native_dialog_set_modal(GTK_NATIVE_DIALOG(dialog), TRUE);
+    gtk_file_chooser_set_local_only(GTK_FILE_CHOOSER(dialog), TRUE);
+    g_signal_connect(dialog, "response", G_CALLBACK(picked_cb),
+                     g_object_ref(call));
+    gtk_native_dialog_show(GTK_NATIVE_DIALOG(dialog));
+    return;
+  }
+  fl_method_call_respond_not_implemented(call, nullptr);
+}
+
 // Whether a point on the screen is on the app's band, where nothing of the
 // app's takes clicks.
 static gboolean on_the_band(MyApplication* self, gdouble x_root,
@@ -640,6 +681,11 @@ static void my_application_activate(GApplication* application) {
       "passbundle/window", FL_METHOD_CODEC(codec));
   fl_method_channel_set_method_call_handler(self->chrome, chrome_call_cb,
                                             self, nullptr);
+  self->platform = fl_method_channel_new(
+      fl_engine_get_binary_messenger(fl_view_get_engine(view)),
+      "passbundle/platform", FL_METHOD_CODEC(codec));
+  fl_method_channel_set_method_call_handler(self->platform, platform_call_cb,
+                                            self, nullptr);
 
   gtk_widget_grab_focus(GTK_WIDGET(view));
 }
@@ -698,6 +744,7 @@ static void my_application_dispose(GObject* object) {
   g_clear_object(&self->system_bus);
   g_clear_object(&self->computer);
   g_clear_object(&self->chrome);
+  g_clear_object(&self->platform);
   g_clear_pointer(&self->holes, g_array_unref);
   G_OBJECT_CLASS(my_application_parent_class)->dispose(object);
 }

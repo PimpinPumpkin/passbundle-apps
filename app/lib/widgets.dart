@@ -13,13 +13,17 @@ import 'theme.dart';
 /// True while a slow core call runs; the screens don't read from the core then.
 final busy = ValueNotifier<bool>(false);
 
+/// True while one of an upload's steps has the core (attaching.dart): a slow
+/// call that ends then leaves the busy flag up.
+var uploadHasCore = false;
+
 /// Runs a slow call with the busy flag up.
 Future<Answer> whileBusy(Future<Answer> Function() call) async {
   busy.value = true;
   try {
     return await call();
   } finally {
-    busy.value = false;
+    busy.value = uploadHasCore;
   }
 }
 

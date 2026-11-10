@@ -27,6 +27,8 @@ import UniformTypeIdentifiers
     // account (now carried over as an account of its own): it goes, and the
     // app offers Face ID again after the next unlock with the master password.
     Biometric.forgetEarlier()
+    // A copy of a file to attach left by a run that stopped partway.
+    Picker.forget()
     guard let registrar = engineBridge.pluginRegistry.registrar(forPlugin: "PassBundlePlatform") else { return }
     // What only the phone's own code does (docs/phones.md, "Talking to the OS").
     let channel = FlutterMethodChannel(name: "passbundle/platform", binaryMessenger: registrar.messenger())
@@ -119,6 +121,14 @@ import UniformTypeIdentifiers
           }
           DispatchQueue.main.async { result(answer) }
         }
+      // A file to attach (Picker, below): copied into the app's tmp folder,
+      // and deleted after.
+      case "pickFile":
+        let limit = ((call.arguments as? [String: Any])?["limit"] as? NSNumber)?.int64Value ?? 0
+        Picker.shared.pick(limit: limit) { answer in result(answer) }
+      case "forgetPicked":
+        Picker.forget()
+        result(nil)
       // What iOS may suggest above the keyboard, after each sync (Suggestions, below).
       case "suggest":
         Suggestions.update { count, stored in result(["count": count, "stored": stored]) }
@@ -148,6 +158,82 @@ import UniformTypeIdentifiers
   }
 
   private var phoneLocks: NSObjectProtocol?
+}
+
+/// Picking a file to attach to an item (docs/phones.md, "Attachments"):
+/// iOS's own picker copies the file into the app's tmp folder, which only
+/// this app can read, and it's moved into tmp/picked, for the core to read,
+/// encrypt, and send. iOS copies the whole file before the app can see its
+/// size, so one larger than the app attaches is deleted at once. The copies
+/// are deleted once the upload ends, however it ends (`forget`, which
+/// attaching.dart calls), and when the app starts.
+final class Picker: NSObject, UIDocumentPickerDelegate {
+  static let shared = Picker()
+  private var done: FlutterResult?
+  private var limit: Int64 = 0
+
+  static var folder: URL {
+    FileManager.default.temporaryDirectory.appendingPathComponent("picked", isDirectory: true)
+  }
+
+  /// Opens the picker: `{path, name}` of the copy, `{tooLarge: true}`, or
+  /// nil when the person chose none.
+  func pick(limit: Int64, _ done: @escaping FlutterResult) {
+    // One at a time: an earlier one that never came back chose nothing.
+    finish(nil)
+    self.done = done
+    self.limit = limit
+    let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.item], asCopy: true)
+    picker.delegate = self
+    picker.allowsMultipleSelection = false
+    guard let top = Picker.top() else {
+      finish(["error": "PassBundle couldn't open the file picker."])
+      return
+    }
+    top.present(picker, animated: true)
+  }
+
+  func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+    guard let url = urls.first else { return finish(nil) }
+    let name = url.lastPathComponent
+    let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize).map { Int64($0) } ?? 0
+    if size > limit {
+      try? FileManager.default.removeItem(at: url)
+      return finish(["tooLarge": true])
+    }
+    do {
+      try FileManager.default.createDirectory(at: Picker.folder, withIntermediateDirectories: true)
+      // A name of the app's own, so the file's name never makes the path.
+      let copy = Picker.folder.appendingPathComponent(UUID().uuidString)
+      try FileManager.default.moveItem(at: url, to: copy)
+      finish(["path": copy.path, "name": name])
+    } catch {
+      try? FileManager.default.removeItem(at: url)
+      finish(["error": "PassBundle couldn't read that file. Check that it's still there."])
+    }
+  }
+
+  func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
+    finish(nil)
+  }
+
+  private func finish(_ answer: Any?) {
+    let done = self.done
+    self.done = nil
+    done?(answer)
+  }
+
+  /// Deletes every copy the picker made.
+  static func forget() {
+    try? FileManager.default.removeItem(at: folder)
+  }
+
+  private static func top() -> UIViewController? {
+    let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+    var top = scenes.flatMap(\.windows).first(where: \.isKeyWindow)?.rootViewController
+    while let shown = top?.presentedViewController { top = shown }
+    return top
+  }
 }
 
 /// Duo's Universal Prompt at sign-in (app/lib/two_step.dart), in the

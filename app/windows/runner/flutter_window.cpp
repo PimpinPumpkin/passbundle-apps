@@ -1,6 +1,7 @@
 #include "flutter_window.h"
 
 #include <flutter/standard_method_codec.h>
+#include <shobjidl.h>
 
 #include <optional>
 #include <string>
@@ -8,6 +9,7 @@
 #include <vector>
 
 #include "flutter/generated_plugin_registrant.h"
+#include "utils.h"
 
 // Windows 10 2004's display affinity, for SDKs from before it.
 #ifndef WDA_EXCLUDEFROMCAPTURE
@@ -101,6 +103,52 @@ void AllowCapture(HWND window, bool allowed) {
   }
 }
 
+// Asks the person for a file to attach to an item, with Windows' own picker
+// (app/lib/attaching.dart): its path and name, or null when they chose none.
+// The core reads the file where it is, so nothing is copied.
+void PickFile(HWND owner, flutter::MethodResult<EncodableValue>& result) {
+  IFileOpenDialog* dialog = nullptr;
+  if (FAILED(::CoCreateInstance(CLSID_FileOpenDialog, nullptr,
+                                CLSCTX_INPROC_SERVER,
+                                IID_PPV_ARGS(&dialog)))) {
+    result.Error("picker", "PassBundle couldn't open the file picker.");
+    return;
+  }
+  FILEOPENDIALOGOPTIONS options = 0;
+  dialog->GetOptions(&options);
+  dialog->SetOptions(options | FOS_FORCEFILESYSTEM | FOS_FILEMUSTEXIST |
+                     FOS_PATHMUSTEXIST);
+  dialog->SetTitle(L"Attach a file");
+  dialog->SetOkButtonLabel(L"Attach");
+  const HRESULT shown = dialog->Show(owner);
+  std::string path;
+  IShellItem* item = nullptr;
+  if (SUCCEEDED(shown) && SUCCEEDED(dialog->GetResult(&item))) {
+    PWSTR wide = nullptr;
+    if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &wide))) {
+      path = Utf8FromUtf16(wide);
+      ::CoTaskMemFree(wide);
+    }
+    item->Release();
+  }
+  dialog->Release();
+  if (shown == HRESULT_FROM_WIN32(ERROR_CANCELLED)) {
+    result.Success();
+    return;
+  }
+  if (path.empty()) {
+    result.Error("picker", "PassBundle couldn't open that file.");
+    return;
+  }
+  const size_t slash = path.find_last_of("\\/");
+  result.Success(EncodableValue(EncodableMap{
+      {EncodableValue("path"), EncodableValue(path)},
+      {EncodableValue("name"),
+       EncodableValue(slash == std::string::npos ? path
+                                                 : path.substr(slash + 1))},
+  }));
+}
+
 EncodableValue ButtonName(Win32Window::Button button) {
   switch (button) {
     case Win32Window::kMinimize:
@@ -146,6 +194,19 @@ bool FlutterWindow::OnCreate() {
   window_ = std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
       flutter_controller_->engine()->messenger(), "passbundle/window",
       &flutter::StandardMethodCodec::GetInstance());
+  platform_ = std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
+      flutter_controller_->engine()->messenger(), "passbundle/platform",
+      &flutter::StandardMethodCodec::GetInstance());
+  platform_->SetMethodCallHandler(
+      [this](const flutter::MethodCall<flutter::EncodableValue>& call,
+             std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>>
+                 result) {
+        if (call.method_name() == "pickFile") {
+          PickFile(GetHandle(), *result);
+        } else {
+          result->NotImplemented();
+        }
+      });
   window_->SetMethodCallHandler(
       [this](const flutter::MethodCall<flutter::EncodableValue>& call,
              std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>>
@@ -211,6 +272,7 @@ bool FlutterWindow::OnCreate() {
 void FlutterWindow::OnDestroy() {
   computer_ = nullptr;
   window_ = nullptr;
+  platform_ = nullptr;
   if (flutter_controller_) {
     flutter_controller_ = nullptr;
   }

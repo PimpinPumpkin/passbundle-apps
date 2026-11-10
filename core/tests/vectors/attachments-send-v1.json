@@ -1,0 +1,176 @@
+{
+  "version": 1,
+  "attachment": {
+    "key": "wcLDxMXGx8jJysvMzc7P0NHS09TV1tfY2drb3N3e3+Dh4uPk5ebn6Onq6+zt7u/w8fLz9PX29/j5+vv8/f7/AA==",
+    "wrapped": [
+      {
+        "name": "an item with a key of its own",
+        "wrappingKey": "gYKDhIWGh4iJiouMjY6PkJGSk5SVlpeYmZqbnJ2en6ChoqOkpaanqKmqq6ytrq+wsbKztLW2t7i5uru8vb6/wA==",
+        "keyIv": "ERITFBUWFxgZGhscHR4fIA==",
+        "wrappedKey": "2.ERITFBUWFxgZGhscHR4fIA==|7pi4tTcLKCVDgYvxWLiOKt768c1gBCkB8W0NwmVsfizHIqHvDDXIf1tXBeQoYSdw7WAPAj8Jd/pSC7+FbzPNpyQgKIviEOcVBUhJWfBL5ig=|QD0vzIWtnMlxu0GWn3ohN9rzHGUz5cCMshfT2+L1s6o=",
+        "fileName": "plan.pdf",
+        "nameIv": "Li8wMTIzNDU2Nzg5Ojs8PQ==",
+        "encryptedName": "2.Li8wMTIzNDU2Nzg5Ojs8PQ==|GSan4ighjKWyZyryFN6/tA==|/+lLJC7UDr8xyh/AL6RY1ZjBYvriLqInOSgw3VIZqIE="
+      },
+      {
+        "name": "a personal item without one, under the user key",
+        "wrappingKey": "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyAhIiMkJSYnKCkqKywtLi8wMTIzNDU2Nzg5Ojs8PT4/QA==",
+        "keyIv": "S0xNTk9QUVJTVFVWV1hZWg==",
+        "wrappedKey": "2.S0xNTk9QUVJTVFVWV1hZWg==|0wMaQ2KLNSpNhgIvWH5lX0intWkPYNaWR2SkCx7d/HiPMspFWMm8SzwCvSb0ARY19FD+IgDJKLMkJt5yGvh+Oj7gjTSW0eqS0/7ieeI6xAc=|D590kdKQtQW7t1xqOwck3s8jmeKQt2bpl0Xxf1+BMnQ=",
+        "fileName": "Führerschein (Kopie).jpg",
+        "nameIv": "aGlqa2xtbm9wcXJzdHV2dw==",
+        "encryptedName": "2.aGlqa2xtbm9wcXJzdHV2dw==|UVVS+N24B6BUwXOiIJ/7RYoao9yObC8OmqtFlRTSgnc=|R9aD7EV+JJyOnLx7YsoIuJVeyOC4smEKC5tgeVq2Txk="
+      },
+      {
+        "name": "an organization's item without one, under the organization's key",
+        "wrappingKey": "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVpbXF1eX2BhYmNkZWZnaGlqa2xtbm9wcXJzdHV2d3h5ent8fX5/gA==",
+        "keyIv": "hYaHiImKi4yNjo+QkZKTlA==",
+        "wrappedKey": "2.hYaHiImKi4yNjo+QkZKTlA==|RB++1J4RDeJeo9NmPt89GvTRJ+dj03ftrKlX7yOgzHVWJUQvmoP9pg+2FS9dGW4Pa51Oigr0LXBHRrvFAsm3MCZYzXsy/1LjFNu094YCzRM=|OGaBe1Oh3ZSB6FQtV5qPhvFIyIQLnX6wQEU10UCiXH0=",
+        "fileName": "合同 final.docx",
+        "nameIv": "oqOkpaanqKmqq6ytrq+wsQ==",
+        "encryptedName": "2.oqOkpaanqKmqq6ytrq+wsQ==|Nszm4zKIqUBFOd/6U7G9mMICBiuwNwPC5U3PUTKXM7c=|ilqn27uA9Z99qpCvDyyLprj2ujQCe/H75u/3PtINm8o="
+      }
+    ],
+    "files": [
+      {
+        "name": "an empty file",
+        "plaintext": "",
+        "iv": "v8DBwsPExcbHyMnKy8zNzg==",
+        "encrypted": "Ar/AwcLDxMXGx8jJysvMzc7ylaUfNwMP6eM0iIN++PXsNDIMoGIvz9OQFmHAlpFzFE01xgXcf1V9Z8AG8VTrFuE=",
+        "encryptedLength": 65
+      },
+      {
+        "name": "one byte",
+        "plaintext": "UA==",
+        "iv": "3N3e3+Dh4uPk5ebn6Onq6w==",
+        "encrypted": "Atzd3t/g4eLj5OXm5+jp6uvyOQnWv49psbFfv4XVSBtY+mimqt88nBOxAH+keRvGs97JNemQPbuLlQPLUK16PTk=",
+        "encryptedLength": 65
+      },
+      {
+        "name": "15 bytes, one block with padding",
+        "plaintext": "MDEyMzQ1Njc4OTo7PD0+",
+        "iv": "+fr7/P3+/wABAgMEBQYHCA==",
+        "encrypted": "Avn6+/z9/v8AAQIDBAUGBwgtEF3PFvhtbgPLLUx+XslKqEnOWJ59HEWQjGC73VCDUlJpXJLR5qDcDiyCIXSWF0s=",
+        "encryptedLength": 65
+      },
+      {
+        "name": "16 bytes, a whole block of padding added",
+        "plaintext": "MDEyMzQ1Njc4OTo7PD0+Pw==",
+        "iv": "FhcYGRobHB0eHyAhIiMkJQ==",
+        "encrypted": "AhYXGBkaGxwdHh8gISIjJCVMoifMKbY4rEwK7yEKzFjqsFU5dJBNKzrMGN8UsRhq3mXG5Hiozj4y3sxLTdqVQst+mm2biYsKbjJETBrov+gy",
+        "encryptedLength": 81
+      },
+      {
+        "name": "17 bytes",
+        "plaintext": "MDEyMzQ1Njc4OTo7PD0+P0A=",
+        "iv": "MzQ1Njc4OTo7PD0+P0BBQg==",
+        "encrypted": "AjM0NTY3ODk6Ozw9Pj9AQULE41ep9o6Atw7oezbsEvzjoROjZt40YD3zt4uRtN8E8apowmorqC7dph/dL71pQ5LbTbiPj0kFn1FkkqGdxbvE",
+        "encryptedLength": 81
+      },
+      {
+        "name": "text",
+        "plaintext": "UmVjb3ZlcnkgY29kZXM6CjEyMzQtNTY3OAo4NzY1LTQzMjEK",
+        "iv": "UFFSU1RVVldYWVpbXF1eXw==",
+        "encrypted": "AlBRUlNUVVZXWFlaW1xdXl9dd7RwDy+6aTvUyS0eQrvnU6Tx/OZO5QID/t8LpmOuT7oJiGGgPZWl+3rSYflv2P0rBzlU2/1MujFWBg1FEhvW/pxutc65lgskEYLxcEZUOg==",
+        "encryptedLength": 97
+      },
+      {
+        "name": "1000 bytes",
+        "plaintext": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0+P0BBQkNERUZHSElKS0xNTk9QUVJTVFVWV1hZWltcXV5fYGFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eHl6e3x9fn+AgYKDhIWGh4iJiouMjY6PkJGSk5SVlpeYmZqbnJ2en6ChoqOkpaanqKmqq6ytrq+wsbKztLW2t7i5uru8vb6/wMHCw8TFxsfIycrLzM3Oz9DR0tPU1dbX2Nna29zd3t/g4eLj5OXm5+jp6uvs7e7v8PHy8/T19vf4+fr7/P3+/wABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4fICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj9AQUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVpbXF1eX2BhYmNkZWZnaGlqa2xtbm9wcXJzdHV2d3h5ent8fX5/gIGCg4SFhoeIiYqLjI2Oj5CRkpOUlZaXmJmam5ydnp+goaKjpKWmp6ipqqusra6vsLGys7S1tre4ubq7vL2+v8DBwsPExcbHyMnKy8zNzs/Q0dLT1NXW19jZ2tvc3d7f4OHi4+Tl5ufo6err7O3u7/Dx8vP09fb3+Pn6+/z9/v8AAQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyAhIiMkJSYnKCkqKywtLi8wMTIzNDU2Nzg5Ojs8PT4/QEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaW1xdXl9gYWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXp7fH1+f4CBgoOEhYaHiImKi4yNjo+QkZKTlJWWl5iZmpucnZ6foKGio6SlpqeoqaqrrK2ur7CxsrO0tba3uLm6u7y9vr/AwcLDxMXGx8jJysvMzc7P0NHS09TV1tfY2drb3N3e3+Dh4uPk5ebn6Onq6+zt7u/w8fLz9PX29/j5+vv8/f7/AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0+P0BBQkNERUZHSElKS0xNTk9QUVJTVFVWV1hZWltcXV5fYGFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eHl6e3x9fn+AgYKDhIWGh4iJiouMjY6PkJGSk5SVlpeYmZqbnJ2en6ChoqOkpaanqKmqq6ytrq+wsbKztLW2t7i5uru8vb6/wMHCw8TFxsfIycrLzM3Oz9DR0tPU1dbX2Nna29zd3t/g4eLj5OXm5w==",
+        "iv": "bW5vcHFyc3R1dnd4eXp7fA==",
+        "encrypted": "Am1ub3BxcnN0dXZ3eHl6e3ynAmQJ/74n0xB66T+MFfwUCHsDa4OAWeqG0Djwm0xM2RRXGmrrH98VKfFLlBdn7m0R9aBqovUS8118LB6TrqAKVdY7Rwn1sbPwuGSstdRlNK+LTYppTpTLY9xqGTRrlgoxB6KltFEdvQg/Chjb79nAiOH4Dul1Gzav9GJNdNIcIE/7F9wvH+zp8iRKpWFfW276Qe03D9mXtnJHe4Fw/qkKIuVVh0nPQ95W3YK0lqtw0eH0VGjTUujFlcWeKFHrY3MKTCMKSJtOdp3Dn5kxEFQenCKacvgAJHBVDWwMiJCOfuQNpWNCxSPqTSxsYmyt9D03stb8l0Sv1Xw5SsbMOjOjjXGqVqbElklqRG6qzLH6kkDImAvAclDaB/gHSgzJBqy+5gtuhmxL2+UzktJa2SOSPJs3IFNNBz7AYlv4F4xpw97JBy6LWEtzSotU/g59UjB2V1hix6eF8NsMCKLRmu1GZkl/+SUydOWO6/V172oBdohdl/vdMWljIzZVD5kKxTDEFi4BPowh50PZQPKe1szyoxA3ZNvR/lrGL8AZkzT1hddjnLVLo9sK2V2XDb34FYLqew42+tZFiF6kk6/xu17B4KKL3LzBIn2po7Ra4XJokmEblXKqpOmY7K3yTob/f7AZyfbWCURG5nBhOxX07wHg96fTaA1F4VyXZksu+dKy47+f5ZMuy1H0VjNYZ5RiJjTuTMTHFtIvhKwvvI42W2n+g8137G6kgumoh0myljhxS9sXkPXuVPlRCGvETcQbWci2mpJnh16RwNk6gDtF/5hKj5lJ0lBogEnPBm0xi9kHhIueCN450BuwUI0fsOLY5g0DJb0CzzUbIPGl5eQzq2TwaWrgif3reWKL3/0hVOnxia4ZQORdLsJa2xNRTecbdgdomKkSh3fq9EslZIRuBEQHibX7G+K2yjjOdDOAP/tAz0hrspJDVUcAUQZq7R9TuOYg9qDG7w7TQclBVs5qi0wQF957zIIfDghqRnAwCy/rU8CT6eetTQq6NdjqTkbJ9MKiyTD577jTQG+D0wH/HwU+QFRmwVkQProJ46yY3SpduKuhjW4em0+uvW0Svxqfw+BhvL+tzSnUMkUJxGhVSmFY04lz72R2LvWLZinJqXWodyUk2Pzd91lvBbvaPjGEd5N5wEOXtCjbiXR44Up5Ndy+vClOq296C79Cr6Cs6xEhhQ8Vq0wRUaietOhjrzvykFbDTjYPhoxlYmshdyMqj93MDDx0s1CYJdbLRkOEsjc1QmRGZLXPWVG6FxGVZKFruUq/RwAwAPyXAOxp7vTLsSJcKLvJ4sQLZjXieNGSHm/K2FqmRniiuKapMkIzH7PkUvUzz/LmIGSMeNJn5tDN5mJT/fQSSgUEG9VRgJQZJdq5tw==",
+        "encryptedLength": 1057
+      }
+    ],
+    "refused": [
+      {
+        "why": "the last byte changed",
+        "encrypted": "AlBRUlNUVVZXWFlaW1xdXl9dd7RwDy+6aTvUyS0eQrvnU6Tx/OZO5QID/t8LpmOuT7oJiGGgPZWl+3rSYflv2P0rBzlU2/1MujFWBg1FEhvW/pxutc65lgskEYLxcEZUOw=="
+      }
+    ]
+  },
+  "send": {
+    "userKey": "BQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4fICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj9AQUJDRA==",
+    "seed": "oKGio6SlpqeoqaqrrK2urw==",
+    "seedInLink": "oKGio6SlpqeoqaqrrK2urw",
+    "salt": "bitwarden-send",
+    "info": "send",
+    "key": "NNMQj9ioghJNAQhwb6SXcomzSrod6ch4q/Ep5fmJZaoeyg+/81gBI8KCNL6899y7w8dg++T9I4eU825EtD4f3A==",
+    "wrappedSeed": {
+      "iv": "iouMjY6PkJGSk5SVlpeYmQ==",
+      "encrypted": "2.iouMjY6PkJGSk5SVlpeYmQ==|uCsnlEhiZYihIKD0oPRoBENcpGurYnSLEu8K04xqy0A=|osZ8NIaEvnctauAP4WV4DSk8qjULQyrDe2bPUhijBtQ="
+    },
+    "fields": {
+      "name": {
+        "plain": "Door code for Saturday",
+        "iv": "p6ipqqusra6vsLGys7S1tg==",
+        "encrypted": "2.p6ipqqusra6vsLGys7S1tg==|WNwwHPes/zRjcA8HhfqJF0TK7fFUS25tmUZlCJu1y08=|z1WAYTBYP6RmcL7slmOSfEZCx6IAx1lwO/3kNvvJIIk="
+      },
+      "notes": {
+        "plain": "For Malia. Delete after the party.",
+        "iv": "xMXGx8jJysvMzc7P0NHS0w==",
+        "encrypted": "2.xMXGx8jJysvMzc7P0NHS0w==|Zc9/INQlPvtjrh3HhUL+YdHYh3PMToyAmMUK6MbCJk2IBMldyxrDjCypW8pziWSa|bnaMYVUWAoAYrpglZuSul0fCMACQl+/ueRAJQ8eduQ4="
+      },
+      "text": {
+        "plain": "4417# then the green button.\nDon't share it. Ünïcödé ✓",
+        "iv": "4eLj5OXm5+jp6uvs7e7v8A==",
+        "encrypted": "2.4eLj5OXm5+jp6uvs7e7v8A==|AVTYnymlL5lalec51kjoN/fda4DztIVpoyVoILOZQJlStkFk37DQ+24KTHqukvttijGL3DONd7cPz6QoL6vfmA==|aKzfP4v/XJc2z+fSOTd3nbmWg2jjamMInCQsZPVLEKU="
+      },
+      "fileName": {
+        "plain": "floor plan (2).pdf",
+        "iv": "/v8AAQIDBAUGBwgJCgsMDQ==",
+        "encrypted": "2./v8AAQIDBAUGBwgJCgsMDQ==|5yu+8sPPOgrDRin44H+LNmBNofxwYDakl9ovc0aQJPU=|/tVOCRei0WxoGZFU9U3OHC2IypHCw2VZXVjsqZGZ/Y0="
+      }
+    },
+    "files": [
+      {
+        "name": "a file Send's file",
+        "plaintext": "JVBERi0xLjcKbm90IHJlYWxseSBhIFBERgo=",
+        "iv": "GxwdHh8gISIjJCUmJygpKg==",
+        "encrypted": "AhscHR4fICEiIyQlJicoKSomswFc+Td3JsIWDNMMIgG+zPVDtQmENOWk1tCZLcSKTvFqB/VnoxvbOxFSQ/bLbcWe4h5pdGXEuIye1Q293Q58",
+        "encryptedLength": 81
+      }
+    ],
+    "passwords": [
+      {
+        "password": "open sesame",
+        "proof": "3+AMgFzBwtzSDegY58ExPf+ya+BAgqGREE7hDwjFAXk="
+      },
+      {
+        "password": "pässwörd 密码",
+        "proof": "OnuMSoBdMJGv+OXTh7E57lxnZUQa0fM48ecZXKhJl1s="
+      },
+      {
+        "password": " ",
+        "proof": "+lJPXim1X2c3PlMd1ZLCcJ9u5P33Q9QwKhP30BdH4eU="
+      }
+    ],
+    "passwordRounds": 100000,
+    "links": [
+      {
+        "server": "https://vault.example.test",
+        "accessId": "ESIzRFVmd4iZqrvM3e7_AA",
+        "link": "https://vault.example.test/#/send/ESIzRFVmd4iZqrvM3e7_AA/oKGio6SlpqeoqaqrrK2urw"
+      },
+      {
+        "server": "https://example.test/vault",
+        "accessId": "ESIzRFVmd4iZqrvM3e7_AA",
+        "link": "https://example.test/vault/#/send/ESIzRFVmd4iZqrvM3e7_AA/oKGio6SlpqeoqaqrrK2urw"
+      }
+    ],
+    "keys": [
+      {
+        "seed": "AAECAwQFBgcICQoLDA0ODw==",
+        "key": "BjqVWhwBtOGqy3zTWckZssthBBwMBclMDrdvuanhRLP77KB03hQ3oaIzCtKDMTir874lYaOjCuHzPhXhovfKBA=="
+      },
+      {
+        "seed": "/////////////////////w==",
+        "key": "tMa9Frz44w/i5uvMK1p+C+dETLrfMObG/Fhe7hHP+72B/7/VHV9z3WYjjzVtdbmJEx4EP60+fD8AaQaFoiVleQ=="
+      },
+      {
+        "seed": "WltcXV5fYGFiY2RlZmdoaQ==",
+        "key": "XwsmYbg3G0fG8GntNjme2n0kp9d+fh96LJuG3nV0rMQPxu723kJQw38kcsQArmzWVIzJHXJJ46tSqQRditFIgQ=="
+      }
+    ]
+  }
+}

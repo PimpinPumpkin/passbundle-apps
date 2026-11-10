@@ -2346,3 +2346,607 @@ fn importing_from_a_computers_browsers_saves_what_the_server_has_only_encrypted(
         assert!(!raw.contains(plain), "the server has {plain} as it is");
     }
 }
+
+/// A file to attach, in a folder of its own: where it is and what's in it.
+fn file_to_attach(name: &str, len: usize) -> (std::path::PathBuf, Vec<u8>) {
+    let dir = std::env::temp_dir().join(format!("pb-core-file-{}", uuid::Uuid::new_v4().simple()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let contents: Vec<u8> = (0..len).map(|i| (i * 7 % 251) as u8).collect();
+    let path = dir.join(name);
+    std::fs::write(&path, &contents).unwrap();
+    (path, contents)
+}
+
+/// A new login in the app's vault, for files: its id.
+fn item_for_files(app: &mut App, name: &str) -> String {
+    let draft = ItemDraft {
+        name: name.into(),
+        username: Some("not-a-real-user".into()),
+        ..ItemDraft::default()
+    };
+    app.save(None, &draft, &[]).unwrap().id
+}
+
+/// Attaching in the apps (src/app/files.rs; DESIGN.md in the meta repo,
+/// "Attachments in the apps"): a file attached through the app is listed
+/// with its name, opens on another device, is on the server only encrypted,
+/// and is deleted. An item with a key of its own has its files' keys and
+/// names under that key, as the web vault expects.
+#[test]
+fn a_file_is_attached_opens_on_another_device_and_is_deleted() {
+    use passbundle_core::crypto::{decrypt_file, encrypted_file_len, EncString};
+    let Some(server) = server() else { return };
+    let url = std::env::var("PB_TEST_SERVER").unwrap();
+    let email = new_email("attach");
+    sign_up(&server, &email);
+    let mut app = signed_in_app(&url, &email);
+    let id = item_for_files(&mut app, "Has files");
+
+    let (path, contents) = file_to_attach("codes.txt", 300_000);
+    let attached = app.attach(&id, &path, "").unwrap();
+    assert!(attached.synced);
+    assert!(!app.hides_attachment(&attached.id));
+    let item = app.vault().unwrap().item(&id).unwrap();
+    assert_eq!(item.attachments.len(), 1);
+    assert_eq!(item.attachments[0].id, attached.id);
+    assert_eq!(item.attachments[0].name, "codes.txt");
+    // The size listed is the encrypted file's.
+    let encrypted_len = encrypted_file_len(contents.len() as u64);
+    assert_eq!(item.attachments[0].size, Some(encrypted_len));
+    let (name, opened) = app.attachment(&id, &attached.id).unwrap();
+    assert_eq!(name, "codes.txt");
+    assert_eq!(opened.as_slice(), &contents[..]);
+
+    // What the server has: the file's own format, and none of the file.
+    let mut session = sign_in(&server, &email);
+    let kept = server.attachment(&mut session, &id, &attached.id).unwrap();
+    assert_eq!(kept[0], 2);
+    assert_eq!(kept.len() as u64, encrypted_len);
+    assert!(!kept.windows(32).any(|w| w == &contents[..32]));
+    let (_, text) = server.sync(&mut session).unwrap();
+    assert!(!text.contains("codes.txt"));
+
+    // Another device lists it and opens it.
+    let mut elsewhere = signed_in_app(&url, &email);
+    let (name, opened) = elsewhere.attachment(&id, &attached.id).unwrap();
+    assert_eq!(name, "codes.txt");
+    assert_eq!(opened.as_slice(), &contents[..]);
+
+    // An empty file, under a name the person gave.
+    let (empty, _) = file_to_attach("empty.bin", 0);
+    let second = app.attach(&id, &empty, "Nothing yet.txt").unwrap();
+    assert!(second.synced);
+    let (name, opened) = app.attachment(&id, &second.id).unwrap();
+    assert_eq!(name, "Nothing yet.txt");
+    assert!(opened.is_empty());
+    assert_eq!(app.vault().unwrap().item(&id).unwrap().attachments.len(), 2);
+
+    // An item with a key of its own, as the web vault makes them: the
+    // file's key and name are under the item's key, not the account's.
+    let item_key = SymmetricKey::generate();
+    let wrapped = session.user_key().encrypt(&item_key.to_bytes()).to_string();
+    let (sync, _) = server.sync(&mut session).unwrap();
+    let own = server
+        .raw(
+            &mut session,
+            "POST",
+            "/api/ciphers",
+            Some(json!({
+                "type": 2,
+                "encryptedFor": sync.profile.id,
+                "name": item_key.encrypt_str("Own key").to_string(),
+                "key": wrapped,
+                "secureNote": { "type": 0 },
+                "favorite": false,
+                "reprompt": 0,
+            })),
+        )
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    app.sync().unwrap();
+    assert_eq!(app.vault().unwrap().item(&own).unwrap().name, "Own key");
+    let (path, contents) = file_to_attach("plan.pdf", 70_000);
+    let third = app.attach(&own, &path, "").unwrap();
+    assert!(third.synced);
+    let (_, text) = server.sync(&mut session).unwrap();
+    let sync: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let listed = sync["ciphers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == own.as_str())
+        .unwrap()["attachments"][0]
+        .clone();
+    assert_eq!(listed["id"], third.id.as_str());
+    let name = EncString::parse(listed["fileName"].as_str().unwrap()).unwrap();
+    assert_eq!(name.decrypt_string(&item_key).unwrap().as_str(), "plan.pdf");
+    assert!(name.decrypt_string(session.user_key()).is_err());
+    let file_key = EncString::parse(listed["key"].as_str().unwrap())
+        .unwrap()
+        .decrypt_key(&item_key)
+        .unwrap();
+    let kept = server.attachment(&mut session, &own, &third.id).unwrap();
+    assert_eq!(
+        decrypt_file(kept, &file_key).unwrap().as_slice(),
+        &contents[..]
+    );
+
+    // Deleted: gone from this device at once, from the server, and from
+    // the other device at its next sync. The other file stays.
+    assert!(app.delete_attachment(&id, &attached.id).unwrap());
+    let left = &app.vault().unwrap().item(&id).unwrap().attachments;
+    assert_eq!(left.len(), 1);
+    assert_eq!(left[0].id, second.id);
+    assert!(!app.hides_attachment(&attached.id));
+    assert!(server.attachment(&mut session, &id, &attached.id).is_err());
+    elsewhere.sync().unwrap();
+    assert_eq!(
+        elsewhere
+            .vault()
+            .unwrap()
+            .item(&id)
+            .unwrap()
+            .attachments
+            .len(),
+        1
+    );
+    // Deleting it again is refused here, before the server is asked.
+    assert_eq!(
+        app.delete_attachment(&id, &attached.id).err(),
+        Some(Error::Damaged("no such attachment"))
+    );
+}
+
+/// The server makes an attachment's record before it has the file. One the
+/// app started isn't shown until the file is there whole and the item lists
+/// it as it was made; one whose upload fails, is refused, or is canceled is
+/// deleted on the server, now or, when the server can't be reached now,
+/// before the next sync.
+#[test]
+fn an_upload_that_fails_or_is_canceled_leaves_nothing_attached() {
+    use passbundle_core::app::{attach, Progress};
+    let Some(server) = server() else { return };
+    let url = std::env::var("PB_TEST_SERVER").unwrap();
+    let email = new_email("half");
+    sign_up(&server, &email);
+    let mut app = signed_in_app(&url, &email);
+    let id = item_for_files(&mut app, "Has files");
+    // What another device would be told.
+    let mut session = sign_in(&server, &email);
+    let on_server = |session: &mut Session| {
+        open(&server, session)
+            .item(&id)
+            .unwrap()
+            .attachments
+            .iter()
+            .map(|a| a.id.clone())
+            .collect::<Vec<_>>()
+    };
+
+    // Step by step. Telling the server a file is coming makes the record
+    // there; this app doesn't show it, whatever a sync brings.
+    let adding = app.attachment_to_add(&id, "codes.txt").unwrap();
+    let (half, upload) = app.start_attachment(&adding, 1000).unwrap();
+    assert_eq!(on_server(&mut session), vec![half.clone()]);
+    app.sync().unwrap();
+    assert!(app.hides_attachment(&half));
+    // The upload didn't go through: the record is deleted.
+    assert_eq!(
+        app.finish_attachment(&adding, &half, Err(Error::Canceled))
+            .err(),
+        Some(Error::Canceled)
+    );
+    assert!(on_server(&mut session).is_empty());
+    assert!(!app.hides_attachment(&half));
+    drop(upload);
+
+    // The server refuses a file that isn't the length it was told (it
+    // deletes the record itself), and says so in the app's words.
+    let adding = app.attachment_to_add(&id, "codes.txt").unwrap();
+    let (half, upload) = app.start_attachment(&adding, 1000).unwrap();
+    let refused = upload.send(&vec![2u8; 3 * 1024 * 1024], &mut |_| true);
+    let words = Error::Refused("the file didn't arrive whole. Try again");
+    assert_eq!(refused, Err(words.clone()));
+    assert_eq!(
+        app.finish_attachment(&adding, &half, refused).err(),
+        Some(words)
+    );
+    assert!(on_server(&mut session).is_empty());
+    assert!(!app.hides_attachment(&half));
+
+    // The server kept a whole file, but not under the key and name this
+    // upload made: it isn't trusted, and it's deleted.
+    let adding = app.attachment_to_add(&id, "codes.txt").unwrap();
+    let (kept, upload) = app.start_attachment(&adding, 100).unwrap();
+    upload.send(&[2u8; 100], &mut |_| true).unwrap();
+    assert_eq!(on_server(&mut session), vec![kept.clone()]);
+    let another = app.attachment_to_add(&id, "codes.txt").unwrap();
+    assert_eq!(
+        app.finish_attachment(&another, &kept, Ok(())).err(),
+        Some(Error::Damaged(
+            "an attachment the server didn't keep as it was sent"
+        ))
+    );
+    assert!(on_server(&mut session).is_empty());
+    assert!(app
+        .vault()
+        .unwrap()
+        .item(&id)
+        .unwrap()
+        .attachments
+        .is_empty());
+
+    // Start to finish, with the person's Cancel. While the file is read:
+    // the server never hears of it.
+    let (path, contents) = file_to_attach("codes.txt", 300_000);
+    let progress = Progress::new();
+    progress.begin();
+    let mut steps = 0;
+    let canceled = attach(
+        &mut |call| {
+            steps += 1;
+            call(&mut app);
+            progress.cancel();
+        },
+        &id,
+        &path,
+        "",
+        &progress,
+    );
+    assert_eq!(canceled.err(), Some(Error::Canceled));
+    assert_eq!(steps, 1);
+    assert!(on_server(&mut session).is_empty());
+
+    // While it's sent: the record the server made is deleted.
+    progress.begin();
+    let mut steps = 0;
+    let canceled = attach(
+        &mut |call| {
+            steps += 1;
+            call(&mut app);
+            if steps == 2 {
+                progress.cancel();
+            }
+        },
+        &id,
+        &path,
+        "",
+        &progress,
+    );
+    assert_eq!(canceled.err(), Some(Error::Canceled));
+    assert_eq!(steps, 3);
+    assert!(on_server(&mut session).is_empty());
+    assert!(app
+        .vault()
+        .unwrap()
+        .item(&id)
+        .unwrap()
+        .attachments
+        .is_empty());
+
+    // A record that can't be deleted now (here the vault locked while the
+    // file was on its way, so nothing is signed in) stays hidden, and is
+    // deleted before the next sync.
+    let adding = app.attachment_to_add(&id, "codes.txt").unwrap();
+    let (half, upload) = app.start_attachment(&adding, 1000).unwrap();
+    drop(upload);
+    app.lock();
+    assert_eq!(
+        app.finish_attachment(&adding, &half, Err(Error::Canceled))
+            .err(),
+        Some(Error::Canceled)
+    );
+    assert_eq!(on_server(&mut session), vec![half.clone()]);
+    app.unlock(PASSWORD).unwrap();
+    assert!(app.hides_attachment(&half));
+    app.sync().unwrap();
+    assert!(on_server(&mut session).is_empty());
+    assert!(!app.hides_attachment(&half));
+
+    // The vault locks while a file is sent: the upload finishes with the
+    // session it started with, and the item shows the file once the vault
+    // is open and up to date again.
+    progress.begin();
+    let mut steps = 0;
+    let sent = attach(
+        &mut |call| {
+            steps += 1;
+            call(&mut app);
+            if steps == 2 {
+                app.lock();
+            }
+        },
+        &id,
+        &path,
+        "",
+        &progress,
+    )
+    .unwrap();
+    assert!(!sent.synced);
+    assert!(app.vault().is_none());
+    app.unlock(PASSWORD).unwrap();
+    app.sync().unwrap();
+    assert!(!app.hides_attachment(&sent.id));
+    let (name, opened) = app.attachment(&id, &sent.id).unwrap();
+    assert_eq!(name, "codes.txt");
+    assert_eq!(opened.as_slice(), &contents[..]);
+
+    // Signing out forgets what was hidden: nothing of this account's is
+    // asked of a server again.
+    let adding = app.attachment_to_add(&id, "codes.txt").unwrap();
+    let (half, _upload) = app.start_attachment(&adding, 1000).unwrap();
+    assert!(app.hides_attachment(&half));
+    app.sign_out();
+    assert!(!app.hides_attachment(&half));
+}
+
+/// Makes an account a member of an organization with the given places in
+/// its shared folders (accepted at once, as a server without email does for
+/// an account that exists), and confirms it with the organization's key
+/// sealed to its public key.
+fn join(
+    server: &Server,
+    owner: &mut Session,
+    org_id: &str,
+    org_key: &SymmetricKey,
+    member: &str,
+    collections: serde_json::Value,
+) {
+    server
+        .raw(
+            owner,
+            "POST",
+            &format!("/api/organizations/{org_id}/users/invite"),
+            Some(json!({
+                "emails": [member],
+                "groups": [],
+                "type": 2,
+                "collections": collections,
+                "permissions": {},
+            })),
+        )
+        .unwrap();
+    let members = server
+        .raw(
+            owner,
+            "GET",
+            &format!("/api/organizations/{org_id}/users"),
+            None,
+        )
+        .unwrap();
+    let joined = members["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["email"] == member)
+        .unwrap();
+    let public = server
+        .raw(
+            owner,
+            "GET",
+            &format!(
+                "/api/users/{}/public-key",
+                joined["userId"].as_str().unwrap()
+            ),
+            None,
+        )
+        .unwrap();
+    let public = STANDARD
+        .decode(public["publicKey"].as_str().unwrap())
+        .unwrap();
+    server
+        .raw(
+            owner,
+            "POST",
+            &format!(
+                "/api/organizations/{org_id}/users/{}/confirm",
+                joined["id"].as_str().unwrap()
+            ),
+            Some(json!({ "key": encrypt_for(&public, &org_key.to_bytes()).unwrap().to_string() })),
+        )
+        .unwrap();
+}
+
+/// An organization's item in a shared folder: whoever may edit it attaches
+/// files to it and deletes them, each under the organization's key, so the
+/// others open them; whoever may only view it opens its files and changes
+/// none, by the app's own check and by the server's.
+#[test]
+fn an_organizations_item_takes_files_from_those_who_may_edit_it() {
+    let Some(server) = server() else { return };
+    let url = std::env::var("PB_TEST_SERVER").unwrap();
+    let (owner, editor, viewer) = (new_email("owner"), new_email("editor"), new_email("viewer"));
+    for email in [&owner, &editor, &viewer] {
+        sign_up(&server, email);
+    }
+    let mut session = sign_in(&server, &owner);
+    let (org_id, org_key) = new_organization(&server, &mut session, &owner);
+    let vault = open(&server, &mut session);
+    let it = vault.collections.keys().next().unwrap().clone();
+    join(
+        &server,
+        &mut session,
+        &org_id,
+        &org_key,
+        &editor,
+        json!([{ "id": it, "readOnly": false, "hidePasswords": false, "manage": false }]),
+    );
+    join(
+        &server,
+        &mut session,
+        &org_id,
+        &org_key,
+        &viewer,
+        json!([{ "id": it, "readOnly": true, "hidePasswords": false, "manage": false }]),
+    );
+    let draft = ItemDraft {
+        name: "Office Wi-Fi".into(),
+        username: Some("not-a-real-user".into()),
+        organization_id: Some(org_id.clone()),
+        ..ItemDraft::default()
+    };
+    let id = server
+        .save_item(
+            &mut session,
+            None,
+            vault.encrypt_item(&draft, None).unwrap(),
+            std::slice::from_ref(&it),
+        )
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    // The owner attaches a file; it's under the organization's key.
+    let mut owners = signed_in_app(&url, &owner);
+    let (path, router) = file_to_attach("router.cfg", 20_000);
+    let first = owners.attach(&id, &path, "").unwrap();
+    assert!(first.synced);
+    let (_, text) = server.sync(&mut session).unwrap();
+    let sync: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let listed = &sync["ciphers"][0]["attachments"][0];
+    let name =
+        passbundle_core::crypto::EncString::parse(listed["fileName"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        name.decrypt_string(&org_key).unwrap().as_str(),
+        "router.cfg"
+    );
+
+    // A member who may edit opens it, and attaches one of their own, which
+    // the owner opens.
+    let mut editors = signed_in_app(&url, &editor);
+    let (_, opened) = editors.attachment(&id, &first.id).unwrap();
+    assert_eq!(opened.as_slice(), &router[..]);
+    let (path, map) = file_to_attach("map.png", 50_000);
+    let second = editors.attach(&id, &path, "").unwrap();
+    assert!(second.synced);
+    owners.sync().unwrap();
+    let (name, opened) = owners.attachment(&id, &second.id).unwrap();
+    assert_eq!(name, "map.png");
+    assert_eq!(opened.as_slice(), &map[..]);
+
+    // A member who may only view opens both, and changes neither: the app
+    // refuses before the file is read or the server asked.
+    let view_only = Error::Refused(
+        "you can view this item but not change it, so you can't change its attachments",
+    );
+    let mut viewers = signed_in_app(&url, &viewer);
+    let vault = viewers.vault().unwrap();
+    assert!(!vault.grid(vault.item(&id).unwrap()).edit);
+    let (_, opened) = viewers.attachment(&id, &second.id).unwrap();
+    assert_eq!(opened.as_slice(), &map[..]);
+    assert_eq!(
+        viewers.attach(&id, &path, "").err(),
+        Some(view_only.clone())
+    );
+    assert_eq!(
+        viewers.delete_attachment(&id, &first.id).err(),
+        Some(view_only.clone())
+    );
+    // And the server refuses them itself, which reads the same.
+    let mut viewer_session = sign_in(&server, &viewer);
+    let blob = org_key.encrypt_str("x").to_string();
+    assert_eq!(
+        server
+            .start_attachment(&mut viewer_session, &id, &blob, &blob, 100)
+            .err(),
+        Some(view_only.clone())
+    );
+    assert_eq!(
+        server
+            .delete_attachment(&mut viewer_session, &id, &first.id)
+            .err(),
+        Some(view_only)
+    );
+    viewers.sync().unwrap();
+    assert_eq!(
+        viewers
+            .vault()
+            .unwrap()
+            .item(&id)
+            .unwrap()
+            .attachments
+            .len(),
+        2
+    );
+
+    // The editor deletes the owner's file; the owner's next sync has one.
+    assert!(editors.delete_attachment(&id, &first.id).unwrap());
+    owners.sync().unwrap();
+    let left = &owners.vault().unwrap().item(&id).unwrap().attachments;
+    assert_eq!(left.len(), 1);
+    assert_eq!(left[0].id, second.id);
+}
+
+/// A server with 64 KB of room for an account's files
+/// (PB_TEST_SERVER_LITTLE_ROOM: USER_ATTACHMENT_LIMIT=64 with
+/// tools/test-server.sh) refuses what doesn't fit, and the app says so in
+/// its own words and leaves nothing attached.
+#[test]
+fn a_server_without_room_for_a_file_says_so_in_plain_words() {
+    let Ok(url) = std::env::var("PB_TEST_SERVER_LITTLE_ROOM") else {
+        eprintln!("PB_TEST_SERVER_LITTLE_ROOM isn't set; skipping the test of a server without room for files.");
+        return;
+    };
+    let server = Server::new(&url, Device::this_one(&Device::new_identifier())).unwrap();
+    let email = new_email("room");
+    sign_up(&server, &email);
+    let mut app = signed_in_app(&url, &email);
+    let id = item_for_files(&mut app, "Has files");
+
+    // Larger than the room there is.
+    let (large, _) = file_to_attach("large.bin", 100_000);
+    assert_eq!(
+        app.attach(&id, &large, "").err(),
+        Some(Error::Refused(
+            "your server doesn't have room for this file. Delete some attachments, or ask whoever runs it for more room"
+        ))
+    );
+    assert!(app
+        .vault()
+        .unwrap()
+        .item(&id)
+        .unwrap()
+        .attachments
+        .is_empty());
+
+    // One that fits is attached. An encrypted file is 49 bytes and a
+    // whole number of 16-byte blocks, so one can't fill 64 KB to the byte;
+    // the bytes left over are taken here by a record made as the app's
+    // steps make one, and then the room is full.
+    let (fits, _) = file_to_attach("fits.bin", 64 * 1024 - 65);
+    let attached = app.attach(&id, &fits, "").unwrap();
+    assert!(attached.synced);
+    let left = 64 * 1024 - passbundle_core::crypto::encrypted_file_len(64 * 1024 - 65);
+    assert_eq!(left, 15);
+    let mut session = sign_in(&server, &email);
+    let vault = app.vault().unwrap();
+    let filler = vault
+        .new_attachment(vault.item(&id).unwrap(), "filler")
+        .unwrap();
+    let (_, upload) = server
+        .start_attachment(
+            &mut session,
+            &id,
+            &filler.wrapped_key,
+            &filler.file_name,
+            left,
+        )
+        .unwrap();
+    upload
+        .send(&vec![2u8; left as usize], &mut |_| true)
+        .unwrap();
+    let (small, _) = file_to_attach("small.txt", 10);
+    assert_eq!(
+        app.attach(&id, &small, "").err(),
+        Some(Error::Refused(
+            "your server's room for files is full. Delete some attachments, or ask whoever runs it for more room"
+        ))
+    );
+    // Deleting makes room again.
+    assert!(app.delete_attachment(&id, &attached.id).unwrap());
+    assert!(app.attach(&id, &small, "").unwrap().synced);
+    assert_eq!(app.vault().unwrap().item(&id).unwrap().attachments.len(), 2);
+}
