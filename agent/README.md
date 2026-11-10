@@ -2,7 +2,7 @@
 
 PassBundle's desktop app: a tray app (menu bar on macOS) with no windows, written in Rust. It replaces upstream's Electron desktop app, which we don't ship. The design is in the meta repo's DESIGN.md, "Desktop agent".
 
-Version 0.1 is the foundation: the tray icon and menu (the version, Open web vault, Quit, and while the app has said so, "2 items expire soon", which opens the app: the app tells the agent two numbers per account over its socket, `keykeeper.reminders` with `soon` and `expired`, and the agent makes its own words; see `src/reminders.rs`), one agent per signed-in user, settings by policy, and a self-updater that installs only releases signed with our offline update key. It also unlocks the browser extension with Windows Hello (DESIGN.md, "Biometric unlock"): the extension speaks upstream's native-messaging protocol to `passbundle-agent-host`, which the browser starts, and the host pipes it to the agent over a socket only the signed-in user can open.
+Version 0.1 is the foundation: the tray icon and menu (the version, Open PassBundle when the app is installed with the agent, Open web vault, Quit, and while the app has said so, "2 items expire soon", which opens the app: the app tells the agent two numbers per account over its socket, `keykeeper.reminders` with `soon` and `expired`, and the agent makes its own words; see `src/reminders.rs`), one agent per signed-in user, settings by policy, and a self-updater that installs only releases signed with our offline update key. It also unlocks the browser extension with Windows Hello (DESIGN.md, "Biometric unlock"): the extension speaks upstream's native-messaging protocol to `passbundle-agent-host`, which the browser starts, and the host pipes it to the agent over a socket only the signed-in user can open.
 
 ## Why it's its own workspace
 
@@ -30,7 +30,7 @@ Read only from places a standard user can't write:
 | Web vault to open | `ServerUrl` (string, `https://` only) | `ServerUrl` (string) |
 | Self-updates | `Updates` (DWORD, 0 turns them off) | `Updates` (boolean) |
 
-Without a policy the agent opens the brand's web vault and updates itself. MSPs that push the agent through their RMM can turn updates off.
+Without a policy the agent opens the brand's web vault. No build updates itself yet, since none has an update key compiled in ("The update key", below): `passbundle-agent --update` says "This build doesn't update itself." The agent gets new versions with the app, or from the RMM. MSPs that push the agent through their RMM can turn updates off.
 
 ## Updates
 
@@ -49,7 +49,7 @@ Without a policy the agent opens the brand's web vault and updates itself. MSPs 
 
 and its minisign signature, `<target>.json.minisig`. It installs the release only if the signature verifies with the public key compiled in (`update-key.pub`), the manifest is for this product and platform, the version is newer, the file is served over HTTPS, and the download has the stated size and SHA-256. The running executable is moved aside, not overwritten, so a failure leaves a working agent. TLS is the operating system's (SChannel, Security.framework), with its certificate store.
 
-The installer will run `--update` from a scheduled task (Windows) or a launch daemon (macOS), since replacing an installed agent needs admin rights. The tray agent itself never accepts commands from the network.
+On Windows the meta repo's installer (`installer/windows/Install-PassBundle.ps1`) makes a scheduled task that runs `--update` as SYSTEM, daily and at startup, since replacing an installed agent needs admin rights; `-DisableAgentUpdates` leaves the task out. On macOS nothing runs `--update`: the agent is inside the app, where replacing it alone would break the app's signature, so it's updated only with the app. The tray agent itself never accepts commands from the network.
 
 ### The update key
 
@@ -72,6 +72,7 @@ Then publish the manifest, its `.minisig`, and the binary under the site's `agen
 The MSP background work (confirming members, keeping template copies current) stays in the web vault and the extension: the agent holds the user key only behind Windows Hello, and doing it in the background would mean keeping the key unlocked.
 
 
-- Installing the agent from `Install-PassBundle.ps1`, with autostart, the update task, and the native-messaging host registered for Chrome, Edge, and Firefox. Waits on signed builds (Authenticode on Windows, a Developer ID on macOS).
+- The native-messaging host registered for Firefox. The meta repo's `Install-PassBundle.ps1` installs the agent with autostart, the update task, and the host registered for Chrome and Edge; its Mac installer registers it for the same two.
+- Signed builds (Authenticode on Windows, a Developer ID on macOS).
 - Touch ID on macOS, which needs the agent signed with our Apple developer ID.
 - A check of Windows Hello on real hardware: CI machines have none, so the tests use a stand-in (`--features test-authenticator`, which release builds refuse).
