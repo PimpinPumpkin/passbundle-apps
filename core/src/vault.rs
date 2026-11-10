@@ -629,6 +629,36 @@ pub struct Attachment {
     pub key: Option<SymmetricKey>,
 }
 
+/// A file about to be attached (DESIGN.md in the meta repo, "Attachments in
+/// the apps"): the new key its file is encrypted with, and what the server
+/// gets, which is that key and the file's name, each encrypted with its own
+/// new IV under the key the item's values are under.
+pub struct NewAttachment {
+    pub key: SymmetricKey,
+    pub wrapped_key: String,
+    pub file_name: String,
+}
+
+impl NewAttachment {
+    pub(crate) fn wrapped_with(
+        wrapping: &SymmetricKey,
+        key: SymmetricKey,
+        name: &str,
+        key_iv: [u8; 16],
+        name_iv: [u8; 16],
+    ) -> Self {
+        NewAttachment {
+            wrapped_key: wrapping
+                .encrypt_with_iv(&key.to_bytes(), key_iv)
+                .to_string(),
+            file_name: wrapping
+                .encrypt_with_iv(name.as_bytes(), name_iv)
+                .to_string(),
+            key,
+        }
+    }
+}
+
 /// An SSH key (docs/core.md, "Items"): its public key and fingerprint, and
 /// its private key, a secret like a password. The web vault makes and edits
 /// them; the apps show and copy them.
@@ -1431,6 +1461,30 @@ impl Vault {
                     .join(", ")
             })
             .collect()
+    }
+
+    /// A new attachment for `item`, for a file called `name`: a new random
+    /// key for the file, wrapped under the item's own key if it has one,
+    /// else its organization's, else the person's, as the other apps do.
+    pub fn new_attachment(&self, item: &Item, name: &str) -> Result<NewAttachment> {
+        Ok(NewAttachment::wrapped_with(
+            self.item_value_key(item)?,
+            SymmetricKey::generate(),
+            name,
+            crate::crypto::new_iv(),
+            crate::crypto::new_iv(),
+        ))
+    }
+
+    /// Whether `item` lists the attachment `id` with this key and this name:
+    /// what an upload checks after the sync that follows it, before anything
+    /// is shown as attached.
+    pub fn has_attachment(&self, item: &str, id: &str, key: &SymmetricKey, name: &str) -> bool {
+        self.item(item).is_some_and(|item| {
+            item.attachments
+                .iter()
+                .any(|a| a.id == id && a.key.as_ref() == Some(key) && a.name == name)
+        })
     }
 
     /// The key an item's values are under: its own, or its owner's.

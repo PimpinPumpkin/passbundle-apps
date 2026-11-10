@@ -11,8 +11,11 @@
 # used; NEW_DEVICE_CHECK=true turns it on, for the tests of it. An
 # IP-to-location database (IP_LOCATION_DATABASE, a MaxMind DB file, passed
 # on to the server as it is) is optional: without one, no location is shown.
+# So is a limit on the room an account's attachments may take
+# (USER_ATTACHMENT_LIMIT, in KB, passed on the same way), for the tests of a
+# server that refuses a file.
 #
-#   [NEW_DEVICE_CHECK=true] [IP_LOCATION_DATABASE=<file>] \
+#   [NEW_DEVICE_CHECK=true] [IP_LOCATION_DATABASE=<file>] [USER_ATTACHMENT_LIMIT=<KB>] \
 #     tools/test-server.sh <passbundle-server binary> <port> <data folder> [host name]
 set -euo pipefail
 

@@ -15,7 +15,7 @@
 
 use std::ffi::{c_char, CStr, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -308,6 +308,8 @@ fn failed(e: Error) -> Value {
         "accountMade": matches!(e, Error::AccountMade { .. }),
         // Approving a sign-in waits for biometrics or the master password.
         "confirmFirst": e == Error::ConfirmFirst,
+        // The person stopped an upload: nothing to say.
+        "canceled": e == Error::Canceled,
     })
 }
 
@@ -1816,13 +1818,20 @@ pub unsafe extern "C" fn pb_item(account: *const c_char, id: *const c_char) -> *
                 "hasCode": card.code.as_ref().is_some_and(|c| !c.is_empty()),
             });
         }
+        // Not one whose file is still on its way, or that's to be deleted
+        // on the server (app/files.rs).
         view["attachments"] = item
             .attachments
             .iter()
+            .filter(|a| !app.hides_attachment(&a.id))
             .map(
                 |a| json!({ "id": a.id, "name": a.name, "size": a.size, "opens": a.key.is_some() }),
             )
             .collect();
+        // Whether files may be attached to it and its attachments deleted
+        // (app/files.rs, `may_change`): where the person may edit it, out
+        // of the trash. As the web vault, without needing to see passwords.
+        view["changesAttachments"] = json!(vault.grid(item).edit && !item.deleted);
         // A login's passkey: who it's for, never its key.
         if let Some(passkey) = &item.passkey {
             view["passkey"] = json!({
@@ -2379,6 +2388,164 @@ pub unsafe extern "C" fn pb_save_attachment_in(
             Err(e) => failed(e),
         },
     ))
+}
+
+/// The upload under way, for every screen that asks (`pb_upload_progress`)
+/// and the person's Cancel (`pb_upload_cancel`). One at a time.
+static UPLOAD: crate::app::Progress = crate::app::Progress::new();
+static UPLOADING: AtomicBool = AtomicBool::new(false);
+/// The upload's step that has the app, or waits for it (0 when none): the
+/// screens don't read from the core then, as with any slow call. Each step
+/// has a number of its own, so the go-ahead for one never lets another by.
+static UPLOAD_WANTS_APP: AtomicU64 = AtomicU64::new(0);
+static UPLOAD_STEPS: AtomicU64 = AtomicU64::new(0);
+/// The step the screens have stopped reading from the core for
+/// (`pb_upload_go`).
+static UPLOAD_GO: AtomicU64 = AtomicU64::new(0);
+/// How long a step waits for the screens' go-ahead before it takes the app
+/// anyway: a screen's read then waits for the step, which is all the
+/// go-ahead spares it.
+const UPLOAD_GO_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Attaches the file at `path` to an item, under `name` (the file's own
+/// name when empty), with the item's account's keys (docs/core.md,
+/// "Attachments"): `{ok, id, synced}`, or the words to show (`canceled`
+/// when the person stopped it, with nothing to say). `synced` is false when
+/// the server has the file but the sync after didn't come through.
+///
+/// Slow: from a background isolate. The app is held only for the moments
+/// that need it (app/files.rs, `attach`), so the screens' reads, locking,
+/// and `pb_upload_progress` go on while the file travels. Before each of
+/// those moments, `pb_upload_progress` says `wantsApp`, and the step waits
+/// for the screens to stop reading from the core (`pb_upload_go`). One
+/// file at a time: a second call while one runs is refused.
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_attach_file(
+    account: *const c_char,
+    id: *const c_char,
+    path: *const c_char,
+    name: *const c_char,
+) -> *mut c_char {
+    let account = text(account);
+    let (id, path, name) = (text(id), text(path), text(name));
+    out(attach_file(&account, &id, &path, &name))
+}
+
+/// What `pb_attach_file` does, on a thread of the core's own (as
+/// `with_app_waiting`), taking the app only when `attach` asks for it.
+fn attach_file(account: &str, id: &str, path: &str, name: &str) -> Value {
+    if UPLOADING.swap(true, Ordering::SeqCst) {
+        return failed(Error::Refused(
+            "another file is still uploading. Wait for it to finish, or cancel it",
+        ));
+    }
+    UPLOAD.begin();
+    let attached = std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                catch_unwind(AssertUnwindSafe(|| {
+                    let mut on_app = |call: &mut dyn FnMut(&mut App)| {
+                        let step = UPLOAD_STEPS.fetch_add(1, Ordering::SeqCst) + 1;
+                        UPLOAD_WANTS_APP.store(step, Ordering::SeqCst);
+                        let asked = Instant::now();
+                        while UPLOAD_GO.load(Ordering::SeqCst) != step
+                            && asked.elapsed() < UPLOAD_GO_WAIT
+                        {
+                            std::thread::sleep(std::time::Duration::from_millis(5));
+                        }
+                        app_value(account, |app| {
+                            call(app);
+                            Value::Null
+                        });
+                        UPLOAD_WANTS_APP.store(0, Ordering::SeqCst);
+                    };
+                    let path = std::path::Path::new(path);
+                    match crate::app::attach(&mut on_app, id, path, name, &UPLOAD) {
+                        Ok(attached) => {
+                            json!({ "ok": true, "id": attached.id, "synced": attached.synced })
+                        }
+                        Err(e) => failed(e),
+                    }
+                }))
+                .unwrap_or_else(|_| json!({ "ok": false, "error": STOPPED }))
+            })
+            .join()
+            .unwrap_or_else(|_| json!({ "ok": false, "error": STOPPED }))
+    });
+    UPLOAD.end();
+    // A step that stopped partway (a panic) leaves nothing said to have it.
+    UPLOAD_WANTS_APP.store(0, Ordering::SeqCst);
+    UPLOADING.store(false, Ordering::SeqCst);
+    attached
+}
+
+/// How far the upload under way is: `{phase, done, total, wantsApp}`, the
+/// phase one of "reading", "encrypting", "sending", "finishing", or null
+/// when no file is uploading; `done` and `total` are bytes of that phase
+/// (`total` 0 when it has no amount to show); `wantsApp` the number of the
+/// step that has the app or waits for it, 0 when none: the screens don't
+/// read from the core until it's 0 again, and say so with `pb_upload_go`.
+/// Never waits for the app.
+#[no_mangle]
+pub extern "C" fn pb_upload_progress() -> *mut c_char {
+    let (done, total) = UPLOAD.amounts();
+    out(json!({
+        "phase": UPLOAD.phase().map(crate::app::Phase::word),
+        "done": done,
+        "total": total,
+        "wantsApp": UPLOAD_WANTS_APP.load(Ordering::SeqCst),
+    }))
+}
+
+/// The screens have stopped reading from the core for the upload's step
+/// numbered `step` (`pb_upload_progress`, `wantsApp`): it may take the app.
+#[no_mangle]
+pub extern "C" fn pb_upload_go(step: u64) {
+    UPLOAD_GO.store(step, Ordering::SeqCst);
+}
+
+/// The largest file the app attaches here (app/files.rs, `MAX_FILE`):
+/// `{bytes, refusal}`, the words for a larger one. A phone's picker asks
+/// before it copies a file into the app's cache, so one that's too large is
+/// never copied.
+#[no_mangle]
+pub extern "C" fn pb_attach_limit() -> *mut c_char {
+    out(json!({
+        "bytes": crate::app::MAX_FILE,
+        "refusal": crate::app::too_large().to_string(),
+    }))
+}
+
+/// The person's Cancel for the upload under way: it stops at the next
+/// piece, and the record the server made for it is deleted. Once the server
+/// has the whole file, it's attached. Never waits for the app.
+#[no_mangle]
+pub extern "C" fn pb_upload_cancel() {
+    UPLOAD.cancel();
+}
+
+/// Deletes one of an item's attachments, then syncs: `{ok, synced}`, or the
+/// words to show. Slow: from a background isolate.
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_delete_attachment(
+    account: *const c_char,
+    id: *const c_char,
+    attachment_id: *const c_char,
+) -> *mut c_char {
+    let account = text(account);
+    let (id, attachment_id) = (text(id), text(attachment_id));
+    with_app_waiting(&account, |app| {
+        match app.delete_attachment(&id, &attachment_id) {
+            Ok(synced) => json!({ "ok": true, "synced": synced }),
+            Err(e) => failed(e),
+        }
+    })
 }
 
 /// Writes an attachment into a file Android opened for it (android.rs):

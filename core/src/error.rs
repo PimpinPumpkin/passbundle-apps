@@ -111,6 +111,8 @@ pub enum Error {
     /// the account's credentials, a Duo answer for another sign-in, a code
     /// that isn't a YubiKey's (two_step.rs, security_key).
     TwoStep(&'static str),
+    /// The person stopped a file's upload. The apps show nothing for it.
+    Canceled,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -295,6 +297,7 @@ impl fmt::Display for Error {
             Error::TooManyAccounts => write!(f, "PassBundle keeps up to {} accounts on this device. Sign out of one to add another.", crate::accounts::MOST),
             Error::AlreadyHere => write!(f, "That account is in PassBundle on this device already, under another email or server. Sign out of it there first."),
             Error::TwoStep(sentence) => write!(f, "{sentence}"),
+            Error::Canceled => write!(f, "The upload was canceled."),
         }
     }
 }
@@ -387,6 +390,8 @@ mod tests {
             Error::Damaged("no such item"),
             Error::Damaged("bad padding"),
             Error::Server("Username or password is incorrect. Try again".into()),
+            Error::Canceled,
+            Error::Refused("this device doesn't have the memory free for a file that large"),
         ]
         .map(|e| e.to_string());
         for w in &words {

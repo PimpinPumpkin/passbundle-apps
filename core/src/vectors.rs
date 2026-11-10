@@ -5,14 +5,24 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::Value;
 
-use crate::crypto::{EncString, PrivateKey, SymmetricKey};
+use crate::crypto::{decrypt_file, EncString, FileToEncrypt, PrivateKey, SymmetricKey};
 use crate::error::Error;
 use crate::kdf::{Kdf, MasterKey, Prelogin};
 use crate::totp::Totp;
-use crate::vault::{ItemKind, Sync, Vault};
+use crate::vault::{ItemKind, NewAttachment, Sync, Vault};
 
 fn vectors() -> Value {
     serde_json::from_str(include_str!("../tests/vectors/core-v1.json")).unwrap()
+}
+
+/// docs/vectors/attachments-send-v1.json: what the apps make to attach a
+/// file and to make a Send, with fixed keys and IVs, from plain Node.
+fn files_vectors() -> Value {
+    serde_json::from_str(include_str!("../tests/vectors/attachments-send-v1.json")).unwrap()
+}
+
+fn iv(v: &Value) -> [u8; 16] {
+    b64(v).try_into().unwrap()
 }
 
 fn b64(v: &Value) -> Vec<u8> {
@@ -646,4 +656,93 @@ fn a_new_account_is_made_as_the_vectors_say() {
         ),
         (Some(1), Some(3), Some(64), Some(4))
     );
+}
+
+fn to_encrypt(plain: &[u8]) -> FileToEncrypt {
+    let mut file = FileToEncrypt::with_room(plain.len()).unwrap();
+    let mut reader = plain;
+    while file.read_from(&mut reader, 5).unwrap() > 0 {}
+    file
+}
+
+#[test]
+fn an_attachments_key_and_name_wrap_as_the_vectors_say_under_each_kind_of_key() {
+    let v = files_vectors();
+    let attachment = &v["attachment"];
+    let file_key = key(&attachment["key"]);
+    let wrapped = attachment["wrapped"].as_array().unwrap();
+    assert_eq!(wrapped.len(), 3);
+    for w in wrapped {
+        let name = w["name"].as_str().unwrap();
+        let wrapping = key(&w["wrappingKey"]);
+        let made = NewAttachment::wrapped_with(
+            &wrapping,
+            file_key.clone(),
+            w["fileName"].as_str().unwrap(),
+            iv(&w["keyIv"]),
+            iv(&w["nameIv"]),
+        );
+        assert_eq!(
+            made.wrapped_key,
+            w["wrappedKey"].as_str().unwrap(),
+            "{name}"
+        );
+        assert_eq!(
+            made.file_name,
+            w["encryptedName"].as_str().unwrap(),
+            "{name}"
+        );
+        // And they open as the app opens any attachment's.
+        let opened = EncString::parse(&made.wrapped_key)
+            .unwrap()
+            .decrypt_key(&wrapping)
+            .unwrap();
+        assert_eq!(opened, file_key, "{name}");
+        assert_eq!(
+            &**EncString::parse(&made.file_name)
+                .unwrap()
+                .decrypt_string(&wrapping)
+                .unwrap(),
+            w["fileName"].as_str().unwrap(),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn a_file_encrypts_byte_for_byte_as_the_vectors_say_and_opens_again() {
+    let v = files_vectors();
+    let attachment = &v["attachment"];
+    let file_key = key(&attachment["key"]);
+    let files = attachment["files"].as_array().unwrap();
+    assert!(files.len() >= 7);
+    for f in files {
+        let name = f["name"].as_str().unwrap();
+        let plain = b64(&f["plaintext"]);
+        let encrypted = to_encrypt(&plain).encrypt_with_iv(&file_key, iv(&f["iv"]));
+        assert_eq!(encrypted, b64(&f["encrypted"]), "{name}");
+        assert_eq!(
+            encrypted.len() as u64,
+            f["encryptedLength"].as_u64().unwrap(),
+            "{name}"
+        );
+        assert_eq!(
+            crate::crypto::encrypted_file_len(plain.len() as u64),
+            f["encryptedLength"].as_u64().unwrap(),
+            "{name}"
+        );
+        assert_eq!(
+            *decrypt_file(encrypted, &file_key).unwrap(),
+            plain,
+            "{name}"
+        );
+    }
+    for refused in attachment["refused"].as_array().unwrap() {
+        assert_eq!(
+            decrypt_file(b64(&refused["encrypted"]), &file_key).unwrap_err(),
+            Error::Refused("its integrity check failed"),
+            "{}",
+            refused["why"]
+        );
+    }
 }

@@ -15,6 +15,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'accounts.dart';
+import 'attaching.dart';
 import 'autofill_offer.dart';
 import 'browser_import.dart';
 import 'core.dart';
@@ -2896,6 +2897,8 @@ class _ItemPaneState extends State<ItemPane> {
     item = widget.core.item(widget.id);
     tick();
     ticker = Timer.periodic(const Duration(seconds: 1), (_) => tick());
+    uploadingHere = uploading.value?.isFor(widget.id) ?? false;
+    uploading.addListener(uploadChanged);
   }
 
   void tick() {
@@ -2905,9 +2908,26 @@ class _ItemPaneState extends State<ItemPane> {
 
   @override
   void dispose() {
+    uploading.removeListener(uploadChanged);
     ticker?.cancel();
     masterPassword.dispose();
     super.dispose();
+  }
+
+  /// Whether a file is on its way to this item (attaching.dart).
+  bool uploadingHere = false;
+
+  /// Shows how far the upload is; once one for this item ends, the item as
+  /// it is now (the file, if the server confirmed it).
+  void uploadChanged() {
+    if (!mounted) return;
+    final here = uploading.value?.isFor(widget.id) ?? false;
+    setState(() {
+      if (uploadingHere && !here && !busy.value) {
+        item = widget.core.item(widget.id);
+      }
+      uploadingHere = here;
+    });
   }
 
   /// Edits it, then shows what was saved.
@@ -3014,6 +3034,102 @@ class _ItemPaneState extends State<ItemPane> {
       answer.ok
           ? 'Saved to ${answer.body['path']}'
           : answer.error ?? 'Couldn\'t save that.',
+    );
+  }
+
+  /// Asks for a file with the device's picker and attaches it, with how far
+  /// it is shown on the item (attaching.dart). Only the server's say makes
+  /// it attached: a file it didn't confirm isn't listed.
+  Future<void> attach() async {
+    if (asksAgain()) {
+      setState(() {});
+      return;
+    }
+    if (uploading.value != null) {
+      showMessage(context, anotherUploading);
+      return;
+    }
+    final limit = widget.core.attachLimit();
+    Map<String, dynamic>? picked;
+    try {
+      picked = await Core.pickFile((limit['bytes'] as num? ?? 0).toInt());
+    } on PlatformException catch (e) {
+      picked = {'error': e.message};
+    } on MissingPluginException {
+      picked = {'error': null};
+    }
+    if (picked == null) return;
+    final path = picked['path'] as String?;
+    if (!mounted || path == null) {
+      await Core.forgetPicked();
+      if (!mounted) return;
+      showMessage(
+        context,
+        picked['tooLarge'] == true
+            ? limit['refusal'] as String? ?? 'That file is too large.'
+            : picked['error'] as String? ??
+                  'PassBundle couldn\'t open that file.',
+      );
+      return;
+    }
+    final name = picked['name'] as String? ?? '';
+    // Said wherever the person is by the time it ends; the file's name only
+    // while its item is still shown.
+    final messenger = ScaffoldMessenger.of(context);
+    final answer = await attachFile(widget.core, widget.id, path, name);
+    if (answer.body['canceled'] == true) return;
+    final said = answer.ok
+        ? (answer.body['synced'] == false
+              ? 'The server has ${mounted ? name : 'the file'}. It shows here once PassBundle syncs.'
+              : 'Attached ${mounted ? name : 'the file'}.')
+        : answer.error ?? 'Couldn\'t attach that file.';
+    messenger.showSnackBar(
+      SnackBar(content: Text(said), duration: const Duration(seconds: 4)),
+    );
+    if (!mounted) return;
+    setState(() => item = widget.core.item(widget.id));
+    widget.onChanged?.call();
+  }
+
+  /// Deletes one of its attachments from the server, once the person says so.
+  Future<void> deleteAttachment(String attachmentId, String name) async {
+    if (asksAgain()) {
+      setState(() {});
+      return;
+    }
+    final sure = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('Delete $name?'),
+        content: const Text(
+          'It\'s deleted from the server, for every device. It can\'t be restored.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (sure != true || !mounted) return;
+    final answer = await whileBusy(
+      () => Core.deleteAttachment(widget.id, attachmentId),
+    );
+    if (!mounted) return;
+    setState(() => item = widget.core.item(widget.id));
+    widget.onChanged?.call();
+    showMessage(
+      context,
+      answer.ok
+          ? (answer.body['synced'] == false
+                ? 'Deleted $name. PassBundle couldn\'t sync the rest just now, and will next time.'
+                : 'Deleted $name.')
+          : answer.error ?? 'Couldn\'t delete that.',
     );
   }
 
@@ -3501,7 +3617,9 @@ class _ItemPaneState extends State<ItemPane> {
               ),
       );
     }
-    // Attachments: saved to Downloads, or to Files on an iPhone.
+    // Attachments: saved to Downloads, or to Files on an iPhone; deleted
+    // where the person may edit the item.
+    final changesAttachments = item['changesAttachments'] == true;
     for (final a
         in ((item['attachments'] as List?) ?? const [])
             .cast<Map<String, dynamic>>()) {
@@ -3514,12 +3632,58 @@ class _ItemPaneState extends State<ItemPane> {
           ),
           // One whose name or key doesn't open is listed, but not saved.
           actions: [
+            if (changesAttachments)
+              IconButton(
+                tooltip: 'Delete ${a['name']}',
+                icon: Icon(Icons.delete_outline_rounded, color: c.muted),
+                onPressed: () =>
+                    deleteAttachment(a['id'] as String, a['name'] as String),
+              ),
             if (a['opens'] != false)
               action(
                 'Save ${a['name']}',
                 Icon(Icons.download_rounded, size: 20, color: scheme.primary),
                 () => saveAttachment(a['id'] as String, a['name'] as String),
               ),
+          ],
+        ),
+      );
+    }
+    // The file on its way here, with how far it is and Cancel.
+    final upload = uploading.value;
+    if (upload != null && upload.isFor(widget.id)) {
+      rows.add(
+        row(
+          'Attaching',
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                upload.name,
+                style: TextStyle(fontSize: valueSize),
+                overflow: TextOverflow.ellipsis,
+              ),
+              const SizedBox(height: 8),
+              LinearProgressIndicator(
+                key: const ValueKey('upload-progress'),
+                value: upload.canceling ? null : upload.fraction,
+                borderRadius: BorderRadius.circular(2),
+              ),
+              const SizedBox(height: 6),
+              Text(
+                uploadWords(upload),
+                style: TextStyle(color: c.muted, fontSize: 13),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: upload.canceling
+                  ? null
+                  : () => cancelUpload(widget.core),
+              child: const Text('Cancel'),
+            ),
           ],
         ),
       );
@@ -3634,6 +3798,23 @@ class _ItemPaneState extends State<ItemPane> {
                 ),
               ),
             ],
+          ),
+        ),
+      if (changesAttachments && !(upload?.isFor(widget.id) ?? false))
+        Padding(
+          padding: const EdgeInsets.only(top: 10),
+          child: Align(
+            alignment: Alignment.centerLeft,
+            child: TextButton.icon(
+              key: const ValueKey('attach-file'),
+              onPressed: attach,
+              icon: Icon(
+                Icons.attach_file_rounded,
+                size: 18,
+                color: scheme.primary,
+              ),
+              label: const Text('Attach a file'),
+            ),
           ),
         ),
       if (may(item, 'viewHistory'))
@@ -3872,6 +4053,20 @@ class _MasterPasswordDialogState extends State<_MasterPasswordDialog> {
       WorkingButton(label: 'Continue', working: working, onPressed: confirm),
     ],
   );
+}
+
+/// What an upload is doing, in words (attaching.dart).
+String uploadWords(Uploading upload) {
+  if (upload.canceling) return 'Canceling';
+  return switch (upload.phase) {
+    'reading' => 'Reading the file',
+    'encrypting' => 'Encrypting it on this device',
+    'sending' when upload.total > 0 =>
+      'Sent ${fileSize(upload.done)} of ${fileSize(upload.total)}',
+    'sending' => 'Sending',
+    'finishing' => 'Checking that the server has it',
+    _ => 'Starting',
+  };
 }
 
 /// A file's size for people: "37 bytes", "1.2 KB", "3.4 MB".

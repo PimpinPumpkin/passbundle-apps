@@ -169,7 +169,7 @@ jobs:
           persist-credentials: false
       - name: Each copy is the meta repo's
         run: |
-          for name in core-v1.json desktop-update-v1.json device-approval-v1.json mac-local-v1.json; do
+          for name in attachments-send-v1.json core-v1.json desktop-update-v1.json device-approval-v1.json mac-local-v1.json; do
             cmp "core/tests/vectors/$name" "meta/docs/vectors/$name"
           done
 
@@ -532,11 +532,12 @@ jobs:
       - name: Build the server
         working-directory: server
         run: cargo build --features sqlite
-      - name: Start it, another named localhost for security keys (WebAuthn takes only a domain), and one with the new-device check on
+      - name: Start it, another named localhost for security keys (WebAuthn takes only a domain), one with the new-device check on, and one with 64 KB of room for an account's attachments
         run: |
           echo "PB_TEST_SERVER=$(tools/test-server.sh server/target/debug/vaultwarden 8591 "$RUNNER_TEMP/server")" >> "$GITHUB_ENV"
           echo "PB_TEST_SERVER_LOCALHOST=$(tools/test-server.sh server/target/debug/vaultwarden 8593 "$RUNNER_TEMP/server-localhost" localhost)" >> "$GITHUB_ENV"
           echo "PB_TEST_SERVER_NEW_DEVICE=$(NEW_DEVICE_CHECK=true tools/test-server.sh server/target/debug/vaultwarden 8594 "$RUNNER_TEMP/server-new-device")" >> "$GITHUB_ENV"
+          echo "PB_TEST_SERVER_LITTLE_ROOM=$(USER_ATTACHMENT_LIMIT=64 tools/test-server.sh server/target/debug/vaultwarden 8595 "$RUNNER_TEMP/server-little-room")" >> "$GITHUB_ENV"
       - name: The core against it (test-hooks for the software security key, core/src/security_key/soft.rs)
         working-directory: core
         run: cargo test --locked --features test-hooks --test server
@@ -546,6 +547,7 @@ jobs:
           cat "$RUNNER_TEMP/server/server.log" || true
           cat "$RUNNER_TEMP/server-localhost/server.log" || true
           cat "$RUNNER_TEMP/server-new-device/server.log" || true
+          cat "$RUNNER_TEMP/server-little-room/server.log" || true
 
   app:
     if: ${{ !inputs.ios_only }}
