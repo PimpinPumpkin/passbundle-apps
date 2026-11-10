@@ -7,6 +7,10 @@
 // behind "Self-hosted?". Their server is checked as they leave its field, and
 // before anything is sent to it (docs/core.md, "Checking a server"): what's
 // wrong with it is said under that field, not under the master password.
+// A server that says it takes no new accounts isn't offered the form for
+// making one: the screen says so where "Create account" would be, in the web
+// vault's words, and on PassBundle's server links to the website's contact
+// page.
 import 'package:flutter/material.dart';
 
 import 'accounts.dart';
@@ -17,6 +21,40 @@ import 'two_step.dart';
 import 'widgets.dart';
 
 final _measuring = testSetting('PB_MEASURE') == '1';
+
+// What's said where "Create account" would be on a server that takes no new
+// accounts, and under an email the server turned down: the web vault's
+// sentences, word for word (passbundle-clients, brand/messages.en.json, the
+// keys starting keykeeperNewAccounts).
+const _notOpenYet = 'New accounts aren\'t open yet.';
+const _askForOne = 'Ask for one';
+const _ownServer =
+    'This server isn\'t taking new accounts. Ask the person who runs it.';
+const _notThatAddress = 'New accounts aren\'t open for that address.';
+const _notThatAddressOwnServer =
+    'New accounts aren\'t open for that address. Ask the person who runs this server.';
+
+/// Tests only: where to sign in, in place of the core's answer
+/// ([Core.servers]), so a stand-in on this computer can be PassBundle's own
+/// server. Null is what the core says.
+@visibleForTesting
+Map<String, dynamic>? debugServers;
+
+/// Under flutter test, the screen asks a server whether it takes new accounts
+/// as it opens only where the test names the servers ([debugServers]): no
+/// test asks PassBundle's. A product build never takes FLUTTER_TEST from its
+/// environment.
+final _underTest = testSetting('FLUTTER_TEST') != null;
+
+/// A server's address as it's compared with another: the host in lower case,
+/// without a slash at the end.
+String _sameServer(String address) {
+  final typed = address.trim();
+  return (Uri.tryParse(typed)?.toString() ?? typed).replaceAll(
+    RegExp(r'/+$'),
+    '',
+  );
+}
 
 /// A server address as someone typed it, with https:// added when they left
 /// the scheme off ("vault.example.com"). An address that names http:// stays
@@ -55,9 +93,16 @@ class SignInScreen extends StatefulWidget {
 }
 
 class _SignInScreenState extends State<SignInScreen> {
-  final servers = Core().servers();
+  final servers = debugServers ?? Core().servers();
   late final ours = servers['ours'] as String;
   late final managed = servers['managed'] as String?;
+
+  /// The website's page for asking for an account. Only an https address is
+  /// opened, as in the web vault; without one there's no link.
+  late final String? contactPage = switch (servers['contactPage']) {
+    final String page when page.startsWith('https://') => page,
+    _ => null,
+  };
 
   /// Someone's own server: shown when they ask, or when they signed in to one before.
   late bool selfHosted =
@@ -90,7 +135,86 @@ class _SignInScreenState extends State<SignInScreen> {
     final typed = server.text;
     final answer = await Core.checkServer(serverAddress(typed));
     if (!mounted || asked != checks || typed != server.text) return;
-    setState(() => serverError = answer.ok ? null : answer.error);
+    setState(() {
+      serverError = answer.ok ? null : answer.error;
+      heard(serverAddress(typed), answer);
+    });
+  }
+
+  /// The servers that said they take no new accounts, with their answer to
+  /// the check (docs/core.md, "Checking a server"). One that doesn't say, or
+  /// can't be asked, isn't here: the form is offered, and the server answers
+  /// it.
+  final closed = <String>{};
+
+  /// The server signed in to takes no new accounts.
+  bool get closedHere => closed.contains(_sameServer(signInTo));
+
+  /// PassBundle's own server, not one someone else runs.
+  bool get onOurs => _sameServer(signInTo) == _sameServer(ours);
+
+  /// Why the server turned down the email at the form's first step, when it
+  /// said: "closed" or "address". Said under the email until it changes.
+  String? refused;
+
+  /// The browser didn't open the contact page.
+  bool couldntOpen = false;
+
+  /// Takes what a server said about new accounts with its answer to the
+  /// check. Inside setState.
+  void heard(String server, Answer answer) {
+    if (!answer.ok) return;
+    if (answer.body['newAccounts'] == 'closed') {
+      closed.add(_sameServer(server));
+    } else {
+      closed.remove(_sameServer(server));
+    }
+    leaveFormIfClosed();
+  }
+
+  /// Asks the server signed in to whether it takes new accounts: as the
+  /// screen opens, and when the person turns to the other server. Nothing is
+  /// said if it can't be asked.
+  Future<void> askAboutNewAccounts() async {
+    if (_underTest && debugServers == null) return;
+    final server = signInTo;
+    if (server.isEmpty) return;
+    final answer = await Core.checkServer(server);
+    if (mounted) setState(() => heard(server, answer));
+  }
+
+  /// The form for making an account goes once its server is known to take
+  /// none: back to signing in, which says so. Inside setState.
+  void leaveFormIfClosed() {
+    if (!creating || !closedHere) return;
+    creating = false;
+    error = null;
+    refused = null;
+    password.clear();
+    confirm.clear();
+  }
+
+  /// PassBundle's server or the person's own: the other one.
+  void switchServer() {
+    setState(() {
+      selfHosted = !selfHosted;
+      serverError = null;
+      refused = null;
+      leaveFormIfClosed();
+    });
+    askAboutNewAccounts();
+  }
+
+  /// Opens the website's contact page in the browser.
+  Future<void> askForOne(String page) async {
+    final opened = await Core.openWebsite(page);
+    if (mounted) setState(() => couldntOpen = !opened);
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    askAboutNewAccounts();
   }
 
   /// An answer about the server rather than the email or master password,
@@ -200,6 +324,7 @@ class _SignInScreenState extends State<SignInScreen> {
       working = true;
       error = null;
       serverError = null;
+      refused = null;
     });
     final answer = await whileBusy(
       () => Core.signUp(
@@ -211,6 +336,17 @@ class _SignInScreenState extends State<SignInScreen> {
       ),
     );
     if (!mounted || aboutTheServer(answer)) return;
+    final why = answer.body['newAccounts'];
+    if (!answer.ok && (why == 'closed' || why == 'address')) {
+      // The server turned the email down, and said why: the web vault's
+      // sentence for it, under the email.
+      setState(() {
+        working = false;
+        error = null;
+        refused = why as String;
+      });
+      return;
+    }
     if (answer.body['accountMade'] == true) {
       // The account is there: signing in is what's left, with the same email.
       setState(() {
@@ -336,25 +472,29 @@ class _SignInScreenState extends State<SignInScreen> {
         const SizedBox(height: 16),
         WorkingButton(label: 'Sign in', working: working, onPressed: signIn),
         const SizedBox(height: 8),
-        TextButton(
-          onPressed: working
-              ? null
-              : () => setState(() {
-                  creating = true;
-                  error = null;
-                  password.clear();
-                }),
-          child: const Text('Create account'),
-        ),
-        if (managed == null) ...[
-          const SizedBox(height: 8),
+        if (closedHere)
+          // The server takes no new accounts: who to ask, not a form that
+          // can only fail.
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 6),
+            child: _noNewAccounts('closed'),
+          )
+        else
           TextButton(
             onPressed: working
                 ? null
                 : () => setState(() {
-                    selfHosted = !selfHosted;
-                    serverError = null;
+                    creating = true;
+                    error = null;
+                    refused = null;
+                    password.clear();
                   }),
+            child: const Text('Create account'),
+          ),
+        if (managed == null) ...[
+          const SizedBox(height: 8),
+          TextButton(
+            onPressed: working ? null : switchServer,
             child: Text(
               selfHosted ? 'Use PassBundle\'s server' : 'Self-hosted?',
             ),
@@ -381,9 +521,13 @@ class _SignInScreenState extends State<SignInScreen> {
         enabled: !working,
         keyboardType: TextInputType.url,
         autocorrect: false,
-        onChanged: (_) {
-          if (serverError != null) setState(() => serverError = null);
-        },
+        // Another address is another server: what was said about the last
+        // one goes, and what's known about this one shows.
+        onChanged: (_) => setState(() {
+          serverError = null;
+          refused = null;
+          leaveFormIfClosed();
+        }),
         decoration: InputDecoration(
           labelText: 'Server',
           hintText: 'vault.example.com',
@@ -421,8 +565,16 @@ class _SignInScreenState extends State<SignInScreen> {
         enabled: !working,
         keyboardType: TextInputType.emailAddress,
         autofillHints: const [AutofillHints.email],
+        onChanged: (_) {
+          if (refused != null) setState(() => refused = null);
+        },
         decoration: const InputDecoration(labelText: 'Email'),
       ),
+      if (refused case final why?)
+        Padding(
+          padding: const EdgeInsets.only(left: 14, top: 4),
+          child: _noNewAccounts(why, underEmail: true),
+        ),
       const SizedBox(height: 12),
       TextField(
         controller: name,
@@ -492,16 +644,62 @@ class _SignInScreenState extends State<SignInScreen> {
       ),
       if (managed == null)
         TextButton(
-          onPressed: working
-              ? null
-              : () => setState(() {
-                    selfHosted = !selfHosted;
-                    serverError = null;
-                  }),
+          onPressed: working ? null : switchServer,
           child: Text(selfHosted ? 'Use PassBundle\'s server' : 'Self-hosted?'),
         ),
     ],
   );
+
+  /// A server that takes no new accounts ([why] "closed"), or none for the
+  /// email just tried ("address"): the web vault's sentence for it. On
+  /// PassBundle's server, with its link to the website's contact page; on
+  /// anyone else's, the person who runs it is who to ask.
+  Widget _noNewAccounts(String why, {bool underEmail = false}) {
+    final words = switch ((onOurs, why)) {
+      (true, 'address') => _notThatAddress,
+      (true, _) => _notOpenYet,
+      (false, 'address') => _notThatAddressOwnServer,
+      (false, _) => _ownServer,
+    };
+    final page = onOurs ? contactPage : null;
+    final theme = Theme.of(context);
+    return Column(
+      key: const ValueKey('no-new-accounts'),
+      crossAxisAlignment: underEmail
+          ? CrossAxisAlignment.start
+          : CrossAxisAlignment.center,
+      children: [
+        Wrap(
+          alignment: underEmail ? WrapAlignment.start : WrapAlignment.center,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          spacing: 4,
+          children: [
+            Text(
+              words,
+              textAlign: underEmail ? TextAlign.start : TextAlign.center,
+              style: underEmail
+                  ? theme.textTheme.bodySmall?.copyWith(
+                      color: theme.colorScheme.error,
+                    )
+                  : null,
+            ),
+            if (page != null)
+              TextButton(
+                key: const ValueKey('ask-for-account'),
+                onPressed: working ? null : () => askForOne(page),
+                child: const Text(_askForOne),
+              ),
+          ],
+        ),
+        if (page != null && couldntOpen)
+          Text(
+            'Couldn\'t open $page.',
+            textAlign: underEmail ? TextAlign.start : TextAlign.center,
+            style: TextStyle(color: context.colors.muted, fontSize: 13),
+          ),
+      ],
+    );
+  }
 }
 
 class UnlockScreen extends StatefulWidget {

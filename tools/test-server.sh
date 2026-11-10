@@ -12,7 +12,13 @@
 # IP-to-location database (IP_LOCATION_DATABASE, a MaxMind DB file, passed
 # on to the server as it is) is optional: without one, no location is shown.
 #
+# It takes new accounts from anyone, as the tests need. For the tests of a
+# server that doesn't: SIGNUPS_ALLOWED=false INVITATIONS_ALLOWED=false makes
+# one that takes none and says so, and SIGNUPS_DOMAINS_WHITELIST=<domain>
+# one that takes them only from addresses at that domain.
+#
 #   [NEW_DEVICE_CHECK=true] [IP_LOCATION_DATABASE=<file>] \
+#     [SIGNUPS_ALLOWED=false INVITATIONS_ALLOWED=false] [SIGNUPS_DOMAINS_WHITELIST=<domain>] \
 #     tools/test-server.sh <passbundle-server binary> <port> <data folder> [host name]
 set -euo pipefail
 
@@ -28,7 +34,9 @@ NEW_DEVICE_CHECK="${NEW_DEVICE_CHECK:-false}" \
   ROCKET_PORT="$port" \
   DOMAIN="http://$host:$port" \
   WEB_VAULT_ENABLED=false \
-  SIGNUPS_ALLOWED=true \
+  SIGNUPS_ALLOWED="${SIGNUPS_ALLOWED:-true}" \
+  INVITATIONS_ALLOWED="${INVITATIONS_ALLOWED:-true}" \
+  SIGNUPS_DOMAINS_WHITELIST="${SIGNUPS_DOMAINS_WHITELIST:-}" \
   SIGNUPS_VERIFY=false \
   DISABLE_ICON_DOWNLOAD=true \
   LOGIN_RATELIMIT_SECONDS=1 \

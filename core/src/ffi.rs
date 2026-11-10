@@ -306,6 +306,13 @@ fn failed(e: Error) -> Value {
         "field": if e.about_the_server() { json!("server") } else { Value::Null },
         // Making an account got to the server: signing in is what's left.
         "accountMade": matches!(e, Error::AccountMade { .. }),
+        // Making an account: the server takes none ("closed"), or none for
+        // this address ("address"). The sign-in screen has the words.
+        "newAccounts": match e {
+            Error::NoNewAccounts(crate::error::NoNewAccounts::Closed) => json!("closed"),
+            Error::NoNewAccounts(crate::error::NoNewAccounts::Address) => json!("address"),
+            _ => Value::Null,
+        },
         // Approving a sign-in waits for biometrics or the master password.
         "confirmFirst": e == Error::ConfirmFirst,
     })
@@ -745,9 +752,15 @@ pub extern "C" fn pb_version() -> *mut c_char {
 
 /// Where to sign in: `ours`, PassBundle's own server, and `managed`, the
 /// server an organization set by policy (managed.rs), which then is the one.
+/// And `contactPage`, the website's page for asking for an account while
+/// PassBundle's server takes no new ones.
 #[no_mangle]
 pub extern "C" fn pb_servers() -> *mut c_char {
-    out(json!({ "ours": crate::brand::SERVER, "managed": crate::managed::server() }))
+    out(json!({
+        "ours": crate::brand::SERVER,
+        "managed": crate::managed::server(),
+        "contactPage": crate::brand::CONTACT_PAGE,
+    }))
 }
 
 /// An account's state: signed out, locked, or unlocked, with the server and
@@ -1022,7 +1035,8 @@ pub unsafe extern "C" fn pb_sync(account: *const c_char) -> *mut c_char {
 
 /// Whether a PassBundle server answers at an address, before signing in or
 /// making an account there (docs/core.md, "Checking a server"): `{ok}`, or
-/// what's wrong, with `field: "server"`.
+/// what's wrong, with `field: "server"`. With `newAccounts`, "open" or
+/// "closed", when the server says whether it takes new accounts.
 ///
 /// # Safety
 /// `server` is null or a NUL-terminated UTF-8 string, valid for the call.
@@ -1034,10 +1048,15 @@ pub unsafe extern "C" fn pb_check_server(server: *const c_char) -> *mut c_char {
         scope
             .spawn(|| {
                 catch_unwind(AssertUnwindSafe(|| {
-                    done(
-                        crate::server::Server::new(&server, crate::server::Device::this_one(""))
-                            .and_then(|s| s.check()),
-                    )
+                    match crate::server::Server::new(&server, crate::server::Device::this_one(""))
+                        .and_then(|s| s.takes_new_accounts())
+                    {
+                        Ok(takes) => json!({
+                            "ok": true,
+                            "newAccounts": takes.map(|yes| if yes { "open" } else { "closed" }),
+                        }),
+                        Err(e) => failed(e),
+                    }
                 }))
                 .unwrap_or_else(|_| json!({ "ok": false, "error": STOPPED }))
             })
