@@ -67,14 +67,19 @@ final class TouchIDSecret {
 /// another's. Opening needs the enclave's half of the agreement. The shared
 /// secret and the AES key stay CryptoKit's own (SharedSecret, SymmetricKey),
 /// which zero themselves when let go of.
+///
+/// `info` is what the seal is for, so one kind never opens as another: Touch
+/// ID's own here, and the PIN record's in DeviceSeal.swift.
 enum TouchIDSeal {
   static let info = Data("keykeeper Touch ID v1".utf8)
 
-  static func authenticated(_ account: String) -> Data {
+  static func authenticated(_ account: String, info: Data = info) -> Data {
     info + Data([0]) + Data(account.utf8)
   }
 
-  private static func key(_ shared: SharedSecret, ephemeral: Data, enclave: Data) -> SymmetricKey {
+  private static func key(
+    _ shared: SharedSecret, ephemeral: Data, enclave: Data, info: Data
+  ) -> SymmetricKey {
     shared.hkdfDerivedSymmetricKey(
       using: SHA256.self, salt: ephemeral + enclave, sharedInfo: info, outputByteCount: 32)
   }
@@ -85,14 +90,16 @@ enum TouchIDSeal {
   /// key is read where it is, not copied.
   static func seal(
     _ userKey: UnsafeRawBufferPointer, to enclave: P256.KeyAgreement.PublicKey, account: String,
+    info: Data = info,
     ephemeral: P256.KeyAgreement.PrivateKey = P256.KeyAgreement.PrivateKey(),
     nonce: AES.GCM.Nonce = AES.GCM.Nonce()
   ) throws -> (ephemeral: Data, sealed: Data) {
     let shared = try ephemeral.sharedSecretFromKeyAgreement(with: enclave)
     let ephemeralPublic = ephemeral.publicKey.x963Representation
     let box = try AES.GCM.seal(
-      userKey, using: key(shared, ephemeral: ephemeralPublic, enclave: enclave.x963Representation),
-      nonce: nonce, authenticating: authenticated(account))
+      userKey,
+      using: key(shared, ephemeral: ephemeralPublic, enclave: enclave.x963Representation, info: info),
+      nonce: nonce, authenticating: authenticated(account, info: info))
     guard let combined = box.combined else { throw TouchIDError.damaged }
     return (ephemeralPublic, combined)
   }
@@ -101,14 +108,15 @@ enum TouchIDSeal {
   /// (`agree`), which is what asks for Touch ID. The caller wipes it.
   static func open(
     _ sealed: Data, ephemeral: Data, enclave: P256.KeyAgreement.PublicKey, account: String,
+    info: Data = info,
     agree: (P256.KeyAgreement.PublicKey) throws -> SharedSecret
   ) throws -> TouchIDSecret {
     let shared = try agree(P256.KeyAgreement.PublicKey(x963Representation: ephemeral))
     // CryptoKit opens into a Data, held only here: taken and zeroed at once.
     var opened = try AES.GCM.open(
       AES.GCM.SealedBox(combined: sealed),
-      using: key(shared, ephemeral: ephemeral, enclave: enclave.x963Representation),
-      authenticating: authenticated(account))
+      using: key(shared, ephemeral: ephemeral, enclave: enclave.x963Representation, info: info),
+      authenticating: authenticated(account, info: info))
     return TouchIDSecret(taking: &opened)
   }
 }
@@ -204,6 +212,7 @@ final class LoadedCore: TouchIDCore {
   private typealias Free = @convention(c) (UnsafeMutablePointer<CChar>?) -> Void
   typealias Remove = @convention(c) (UnsafePointer<CChar>?) -> Void
   private typealias SetRemove = @convention(c) (Remove) -> Void
+  private typealias SetDeviceSeal = @convention(c) (DeviceSeal.Call, DeviceSeal.Call) -> Void
 
   private let userKey: UserKey
   private let freeSecret: FreeSecret
@@ -211,6 +220,7 @@ final class LoadedCore: TouchIDCore {
   private let confirmWithKey: WithKey
   private let free: Free
   private let setRemove: SetRemove
+  private let setDeviceSeal: SetDeviceSeal
 
   /// Where Dart opened it, as Dart names it (the program's folder, then
   /// ../Frameworks), only if it's loaded; else wherever the process has it.
@@ -232,7 +242,8 @@ final class LoadedCore: TouchIDCore {
       let unlockWithKey = symbol("pb_unlock_with_key", WithKey.self),
       let confirmWithKey = symbol("pb_confirm_approval_with_key", WithKey.self),
       let free = symbol("pb_free", Free.self),
-      let setRemove = symbol("pb_set_remove_biometric", SetRemove.self)
+      let setRemove = symbol("pb_set_remove_biometric", SetRemove.self),
+      let setDeviceSeal = symbol("pb_set_device_seal", SetDeviceSeal.self)
     else { return nil }
     self.userKey = userKey
     self.freeSecret = freeSecret
@@ -240,12 +251,24 @@ final class LoadedCore: TouchIDCore {
     self.confirmWithKey = confirmWithKey
     self.free = free
     self.setRemove = setRemove
+    self.setDeviceSeal = setDeviceSeal
   }
 
   /// What the core does when it turns an account's Touch ID off (signing
   /// out, or a key that's out of date): set once; the core keeps the first.
   func onRemove(_ remove: Remove) {
     setRemove(remove)
+  }
+
+  /// Gives the core this Mac's seal for what unlocking with a PIN keeps
+  /// (DeviceSeal.swift), where the Mac has a Secure Enclave: without one the
+  /// core is given nothing, and offers no PIN. True if it was given. The
+  /// core keeps the first.
+  @discardableResult
+  func giveDeviceSeal() -> Bool {
+    guard DeviceSeal.available else { return false }
+    setDeviceSeal(DeviceSeal.sealCall, DeviceSeal.openCall)
+    return true
   }
 
   func withUserKey<T>(_ account: String, _ body: (UnsafeRawBufferPointer) throws -> T) rethrows -> T? {

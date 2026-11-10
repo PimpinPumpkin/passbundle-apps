@@ -1,7 +1,8 @@
 //! The Android app's calls into the core, and the core's into the app
 //! (docs/phones.md, "Talking to the OS"), through JNI. Kotlin calls in
 //! (`com.passbundle.app.Core`); the core calls out only to the Keystore, which
-//! keeps the refresh token's key (`com.passbundle.app.Keystore`).
+//! keeps the refresh token's key and the key a PIN's record is sealed with
+//! (`com.passbundle.app.Keystore`).
 
 use std::sync::OnceLock;
 
@@ -557,6 +558,60 @@ pub(crate) fn seal(plain: &[u8]) -> Option<Vec<u8>> {
 /// What `seal` sealed; None if it doesn't open.
 pub(crate) fn open(sealed: &[u8]) -> Option<Zeroizing<Vec<u8>>> {
     keystore(jni_str!("open"), sealed).map(Zeroizing::new)
+}
+
+/// Calls `Keystore.<method>(byte[], byte[]): byte[]` in the app: what's
+/// authenticated with it, then what to seal or open.
+fn keystore_with(method: &'static JNIStr, context: &[u8], input: &[u8]) -> Option<Vec<u8>> {
+    let (vm, loader) = JVM.get()?;
+    vm.attach_current_thread_for_scope(|env| -> JniResult<Option<Vec<u8>>> {
+        let called = (|| -> JniResult<Option<Vec<u8>>> {
+            let name = env.new_string("com.passbundle.app.Keystore")?;
+            let class = loader.load_class(env, name)?;
+            let context = env.byte_array_from_slice(context)?;
+            let input = env.byte_array_from_slice(input)?;
+            let output = env
+                .call_static_method(
+                    &class,
+                    method,
+                    jni_sig!((context: jbyte[], input: jbyte[]) -> jbyte[]),
+                    &[
+                        JValue::from(&JObject::from(context)),
+                        JValue::from(&JObject::from(input)),
+                    ],
+                )?
+                .l()?;
+            if output.is_null() {
+                return Ok(None);
+            }
+            let output = env.cast_local::<JByteArray>(output)?;
+            Ok(Some(env.convert_byte_array(&output)?))
+        })();
+        match called {
+            Ok(output) => Ok(output),
+            Err(_) => {
+                // A Java exception (no Keystore) leaves nothing sealed or opened.
+                env.exception_clear();
+                Ok(None)
+            }
+        }
+    })
+    .ok()
+    .flatten()
+}
+
+/// Seals an account's PIN record (pin.rs) with the Keystore key that's for
+/// PINs alone (`Keystore.sealPin`), `context` authenticated with it; None
+/// before the app has started the core. It never asks for biometrics.
+pub(crate) fn seal_pin(context: &[u8], plain: &[u8]) -> Option<Vec<u8>> {
+    keystore_with(jni_str!("sealPin"), context, plain)
+}
+
+/// What `seal_pin` sealed with the same context; None if it doesn't open
+/// (the key is gone, as after a restore to another phone, or it was
+/// changed).
+pub(crate) fn open_pin(context: &[u8], sealed: &[u8]) -> Option<Zeroizing<Vec<u8>>> {
+    keystore_with(jni_str!("openPin"), context, sealed).map(Zeroizing::new)
 }
 
 /// A security key for two-step login (security_key), through the app's

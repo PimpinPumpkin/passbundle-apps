@@ -111,6 +111,16 @@ pub enum Error {
     /// the account's credentials, a Duo answer for another sign-in, a code
     /// that isn't a YubiKey's (two_step.rs, security_key).
     TwoStep(&'static str),
+    /// Unlocking with a PIN: that wasn't the PIN, and how many tries are
+    /// left before the PIN is removed (pin.rs). Never the PIN itself.
+    WrongPin { left: u32 },
+    /// The last wrong PIN allowed in a row: the PIN was removed, and the
+    /// master password is needed.
+    PinTurnedOff,
+    /// There's no PIN to unlock with: it's off, or it was removed (the
+    /// account's keys changed, the organization doesn't allow one, the
+    /// device no longer opens what it kept).
+    NoPin,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -295,6 +305,14 @@ impl fmt::Display for Error {
             Error::TooManyAccounts => write!(f, "PassBundle keeps up to {} accounts on this device. Sign out of one to add another.", crate::accounts::MOST),
             Error::AlreadyHere => write!(f, "That account is in PassBundle on this device already, under another email or server. Sign out of it there first."),
             Error::TwoStep(sentence) => write!(f, "{sentence}"),
+            Error::WrongPin { left: 1 } => write!(f, "That PIN isn't right. 1 try left."),
+            Error::WrongPin { left } => write!(f, "That PIN isn't right. {left} tries left."),
+            Error::PinTurnedOff => write!(
+                f,
+                "Unlocking with a PIN was turned off after {} wrong tries. Use your master password.",
+                crate::pin::MAX_WRONG_TRIES
+            ),
+            Error::NoPin => write!(f, "Unlocking with a PIN is off on this device. Use your master password."),
         }
     }
 }
@@ -423,6 +441,35 @@ mod tests {
         assert_eq!(
             Error::WrongPassword.to_string(),
             "That master password isn't right."
+        );
+    }
+
+    #[test]
+    fn a_wrong_pin_says_how_many_tries_are_left_and_the_last_says_it_was_turned_off() {
+        assert_eq!(
+            Error::WrongPin { left: 4 }.to_string(),
+            "That PIN isn't right. 4 tries left."
+        );
+        assert_eq!(
+            Error::WrongPin { left: 1 }.to_string(),
+            "That PIN isn't right. 1 try left."
+        );
+        assert_eq!(
+            Error::PinTurnedOff.to_string(),
+            "Unlocking with a PIN was turned off after 5 wrong tries. Use your master password."
+        );
+        assert_eq!(
+            Error::NoPin.to_string(),
+            "Unlocking with a PIN is off on this device. Use your master password."
+        );
+        // What's refused when setting one up, as the person reads it.
+        assert_eq!(
+            Error::Refused("your organization doesn't allow unlocking with a PIN").to_string(),
+            "Your organization doesn't allow unlocking with a PIN."
+        );
+        assert_eq!(
+            Error::Refused("a PIN needs at least 4 characters").to_string(),
+            "A PIN needs at least 4 characters."
         );
     }
 }

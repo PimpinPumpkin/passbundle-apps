@@ -643,4 +643,76 @@ void main() {
     binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
     await pumpUntil(tester, find.text('Unlock PassBundle'));
   });
+
+  testWidgets(
+    'a PIN set with the master password is sealed with the phone\'s own key, unlocks, and five wrong tries turn it off',
+    (tester) async {
+      final dir = (await Core.platform.invokeMethod<String>('filesDir'))!;
+      for (final kept in Directory(dir).listSync()) {
+        kept.deleteSync(recursive: true);
+      }
+      File('$dir/settings.json').writeAsStringSync(sampleSettings);
+      File('$dir/sync.json').writeAsStringSync(sampleSync);
+      await Core.openOnThisDevice();
+      declinedTheOffer();
+      await tester.pumpWidget(PassBundleApp(key: UniqueKey()));
+      await pumpUntil(tester, find.text('Unlock PassBundle'));
+      await tester.enterText(find.byType(TextField), samplePassword);
+      await unlockWhenStill(tester);
+      await pumpUntil(tester, find.text('Logins'));
+      await pumpUntil(tester, find.textContaining('Sign in again'));
+
+      // The phone keeps one: the Keystore's key on Android, the Keychain's
+      // on an iPhone (DESIGN.md in the meta repo, "Unlock with a PIN").
+      expect((await Core.pinStatus())['status'], 'off');
+      expect(
+        (await Core.setPin('not the master password', '2580')).ok,
+        isFalse,
+      );
+      expect((await Core.setPin(samplePassword, '2580')).ok, isTrue);
+      expect((await Core.pinStatus())['status'], 'on');
+      File? kept() {
+        final found = Directory(dir)
+            .listSync(recursive: true)
+            .whereType<File>()
+            .where((f) => f.uri.pathSegments.last == 'pin.json');
+        return found.isEmpty ? null : found.single;
+      }
+
+      expect(kept()!.readAsStringSync(), isNot(contains('2580')));
+
+      // Locked: the PIN's field. A wrong one counts; the right one opens.
+      final field = find.byKey(const ValueKey('unlock-pin'));
+      Future<void> tryPin(String pin) async {
+        await tester.enterText(field, pin);
+        await unlockWhenStill(tester);
+      }
+
+      await tester.tap(find.byTooltip('Lock'));
+      await pumpUntil(tester, field);
+      await tryPin('0000');
+      await pumpUntil(tester, find.text("That PIN isn't right. 4 tries left."));
+      await tryPin('2580');
+      await pumpUntil(tester, find.text('Logins'));
+      // A PIN unlock doesn't bring up the offer of biometrics.
+      await tester.pump(const Duration(seconds: 1));
+      expect(find.textContaining('next time?'), findsNothing);
+
+      // Five wrong in a row: it's off, and the master password is asked for.
+      await tester.tap(find.byTooltip('Lock'));
+      await pumpUntil(tester, field);
+      for (final left in ['4 tries', '3 tries', '2 tries', '1 try']) {
+        await tryPin('0000');
+        await pumpUntil(tester, find.text("That PIN isn't right. $left left."));
+      }
+      await tryPin('0000');
+      await pumpUntil(tester, find.textContaining('was turned off after 5'));
+      expect(field, findsNothing);
+      expect(kept(), isNull);
+      expect((await Core.pinStatus())['status'], 'off');
+      await tester.enterText(find.byType(TextField), samplePassword);
+      await unlockWhenStill(tester);
+      await pumpUntil(tester, find.text('Logins'));
+    },
+  );
 }
