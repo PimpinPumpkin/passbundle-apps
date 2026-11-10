@@ -31,6 +31,11 @@ use crate::vault::{Item, ItemDraft, Sync, Vault};
 
 mod bulk;
 pub use bulk::{Bulk, Outcome, Plan, Skip};
+mod sends;
+pub use sends::SavedSend;
+
+/// What `copy` copies for a Send's link, with the Send's id.
+pub const SEND_LINK: &str = "sendLink";
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum State {
@@ -105,6 +110,8 @@ pub struct App {
     /// The organizations' "Vault lock" policy, from the kept sync.
     policy: LockPolicy,
     generator_policy: GeneratorPolicy,
+    /// The organizations' Send policies, from the kept sync (send.rs).
+    send_policy: crate::send::SendPolicy,
     /// The item whose secrets the master password, asked for again, let
     /// out (docs/core.md, "Asking for the master password again"): until
     /// another item asks, or the vault locks.
@@ -216,6 +223,7 @@ impl App {
             preferences,
             policy: LockPolicy::default(),
             generator_policy: GeneratorPolicy::default(),
+            send_policy: crate::send::SendPolicy::default(),
             reprompted: None,
             grant: 0,
             autolock: AutoLock::new(Instant::now(), SystemTime::now()),
@@ -700,6 +708,10 @@ impl App {
             .as_deref()
             .map(GeneratorPolicy::from_sync)
             .unwrap_or_default();
+        self.send_policy = kept
+            .as_deref()
+            .map(crate::send::SendPolicy::from_sync)
+            .unwrap_or_default();
         self.autolock = AutoLock::new(Instant::now(), SystemTime::now());
     }
 
@@ -832,6 +844,7 @@ impl App {
         self.store.save_sync(&text)?;
         self.policy = LockPolicy::from_sync(&text);
         self.generator_policy = GeneratorPolicy::from_sync(&text);
+        self.send_policy = crate::send::SendPolicy::from_sync(&text);
         // The server may have issued a new refresh token.
         keep_refresh_token(&*self.secrets, &self.store, settings, session);
         self.vault = Some(Vault::open(&sync, session.user_key().clone())?);
@@ -2217,9 +2230,12 @@ impl App {
 
     /// Copies one of an item's values: "username", "password", "totp" (the
     /// current code), "notes", "field:<index>", or a card's or an identity's
-    /// (`Item::detail`). Secrets clear after 30 seconds.
+    /// (`Item::detail`); or a Send's link (`SEND_LINK`, with the Send's
+    /// id). Secrets clear after 30 seconds.
     pub fn copy(&self, id: &str, what: &str) -> Result<()> {
-        if id.is_empty() && what == "generated" {
+        // The generator's password, and a Send's link (`id` is the Send's):
+        // whoever has the link opens the Send, so it's a secret.
+        if (id.is_empty() && what == "generated") || what == SEND_LINK {
             return clipboard::copy_secret(&self.value(id, what)?, clipboard::CLEAR_AFTER);
         }
         let item = self
@@ -2253,6 +2269,9 @@ impl App {
     /// The value `copy` copies. On phones the app's native piece puts it on
     /// the clipboard itself (docs/phones.md, "Copying").
     pub fn value(&self, id: &str, what: &str) -> Result<zeroize::Zeroizing<String>> {
+        if what == SEND_LINK {
+            return self.send_link(id);
+        }
         // The generator's last password, for its Copy.
         if id.is_empty() && what == "generated" {
             return self

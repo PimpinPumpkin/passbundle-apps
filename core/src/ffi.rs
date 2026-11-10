@@ -3626,3 +3626,166 @@ pub unsafe extern "C" fn pb_free(ptr: *mut c_char) {
         drop(unsafe { CString::from_raw(ptr) });
     }
 }
+
+/// A Send as its list and its editor show it (DESIGN.md, "Send in the
+/// apps"): never its key or seed, and its text and note only with `full`.
+fn send_view(send: &crate::send::Send, now: &str, full: bool) -> Value {
+    let mut view = json!({
+        "id": send.id,
+        "kind": send.kind.word(),
+        "name": send.name,
+        "opens": send.opens,
+        "hasPassword": send.has_password,
+        "asksForEmail": send.asks_for_email,
+        "disabled": send.disabled,
+        "hideEmail": send.hide_email,
+        "deletionDate": send.deletion_date,
+        "expirationDate": send.expiration_date,
+        "maxAccessCount": send.max_access_count,
+        "accessCount": send.access_count,
+        "expired": send.expired(now),
+        "usedUp": send.used_up(),
+        "fileName": send.file_name,
+        "fileSize": send.file_size,
+        "revisionDate": send.revision_date,
+    });
+    if full {
+        view["notes"] = json!(send.notes.as_deref());
+        view["text"] = json!(send.text.as_deref());
+        view["hidden"] = json!(send.hidden);
+    }
+    view
+}
+
+/// The account's Sends, newest change first, with the organizations' Send
+/// policies: `{sends, policy: {disabled, noHidingEmail}}`, or null while
+/// it's locked.
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_sends(account: *const c_char) -> *mut c_char {
+    let account = text(account);
+    with_app(&account, |app| {
+        if app.vault().is_none() {
+            return Value::Null;
+        }
+        let now = crate::vault::now_iso8601();
+        let mut sends: Vec<&crate::send::Send> = app.sends().iter().collect();
+        sends.sort_by(|a, b| b.revision_date.cmp(&a.revision_date));
+        let policy = app.send_policy();
+        json!({
+            "sends": sends.iter().map(|s| send_view(s, &now, false)).collect::<Vec<_>>(),
+            "policy": { "disabled": policy.disabled, "noHidingEmail": policy.no_hiding_email },
+        })
+    })
+}
+
+/// One Send, for its editor: what the list has, and its text, note, and
+/// whether the text starts hidden. Null if there's none by that id.
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_send(account: *const c_char, id: *const c_char) -> *mut c_char {
+    let account = text(account);
+    let id = text(id);
+    with_app(&account, |app| {
+        let now = crate::vault::now_iso8601();
+        app.vault()
+            .and_then(|v| v.send(&id))
+            .map_or(Value::Null, |s| send_view(s, &now, true))
+    })
+}
+
+/// A Send's draft from the editor's JSON: `{kind ("text" or "file"),
+/// name, notes, text, hidden, maxAccessCount, expirationDate,
+/// deletionDate, disabled, hideEmail}`.
+fn send_draft(d: &Value) -> crate::send::SendDraft {
+    let string = |key: &str| d[key].as_str().filter(|s| !s.is_empty()).map(str::to_owned);
+    crate::send::SendDraft {
+        kind: match d["kind"].as_str() {
+            Some("file") => Some(crate::send::SendKind::File),
+            Some("text") => Some(crate::send::SendKind::Text),
+            _ => None,
+        },
+        name: d["name"].as_str().unwrap_or_default().to_owned(),
+        notes: string("notes").map(Zeroizing::new),
+        text: string("text").map(Zeroizing::new),
+        hidden: d["hidden"] == true,
+        max_access_count: d["maxAccessCount"].as_u64(),
+        expiration_date: string("expirationDate"),
+        deletion_date: string("deletionDate").unwrap_or_default(),
+        disabled: d["disabled"] == true,
+        hide_email: d["hideEmail"] == true,
+    }
+}
+
+/// Makes a text Send (`id` empty) or edits one, then syncs: `{ok, id,
+/// synced}`, or the words to show. `draft` is the editor's JSON
+/// (`send_draft`); `password`, a new password (empty leaves it as it is),
+/// comes apart from it, is hashed with the Send's seed for the server, and
+/// is wiped. Slow: from a background isolate.
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_save_send(
+    account: *const c_char,
+    id: *const c_char,
+    draft: *const c_char,
+    password: *const c_char,
+) -> *mut c_char {
+    let account = text(account);
+    let id = text(id);
+    let draft_json = Zeroizing::new(text(draft));
+    let password = Zeroizing::new(text(password));
+    with_app_waiting(&account, move |app| {
+        let d: Value = match serde_json::from_str(&draft_json) {
+            Ok(d) => d,
+            Err(e) => {
+                return failed(Error::Malformed(format!(
+                    "a draft the core can't read ({e})"
+                )))
+            }
+        };
+        let draft = send_draft(&d);
+        let id = Some(id.as_str()).filter(|i| !i.is_empty());
+        let password = Some(password).filter(|p| !p.is_empty());
+        match app.save_send(id, &draft, password) {
+            Ok(saved) => json!({ "ok": true, "id": saved.id, "synced": saved.synced }),
+            Err(e) => failed(e),
+        }
+    })
+}
+
+/// Takes a Send's password away, then syncs: `{ok, synced}`. Slow.
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_remove_send_password(
+    account: *const c_char,
+    id: *const c_char,
+) -> *mut c_char {
+    let account = text(account);
+    let id = text(id);
+    with_app_waiting(&account, move |app| match app.remove_send_password(&id) {
+        Ok(synced) => json!({ "ok": true, "synced": synced }),
+        Err(e) => failed(e),
+    })
+}
+
+/// Deletes a Send, then syncs: `{ok, synced}`. Slow.
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_delete_send(account: *const c_char, id: *const c_char) -> *mut c_char {
+    let account = text(account);
+    let id = text(id);
+    with_app_waiting(&account, move |app| match app.delete_send(&id) {
+        Ok(synced) => json!({ "ok": true, "synced": synced }),
+        Err(e) => failed(e),
+    })
+}

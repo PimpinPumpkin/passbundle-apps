@@ -2346,3 +2346,368 @@ fn importing_from_a_computers_browsers_saves_what_the_server_has_only_encrypted(
         assert!(!raw.contains(plain), "the server has {plain} as it is");
     }
 }
+
+/// What the web vault's access page does with a Send's link: asks the
+/// server for a token with the access id (and the password's proof, if
+/// it has one), then for the Send. The Send as the server gives it, or
+/// the server's refusal.
+fn open_by_link(
+    url: &str,
+    access_id: &str,
+    proof: Option<&str>,
+) -> Result<serde_json::Value, String> {
+    let mut form = vec![
+        ("grant_type", "send_access"),
+        ("client_id", "send"),
+        ("scope", "api.send.access"),
+        ("send_id", access_id),
+    ];
+    if let Some(proof) = proof {
+        form.push(("password_hash_b64", proof));
+    }
+    let mut token = ureq::post(format!("{url}/identity/connect/token"))
+        .send_form(form)
+        .map_err(|e| e.to_string())?;
+    let token: serde_json::Value = token.body_mut().read_json().unwrap();
+    let mut send = ureq::post(format!("{url}/api/sends/access"))
+        .header(
+            "Authorization",
+            format!("Bearer {}", token["access_token"].as_str().unwrap()),
+        )
+        .send_empty()
+        .map_err(|e| e.to_string())?;
+    Ok(send.body_mut().read_json().unwrap())
+}
+
+/// A link's access id and seed (`/#/send/<access id>/<seed>`).
+fn link_parts(link: &str) -> (String, Vec<u8>) {
+    let tail = link.split("/#/send/").nth(1).unwrap();
+    let (access_id, seed) = tail.split_once('/').unwrap();
+    (
+        access_id.to_owned(),
+        base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(seed)
+            .unwrap(),
+    )
+}
+
+/// Send (DESIGN.md, "Send in the apps"): a text Send made through the app
+/// opens by its link, as the web vault's access page opens it, only with
+/// its password's proof; the fields the server gives open with the key
+/// from the link's seed. Then it's edited (its password stays), its
+/// password taken away, and deleted.
+#[test]
+fn a_text_send_opens_by_its_link_and_is_edited_and_deleted() {
+    use passbundle_core::send::{self, SendDraft, SendKind};
+
+    let Some(server) = server() else { return };
+    let url = std::env::var("PB_TEST_SERVER").unwrap();
+    let email = new_email("send");
+    sign_up(&server, &email);
+    let mut app = signed_in_app(&url, &email);
+    let draft = SendDraft {
+        kind: Some(SendKind::Text),
+        name: "Door code".into(),
+        notes: secret("For Malia"),
+        text: secret("4417# then the green button"),
+        hidden: true,
+        max_access_count: Some(5),
+        deletion_date: send::date_after(7 * 86_400),
+        expiration_date: Some(send::date_after(86_400)),
+        ..Default::default()
+    };
+    let saved = app.save_send(None, &draft, secret("open sesame")).unwrap();
+    assert!(saved.synced);
+    let made = app.vault().unwrap().send(&saved.id).unwrap().clone();
+    assert!(made.opens && made.has_password && made.hidden);
+    assert_eq!(made.name, "Door code");
+    assert_eq!(made.max_access_count, Some(5));
+    assert_eq!(made.notes.as_deref().map(String::as_str), Some("For Malia"));
+
+    let link = app.send_link(&saved.id).unwrap();
+    assert!(link.starts_with(&format!("{url}/#/send/")));
+    // What a phone's native piece copies is the same link.
+    assert_eq!(
+        app.value_to_copy(&saved.id, passbundle_core::app::SEND_LINK)
+            .unwrap(),
+        link
+    );
+    let (access_id, seed) = link_parts(&link);
+    assert_eq!(access_id, made.access_id);
+    // Without the password, or with a wrong one, the server says no.
+    assert!(open_by_link(&url, &access_id, None).is_err());
+    let wrong = send::password_proof("open says me", &seed);
+    assert!(open_by_link(&url, &access_id, Some(&wrong)).is_err());
+    let proof = send::password_proof("open sesame", &seed);
+    let opened = open_by_link(&url, &access_id, Some(&proof)).unwrap();
+    let key = send::key_from_seed(&seed);
+    let open = |v: &serde_json::Value| {
+        passbundle_core::crypto::EncString::parse(v.as_str().unwrap())
+            .unwrap()
+            .decrypt_string(&key)
+            .unwrap()
+            .as_str()
+            .to_owned()
+    };
+    assert_eq!(open(&opened["name"]), "Door code");
+    assert_eq!(open(&opened["text"]["text"]), "4417# then the green button");
+    // The server never had the password, the seed, or the text.
+    let kept = server
+        .raw(
+            &mut sign_in(&server, &email),
+            "GET",
+            &format!("/api/sends/{}", saved.id),
+            None,
+        )
+        .unwrap();
+    let kept = kept.to_string();
+    assert!(!kept.contains("open sesame") && !kept.contains("4417#"));
+    assert!(!kept.contains(&base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&seed)));
+    assert!(!kept.contains(&STANDARD.encode(&seed)));
+
+    // Edited: a new name; the password stays as it was.
+    let edit = SendDraft {
+        name: "Gate code".into(),
+        disabled: false,
+        ..draft
+    };
+    let edited = app.save_send(Some(&saved.id), &edit, None).unwrap();
+    assert_eq!(edited.id, saved.id);
+    let now = app.vault().unwrap().send(&saved.id).unwrap().clone();
+    assert_eq!(now.name, "Gate code");
+    assert!(now.has_password);
+    assert_eq!(app.send_link(&saved.id).unwrap(), link);
+    assert!(open_by_link(&url, &access_id, None).is_err());
+
+    // Its password taken away, it opens without one.
+    assert!(app.remove_send_password(&saved.id).unwrap());
+    assert!(!app.vault().unwrap().send(&saved.id).unwrap().has_password);
+    assert!(open_by_link(&url, &access_id, None).is_ok());
+
+    // Deleted: gone, here and by its link.
+    assert!(app.delete_send(&saved.id).unwrap());
+    assert!(app.vault().unwrap().send(&saved.id).is_none());
+    assert!(open_by_link(&url, &access_id, None).is_err());
+    assert_eq!(
+        app.delete_send(&saved.id).err(),
+        Some(Error::Damaged("no such Send"))
+    );
+}
+
+/// A Send as the web vault makes one (its own seed, wrapped under the user
+/// key; its fields under the key from it) is listed and opened by the app,
+/// and its link is the one the web vault would copy. One whose key doesn't
+/// open is listed as one that can't be opened, and can only be deleted.
+#[test]
+fn a_send_made_elsewhere_is_listed_and_opened() {
+    use passbundle_core::send::{self, SendDraft, SendKind, CANT_OPEN_SEND};
+
+    let Some(server) = server() else { return };
+    let url = std::env::var("PB_TEST_SERVER").unwrap();
+    let email = new_email("send-elsewhere");
+    sign_up(&server, &email);
+    let mut session = sign_in(&server, &email);
+    let user = session.user_key().clone();
+    let seed = send::new_seed();
+    let key = send::key_from_seed(&*seed);
+    let made = server
+        .raw(
+            &mut session,
+            "POST",
+            "/api/sends",
+            Some(json!({
+                "type": 0,
+                "name": key.encrypt_str("Wi-Fi for guests").to_string(),
+                "notes": null,
+                "key": user.encrypt(&*seed).to_string(),
+                "text": { "text": key.encrypt_str("not-a-real-password-guest").to_string(), "hidden": false },
+                "deletionDate": send::date_after(86_400),
+                "expirationDate": null,
+                "maxAccessCount": null,
+                "password": null,
+                "disabled": false,
+                "hideEmail": false,
+            })),
+        )
+        .unwrap();
+    // And one under another account's key.
+    let stray = SymmetricKey::generate();
+    let stray_seed = send::new_seed();
+    let unopened = server
+        .raw(
+            &mut session,
+            "POST",
+            "/api/sends",
+            Some(json!({
+                "type": 0,
+                "name": send::key_from_seed(&*stray_seed).encrypt_str("Not mine").to_string(),
+                "key": stray.encrypt(&*stray_seed).to_string(),
+                "text": { "text": send::key_from_seed(&*stray_seed).encrypt_str("x").to_string(), "hidden": false },
+                "deletionDate": send::date_after(86_400),
+                "disabled": false,
+            })),
+        )
+        .unwrap();
+
+    let mut app = signed_in_app(&url, &email);
+    let id = made["id"].as_str().unwrap();
+    let send = app.vault().unwrap().send(id).unwrap().clone();
+    assert!(send.opens);
+    assert_eq!(send.kind, SendKind::Text);
+    assert_eq!(send.name, "Wi-Fi for guests");
+    assert_eq!(
+        send.text.as_deref().map(String::as_str),
+        Some("not-a-real-password-guest")
+    );
+    assert_eq!(
+        app.send_link(id).unwrap().as_str(),
+        format!(
+            "{url}/#/send/{}/{}",
+            made["accessId"].as_str().unwrap(),
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(*seed)
+        )
+    );
+    // The app edits it with its seed, so the link stays the same.
+    let edit = SendDraft {
+        kind: Some(SendKind::Text),
+        name: "Guest Wi-Fi".into(),
+        text: secret("not-a-real-password-guest"),
+        deletion_date: send::date_after(86_400),
+        ..Default::default()
+    };
+    app.save_send(Some(id), &edit, None).unwrap();
+    let (_, in_link) = link_parts(&app.send_link(id).unwrap());
+    assert_eq!(in_link, seed.to_vec());
+
+    let stray_id = unopened["id"].as_str().unwrap();
+    let damaged = app.vault().unwrap().send(stray_id).unwrap().clone();
+    assert!(!damaged.opens);
+    assert_eq!(damaged.name, CANT_OPEN_SEND);
+    assert!(app.send_link(stray_id).is_err());
+    assert!(app.save_send(Some(stray_id), &edit, None).is_err());
+    assert!(app.delete_send(stray_id).unwrap());
+}
+
+/// "Disable Send" and "Send options" (hiding the email), as the server
+/// has them: a member of an organization that turned them on can't make or
+/// edit a Send, or hide their email, and can still delete one; the owner
+/// isn't bound.
+#[test]
+fn the_send_policies_bind_members_and_not_the_owner() {
+    use passbundle_core::send::{self, SendDraft, SendKind};
+
+    let Some(server) = server() else { return };
+    let url = std::env::var("PB_TEST_SERVER").unwrap();
+    let owner = new_email("send-owner");
+    let member = new_email("send-member");
+    sign_up(&server, &owner);
+    sign_up(&server, &member);
+    let mut session = sign_in(&server, &owner);
+    let (org_id, org_key) = new_organization(&server, &mut session, &owner);
+    server
+        .raw(
+            &mut session,
+            "POST",
+            &format!("/api/organizations/{org_id}/users/invite"),
+            Some(json!({ "emails": [member], "groups": [], "type": 2, "collections": [], "permissions": {} })),
+        )
+        .unwrap();
+    let members = server
+        .raw(
+            &mut session,
+            "GET",
+            &format!("/api/organizations/{org_id}/users"),
+            None,
+        )
+        .unwrap();
+    let joined = members["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["email"] == member.as_str())
+        .unwrap()
+        .clone();
+    let public = server
+        .raw(
+            &mut session,
+            "GET",
+            &format!(
+                "/api/users/{}/public-key",
+                joined["userId"].as_str().unwrap()
+            ),
+            None,
+        )
+        .unwrap();
+    let public = STANDARD
+        .decode(public["publicKey"].as_str().unwrap())
+        .unwrap();
+    server
+        .raw(
+            &mut session,
+            "POST",
+            &format!(
+                "/api/organizations/{org_id}/users/{}/confirm",
+                joined["id"].as_str().unwrap()
+            ),
+            Some(json!({ "key": encrypt_for(&public, &org_key.to_bytes()).unwrap().to_string() })),
+        )
+        .unwrap();
+
+    let draft = SendDraft {
+        kind: Some(SendKind::Text),
+        name: "Door code".into(),
+        text: secret("4417#"),
+        deletion_date: send::date_after(86_400),
+        ..Default::default()
+    };
+    // Before the policies: the member makes one, hiding their email.
+    let mut app = signed_in_app(&url, &member);
+    let hiding = SendDraft {
+        hide_email: true,
+        kind: draft.kind,
+        name: draft.name.clone(),
+        text: draft.text.clone(),
+        deletion_date: draft.deletion_date.clone(),
+        ..Default::default()
+    };
+    let kept = app.save_send(None, &hiding, None).unwrap();
+
+    let policy = |kind: u64, data: serde_json::Value| {
+        server
+            .raw(
+                &mut sign_in(&server, &owner),
+                "PUT",
+                &format!("/api/organizations/{org_id}/policies/{kind}"),
+                Some(json!({ "policy": { "enabled": true, "data": data } })),
+            )
+            .unwrap();
+    };
+    policy(7, json!({ "disableHideEmail": true }));
+    app.sync().unwrap();
+    assert_eq!(
+        app.send_policy(),
+        send::SendPolicy {
+            disabled: false,
+            no_hiding_email: true
+        }
+    );
+    assert!(
+        matches!(app.save_send(None, &hiding, None), Err(Error::Refused(why)) if why.contains("hide your email"))
+    );
+    // Without hiding it, it saves; the one that hides it can stop.
+    assert!(app.save_send(None, &draft, None).is_ok());
+    assert!(app.save_send(Some(&kept.id), &draft, None).is_ok());
+
+    policy(6, serde_json::Value::Null);
+    app.sync().unwrap();
+    assert!(app.send_policy().disabled);
+    assert!(
+        matches!(app.save_send(None, &draft, None), Err(Error::Refused(why)) if why.contains("doesn't let you make or edit Sends"))
+    );
+    assert!(app.delete_send(&kept.id).unwrap());
+
+    // The owner isn't bound, here or on the server.
+    let mut owners = signed_in_app(&url, &owner);
+    assert_eq!(owners.send_policy(), send::SendPolicy::default());
+    assert!(owners.save_send(None, &hiding, None).is_ok());
+}

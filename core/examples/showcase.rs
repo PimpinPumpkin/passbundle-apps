@@ -178,6 +178,55 @@ fn main() {
     }));
 
     std::fs::create_dir_all(&out).unwrap();
+    // Two Sends (send.rs): a text one with a password and a limit, and a
+    // file one made in the web vault, each under a key from its own seed.
+    let send = |id: &str, kind: u8, name: &str, days: u64, extra: Value| {
+        let seed = passbundle_core::send::new_seed();
+        let key = passbundle_core::send::key_from_seed(&*seed);
+        let mut s = json!({
+            "id": id, "accessId": format!("access-{id}"), "type": kind,
+            "name": key.encrypt_str(name).to_string(),
+            "key": user.encrypt(&*seed).to_string(),
+            "accessCount": 1, "disabled": false, "hideEmail": false,
+            "revisionDate": "2026-11-08T10:00:00.000000Z",
+            "deletionDate": passbundle_core::send::date_after(days * 86_400),
+            "object": "send",
+        });
+        for (k, v) in extra.as_object().unwrap() {
+            s[k] = match (k.as_str(), v) {
+                ("text", v) => {
+                    json!({ "text": key.encrypt_str(v.as_str().unwrap()).to_string(), "hidden": true })
+                }
+                ("file", v) => {
+                    json!({ "id": "file1", "fileName": key.encrypt_str(v.as_str().unwrap()).to_string(), "size": 48273, "sizeName": "47.14 KB" })
+                }
+                _ => v.clone(),
+            };
+        }
+        s
+    };
+    sync["sends"] = json!([
+        send(
+            "5e000000-0000-4000-8000-000000000001",
+            0,
+            "Door code for Saturday",
+            7,
+            json!({
+                "text": "4417# then the green button", "maxAccessCount": 5,
+                "password": "hashed", "authType": 1,
+            })
+        ),
+        send(
+            "5e000000-0000-4000-8000-000000000002",
+            1,
+            "Floor plan",
+            3,
+            json!({
+                "file": "floor plan (2).pdf", "authType": 2,
+            })
+        ),
+    ]);
+
     std::fs::write(format!("{out}/sync.json"), sync.to_string()).unwrap();
     std::fs::write(format!("{out}/settings.json"), SETTINGS).unwrap();
     println!("Wrote the showcase vault to {out}.");

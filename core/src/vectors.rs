@@ -647,3 +647,104 @@ fn a_new_account_is_made_as_the_vectors_say() {
         (Some(1), Some(3), Some(64), Some(4))
     );
 }
+
+/// docs/vectors/attachments-send-v1.json's Send part, which plain Node
+/// made (make-attachments-send-v1.mjs): the key from a seed, the seed
+/// wrapped under a user key, each field, the password's proof, and the link.
+fn send_vectors() -> Value {
+    let all: Value =
+        serde_json::from_str(include_str!("../tests/vectors/attachments-send-v1.json")).unwrap();
+    all["send"].clone()
+}
+
+fn iv(v: &Value) -> [u8; 16] {
+    b64(v).try_into().unwrap()
+}
+
+#[test]
+fn a_sends_key_comes_from_its_seed_as_the_vectors_say() {
+    let v = send_vectors();
+    assert_eq!(v["salt"], "bitwarden-send");
+    assert_eq!(v["info"], "send");
+    assert_eq!(
+        *crate::send::key_from_seed(&b64(&v["seed"])).to_bytes(),
+        b64(&v["key"])
+    );
+    for k in v["keys"].as_array().unwrap() {
+        assert_eq!(
+            *crate::send::key_from_seed(&b64(&k["seed"])).to_bytes(),
+            b64(&k["key"])
+        );
+    }
+}
+
+#[test]
+fn a_sends_seed_and_fields_encrypt_and_open_as_the_vectors_say() {
+    let v = send_vectors();
+    let user = key(&v["userKey"]);
+    let seed = b64(&v["seed"]);
+    let wrapped = &v["wrappedSeed"];
+    assert_eq!(
+        user.encrypt_with_iv(&seed, iv(&wrapped["iv"])).to_string(),
+        wrapped["encrypted"].as_str().unwrap()
+    );
+    let send_key = crate::send::key_from_seed(&seed);
+    for (name, field) in v["fields"].as_object().unwrap() {
+        let plain = field["plain"].as_str().unwrap();
+        let made = send_key.encrypt_with_iv(plain.as_bytes(), iv(&field["iv"]));
+        assert_eq!(
+            made.to_string(),
+            field["encrypted"].as_str().unwrap(),
+            "{name}"
+        );
+        let opened = EncString::parse(field["encrypted"].as_str().unwrap())
+            .unwrap()
+            .decrypt_string(&send_key)
+            .unwrap();
+        assert_eq!(opened.as_str(), plain, "{name}");
+    }
+    // As the server would send it: the Send opens with the user key, and
+    // with no other.
+    let data: crate::send::SendData = serde_json::from_value(serde_json::json!({
+        "id": "s", "accessId": "ESIzRFVmd4iZqrvM3e7_AA", "type": 0,
+        "key": wrapped["encrypted"],
+        "name": v["fields"]["name"]["encrypted"],
+        "notes": v["fields"]["notes"]["encrypted"],
+        "text": { "text": v["fields"]["text"]["encrypted"], "hidden": false },
+    }))
+    .unwrap();
+    let send = crate::send::Send::open(&data, &user);
+    assert!(send.opens);
+    assert_eq!(send.name, v["fields"]["name"]["plain"].as_str().unwrap());
+    assert_eq!(
+        send.text.as_deref().map(String::as_str),
+        v["fields"]["text"]["plain"].as_str()
+    );
+    assert!(!crate::send::Send::open(&data, &SymmetricKey::generate()).opens);
+}
+
+#[test]
+fn a_sends_password_proof_and_link_are_as_the_vectors_say() {
+    let v = send_vectors();
+    let seed = b64(&v["seed"]);
+    assert_eq!(v["passwordRounds"], crate::send::PASSWORD_ROUNDS);
+    for p in v["passwords"].as_array().unwrap() {
+        assert_eq!(
+            crate::send::password_proof(p["password"].as_str().unwrap(), &seed),
+            p["proof"].as_str().unwrap()
+        );
+    }
+    assert_eq!(
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&seed),
+        v["seedInLink"].as_str().unwrap()
+    );
+    for l in v["links"].as_array().unwrap() {
+        let link = crate::send::link(
+            l["server"].as_str().unwrap(),
+            l["accessId"].as_str().unwrap(),
+            &seed,
+        )
+        .unwrap();
+        assert_eq!(link.as_str(), l["link"].as_str().unwrap());
+    }
+}

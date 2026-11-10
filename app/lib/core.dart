@@ -215,6 +215,11 @@ class Core {
   );
   late final _unlock = _lib.lookupFunction<_Str2, _Str2>('pb_unlock');
   late final _saveAttachment = _lib.lookupFunction<_Str3, _Str3>('pb_save_attachment');
+  late final _sends = _lib.lookupFunction<_Str1, _Str1>('pb_sends');
+  late final _send = _lib.lookupFunction<_Str2, _Str2>('pb_send');
+  late final _saveSend = _lib.lookupFunction<_Str4, _Str4>('pb_save_send');
+  late final _removeSendPassword = _lib.lookupFunction<_Str2, _Str2>('pb_remove_send_password');
+  late final _deleteSend = _lib.lookupFunction<_Str2, _Str2>('pb_delete_send');
   late final _confirmMasterPassword = _lib.lookupFunction<_Str3, _Str3>('pb_confirm_master_password');
   late final _signInRequests = _lib.lookupFunction<_Str1, _Str1>('pb_sign_in_requests');
   late final _answerSignInRequest = _lib.lookupFunction<_Str4, _Str4>('pb_answer_sign_in_request');
@@ -634,6 +639,47 @@ class Core {
             attachmentId,
           ], (p) => c._answer(c._saveAttachment(p[0], p[1], p[2]))),
         );
+
+  /// The account's Sends (DESIGN.md, "Send in the apps"), newest change
+  /// first, and the organizations' Send policies: `{sends, policy:
+  /// {disabled, noHidingEmail}}`, or null while it's locked.
+  Map<String, dynamic>? sends() =>
+      _with([account], (p) => _answer(_sends(p[0]))) as Map<String, dynamic>?;
+
+  /// One Send, for its editor (its text and note too), or null.
+  Map<String, dynamic>? send(String id) =>
+      _with([account, id], (p) => _answer(_send(p[0], p[1])))
+          as Map<String, dynamic>?;
+
+  /// Makes a text Send ([id] null) or edits one, then syncs: `{ok, id,
+  /// synced}`. [password] is a new password, empty to leave it as it is: the
+  /// core hashes it for the server and wipes its copy.
+  static Future<Answer> saveSend(
+    String? id,
+    Map<String, dynamic> draft,
+    String password,
+  ) => _background(
+    (c, a) => c._with([
+      a,
+      id ?? '',
+      jsonEncode(draft),
+      password,
+    ], (p) => c._answer(c._saveSend(p[0], p[1], p[2], p[3]))),
+  );
+
+  /// Takes a Send's password away, then syncs: `{ok, synced}`.
+  static Future<Answer> removeSendPassword(String id) => _background(
+    (c, a) => c._with([
+      a,
+      id,
+    ], (p) => c._answer(c._removeSendPassword(p[0], p[1]))),
+  );
+
+  /// Deletes a Send, then syncs: `{ok, synced}`.
+  static Future<Answer> deleteSend(String id) => _background(
+    (c, a) =>
+        c._with([a, id], (p) => c._answer(c._deleteSend(p[0], p[1]))),
+  );
 
   /// The master password, for an item that asks for it again (docs/core.md,
   /// "Asking for the master password again"): then its secrets may be used.
