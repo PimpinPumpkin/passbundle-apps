@@ -53,6 +53,7 @@ abstract final class Glyphs {
   // What's done with an item (PhoneItem, PhoneVault).
   static const search = 'M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14Z M20 20l-4-4';
   static const copy = 'M9 9h11v11H9Z M5 15H4V4h11v1';
+  static const send = 'M3 11l18-8-8 18-2-8Z M11 13l10-10';
   static const eye =
       'M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z';
   static const eyeOff =

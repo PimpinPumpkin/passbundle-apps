@@ -20,6 +20,7 @@ import 'package:passbundle/icons.dart';
 import 'package:passbundle/main.dart';
 import 'package:passbundle/sign_in_requests.dart';
 import 'package:passbundle/updates.dart';
+import 'package:passbundle/vault.dart';
 import 'package:passbundle/window_chrome.dart';
 
 import 'support.dart';
@@ -472,6 +473,75 @@ void main() {
       await shoot('sign-in-request-phone-$b', tester);
       await tester.tap(find.text('Later'));
       await tester.pumpAndSettle();
+    });
+
+    // Send: the list, a Send's editor, and its link copied. With
+    // PB_SHOWCASE, two Sends (core/examples/showcase.rs).
+    shots('send, desktop, $b', (tester) async {
+      await size(tester, const Size(1280, 800));
+      onComputer(tester, windows);
+      openShowcase();
+      await tester.pumpWidget(PassBundleApp(themeMode: theme));
+      await precacheIcons(tester);
+      await unlock(tester);
+      final menu = find.descendant(
+        of: find.byType(Sidebar),
+        matching: find.text('Send'),
+      );
+      await tester.scrollUntilVisible(
+        menu,
+        100,
+        scrollable: find
+            .descendant(
+              of: find.byType(Sidebar),
+              matching: find.byType(Scrollable),
+            )
+            .first,
+      );
+      await tester.tap(menu);
+      await tester.pumpAndSettle();
+      await shoot('send-desktop-$b', tester);
+      if (Platform.environment['PB_SHOWCASE'] != null) {
+        await tester.tap(find.text('Door code for Saturday'));
+        await tester.pumpAndSettle();
+        await shoot('send-editor-desktop-$b', tester);
+      }
+    });
+
+    shots('send, phone, $b', (tester) async {
+      await size(tester, const Size(390, 844));
+      PhoneStandIn(tester);
+      openShowcase();
+      await tester.pumpWidget(PassBundleApp(themeMode: theme));
+      await precacheIcons(tester);
+      await unlock(tester, phone: true);
+      await pumpUntil(tester, find.text('Unlock with fingerprint next time?'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Not now'));
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.descendant(
+          of: find.byType(NavigationBar),
+          matching: find.text('Send'),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await shoot('send-phone-$b', tester);
+      if (Platform.environment['PB_SHOWCASE'] != null) {
+        await tester.tap(find.byTooltip('Copy link to Door code for Saturday'));
+        await pumpUntil(
+          tester,
+          find.text('Copied the link. It clears in 30 seconds.'),
+        );
+        await tester.pumpAndSettle();
+        await shoot('send-copied-phone-$b', tester);
+        // The note gone, then the editor.
+        await tester.pump(const Duration(seconds: 5));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Door code for Saturday'));
+        await tester.pumpAndSettle();
+        await shoot('send-editor-phone-$b', tester);
+      }
     });
 
     shots('vault, item, editor, and the offer, phone, $b', (tester) async {

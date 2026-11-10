@@ -285,6 +285,38 @@ fn setup_two_step_first(body: &Value) -> Option<Vec<String>> {
     )
 }
 
+/// A Send the server answered with.
+fn send_answer(answer: Value) -> Result<crate::send::SendData> {
+    serde_json::from_value(answer)
+        .map_err(|e| Error::Malformed(format!("a Send the core can't read ({e})")))
+}
+
+/// The server's refusals of a Send (DESIGN.md, "Errors in plain words"),
+/// said as the app says things. Anything else stays as the server put it.
+fn send_refusal(error: Error) -> Error {
+    let Error::Server(message) = &error else {
+        return error;
+    };
+    let said = message.to_lowercase();
+    if said.contains("only able to delete an existing send") {
+        Error::Refused("an organization you're in doesn't let you make or edit Sends. You can still delete them")
+    } else if said.contains("not allowed to hide your email") {
+        Error::Refused("an organization you're in doesn't let Sends hide your email. Turn off \"Hide my email\" to save it")
+    } else if said.contains("deletion date that far into the future") {
+        Error::Refused(
+            "a Send is deleted within 31 days at the most. Choose an earlier deletion date",
+        )
+    } else if said.contains("email verification is not supported") {
+        Error::Refused("your server doesn't take Sends that ask for an email address")
+    } else if said.contains("can't change type") {
+        Error::Refused("a Send's kind can't change")
+    } else if said.contains("send not found") || said.contains("not owned by user") {
+        Error::Damaged("no such Send")
+    } else {
+        error
+    }
+}
+
 fn message_of(body: &Value) -> Option<String> {
     for key in ["message", "Message", "error_description", "ErrorModel"] {
         match &body[key] {
@@ -1138,6 +1170,56 @@ impl Server {
     }
 
     /// Moves an item to the trash.
+    /// Makes a text Send (DESIGN.md, "Send in the apps"): the server's
+    /// answer, the Send as it keeps it.
+    pub fn create_send(&self, session: &mut Session, body: Value) -> Result<crate::send::SendData> {
+        let answer = self
+            .call(session, "POST", "/api/sends", Some(body))
+            .map_err(send_refusal)?;
+        send_answer(answer)
+    }
+
+    /// Edits one of the person's Sends: its kind and a file Send's file
+    /// stay; a password is changed only if the body has one.
+    pub fn update_send(
+        &self,
+        session: &mut Session,
+        id: &str,
+        body: Value,
+    ) -> Result<crate::send::SendData> {
+        let id = path_id(id)?;
+        let answer = self
+            .call(session, "PUT", &format!("/api/sends/{id}"), Some(body))
+            .map_err(send_refusal)?;
+        send_answer(answer)
+    }
+
+    /// Takes a Send's password away.
+    pub fn remove_send_password(
+        &self,
+        session: &mut Session,
+        id: &str,
+    ) -> Result<crate::send::SendData> {
+        let id = path_id(id)?;
+        let answer = self
+            .call(
+                session,
+                "PUT",
+                &format!("/api/sends/{id}/remove-password"),
+                None,
+            )
+            .map_err(send_refusal)?;
+        send_answer(answer)
+    }
+
+    /// Deletes one of the person's Sends, and its file if it has one.
+    pub fn delete_send(&self, session: &mut Session, id: &str) -> Result<()> {
+        let id = path_id(id)?;
+        self.call(session, "DELETE", &format!("/api/sends/{id}"), None)
+            .map(|_| ())
+            .map_err(send_refusal)
+    }
+
     pub fn trash_item(&self, session: &mut Session, id: &str) -> Result<()> {
         self.call(session, "PUT", &format!("/api/ciphers/{id}/delete"), None)
             .map(|_| ())
@@ -1355,6 +1437,31 @@ impl Server {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_servers_refusals_of_a_send_are_said_in_plain_words() {
+        let said = |message: &str| send_refusal(Error::Server(message.into())).to_string();
+        assert_eq!(
+            said("Due to an Enterprise Policy, you are only able to delete an existing Send."),
+            "An organization you're in doesn't let you make or edit Sends. You can still delete them."
+        );
+        assert!(said("Due to an Enterprise Policy, you are not allowed to hide your email address from recipients when creating or editing a Send.")
+            .starts_with("An organization you're in doesn't let Sends hide your email."));
+        assert_eq!(
+            said("You cannot have a Send with a deletion date that far into the future. Adjust the Deletion Date to a value less than 31 days from now and try again."),
+            "A Send is deleted within 31 days at the most. Choose an earlier deletion date."
+        );
+        assert_eq!(
+            said("Send not found"),
+            "That Send isn't here anymore. Sync to see what's there now."
+        );
+        // Anything else stays as the server put it.
+        assert_eq!(
+            send_refusal(Error::Server("Something new".into())),
+            Error::Server("Something new".into())
+        );
+        assert_eq!(send_refusal(Error::Status(500)), Error::Status(500));
+    }
 
     /// A server on this computer that answers each request with the next
     /// of `answers`, and says which paths were asked for.

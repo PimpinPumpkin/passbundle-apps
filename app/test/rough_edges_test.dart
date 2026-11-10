@@ -76,7 +76,8 @@ void openSampleOn(String server) {
 }
 
 Future<void> unlockOnComputer(WidgetTester tester) async {
-  setSize(tester, const Size(1280, 900));
+  // Tall enough for the whole menu, Send and Import from browsers too.
+  setSize(tester, const Size(1280, 980));
   openSample();
   await tester.pumpWidget(const PassBundleApp());
   await tester.enterText(find.byType(TextField), samplePassword);

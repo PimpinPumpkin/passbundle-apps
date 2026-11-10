@@ -249,6 +249,7 @@ impl fmt::Display for Error {
                 "no such item" => write!(f, "That item isn't here anymore. Sync to see what's there now."),
                 "no such folder" => write!(f, "That folder isn't here anymore. Sync to see what's there now."),
                 "no such attachment" => write!(f, "That attachment isn't here anymore. Sync to see what's there now."),
+                "no such Send" => write!(f, "That Send isn't here anymore. Sync to see what's there now."),
                 "no such version" => write!(f, "That version isn't here anymore. Open the history again."),
                 "the file couldn't be written" => write!(f, "PassBundle couldn't save that file. Check that this device has free space, then try again."),
                 why => write!(f, "Something PassBundle read is damaged ({why}). Sync, then try again; if it keeps happening, open it in the web vault."),

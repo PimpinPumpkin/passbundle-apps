@@ -28,6 +28,7 @@ pub mod passkey;
 pub mod places;
 pub mod secrets;
 pub mod security_key;
+pub mod send;
 pub mod server;
 pub mod signup;
 pub mod store;
