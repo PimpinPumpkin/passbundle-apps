@@ -1,6 +1,7 @@
 // Signing in (with two-step login, and the new-device check on a device the
 // account has never used), making an account, and unlocking the vault kept
-// on this device. The master password goes to the core and the
+// on this device, with the master password, biometrics, or a PIN (pin.dart).
+// The master password or PIN goes to the core and the
 // field is cleared at once (docs/core.md, "Memory"). People sign in to
 // PassBundle's own server without being asked; a server an organization set
 // by policy is used and shown; and someone hosting their own types it in,
@@ -543,12 +544,22 @@ class _UnlockScreenState extends State<UnlockScreen> {
     text: _measuring ? (testSetting('PB_MEASURE_PASSWORD') ?? '') : '',
   );
   final passwordFocus = FocusNode();
+  final pin = TextEditingController();
+  final pinFocus = FocusNode();
   String? error;
   bool working = false;
   bool hidden = true;
 
   /// "Windows Hello" or "Touch ID" when this account can unlock with it here.
   String? method;
+
+  /// Whether biometrics' status is known yet ([method] is set if they're on).
+  bool biometricKnown = false;
+
+  /// The account has a PIN here, and the screen shows its field rather than
+  /// the master password's ([usingPin]), until the person asks for that.
+  bool pinOn = false;
+  bool usingPin = false;
 
   /// The prompt asked for by itself is up ([promptIfAsked]).
   bool prompting = false;
@@ -562,16 +573,48 @@ class _UnlockScreenState extends State<UnlockScreen> {
       Core.biometricStatus().then((status) {
         if (!mounted) return;
         final setUp = status['status'] == 'setUp';
+        biometricKnown = true;
         if (setUp) setState(() => method = status['method'] as String);
         // On a phone the field waited for this, so the keyboard doesn't come
         // up under the biometric prompt.
         if (setUp) {
           promptIfAsked();
         } else if (isPhone) {
-          passwordFocus.requestFocus();
+          focusField();
+        }
+      });
+      Core.pinStatus().then((status) {
+        if (!mounted || status['status'] != 'on') return;
+        // The PIN's field, unless the person is already typing their
+        // master password (or unlocking): then only the way to it.
+        final switching = !working && password.text.isEmpty;
+        setState(() {
+          pinOn = true;
+          if (switching) usingPin = true;
+        });
+        // On a phone, not under a biometric prompt to come.
+        if (switching && (!isPhone || (biometricKnown && method == null))) {
+          focusField();
         }
       });
     }
+  }
+
+  /// The field shown, once it's drawn: the PIN's or the master password's.
+  void focusField() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) (usingPin ? pinFocus : passwordFocus).requestFocus();
+    });
+  }
+
+  /// The PIN's field, or the master password's.
+  void usePin(bool on) {
+    setState(() {
+      usingPin = on;
+      error = null;
+      pin.clear();
+    });
+    focusField();
   }
 
   @override
@@ -589,6 +632,8 @@ class _UnlockScreenState extends State<UnlockScreen> {
   @override
   void dispose() {
     passwordFocus.dispose();
+    pin.clear();
+    pinFocus.dispose();
     super.dispose();
   }
 
@@ -659,7 +704,31 @@ class _UnlockScreenState extends State<UnlockScreen> {
       // An out-of-date setup was turned off: the master password, then turn it on again.
       if (!answer.ok) method = null;
     });
-    if (byItself) passwordFocus.requestFocus();
+    if (byItself) focusField();
+  }
+
+  /// Unlocks with the account's PIN. A wrong one says how many tries are
+  /// left; once there's no PIN to try (the fifth wrong try turned it off,
+  /// or it was out of date), the master password's field shows, with why.
+  Future<void> unlockWithPin() async {
+    final typed = pin.text;
+    pin.clear();
+    setState(() {
+      working = true;
+      error = null;
+    });
+    final answer = await whileBusy(() => Core.unlockWithPin(typed));
+    if (!mounted) return;
+    if (answer.ok) {
+      widget.onUnlocked(null);
+      return;
+    }
+    setState(() {
+      working = false;
+      error = answer.error;
+      if (answer.body['pinOn'] == false) pinOn = usingPin = false;
+    });
+    focusField();
   }
 
   Future<void> unlock() async {
@@ -685,33 +754,77 @@ class _UnlockScreenState extends State<UnlockScreen> {
   Widget build(BuildContext context) => Centered(
     children: [
       heading(context, 'Unlock PassBundle', widget.email),
-      TextField(
-        controller: password,
-        focusNode: passwordFocus,
-        obscureText: hidden,
-        // On a phone, once it's known there's no biometric prompt to come.
-        autofocus: !isPhone,
-        enabled: !working,
-        enableSuggestions: false,
-        autocorrect: false,
-        enableIMEPersonalizedLearning: false,
-        onSubmitted: (_) => unlock(),
-        decoration: InputDecoration(
-          labelText: 'Master password',
-          errorText: error,
-          suffixIcon: IconButton(
-            tooltip: hidden ? 'Show' : 'Hide',
-            icon: Icon(
-              hidden
-                  ? Icons.visibility_outlined
-                  : Icons.visibility_off_outlined,
+      if (usingPin)
+        TextField(
+          key: const ValueKey('unlock-pin'),
+          controller: pin,
+          focusNode: pinFocus,
+          obscureText: hidden,
+          autofocus: !isPhone,
+          enabled: !working,
+          enableSuggestions: false,
+          autocorrect: false,
+          enableIMEPersonalizedLearning: false,
+          onSubmitted: (_) => unlockWithPin(),
+          decoration: InputDecoration(
+            labelText: 'PIN',
+            errorText: error,
+            errorMaxLines: 3,
+            suffixIcon: IconButton(
+              tooltip: hidden ? 'Show' : 'Hide',
+              icon: Icon(
+                hidden
+                    ? Icons.visibility_outlined
+                    : Icons.visibility_off_outlined,
+              ),
+              onPressed: () => setState(() => hidden = !hidden),
             ),
-            onPressed: () => setState(() => hidden = !hidden),
+          ),
+        )
+      else
+        TextField(
+          controller: password,
+          focusNode: passwordFocus,
+          obscureText: hidden,
+          // On a phone, once it's known there's no biometric prompt to come.
+          autofocus: !isPhone,
+          enabled: !working,
+          enableSuggestions: false,
+          autocorrect: false,
+          enableIMEPersonalizedLearning: false,
+          onSubmitted: (_) => unlock(),
+          decoration: InputDecoration(
+            labelText: 'Master password',
+            errorText: error,
+            // Room for why a PIN was turned off, and what to do, in full.
+            errorMaxLines: 3,
+            suffixIcon: IconButton(
+              tooltip: hidden ? 'Show' : 'Hide',
+              icon: Icon(
+                hidden
+                    ? Icons.visibility_outlined
+                    : Icons.visibility_off_outlined,
+              ),
+              onPressed: () => setState(() => hidden = !hidden),
+            ),
           ),
         ),
-      ),
       const SizedBox(height: 16),
-      WorkingButton(label: 'Unlock', working: working, onPressed: unlock),
+      WorkingButton(
+        label: 'Unlock',
+        working: working,
+        onPressed: usingPin ? unlockWithPin : unlock,
+      ),
+      if (pinOn)
+        TextButton(
+          key: const ValueKey('pin-or-password'),
+          onPressed: working ? null : () => usePin(!usingPin),
+          child: Text(
+            usingPin
+                ? 'Use your master password instead'
+                : 'Use your PIN instead',
+          ),
+        ),
       if (method != null) ...[
         const SizedBox(height: 10),
         OutlinedButton.icon(
@@ -727,11 +840,12 @@ class _UnlockScreenState extends State<UnlockScreen> {
         ),
       ],
       // First run, or a while away: the hint the account was made with.
-      TextButton(
-        key: const ValueKey('password-hint'),
-        onPressed: working ? null : getHint,
-        child: const Text('Get your master password hint'),
-      ),
+      if (!usingPin)
+        TextButton(
+          key: const ValueKey('password-hint'),
+          onPressed: working ? null : getHint,
+          child: const Text('Get your master password hint'),
+        ),
       const SizedBox(height: 6),
       Text(
         Uri.tryParse(widget.server)?.host ?? widget.server,

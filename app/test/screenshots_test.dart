@@ -353,6 +353,68 @@ void main() {
       await shoot('version-desktop-$b', tester);
     }, skip: Platform.environment['PB_TEST_SERVER'] == null);
 
+    shots('unlocking with a PIN, $b', (tester) async {
+      await size(tester, const Size(1280, 800));
+      onComputer(tester, windows);
+      // The core's test store stands in for a device that keeps a PIN.
+      Core().useDeviceSeal(true);
+      addTearDown(() => Core().useDeviceSeal(false));
+      openSample();
+      await tester.pumpWidget(PassBundleApp(themeMode: theme));
+      await unlock(tester);
+      await tester.tap(find.byTooltip('Settings'));
+      await tester.pump();
+      await pumpUntil(tester, find.byKey(const ValueKey('pin')));
+      await tester.pump(const Duration(milliseconds: 400));
+      await shoot('pin-setting-$b', tester);
+
+      // The sheet, filled in.
+      await tester.tap(find.byKey(const ValueKey('pin')));
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byKey(const ValueKey('pin-master-password')),
+        samplePassword,
+      );
+      await tester.enterText(find.byKey(const ValueKey('pin-new')), '2580');
+      await tester.enterText(find.byKey(const ValueKey('pin-again')), '2580');
+      await tester.pumpAndSettle();
+      await shoot('pin-setup-$b', tester);
+      await tester.tap(find.text('Set PIN'));
+      await pumpUntil(
+        tester,
+        find.byWidgetPredicate(
+          (w) =>
+              w is SwitchListTile && w.key == const ValueKey('pin') && w.value,
+        ),
+      );
+      await tester.tap(find.text('Close'));
+      await tester.pumpAndSettle();
+
+      // Locked: the PIN's field, after one wrong try.
+      await tester.tap(find.text('Lock'));
+      await tester.pump();
+      final field = find.byKey(const ValueKey('unlock-pin'));
+      await pumpUntil(tester, field);
+      Future<void> wrong() async {
+        await tester.enterText(field, '0000');
+        await tester.tap(find.text('Unlock'));
+        await tester.pump();
+        await pumpUntilGone(tester, find.byType(CircularProgressIndicator));
+      }
+
+      await wrong();
+      await tester.pumpAndSettle();
+      await shoot('unlock-with-pin-$b', tester);
+
+      // The fifth: turned off, and the master password asked for.
+      for (var i = 0; i < 4; i++) {
+        await wrong();
+      }
+      await pumpUntil(tester, find.textContaining('was turned off'));
+      await tester.pumpAndSettle();
+      await shoot('pin-turned-off-$b', tester);
+    });
+
     shots('unlocking with Windows Hello or Touch ID, $b', (tester) async {
       await size(tester, const Size(1280, 800));
       onComputer(tester, windows);

@@ -297,6 +297,74 @@ fn the_app_turns_it_on_unlocks_with_it_and_signing_out_turns_it_off() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A vault a PIN opened doesn't hand its user key to the agent (DESIGN.md in
+/// the meta repo, "Unlock with a PIN"): turning biometric unlock on is
+/// refused without a prompt, until the master password unlocks.
+#[test]
+fn a_vault_a_pin_opened_cant_turn_biometric_unlock_on() {
+    use passbundle_core::app::App;
+    use passbundle_core::secrets::MemorySecretStore;
+    use passbundle_core::store::{Settings, Store};
+
+    let Some(agent) = TestAgent::start() else {
+        return;
+    };
+    let v: serde_json::Value = serde_json::from_str(include_str!("vectors/core-v1.json")).unwrap();
+    let pre = &v["account"]["pbkdf2"]["prelogin"];
+    let dir = std::env::temp_dir().join(format!(
+        "pb-core-app-agent-pin-{}",
+        uuid::Uuid::new_v4().simple()
+    ));
+    let store = Store::new(&dir);
+    store
+        .save_settings(&Settings {
+            server: "https://vault.example.test".into(),
+            email: v["account"]["salt"].as_str().unwrap().into(),
+            kdf: 0,
+            kdf_iterations: pre["kdfIterations"].as_u64().unwrap() as u32,
+            kdf_memory: None,
+            kdf_parallelism: None,
+            device_identifier: "d".into(),
+        })
+        .unwrap();
+    store.save_sync(&v["sync"].to_string()).unwrap();
+    let password = v["account"]["password"].as_str().unwrap();
+    let mut app = App::open(store, Box::new(MemorySecretStore::default()));
+    app.use_agent_at(agent.address.clone(), agent.program.clone());
+
+    app.unlock(password).unwrap();
+    app.set_pin(password, "2580").unwrap();
+    app.lock();
+    app.unlock_with_pin("2580").unwrap();
+    // The stand-in would agree; it's never asked.
+    agent.answers(&[true]);
+    let refused = app.enroll_biometric().unwrap_err();
+    assert_eq!(
+        refused.to_string(),
+        "Unlock with your master password to turn this on."
+    );
+    assert_eq!(agent.prompts(), "");
+    assert_eq!(app.biometric_status().unwrap(), Status::NotSetUp);
+
+    // The master password, and it's the agent's to ask.
+    app.lock();
+    app.unlock(password).unwrap();
+    assert!(app.enroll_biometric().unwrap());
+    assert_eq!(app.biometric_status().unwrap(), Status::SetUp);
+
+    // Biometric unlock, once on, works beside the PIN; each opens the vault.
+    app.lock();
+    agent.answers(&[true]);
+    assert!(app.unlock_with_biometric().unwrap());
+    assert!(!app.opened_with_pin());
+    app.lock();
+    app.unlock_with_pin("2580").unwrap();
+    assert!(app.opened_with_pin());
+
+    app.sign_out();
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// Two accounts on one computer (DESIGN.md in the meta repo, "Several
 /// accounts in the apps"): the agent keeps each one's key by its id on the
 /// server, so each turns it on, unlocks with its own, and signing out of one

@@ -1,0 +1,115 @@
+{
+  "about": "Unlocking our apps with a PIN (DESIGN.md, \"Unlock with a PIN\"). Made by make-pin-unlock-v1.mjs. All binary values are base64.",
+  "floor": {
+    "about": "What v1 writes, and the least it opens: Argon2id (version 0x13), 32 bytes out. A record with less memory, fewer passes, or fewer lanes, or with more than the core takes anywhere (1,024 MiB, 10 passes, 16 lanes), is refused before the PIN is used.",
+    "memoryMib": 64,
+    "iterations": 3,
+    "parallelism": 4
+  },
+  "wrap": {
+    "about": "pinKey is Argon2id of `pin` (UTF-8, as typed) with `salt` and the parameters. wrappingKey is HKDF-Expand-SHA256 with pinKey as the PRK and `info`, 64 bytes (32 for AES-256-CBC, then 32 for HMAC-SHA256); info is `label`, then, each after one zero byte, `server`, `userId` (the account's id on its server), and `account` (its own id on the device). wrapped is `userKey` as a type 2 string under wrappingKey with `iv`. record is what the core keeps, sealed to the device first.",
+    "pin": "2580",
+    "salt": "UFFSU1RVVldYWVpbXF1eXw==",
+    "memoryMib": 64,
+    "iterations": 3,
+    "parallelism": 4,
+    "pinKey": "XErM4OHP2xkTYLWPVi2Xg3MrJ2druVpZ8Y7I16NaETc=",
+    "label": "keykeeper PIN unlock v1",
+    "server": "https://vault.example.test",
+    "userId": "0f3c6a52-9d1e-4b7a-8c25-6e1f0a9b4d73",
+    "account": "0123456789abcdef0123456789abcdef",
+    "info": "a2V5a2VlcGVyIFBJTiB1bmxvY2sgdjEAaHR0cHM6Ly92YXVsdC5leGFtcGxlLnRlc3QAMGYzYzZhNTItOWQxZS00YjdhLThjMjUtNmUxZjBhOWI0ZDczADAxMjM0NTY3ODlhYmNkZWYwMTIzNDU2Nzg5YWJjZGVm",
+    "wrappingKey": "GN2vsQPXuS0iv1BGdliJZIaRkyyFBsYdQM6QlP+eGgSb2oxLa86VaJMKW7CqZ1aNXl4Cw9JMap+SJi40ykHkDQ==",
+    "userKey": "gIGCg4SFhoeIiYqLjI2Oj5CRkpOUlZaXmJmam5ydnp+goaKjpKWmp6ipqqusra6vsLGys7S1tre4ubq7vL2+vw==",
+    "iv": "wMHCw8TFxsfIycrLzM3Ozw==",
+    "wrapped": "2.wMHCw8TFxsfIycrLzM3Ozw==|Dqk0tm2fIAoOUays1wMCaSfS+Z3wgPAjL/41WvWcJTGoOBz7qCQNDzOzExjt5xbBbsVTLLdNwMrQw/OW5SnZPfzzELL8qKxK49P0jg1UT74=|Ca9lCvicf9JrRA40KlBAQyHutB3FciWtsw8VUXMyUSo=",
+    "record": "{\"version\":1,\"salt\":\"UFFSU1RVVldYWVpbXF1eXw==\",\"memoryMib\":64,\"iterations\":3,\"parallelism\":4,\"wrapped\":\"2.wMHCw8TFxsfIycrLzM3Ozw==|Dqk0tm2fIAoOUays1wMCaSfS+Z3wgPAjL/41WvWcJTGoOBz7qCQNDzOzExjt5xbBbsVTLLdNwMrQw/OW5SnZPfzzELL8qKxK49P0jg1UT74=|Ca9lCvicf9JrRA40KlBAQyHutB3FciWtsw8VUXMyUSo=\"}"
+  },
+  "asTyped": {
+    "about": "A PIN that isn't digits, for the same account: used exactly as typed, with its spaces at both ends, as UTF-8 (the e with an acute accent is U+00E9, two bytes).",
+    "pin": " Tr0ub4dor & 3 café ",
+    "pinUtf8": "IFRyMHViNGRvciAmIDMgY2Fmw6kg",
+    "salt": "YGFiY2RlZmdoaWprbG1ubw==",
+    "memoryMib": 64,
+    "iterations": 3,
+    "parallelism": 4,
+    "pinKey": "rVlg2FlEpf0Nizsf7C3bxcDKD3a2d3iP79tm7TYBGZk=",
+    "wrappingKey": "PGSBYpSfOLxK4OhkfTCpc7aDrik+8hzmrSDdcsEcdFtPT6pQ3XvtiMkD9J6W3HPmdgcGQEGPu2lGqI8Fs+mLmg==",
+    "iv": "0NHS09TV1tfY2drb3N3e3w==",
+    "wrapped": "2.0NHS09TV1tfY2drb3N3e3w==|Ch4IAcjYf6wm9xQDDhjf53WqPthQgbyiU8vPDqodepEQPSNqpg9mLK6guhHvEzQEsmISgEd8UZK9IG6qNKV/VKWyJq2J6h5vZa3l47BnooU=|lh/Rni7XXcy1pejx2SQEJ88hki4PvYdKhfGBIK9cB8Y="
+  },
+  "refused": {
+    "about": "Each of these must fail to open. The first five are opening `wrap.wrapped` with something that isn't what it was made with; `madeFor*` are the same user key wrapped, with the right PIN, for another account, server, or version, opened as `wrap`'s; the tampered ones changed the last byte after wrapping.",
+    "wrongPin": "2581",
+    "otherAccount": "fedcba9876543210fedcba9876543210",
+    "otherServer": "https://vault.example.test:8443",
+    "otherUserId": "7b1d2c4e-55aa-4c0f-9e3b-2a6d8f1c0e94",
+    "otherLabel": "keykeeper PIN unlock v2",
+    "madeForOtherAccount": "2.wMHCw8TFxsfIycrLzM3Ozw==|AHWh3q58YSVsry5+51JlszxIfNRJ5b0hTnt3C3iWV12BtQe6jqkVvpg+rF47GaIYYtdYUDoEopSGSNxVX3LuNdovQqC0dARWQqPGt/Z+4kc=|f2zzepVJe6qbzcpITWXVDZCfuLKI7NKL3Qz9EwxDVzU=",
+    "madeForOtherServer": "2.wMHCw8TFxsfIycrLzM3Ozw==|R9lVH3siVBVgeC20ZrcpEedJpgAwpZyeNfxdc/p990soFjIdIfihmpLDReNwzWwcwM4y0gl9px6XXQvAQTIc/bvvw2JZfSF5J0FdyX0FMDs=|bqehGOU7rJqubOlDdU207bAIDnU5pid52gzmf/vzyJQ=",
+    "madeForOtherUserId": "2.wMHCw8TFxsfIycrLzM3Ozw==|cfsjIk3xcnoNB7iCLzcUYV65D494ZSQ0QRNz3crx8AIfmP3XxE8cpb+SDQu/LaIsMqIe3YLTDsANuYx0Unq0EC+7U0M5zEaOlmNThF+79lk=|MZa/1TTh1LnoV+CwCvORONndaITHOy1VLBGqbqyVOFs=",
+    "madeForOtherLabel": "2.wMHCw8TFxsfIycrLzM3Ozw==|3PfOh6X0YLW/X0w3+DjAojC7TqtfUgUdrOzs82O+zkRqHHchS1D0VI8Uu41txtrkQh9ARrN3VDKxVRC5ltcnDybIFgj3IswCR1mfb9hJ5oQ=|1lAokcEBrP96bXT1tWYSmSjMi9a8xQC1UdgPhgb5cTk=",
+    "tamperedCiphertext": "2.wMHCw8TFxsfIycrLzM3Ozw==|Dqk0tm2fIAoOUays1wMCaSfS+Z3wgPAjL/41WvWcJTGoOBz7qCQNDzOzExjt5xbBbsVTLLdNwMrQw/OW5SnZPfzzELL8qKxK49P0jg1UT78=|Ca9lCvicf9JrRA40KlBAQyHutB3FciWtsw8VUXMyUSo=",
+    "tamperedMac": "2.wMHCw8TFxsfIycrLzM3Ozw==|Dqk0tm2fIAoOUays1wMCaSfS+Z3wgPAjL/41WvWcJTGoOBz7qCQNDzOzExjt5xbBbsVTLLdNwMrQw/OW5SnZPfzzELL8qKxK49P0jg1UT74=|Ca9lCvicf9JrRA40KlBAQyHutB3FciWtsw8VUXMyUSs=",
+    "parameters": [
+      {
+        "memoryMib": 16,
+        "iterations": 2,
+        "parallelism": 1
+      },
+      {
+        "memoryMib": 63,
+        "iterations": 3,
+        "parallelism": 4
+      },
+      {
+        "memoryMib": 64,
+        "iterations": 2,
+        "parallelism": 4
+      },
+      {
+        "memoryMib": 64,
+        "iterations": 3,
+        "parallelism": 3
+      },
+      {
+        "memoryMib": 1025,
+        "iterations": 3,
+        "parallelism": 4
+      },
+      {
+        "memoryMib": 64,
+        "iterations": 11,
+        "parallelism": 4
+      },
+      {
+        "memoryMib": 64,
+        "iterations": 3,
+        "parallelism": 17
+      }
+    ],
+    "weakRecord": "{\"version\":1,\"salt\":\"UFFSU1RVVldYWVpbXF1eXw==\",\"memoryMib\":16,\"iterations\":2,\"parallelism\":1,\"wrapped\":\"2.wMHCw8TFxsfIycrLzM3Ozw==|hvmWDDwD5dhBLxlZKC//X4WXOmrq4Pc3lZZrYiJcEjhyGsdZ7cXmE3jN7COn0LZBwOoGM9EFn7QKkasOYBZc5LDTTwcWd8ut5Nd5cBeKS+I=|QmfJEH+9TGsUWL+eAjsSeXHlN1DK6e83c1r3E36vSsk=\"}",
+    "weakRecordAbout": "A record with the first of `parameters`, whose wrap is right for `wrap.pin` at those parameters: only the floor refuses it."
+  },
+  "madeFor": {
+    "about": "What the PIN was made for: SHA-256 of the account's protected user key as the sync has it (`profile.key`, the string's UTF-8). The PIN is removed when a sync's no longer matches.",
+    "protectedUserKey": "2.4OHi4+Tl5ufo6err7O3u7w==|9DAzFABc4AEulbUuqyjcgoNQbEZY+3y4bvc0kYJGAKfxclWnCQn0IBZTdWgIZi4LxGNhNerBhKZpk0xJeLqodH14lmTxgz6dFWAas1HFrN0=|c2yPN04iYQPNzi07Y3s3Ald1yw3CdSwxW0HWtCh2X64=",
+    "madeFor": "TF8DpTcJN5WrYUtHpP10cfkkJWNlvAWdT3DE+ju9JSw="
+  },
+  "macDeviceSeal": {
+    "about": "The Mac's seal of `wrap.record`, to a key in the Secure Enclave that asks for no fingerprint (this software key stands in for it). The shared secret is ECDH on P-256 of the ephemeral key and the enclave's public key; the key is HKDF-SHA256 of it with salt ephemeralPublicKey || enclavePublicKey and `info`, 32 bytes; sealed is AES-256-GCM's nonce || ciphertext || tag (CryptoKit's combined form), authenticating `info`, a zero byte, and the account's id.",
+    "enclavePrivateKey": "FRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4vMDEyMzQ=",
+    "enclavePublicKey": "BA60vxLQay93E4ttwliB1/h1T/t55/2+s41gxCilJ/1mjK5AAgx2FU2CY2EbT+0FrhwzUqqqYuK0c7QNTNIbgrQ=",
+    "ephemeralPrivateKey": "JicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj9AQUJDREU=",
+    "ephemeralPublicKey": "BOfcGyW8wuw3DZ7a1vR6qx56aV2qqayD0h8zy08OIJx4FS224kRnBMYNBNowk69ak/EE4C2KJc5egTKhqJ8g19g=",
+    "sharedSecret": "0Z1adu+HGkgezy2xaGZPqI+4MomL6FGAclm2GVe9s8w=",
+    "info": "keykeeper PIN device seal v1",
+    "key": "kZKs02ETv+K0UFVuLDrS4tW+wn3VDKTqdvEz9TJuQSo=",
+    "account": "0123456789abcdef0123456789abcdef",
+    "nonce": "Nzg5Ojs8PT4/QEFC",
+    "record": "{\"version\":1,\"salt\":\"UFFSU1RVVldYWVpbXF1eXw==\",\"memoryMib\":64,\"iterations\":3,\"parallelism\":4,\"wrapped\":\"2.wMHCw8TFxsfIycrLzM3Ozw==|Dqk0tm2fIAoOUays1wMCaSfS+Z3wgPAjL/41WvWcJTGoOBz7qCQNDzOzExjt5xbBbsVTLLdNwMrQw/OW5SnZPfzzELL8qKxK49P0jg1UT74=|Ca9lCvicf9JrRA40KlBAQyHutB3FciWtsw8VUXMyUSo=\"}",
+    "sealed": "Nzg5Ojs8PT4/QEFCbg6mbPJnpeS/3CkYpkcTO35eHJ8ALBNwzBUcwyt8dq8/TwBN5ZeDSa3Yd64MPQR1eP4GrFZ+Yid7tC7buDMh1sRGVEQenS2tkVm+Cxa16oz4Eeri4GeMK4hzqO3LXdVEdToBc3A6Q+EPvSs+CCrPyD4y0gpIfTBQzKqHD4BMuQP9jRjNGGLR3I9Bgww0QTYKBe22kzGoTBlRivRyB7z5bPT9WIm2iKulowZtHXAqk+Z99fK8uU/hW6boVgqlIYU37Kn7/X63KgZPQGRQ2k19qCyGi8MoqhroKBJ2ztr+VxUO1Q8IRBxr9XODotMbrFv5VziZgbp2L+NSHBZd4VJz1yUGlam9aBoseO6YnDx0qDxCS5sZzRG52OXJ3qvIT+ZFIQ9JyedK6BHyJRE9tL8=",
+    "otherAccount": "fedcba9876543210fedcba9876543210",
+    "otherAccountAbout": "Opening `sealed` as this account's is refused: the tag covers the account's id."
+  }
+}
