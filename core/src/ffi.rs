@@ -825,23 +825,33 @@ pub unsafe extern "C" fn pb_sign_up(
     let (name, hint) = (given(&name), given(&hint).map(Zeroizing::new));
     // The slow part (the master key, an RSA key pair) away from the app, so
     // nothing else waits on it; a server address that can't be used first.
-    let made = crate::server::Server::new(
-        &server,
-        crate::server::Device::this_one(&crate::server::Device::new_identifier()),
-    )
-    // A PassBundle server there, before the slow part.
-    .and_then(|s| s.check())
-    .and_then(|_| {
-        crate::signup::NewAccount::make(
-            &email,
-            name.as_deref(),
-            &password,
-            hint.as_deref().map(|h| h.as_str()),
-        )
+    // On a thread of the core's own, as the server check waits on the
+    // network (`with_accounts_waiting`): on Dart's own thread, a signal from
+    // Dart ends the read, and the check says the server can't be reached.
+    let made = std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                crate::server::Server::new(
+                    &server,
+                    crate::server::Device::this_one(&crate::server::Device::new_identifier()),
+                )
+                // A PassBundle server there, before the slow part.
+                .and_then(|s| s.check())
+                .and_then(|_| {
+                    crate::signup::NewAccount::make(
+                        &email,
+                        name.as_deref(),
+                        &password,
+                        hint.as_deref().map(|h| h.as_str()),
+                    )
+                })
+            })
+            .join()
     });
     let account = match made {
-        Ok(account) => account,
-        Err(e) => return out(failed(e)),
+        Ok(Ok(account)) => account,
+        Ok(Err(e)) => return out(failed(e)),
+        Err(_) => return out(json!({ "ok": false, "error": STOPPED })),
     };
     with_accounts_waiting(|accounts| {
         let result = accounts.register(&server, &account, &password);
