@@ -6,7 +6,8 @@
 // every item, and an item opens on a page of its own. Copying goes through
 // the core, so a password never passes through Dart; secrets reach the
 // screen only while revealed, and never when the person's shared folder
-// hides them.
+// hides them. Several items can be selected in a list and moved, favorited
+// or put in the trash together (selection.dart).
 import 'dart:async';
 import 'dart:math' as math;
 
@@ -24,6 +25,7 @@ import 'history.dart';
 import 'icons.dart';
 import 'new_item.dart';
 import 'places.dart';
+import 'selection.dart';
 import 'settings.dart';
 import 'sign_in_requests.dart';
 import 'theme.dart';
@@ -120,7 +122,24 @@ class VaultScreenState extends State<VaultScreen> {
   String query = '';
   Filter filter = Filter.all;
   String? filterId;
+
+  /// The item open beside the list, on a computer.
   String? selected;
+
+  /// The items selected in the list, by id, to do one thing to all of them
+  /// (selection.dart): always among those shown, and this account's.
+  final checked = <String>{};
+
+  /// Where a range starts (Shift and a click): the item last selected.
+  String? anchor;
+
+  /// Whether the selected items' bar offers the trash: not when the person
+  /// may delete none of them.
+  bool trashOffered = true;
+
+  /// Counts the bulk actions that changed the open item, so its pane reads
+  /// it again.
+  int refreshed = 0;
 
   /// What the search finds (everything, without one).
   List<Map<String, dynamic>> all = [];
@@ -346,6 +365,7 @@ class VaultScreenState extends State<VaultScreen> {
       if (selected != null && widget.core.item(selected!) == null) {
         selected = null;
       }
+      keepChecked();
     });
     judge();
   }
@@ -364,6 +384,7 @@ class VaultScreenState extends State<VaultScreen> {
                 .cast<Map<String, dynamic>>())
           i['id'] as String: i,
       };
+      keepChecked();
     });
   }
 
@@ -469,9 +490,192 @@ class VaultScreenState extends State<VaultScreen> {
     setState(() {
       filter = f;
       filterId = id;
+      // What's selected is of the list shown.
+      checked.clear();
+      anchor = null;
     });
     // The search is every account's there, and this one's elsewhere.
     if (searchesChange && query.isNotEmpty) reload();
+  }
+
+  /// The selected items, in the list's order.
+  List<String> get checkedIds => [
+    for (final i in shown)
+      if (ofThisAccount(i) && checked.contains(i['id'])) i['id'] as String,
+  ];
+
+  /// The selection stays among the items shown: one a search or a sync
+  /// took out of the list isn't selected any more, so nothing is done to an
+  /// item the person can't see. Inside a setState.
+  void keepChecked() {
+    if (checked.isEmpty) return;
+    final here = {
+      for (final i in shown)
+        if (ofThisAccount(i)) i['id'] as String,
+    };
+    checked.retainAll(here);
+    if (!here.contains(anchor)) anchor = null;
+    offer();
+  }
+
+  /// What the selected items' bar offers, once the selection changes. The
+  /// trash isn't offered when the person may delete none of them, which the
+  /// core says (`Core.bulkPlan`, nothing sent); while a slow call runs it
+  /// isn't asked, and the question before the trash says so instead.
+  void offer() {
+    trashOffered = true;
+    if (checked.isEmpty || busy.value) return;
+    final plan = widget.core.bulkPlan(
+      checkedIds,
+      const BulkAction.trash().json,
+    );
+    trashOffered =
+        !plan.ok ||
+        (plan.body['go'] as List).isNotEmpty ||
+        leftBy(plan).containsKey('masterPassword');
+  }
+
+  /// Selects an item, or takes it out of the selection.
+  void check(Map<String, dynamic> item) {
+    if (!ofThisAccount(item)) return;
+    final id = item['id'] as String;
+    setState(() {
+      if (!checked.remove(id)) checked.add(id);
+      anchor = checked.contains(id) ? id : null;
+      offer();
+    });
+  }
+
+  /// Selects every item from the last one selected to this one (Shift and
+  /// a click); with none to start from, this one.
+  void checkTo(Map<String, dynamic> item) {
+    if (!ofThisAccount(item)) return;
+    final list = shown;
+    final from = list.indexWhere((i) => ofThisAccount(i) && i['id'] == anchor);
+    final to = list.indexWhere(
+      (i) => ofThisAccount(i) && i['id'] == item['id'],
+    );
+    if (anchor == null || from < 0 || to < 0) {
+      if (!checked.contains(item['id'])) check(item);
+      return;
+    }
+    setState(() {
+      for (var i = math.min(from, to); i <= math.max(from, to); i++) {
+        if (ofThisAccount(list[i])) checked.add(list[i]['id'] as String);
+      }
+      offer();
+    });
+  }
+
+  /// Selects everything shown.
+  void checkAll() => setState(() {
+    checked.addAll([
+      for (final i in shown)
+        if (ofThisAccount(i)) i['id'] as String,
+    ]);
+    offer();
+  });
+
+  void uncheckAll() {
+    if (checked.isEmpty) return;
+    setState(() {
+      checked.clear();
+      anchor = null;
+    });
+  }
+
+  /// Every selected item is a favorite: the star takes them out.
+  bool get checkedAreFavorites => shown
+      .where((i) => ofThisAccount(i) && checked.contains(i['id']))
+      .every((i) => i['favorite'] == true);
+
+  /// Whether Move has anywhere to offer: a folder for the person's own
+  /// items, or a shared folder the person may add items to, in an
+  /// organization that has one of them.
+  bool get moveOffered => shown
+      .where((i) => ofThisAccount(i) && checked.contains(i['id']))
+      .any((i) {
+        final owner = i['organizationId'] as String?;
+        return owner == null || places.canCreateIn(owner);
+      });
+
+  /// Move, for the selected items: asks where, then does it.
+  Future<void> moveChecked() async {
+    final items = shown
+        .where((i) => ofThisAccount(i) && checked.contains(i['id']))
+        .toList();
+    if (items.isEmpty) return;
+    final action = await chooseWhereToMove(
+      context,
+      places: places,
+      count: items.length,
+      personal: items.any((i) => i['organizationId'] == null),
+      organizations: {
+        for (final i in items)
+          if (i['organizationId'] case final String owner) owner,
+      },
+      here: filter == Filter.folder || filter == Filter.collection
+          ? filterId
+          : null,
+      inNoFolder: filter == Filter.noFolder,
+    );
+    if (action == null || !mounted) return;
+    await doToChecked(action);
+  }
+
+  /// Does one thing to every selected item (selection.dart). The core says
+  /// first which it may be done to (`Core.bulkPlan`): the trash always asks,
+  /// with how many; anything else asks only when some items would be left
+  /// as they are, saying how many and why, or ask for the master password.
+  /// What happened is said after, and an item it failed for stays selected.
+  Future<void> doToChecked(BulkAction action) async {
+    final ids = checkedIds;
+    if (ids.isEmpty) return;
+    final plan = widget.core.bulkPlan(ids, action.json);
+    if (!plan.ok) {
+      showMessage(context, plan.error ?? 'Couldn\'t do that.');
+      return;
+    }
+    final asks =
+        action.kind == BulkKind.trash ||
+        (plan.body['skipped'] as List).isNotEmpty;
+    final answer = asks
+        ? await confirmBulk(context, action: action, ids: ids, plan: plan)
+        : await whileBusy(() => Core.bulk(ids, action.json));
+    if (answer == null || !mounted) return;
+    if (!answer.ok) {
+      showMessage(context, answer.error ?? 'Couldn\'t do that.', inPlace: true);
+      reload();
+      return;
+    }
+    final outcome = BulkOutcome(action, answer);
+    setState(() {
+      checked
+        ..clear()
+        ..addAll(outcome.failed);
+      anchor = null;
+      if (outcome.done.contains(selected)) {
+        if (action.kind == BulkKind.trash) selected = null;
+        refreshed++;
+      }
+    });
+    reload();
+    if (outcome.failed.isNotEmpty) {
+      await showBulkFailure(context, outcome);
+      return;
+    }
+    showMessage(
+      context,
+      outcome.said,
+      // Longer to read with what was left and why.
+      seconds: outcome.left.isEmpty && outcome.synced ? null : 8,
+      // What the last one did isn't waited out first.
+      inPlace: true,
+      // Restoring them is the web vault's: its trash, a tap away.
+      action: action.kind == BulkKind.trash && outcome.done.isNotEmpty
+          ? ('Open trash', () => openWebVault('/#/vault?type=trash'))
+          : null,
+    );
   }
 
   /// An item picked from a list: opened, in its own account. One of another
@@ -613,7 +817,11 @@ class VaultScreenState extends State<VaultScreen> {
   void openSettings() {
     if (!mounted) return;
     if (!isWide(context)) {
-      setState(() => tab = 2);
+      setState(() {
+        tab = 2;
+        checked.clear();
+        anchor = null;
+      });
       return;
     }
     final menu = widget.menu;
@@ -797,7 +1005,8 @@ class VaultScreenState extends State<VaultScreen> {
     final pane = selected == null
         ? null
         : ItemPane(
-            key: ValueKey(selected),
+            // Read again once a bulk action changes it.
+            key: ValueKey((selected, refreshed)),
             core: widget.core,
             id: selected!,
             places: places,
@@ -860,6 +1069,25 @@ class VaultScreenState extends State<VaultScreen> {
                     onNew: newItem,
                     onSync: sync,
                     onSelect: pick,
+                    checked: checked,
+                    onCheck: check,
+                    onCheckTo: checkTo,
+                    onCheckAll: checkAll,
+                    onUncheckAll: uncheckAll,
+                    selection: checked.isEmpty
+                        ? null
+                        : SelectionBar(
+                            count: checked.length,
+                            allFavorites: checkedAreFavorites,
+                            onClear: uncheckAll,
+                            onSelectAll: checkAll,
+                            onFavorite: (on) =>
+                                doToChecked(BulkAction.favorite(on)),
+                            onMove: moveOffered ? moveChecked : null,
+                            onTrash: trashOffered
+                                ? () => doToChecked(const BulkAction.trash())
+                                : null,
+                          ),
                   ),
                 ),
                 // The item, beside the list, as the web vault's side panel:
@@ -888,14 +1116,20 @@ class VaultScreenState extends State<VaultScreen> {
 
   /// On a phone: the vault and Settings, as tabs, and New item over the
   /// vault. Back goes back from a search, a kind or folder, or Settings,
-  /// before it leaves the app.
+  /// before it leaves the app; with items selected, it clears the selection
+  /// first. While any are selected, what can be done with them is where the
+  /// tabs are.
   Widget phone(BuildContext context) {
-    final home = tab == 0 && filter == Filter.all && query.isEmpty;
+    final selecting = tab == 0 && checked.isNotEmpty;
+    final home =
+        tab == 0 && filter == Filter.all && query.isEmpty && !selecting;
     return PopScope(
       canPop: home,
       onPopInvokedWithResult: (popped, _) {
         if (popped) return;
-        if (tab != 0) {
+        if (selecting) {
+          uncheckAll();
+        } else if (tab != 0) {
           setState(() => tab = 0);
         } else if (query.isNotEmpty) {
           clearSearch();
@@ -937,7 +1171,7 @@ class VaultScreenState extends State<VaultScreen> {
             ],
           ),
         ),
-        floatingActionButton: tab == 0
+        floatingActionButton: tab == 0 && !selecting
             ? FloatingActionButton(
                 tooltip: 'New item',
                 onPressed: newItem,
@@ -948,26 +1182,35 @@ class VaultScreenState extends State<VaultScreen> {
                 ),
               )
             : null,
-        bottomNavigationBar: NavigationBar(
-          selectedIndex: tab,
-          onDestinationSelected: (i) => setState(() => tab = i),
-          // The web vault's glyphs: all items, the generator, and the gear.
-          // Send, the extension's fourth, isn't in the apps yet.
-          destinations: const [
-            NavigationDestination(
-              icon: Glyph(Glyphs.grid, size: 22),
-              label: 'Items',
-            ),
-            NavigationDestination(
-              icon: Glyph(Glyphs.generator, size: 22),
-              label: 'Generator',
-            ),
-            NavigationDestination(
-              icon: Glyph(Glyphs.settings, size: 22),
-              label: 'Settings',
-            ),
-          ],
-        ),
+        bottomNavigationBar: selecting
+            ? PhoneSelectionBar(
+                allFavorites: checkedAreFavorites,
+                onFavorite: (on) => doToChecked(BulkAction.favorite(on)),
+                onMove: moveOffered ? moveChecked : null,
+                onTrash: trashOffered
+                    ? () => doToChecked(const BulkAction.trash())
+                    : null,
+              )
+            : NavigationBar(
+                selectedIndex: tab,
+                onDestinationSelected: (i) => setState(() => tab = i),
+                // The web vault's glyphs: all items, the generator, and the
+                // gear. Send, the extension's fourth, isn't in the apps yet.
+                destinations: const [
+                  NavigationDestination(
+                    icon: Glyph(Glyphs.grid, size: 22),
+                    label: 'Items',
+                  ),
+                  NavigationDestination(
+                    icon: Glyph(Glyphs.generator, size: 22),
+                    label: 'Generator',
+                  ),
+                  NavigationDestination(
+                    icon: Glyph(Glyphs.settings, size: 22),
+                    label: 'Settings',
+                  ),
+                ],
+              ),
       ),
     );
   }
@@ -985,63 +1228,78 @@ class VaultScreenState extends State<VaultScreen> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        PageTitle(
-          placeName ?? 'Items',
-          leading: filtered
-              ? IconButton(
-                  tooltip: 'Back to all items',
-                  icon: const Icon(Icons.arrow_back_rounded),
-                  onPressed: () => choose(Filter.all),
-                )
-              : null,
-          actions: [
-            if (folder != null)
-              FolderMenu(
-                name: folder['name'] as String,
-                color: c.muted,
-                large: true,
-                onRename: () => renameFolder(
-                  folder['id'] as String,
-                  folder['name'] as String,
-                ),
-                onDelete: () => deleteFolder(
-                  folder['id'] as String,
-                  folder['name'] as String,
-                ),
-              ),
-            if (syncing)
-              const SizedBox(
-                width: 48,
-                height: 48,
-                child: Center(
-                  child: SizedBox(
-                    width: 18,
-                    height: 18,
-                    child: CircularProgressIndicator(strokeWidth: 2),
+        if (checked.isNotEmpty)
+          // While items are selected: how many, with a way out and all.
+          PageTitle(
+            '${checked.length} selected',
+            leading: IconButton(
+              tooltip: 'Clear the selection',
+              icon: const Icon(Icons.close_rounded),
+              onPressed: uncheckAll,
+            ),
+            actions: [
+              TextButton(onPressed: checkAll, child: const Text('Select all')),
+              const SizedBox(width: 4),
+            ],
+          )
+        else
+          PageTitle(
+            placeName ?? 'Items',
+            leading: filtered
+                ? IconButton(
+                    tooltip: 'Back to all items',
+                    icon: const Icon(Icons.arrow_back_rounded),
+                    onPressed: () => choose(Filter.all),
+                  )
+                : null,
+            actions: [
+              if (folder != null)
+                FolderMenu(
+                  name: folder['name'] as String,
+                  color: c.muted,
+                  large: true,
+                  onRename: () => renameFolder(
+                    folder['id'] as String,
+                    folder['name'] as String,
+                  ),
+                  onDelete: () => deleteFolder(
+                    folder['id'] as String,
+                    folder['name'] as String,
                   ),
                 ),
-              )
-            else
+              if (syncing)
+                const SizedBox(
+                  width: 48,
+                  height: 48,
+                  child: Center(
+                    child: SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    ),
+                  ),
+                )
+              else
+                IconButton(
+                  tooltip: 'Sync',
+                  icon: const Icon(Icons.sync_rounded),
+                  onPressed: sync,
+                ),
+              // With more than one account signed in, the one shown and the
+              // others, a tap away (Settings has them too).
+              if (widget.menu case final menu? when menu.several)
+                IconButton(
+                  tooltip: 'Accounts',
+                  icon: const Icon(Icons.account_circle_outlined),
+                  onPressed: () => showAccounts(context, menu),
+                ),
               IconButton(
-                tooltip: 'Sync',
-                icon: const Icon(Icons.sync_rounded),
-                onPressed: sync,
+                tooltip: 'Lock',
+                icon: const Icon(Icons.lock_outline_rounded),
+                onPressed: widget.onLock,
               ),
-            // With more than one account signed in, the one shown and the
-            // others, a tap away (Settings has them too).
-            if (widget.menu case final menu? when menu.several)
-              IconButton(
-                tooltip: 'Accounts',
-                icon: const Icon(Icons.account_circle_outlined),
-                onPressed: () => showAccounts(context, menu),
-              ),
-            IconButton(
-              tooltip: 'Lock',
-              icon: const Icon(Icons.lock_outline_rounded),
-              onPressed: widget.onLock,
-            ),
-          ],
-        ),
+            ],
+          ),
         Padding(
           padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
           child: TextField(
@@ -1232,11 +1490,23 @@ class VaultScreenState extends State<VaultScreen> {
         final account = filter == Filter.everyAccount
             ? widget.menu?.entry(item['account'] as String?)
             : null;
+        // A long press starts selecting; from then a tap selects, or
+        // takes the item out. Another account's items aren't selected from
+        // here ("All accounts").
+        final selecting = checked.isNotEmpty;
+        final mine = ofThisAccount(item);
         return PhoneItemRow(
           item: item,
           radius: radius,
           badge: account == null ? null : AccountBadge(entry: account),
-          onTap: () => pick(item),
+          checked: selecting && mine ? checked.contains(item['id']) : null,
+          dimmed: selecting && !mine,
+          onTap: !selecting
+              ? () => pick(item)
+              : mine
+              ? () => check(item)
+              : null,
+          onLongPress: mine ? () => check(item) : null,
         );
       });
 
@@ -1368,20 +1638,31 @@ class VaultScreenState extends State<VaultScreen> {
 }
 
 /// A quiet note at the bottom, with what to do next when there's an
-/// [action]: its label, and what it does.
+/// [action]: its label, and what it does. [inPlace] puts it where the one
+/// showing is, without waiting that one out.
 void showMessage(
   BuildContext context,
   String text, {
   (String, VoidCallback)? action,
-}) => ScaffoldMessenger.of(context).showSnackBar(
-  SnackBar(
-    content: Text(text),
-    duration: Duration(seconds: action == null ? 3 : 6),
-    action: action == null
-        ? null
-        : SnackBarAction(label: action.$1, onPressed: action.$2),
-  ),
-);
+  int? seconds,
+  bool inPlace = false,
+}) {
+  final messenger = ScaffoldMessenger.of(context);
+  if (inPlace) {
+    messenger
+      ..clearSnackBars()
+      ..removeCurrentSnackBar();
+  }
+  messenger.showSnackBar(
+    SnackBar(
+      content: Text(text),
+      duration: Duration(seconds: seconds ?? (action == null ? 3 : 6)),
+      action: action == null
+          ? null
+          : SnackBarAction(label: action.$1, onPressed: action.$2),
+    ),
+  );
+}
 
 /// The kinds of item on a phone, each its jewel tile with how many there
 /// are: two to a row, or one when the names' words need the room (a large
@@ -1504,12 +1785,25 @@ class PhoneItemRow extends StatelessWidget {
     required this.item,
     required this.radius,
     required this.onTap,
+    this.onLongPress,
+    this.checked,
+    this.dimmed = false,
     this.badge,
   });
 
   final Map<String, dynamic> item;
   final BorderRadius radius;
-  final VoidCallback onTap;
+  final VoidCallback? onTap;
+
+  /// Starts selecting, with this one.
+  final VoidCallback? onLongPress;
+
+  /// While items are being selected, whether this one is: its checkbox is
+  /// where its tile was, and a tap selects it instead of opening it.
+  final bool? checked;
+
+  /// One that can't be selected while others are.
+  final bool dimmed;
 
   /// Its account's, where several accounts' items are listed together.
   final Widget? badge;
@@ -1518,16 +1812,20 @@ class PhoneItemRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final c = context.colors;
     final subtitle = item['subtitle'] as String;
-    return InkWell(
+    final selecting = checked != null;
+    final row = InkWell(
       borderRadius: radius,
       onTap: onTap,
+      onLongPress: onLongPress,
       child: ConstrainedBox(
         constraints: const BoxConstraints(minHeight: 64),
         child: Padding(
           padding: const EdgeInsets.fromLTRB(16, 10, 12, 10),
           child: Row(
             children: [
-              Avatar.of(item, size: 40),
+              selecting
+                  ? SelectBox(checked: checked!, name: item['name'] as String)
+                  : Avatar.of(item, size: 40),
               const SizedBox(width: 12),
               Expanded(
                 child: Column(
@@ -1570,13 +1868,40 @@ class PhoneItemRow extends StatelessWidget {
                 ),
               ?badge,
               const SizedBox(width: 6),
-              Glyph(Glyphs.chevron, size: 18, color: c.muted, strokeWidth: 2),
+              // It doesn't open while selecting.
+              Opacity(
+                opacity: selecting || dimmed ? 0 : 1,
+                child: Glyph(
+                  Glyphs.chevron,
+                  size: 18,
+                  color: c.muted,
+                  strokeWidth: 2,
+                ),
+              ),
             ],
           ),
         ),
       ),
     );
+    if (dimmed) return Opacity(opacity: 0.45, child: row);
+    if (!selecting) return row;
+    return Semantics(
+      selected: checked,
+      child: checked!
+          ? DecoratedBox(
+              decoration: BoxDecoration(color: c.tint, borderRadius: radius),
+              child: row,
+            )
+          : row,
+    );
   }
+}
+
+/// Whether an item in a list is the account shown's: "All accounts" lists
+/// the others' too, which open in their own account.
+bool ofThisAccount(Map<String, dynamic> item) {
+  final account = item['account'] as String?;
+  return account == null || account == Core.account;
 }
 
 /// The favorite star beside an item's name: filled when it's a favorite,
@@ -1634,10 +1959,6 @@ String? ago(String? iso, [DateTime? now]) {
   }
   return 'just now';
 }
-
-/// A favorite's star, and its edge.
-const favoriteColor = Color(0xFFE8B23A);
-const favoriteEdge = Color(0xFFC9921B);
 
 /// The menu on a computer, as the web vault has it: a card on the ground
 /// with All items and Favorites, the kinds of item that have items, with
@@ -2009,8 +2330,13 @@ class Sidebar extends StatelessWidget {
 }
 
 /// The list beside the menu, on a computer: search and New, what it shows
-/// and how many, and the items, the chosen one raised.
-class ItemList extends StatelessWidget {
+/// and how many, and the items, the chosen one raised. Several can be
+/// selected (selection.dart): each row has a checkbox where its tile is,
+/// under the pointer and whenever any is selected; Shift and a click takes
+/// a range, Command (Ctrl off a Mac) and a click one without opening it,
+/// and with the list in focus Command or Ctrl with A takes them all and
+/// Escape none. While any is selected, [selection] is where the title was.
+class ItemList extends StatefulWidget {
   const ItemList({
     super.key,
     required this.title,
@@ -2025,6 +2351,12 @@ class ItemList extends StatelessWidget {
     this.accounts,
     this.banner,
     this.empty = 'Nothing here yet.',
+    this.checked = const {},
+    this.onCheck,
+    this.onCheckTo,
+    this.onCheckAll,
+    this.onUncheckAll,
+    this.selection,
   });
 
   /// What it says with nothing to show: why, by what it shows.
@@ -2050,9 +2382,83 @@ class ItemList extends StatelessWidget {
   final VoidCallback onSync;
   final ValueChanged<Map<String, dynamic>> onSelect;
 
+  /// The items selected to do one thing to all of them, by id.
+  final Set<String> checked;
+
+  /// Selects an item or takes it out; without it nothing is selected here.
+  final ValueChanged<Map<String, dynamic>>? onCheck;
+
+  /// Selects up to an item, from the one selected last.
+  final ValueChanged<Map<String, dynamic>>? onCheckTo;
+  final VoidCallback? onCheckAll;
+  final VoidCallback? onUncheckAll;
+
+  /// How many are selected and what to do with them, in the title's place.
+  final Widget? selection;
+
+  @override
+  State<ItemList> createState() => _ItemListState();
+}
+
+class _ItemListState extends State<ItemList> {
+  /// The list's own focus, which a click on a row takes: the keys that
+  /// select are its, not the search field's.
+  final focus = FocusNode(debugLabel: 'items', skipTraversal: true);
+
+  @override
+  void dispose() {
+    focus.dispose();
+    super.dispose();
+  }
+
+  KeyEventResult key(FocusNode node, KeyEvent event) {
+    if (event is! KeyDownEvent || widget.onCheck == null) {
+      return KeyEventResult.ignored;
+    }
+    if (event.logicalKey == LogicalKeyboardKey.keyA && commandHeld()) {
+      widget.onCheckAll?.call();
+      return KeyEventResult.handled;
+    }
+    if (event.logicalKey == LogicalKeyboardKey.escape &&
+        widget.checked.isNotEmpty) {
+      widget.onUncheckAll?.call();
+      return KeyEventResult.handled;
+    }
+    return KeyEventResult.ignored;
+  }
+
+  /// A click on a row: with Shift, a range; with Command or Ctrl, this one
+  /// without opening it; else it opens.
+  void tap(Map<String, dynamic> item) {
+    focus.requestFocus();
+    if (widget.onCheck != null && ofThisAccount(item)) {
+      if (HardwareKeyboard.instance.isShiftPressed) {
+        widget.onCheckTo?.call(item);
+        return;
+      }
+      if (commandHeld()) {
+        widget.onCheck!(item);
+        return;
+      }
+    }
+    widget.onSelect(item);
+  }
+
+  /// A click on a row's checkbox.
+  void check(Map<String, dynamic> item) {
+    focus.requestFocus();
+    if (HardwareKeyboard.instance.isShiftPressed) {
+      widget.onCheckTo?.call(item);
+    } else {
+      widget.onCheck?.call(item);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final c = context.colors;
+    final items = widget.items;
+    final selection = widget.selection;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -2065,7 +2471,7 @@ class ItemList extends StatelessWidget {
             children: [
               Expanded(
                 child: TextField(
-                  onChanged: onSearch,
+                  onChanged: widget.onSearch,
                   decoration: InputDecoration(
                     hintText: 'Search items',
                     prefixIcon: Padding(
@@ -2077,7 +2483,7 @@ class ItemList extends StatelessWidget {
                 ),
               ),
               const SizedBox(width: 4),
-              syncing
+              widget.syncing
                   ? const SizedBox(
                       width: 44,
                       height: 44,
@@ -2092,14 +2498,14 @@ class ItemList extends StatelessWidget {
                   : IconButton(
                       tooltip: 'Sync',
                       icon: const Icon(Icons.sync_rounded),
-                      onPressed: onSync,
+                      onPressed: widget.onSync,
                     ),
               const SizedBox(width: 4),
               Tooltip(
                 message: 'New item',
                 excludeFromSemantics: true,
                 child: FilledButton.icon(
-                  onPressed: onNew,
+                  onPressed: widget.onNew,
                   style: FilledButton.styleFrom(
                     minimumSize: const Size(0, 44),
                     padding: const EdgeInsets.symmetric(horizontal: 14),
@@ -2116,141 +2522,236 @@ class ItemList extends StatelessWidget {
             ],
           ),
         ),
-        if (banner != null)
+        if (widget.banner != null)
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 8, 12, 0),
             child: ClipRRect(
               borderRadius: BorderRadius.circular(12),
-              child: banner,
+              child: widget.banner,
             ),
           ),
-        Padding(
-          padding: const EdgeInsets.fromLTRB(22, 10, 18, 6),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.baseline,
-            textBaseline: TextBaseline.alphabetic,
-            children: [
-              Expanded(
-                child: Text(
-                  title,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    fontSize: 22,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-              ),
-              Text(
-                items.length == 1 ? '1 item' : '${items.length} items',
-                style: TextStyle(color: c.muted, fontSize: 13),
-              ),
-            ],
-          ),
-        ),
         Expanded(
-          child: items.isEmpty
-              ? Center(
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 24),
-                    child: Text(
-                      empty,
-                      textAlign: TextAlign.center,
-                      style: TextStyle(color: c.muted),
-                    ),
-                  ),
-                )
-              : ListView.builder(
-                  padding: const EdgeInsets.fromLTRB(10, 2, 10, 12),
-                  itemCount: items.length,
-                  itemBuilder: (context, i) {
-                    final item = items[i];
-                    final account = item['account'] as String?;
-                    final on =
-                        item['id'] == selected &&
-                        (account == null || account == Core.account);
-                    final badge = accounts?.entry(account);
-                    final subtitle = item['subtitle'] as String;
-                    return Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 2),
-                      // The chosen one rises off the ground, in the
-                      // selection's ring.
-                      child: DecoratedBox(
-                        decoration: on
-                            ? c.lifted.decoration(
-                                BorderRadius.circular(12),
-                                ring: c.selectedRing,
-                              )
-                            : const BoxDecoration(),
-                        child: Material(
-                          color: Colors.transparent,
-                          borderRadius: BorderRadius.circular(12),
-                          child: InkWell(
-                            borderRadius: BorderRadius.circular(12),
-                            onTap: () => onSelect(item),
-                            child: Padding(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 12,
-                                vertical: 10,
-                              ),
-                              child: Row(
-                                children: [
-                                  Avatar.of(item, size: 40),
-                                  const SizedBox(width: 12),
-                                  Expanded(
-                                    child: Column(
-                                      crossAxisAlignment:
-                                          CrossAxisAlignment.start,
-                                      children: [
-                                        Text(
-                                          item['name'] as String,
-                                          maxLines: 1,
-                                          overflow: TextOverflow.ellipsis,
-                                          style: const TextStyle(
-                                            fontSize: 15,
-                                            fontWeight: FontWeight.w600,
-                                          ),
-                                        ),
-                                        if (subtitle.isNotEmpty)
-                                          Text(
-                                            subtitle,
-                                            maxLines: 1,
-                                            overflow: TextOverflow.ellipsis,
-                                            style: TextStyle(
-                                              color: c.muted,
-                                              fontSize: 13,
-                                            ),
-                                          ),
-                                      ],
-                                    ),
-                                  ),
-                                  ExpiryBadge(item),
-                                  if (item['favorite'] == true)
-                                    const Padding(
-                                      padding: EdgeInsets.only(left: 6),
-                                      child: Glyph(
-                                        Glyphs.star,
-                                        size: 16,
-                                        color: favoriteEdge,
-                                        fill: favoriteColor,
-                                        strokeWidth: 1.6,
-                                        semanticLabel: 'Favorite',
-                                      ),
-                                    ),
-                                  if (badges &&
-                                      (item['where'] as String?) != null)
-                                    WhereBadge(item['where'] as String),
-                                  if (badge != null) AccountBadge(entry: badge),
-                                ],
+          child: Focus(
+            focusNode: focus,
+            onKeyEvent: key,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                // The title keeps its room while the selection's bar is in
+                // its place, so the rows stay where they are.
+                Stack(
+                  children: [
+                    Visibility(
+                      visible: selection == null,
+                      maintainSize: true,
+                      maintainAnimation: true,
+                      maintainState: true,
+                      child: Padding(
+                        padding: const EdgeInsets.fromLTRB(22, 10, 18, 6),
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.baseline,
+                          textBaseline: TextBaseline.alphabetic,
+                          children: [
+                            Expanded(
+                              child: Text(
+                                widget.title,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  fontSize: 22,
+                                  fontWeight: FontWeight.w700,
+                                ),
                               ),
                             ),
-                          ),
+                            Text(
+                              items.length == 1
+                                  ? '1 item'
+                                  : '${items.length} items',
+                              style: TextStyle(color: c.muted, fontSize: 13),
+                            ),
+                          ],
                         ),
                       ),
-                    );
-                  },
+                    ),
+                    if (selection != null) Positioned.fill(child: selection),
+                  ],
                 ),
+                Expanded(
+                  child: items.isEmpty
+                      ? Center(
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 24),
+                            child: Text(
+                              widget.empty,
+                              textAlign: TextAlign.center,
+                              style: TextStyle(color: c.muted),
+                            ),
+                          ),
+                        )
+                      : ListView.builder(
+                          padding: const EdgeInsets.fromLTRB(10, 2, 10, 12),
+                          itemCount: items.length,
+                          itemBuilder: (context, i) {
+                            final item = items[i];
+                            final account = item['account'] as String?;
+                            final mine = ofThisAccount(item);
+                            return ItemRow(
+                              key: ValueKey((account, item['id'])),
+                              item: item,
+                              on: item['id'] == widget.selected && mine,
+                              where: widget.badges
+                                  ? item['where'] as String?
+                                  : null,
+                              account: widget.accounts?.entry(account),
+                              checked:
+                                  mine && widget.checked.contains(item['id']),
+                              selecting: widget.checked.isNotEmpty,
+                              onTap: () => tap(item),
+                              onCheck: widget.onCheck != null && mine
+                                  ? () => check(item)
+                                  : null,
+                            );
+                          },
+                        ),
+                ),
+              ],
+            ),
+          ),
         ),
       ],
+    );
+  }
+}
+
+/// An item's row in a computer's list. Its checkbox is where its tile is
+/// while the pointer is over it or any item is selected; on a touch screen a
+/// long press selects it.
+class ItemRow extends StatefulWidget {
+  const ItemRow({
+    super.key,
+    required this.item,
+    required this.on,
+    required this.checked,
+    required this.selecting,
+    required this.onTap,
+    this.onCheck,
+    this.where,
+    this.account,
+  });
+
+  final Map<String, dynamic> item;
+
+  /// It's the one open beside the list.
+  final bool on;
+
+  /// It's selected, and whether any item is.
+  final bool checked;
+  final bool selecting;
+  final VoidCallback onTap;
+
+  /// Selects it or takes it out; null for one that can't be selected
+  /// (another account's, in "All accounts").
+  final VoidCallback? onCheck;
+
+  /// Where it is, beside it.
+  final String? where;
+
+  /// Its account, beside it, in "All accounts".
+  final AccountEntry? account;
+
+  @override
+  State<ItemRow> createState() => _ItemRowState();
+}
+
+class _ItemRowState extends State<ItemRow> {
+  bool hovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.colors;
+    final item = widget.item;
+    final subtitle = item['subtitle'] as String;
+    final box = widget.onCheck != null && (hovered || widget.selecting);
+    return MouseRegion(
+      onEnter: (_) => setState(() => hovered = true),
+      onExit: (_) => setState(() => hovered = false),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 2),
+        // The chosen one rises off the ground, in the selection's ring.
+        child: DecoratedBox(
+          decoration: widget.on
+              ? c.lifted.decoration(
+                  BorderRadius.circular(12),
+                  ring: c.selectedRing,
+                )
+              : const BoxDecoration(),
+          child: Material(
+            color: widget.checked ? c.tint : Colors.transparent,
+            borderRadius: BorderRadius.circular(12),
+            child: InkWell(
+              borderRadius: BorderRadius.circular(12),
+              onTap: widget.onTap,
+              onLongPress: widget.onCheck,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 10,
+                ),
+                child: Row(
+                  children: [
+                    box
+                        ? SelectBox(
+                            checked: widget.checked,
+                            name: item['name'] as String,
+                            onChanged: widget.onCheck,
+                          )
+                        : Avatar.of(item, size: 40),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            item['name'] as String,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              fontSize: 15,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                          if (subtitle.isNotEmpty)
+                            Text(
+                              subtitle,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(color: c.muted, fontSize: 13),
+                            ),
+                        ],
+                      ),
+                    ),
+                    ExpiryBadge(item),
+                    if (item['favorite'] == true)
+                      const Padding(
+                        padding: EdgeInsets.only(left: 6),
+                        child: Glyph(
+                          Glyphs.star,
+                          size: 16,
+                          color: favoriteEdge,
+                          fill: favoriteColor,
+                          strokeWidth: 1.6,
+                          semanticLabel: 'Favorite',
+                        ),
+                      ),
+                    if (widget.where case final where?) WhereBadge(where),
+                    if (widget.account case final account?)
+                      AccountBadge(entry: account),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
     );
   }
 }

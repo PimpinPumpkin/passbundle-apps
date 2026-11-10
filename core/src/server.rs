@@ -1143,6 +1143,38 @@ impl Server {
             .map(|_| ())
     }
 
+    /// Moves several items to the trash in one call (upstream's bulk
+    /// delete). The server stops at the first it refuses, with the ones it
+    /// took before that in the trash already.
+    pub fn trash_items(&self, session: &mut Session, ids: &[String]) -> Result<()> {
+        self.call(
+            session,
+            "PUT",
+            "/api/ciphers/delete",
+            Some(json!({ "ids": ids })),
+        )
+        .map(|_| ())
+    }
+
+    /// Puts several items in one of the person's folders, or in none, in
+    /// one call (upstream's bulk move): only their own filing of each, so
+    /// nothing is encrypted again. The server moves the ones the person
+    /// has, and says so if that wasn't all of them.
+    pub fn move_items(
+        &self,
+        session: &mut Session,
+        ids: &[String],
+        folder_id: Option<&str>,
+    ) -> Result<()> {
+        self.call(
+            session,
+            "PUT",
+            "/api/ciphers/move",
+            Some(json!({ "ids": ids, "folderId": folder_id })),
+        )
+        .map(|_| ())
+    }
+
     /// Sign-in requests waiting for this account's answer (device_approval.rs),
     /// as the server lists them, and the server's clock (its `Date`), so how
     /// long each has left is by the server's time, not this device's. With

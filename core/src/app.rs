@@ -29,6 +29,9 @@ use crate::synced_settings::{self, Known};
 use crate::two_step::{self, Offer};
 use crate::vault::{Item, ItemDraft, Sync, Vault};
 
+mod bulk;
+pub use bulk::{Bulk, Outcome, Plan, Skip};
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum State {
     /// Nothing kept: sign in. The server and email of the last account, if any.
@@ -1576,46 +1579,10 @@ impl App {
                 "you can't see this item's passwords, so edit it in the web vault",
             ));
         }
-        let moved = editing.filter(|item| {
-            let mut held = item.collection_ids.clone();
-            let mut asked = collection_ids.to_vec();
-            held.sort();
-            asked.sort();
-            asked.dedup();
-            item.organization_id.is_some() && !asked.is_empty() && held != asked
-        });
-        // A move between shared folders is checked as the server checks it
-        // (change_item_folders), before anything is saved: share in each
-        // folder it leaves, and create in each it joins, with share on the
-        // item. Folders the person doesn't reach stay as they are.
+        let moved = editing.filter(|item| moves(item, collection_ids));
+        // A move between shared folders is checked before anything is saved.
         if let Some(item) = moved {
-            let grid = vault.grid(item);
-            if !grid.edit {
-                return Err(Error::Refused(
-                    "your organization doesn't let you change this item's shared folders",
-                ));
-            }
-            let leaves = item
-                .collection_ids
-                .iter()
-                .filter(|c| !collection_ids.contains(c));
-            for c in leaves {
-                if vault.collection_grids.get(c).is_some_and(|g| !g.share) {
-                    return Err(Error::Refused(
-                        "your organization doesn't let you move items out of this shared folder",
-                    ));
-                }
-            }
-            let joins = collection_ids
-                .iter()
-                .filter(|c| !item.collection_ids.contains(c));
-            for c in joins {
-                if !grid.share || !vault.collection_grids.get(c).is_some_and(|g| g.create) {
-                    return Err(Error::Refused(
-                        "your organization doesn't let you add this item to that shared folder",
-                    ));
-                }
-            }
+            may_place(vault, item, collection_ids)?;
         }
         let moved = moved.is_some();
         let body = vault.encrypt_item(draft, editing)?;
@@ -2365,6 +2332,54 @@ impl SignInRequestsCall {
     pub fn fetch_new_devices(&self) -> Result<serde_json::Value> {
         self.server.waiting_new_devices(&self.access_token)
     }
+}
+
+/// Whether putting an organization's item in `collection_ids` (its shared
+/// folders) changes where it is: they're given, and aren't the ones it's in.
+fn moves(item: &Item, collection_ids: &[String]) -> bool {
+    let mut held = item.collection_ids.clone();
+    let mut asked = collection_ids.to_vec();
+    held.sort();
+    asked.sort();
+    asked.dedup();
+    item.organization_id.is_some() && !asked.is_empty() && held != asked
+}
+
+/// Whether the person may move an organization's item into `collection_ids`
+/// from the shared folders it's in, checked as the server checks it
+/// (change_item_folders): share in each folder it leaves, and create in each
+/// it joins, with share on the item. Folders the person doesn't reach stay
+/// as they are. The one check for a move, from the editor (`App::save`) or
+/// for several items at once (`App::bulk`).
+fn may_place(vault: &Vault, item: &Item, collection_ids: &[String]) -> Result<()> {
+    let grid = vault.grid(item);
+    if !grid.edit {
+        return Err(Error::Refused(
+            "your organization doesn't let you change this item's shared folders",
+        ));
+    }
+    let leaves = item
+        .collection_ids
+        .iter()
+        .filter(|c| !collection_ids.contains(c));
+    for c in leaves {
+        if vault.collection_grids.get(c).is_some_and(|g| !g.share) {
+            return Err(Error::Refused(
+                "your organization doesn't let you move items out of this shared folder",
+            ));
+        }
+    }
+    let joins = collection_ids
+        .iter()
+        .filter(|c| !item.collection_ids.contains(c));
+    for c in joins {
+        if !grid.share || !vault.collection_grids.get(c).is_some_and(|g| g.create) {
+            return Err(Error::Refused(
+                "your organization doesn't let you add this item to that shared folder",
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Keeps the session's refresh token: in the OS's secret store, or where

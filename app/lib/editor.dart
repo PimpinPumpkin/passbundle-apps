@@ -480,6 +480,28 @@ class _ItemEditorState extends State<ItemEditor> {
     );
   }
 
+  /// What a field or a picker holds, in the same type either way (a picker's
+  /// own is heavier).
+  TextStyle? get _valueStyle => Theme.of(context).textTheme.bodyLarge;
+
+  /// The buttons at a field's end: the last one's glyph as far from the
+  /// box's edge as the text is from its start.
+  Widget _trailing(List<Widget> buttons) => Row(
+    mainAxisSize: MainAxisSize.min,
+    children: [...buttons, const SizedBox(width: 2)],
+  );
+
+  /// Shows or hides the secrets, as an item's page does.
+  Widget _showOrHide() => IconButton(
+    tooltip: hidden ? 'Show' : 'Hide',
+    icon: Glyph(
+      hidden ? Glyphs.eye : Glyphs.eyeOff,
+      size: 20,
+      color: context.colors.muted,
+    ),
+    onPressed: () => setState(() => hidden = !hidden),
+  );
+
   /// A text field for a detail; secrets are hidden until shown.
   Widget _detail(
     TextEditingController controller,
@@ -490,19 +512,10 @@ class _ItemEditorState extends State<ItemEditor> {
     controller: controller,
     obscureText: secret && hidden,
     keyboardType: keyboard,
-    decoration: InputDecoration(
-      labelText: label,
-      suffixIcon: secret
-          ? IconButton(
-              tooltip: hidden ? 'Show' : 'Hide',
-              icon: Icon(
-                hidden
-                    ? Icons.visibility_outlined
-                    : Icons.visibility_off_outlined,
-              ),
-              onPressed: () => setState(() => hidden = !hidden),
-            )
-          : null,
+    decoration: labeledField(
+      context,
+      label,
+      suffix: secret ? _trailing([_showOrHide()]) : null,
     ),
   );
 
@@ -513,7 +526,8 @@ class _ItemEditorState extends State<ItemEditor> {
     DropdownButtonFormField<String?>(
       initialValue: brand,
       isExpanded: true,
-      decoration: const InputDecoration(labelText: 'Brand'),
+      style: _valueStyle,
+      decoration: labeledField(context, 'Brand'),
       items: [
         const DropdownMenuItem(value: null, child: Text('None')),
         for (final b in {..._brands, ?brand})
@@ -533,7 +547,8 @@ class _ItemEditorState extends State<ItemEditor> {
       DropdownButtonFormField<String?>(
         initialValue: expMonth,
         isExpanded: true,
-        decoration: const InputDecoration(labelText: 'Expiration month'),
+        style: _valueStyle,
+        decoration: labeledField(context, 'Expiration month'),
         items: [
           const DropdownMenuItem(value: null, child: Text('None')),
           for (var m = 1; m <= 12; m++)
@@ -571,7 +586,7 @@ class _ItemEditorState extends State<ItemEditor> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             for (var i = 0; i < fields.length; i++) ...[
-              if (i > 0) const SizedBox(height: 12),
+              if (i > 0) const SizedBox(height: _between),
               fields[i],
             ],
           ],
@@ -580,7 +595,7 @@ class _ItemEditorState extends State<ItemEditor> {
       return Row(
         children: [
           for (var i = 0; i < fields.length; i++) ...[
-            if (i > 0) const SizedBox(width: 12),
+            if (i > 0) const SizedBox(width: _between),
             Expanded(child: fields[i]),
           ],
         ],
@@ -628,7 +643,11 @@ class _ItemEditorState extends State<ItemEditor> {
     final f = fields[i];
     final menu = PopupMenuButton<String>(
       tooltip: 'More for ${f.name.text}',
-      icon: const Icon(Icons.more_vert_rounded),
+      icon: Icon(
+        Icons.more_vert_rounded,
+        size: 20,
+        color: context.colors.muted,
+      ),
       onSelected: (action) async {
         switch (action) {
           case 'rename':
@@ -662,46 +681,34 @@ class _ItemEditorState extends State<ItemEditor> {
         const PopupMenuItem(value: 'remove', child: Text('Remove')),
       ],
     );
+    // In the field's box, at its end, where the other fields' buttons are:
+    // every box is as wide as the next.
     if (f.boolean) {
-      return Row(
-        children: [
-          Expanded(
-            child: SwitchListTile(
-              value: f.yes,
-              onChanged: (v) => setState(() => f.yes = v),
-              title: Text(f.name.text),
-              contentPadding: const EdgeInsets.only(left: 4),
+      return FieldBox(
+        child: Row(
+          children: [
+            Expanded(
+              child: SwitchListTile(
+                value: f.yes,
+                onChanged: (v) => setState(() => f.yes = v),
+                title: Text(f.name.text),
+                contentPadding: const EdgeInsets.only(left: 16),
+              ),
             ),
-          ),
-          menu,
-        ],
+            menu,
+            const SizedBox(width: 2),
+          ],
+        ),
       );
     }
-    return Row(
-      children: [
-        Expanded(
-          child: TextField(
-            controller: f.value,
-            obscureText: f.hidden && hidden,
-            decoration: InputDecoration(
-              labelText: f.name.text,
-              suffixIcon: f.hidden
-                  ? IconButton(
-                      tooltip: hidden ? 'Show' : 'Hide',
-                      icon: Icon(
-                        hidden
-                            ? Icons.visibility_outlined
-                            : Icons.visibility_off_outlined,
-                      ),
-                      onPressed: () => setState(() => hidden = !hidden),
-                    )
-                  : null,
-            ),
-          ),
-        ),
-        const SizedBox(width: 4),
-        menu,
-      ],
+    return TextField(
+      controller: f.value,
+      obscureText: f.hidden && hidden,
+      decoration: labeledField(
+        context,
+        f.name.text,
+        suffix: _trailing([if (f.hidden) _showOrHide(), menu]),
+      ),
     );
   }
 
@@ -716,6 +723,34 @@ class _ItemEditorState extends State<ItemEditor> {
   Widget folderPicker() {
     final c = context.colors;
     final options = placeOptions;
+    Widget option(String value, String label, String glyph, int depth) {
+      final heading = value.startsWith('heading:');
+      return Padding(
+        padding: EdgeInsets.only(left: 18.0 * depth),
+        child: Row(
+          children: [
+            Glyph(
+              glyph,
+              size: 18,
+              color: heading
+                  ? Theme.of(context).colorScheme.onSurface
+                  : c.muted,
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                label,
+                overflow: TextOverflow.ellipsis,
+                style: heading
+                    ? const TextStyle(fontWeight: FontWeight.w700)
+                    : null,
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -723,36 +758,20 @@ class _ItemEditorState extends State<ItemEditor> {
           key: const ValueKey('folder-picker'),
           initialValue: place,
           isExpanded: true,
-          decoration: const InputDecoration(labelText: 'Folder'),
+          style: _valueStyle,
+          decoration: labeledField(context, 'Folder'),
+          // The one picked starts where the other fields' values do; in the
+          // list, each is set in under its owner.
+          selectedItemBuilder: (_) => [
+            for (final (value, label, glyph, _) in options)
+              option(value, label, glyph, 0),
+          ],
           items: [
             for (final (value, label, glyph, depth) in options)
               DropdownMenuItem(
                 value: value,
                 enabled: !value.startsWith('heading:'),
-                child: Padding(
-                  padding: EdgeInsets.only(left: 18.0 * depth),
-                  child: Row(
-                    children: [
-                      Glyph(
-                        glyph,
-                        size: 18,
-                        color: value.startsWith('heading:')
-                            ? Theme.of(context).colorScheme.onSurface
-                            : c.muted,
-                      ),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: Text(
-                          label,
-                          overflow: TextOverflow.ellipsis,
-                          style: value.startsWith('heading:')
-                              ? const TextStyle(fontWeight: FontWeight.w700)
-                              : null,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
+                child: option(value, label, glyph, depth),
               ),
           ],
           onChanged: placeLocked
@@ -763,15 +782,11 @@ class _ItemEditorState extends State<ItemEditor> {
                 },
         ),
         if (alsoIn.isNotEmpty || placeLocked)
-          Padding(
-            padding: const EdgeInsets.fromLTRB(4, 6, 4, 0),
-            child: Text(
-              [
-                if (alsoIn.isNotEmpty) 'Also in ${alsoIn.join(', ')}.',
-                if (placeLocked) 'Your organization doesn\'t let you move it to another shared folder.',
-              ].join(' '),
-              style: TextStyle(color: c.muted, fontSize: 13),
-            ),
+          _Footnote(
+            [
+              if (alsoIn.isNotEmpty) 'Also in ${alsoIn.join(', ')}.',
+              if (placeLocked) 'Your organization doesn\'t let you move it to another shared folder.',
+            ].join(' '),
           ),
       ],
     );
@@ -780,16 +795,8 @@ class _ItemEditorState extends State<ItemEditor> {
   @override
   Widget build(BuildContext context) {
     final c = context.colors;
-    Widget gap([double h = 12]) => SizedBox(height: h);
-    Widget label(String text) => Text(
-      text,
-      style: TextStyle(
-        color: c.muted,
-        fontSize: 12,
-        fontWeight: FontWeight.w600,
-      ),
-    );
-    final primary = Theme.of(context).colorScheme.primary;
+    final scheme = Theme.of(context).colorScheme;
+    Widget gap([double h = _between]) => SizedBox(height: h);
     return Scaffold(
       appBar: AppBar(
         title: Text(title),
@@ -810,210 +817,287 @@ class _ItemEditorState extends State<ItemEditor> {
           ),
         ],
       ),
-      body: ListView(
-        padding: const EdgeInsets.fromLTRB(20, 8, 20, 28),
+      body: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          if (error != null) ...[
-            Text(
-              error!,
-              style: TextStyle(color: Theme.of(context).colorScheme.error),
-            ),
-            gap(),
-          ],
-          TextField(
-            controller: name,
-            autofocus: !editing,
-            decoration: const InputDecoration(labelText: 'Name'),
-          ),
-          if (kind == 'card') ..._cardFields(gap),
-          if (kind == 'identity') ..._identityFields(gap),
-          if (kind == 'login') ...[
-            gap(),
-            TextField(
-              controller: username,
-              decoration: const InputDecoration(labelText: 'Username'),
-            ),
-            gap(),
-            TextField(
-              controller: password,
-              obscureText: hidden,
-              decoration: InputDecoration(
-                labelText: 'Password',
-                suffixIcon: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    IconButton(
-                      tooltip: hidden ? 'Show' : 'Hide',
-                      icon: Icon(
-                        hidden
-                            ? Icons.visibility_outlined
-                            : Icons.visibility_off_outlined,
-                      ),
-                      onPressed: () => setState(() => hidden = !hidden),
-                    ),
-                    IconButton(
-                      tooltip: 'Generate a password',
-                      icon: const Icon(Icons.casino_outlined),
-                      onPressed: () async {
-                        final made = await openGenerator(context, widget.core);
-                        if (made == null || !mounted) return;
-                        setState(() {
-                          password.text = made;
-                          hidden = false;
-                        });
-                      },
-                    ),
-                  ],
-                ),
+          // Why it wasn't saved, over the fields rather than among them: it
+          // shows wherever the form is scrolled to.
+          if (error != null)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(
+                _gutter + 4,
+                0,
+                _gutter + 4,
+                8,
               ),
-            ),
-            gap(),
-            TextField(
-              controller: totp,
-              decoration: const InputDecoration(
-                labelText: 'One-time code secret (optional)',
-                hintText: 'The key or otpauth:// address from the site',
-              ),
-            ),
-            gap(16),
-            label('Websites'),
-            for (var i = 0; i < uris.length; i++) ...[
-              gap(6),
-              TextField(
-                controller: uris[i],
-                // Someone who can't see the item's passwords can't change
-                // where autofill sends them (core: vault.rs, encrypt_item_from).
-                readOnly: !websitesEditable,
-                keyboardType: TextInputType.url,
-                decoration: InputDecoration(
-                  hintText: 'https://example.com',
-                  suffixIcon: websitesEditable
-                      ? IconButton(
-                          tooltip: 'Remove',
-                          icon: const Icon(Icons.remove_circle_outline),
-                          onPressed: () => setState(() => uris.removeAt(i)),
-                        )
-                      : null,
-                ),
-              ),
-            ],
-            if (websitesEditable)
-              Align(
-                alignment: Alignment.centerLeft,
-                child: TextButton.icon(
-                  onPressed: () =>
-                      setState(() => uris.add(TextEditingController())),
-                  icon: const Icon(Icons.add_rounded),
-                  label: const Text('Add a website'),
-                ),
-              )
-            else
-              Padding(
-                padding: const EdgeInsets.only(top: 6),
+              child: Semantics(
+                liveRegion: true,
                 child: Text(
-                  "Someone who can see this item's passwords can change its websites.",
-                  style: Theme.of(context).textTheme.bodySmall,
-                ),
-              ),
-          ],
-          gap(16),
-          // A template's fields, under its name, as in the web vault.
-          label(
-            template != null || templateName != null
-                ? '${template?['name'] ?? templateName} details'
-                : 'Custom fields',
-          ),
-          for (var i = 0; i < fields.length; i++) ...[gap(6), customField(i)],
-          Align(
-            alignment: Alignment.centerLeft,
-            child: PopupMenuButton<int>(
-              tooltip: 'Add a field',
-              onSelected: addField,
-              itemBuilder: (_) => [
-                for (final e in _fieldKinds.entries)
-                  PopupMenuItem(value: e.key, child: Text(e.value)),
-              ],
-              child: Padding(
-                padding: const EdgeInsets.symmetric(vertical: 10),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(Icons.add_rounded, size: 18, color: primary),
-                    const SizedBox(width: 8),
-                    Text(
-                      'Add a field',
-                      style: TextStyle(
-                        color: primary,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ],
+                  error!,
+                  style: TextStyle(color: scheme.error, height: 1.35),
                 ),
               ),
             ),
-          ),
-          gap(),
-          // When it expires, and when to be reminded (as the web vault's
-          // "Expires"): the reminders are the app's and the extension's.
-          TextField(
-            controller: expires,
-            keyboardType: TextInputType.datetime,
-            onChanged: (_) => setState(() {}),
-            decoration: InputDecoration(
-              labelText: 'Expires (optional)',
-              hintText: 'YYYY-MM-DD',
-              suffixIcon: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  if (expires.text.isNotEmpty)
-                    IconButton(
-                      tooltip: 'No expiration date',
-                      icon: const Icon(Icons.close_rounded),
-                      onPressed: () => setState(expires.clear),
+          Expanded(
+            child: ListView(
+              padding: const EdgeInsets.fromLTRB(_gutter, 4, _gutter, 28),
+              children: [
+                TextField(
+                  controller: name,
+                  autofocus: !editing,
+                  decoration: labeledField(context, 'Name'),
+                ),
+                if (kind == 'card') ..._cardFields(gap),
+                if (kind == 'identity') ..._identityFields(gap),
+                if (kind == 'login') ...[
+                  gap(),
+                  TextField(
+                    controller: username,
+                    decoration: labeledField(context, 'Username'),
+                  ),
+                  gap(),
+                  TextField(
+                    controller: password,
+                    obscureText: hidden,
+                    decoration: labeledField(
+                      context,
+                      'Password',
+                      suffix: _trailing([
+                        _showOrHide(),
+                        IconButton(
+                          tooltip: 'Generate a password',
+                          icon: Glyph(
+                            Glyphs.generator,
+                            size: 20,
+                            color: c.muted,
+                          ),
+                          onPressed: () async {
+                            final made = await openGenerator(
+                              context,
+                              widget.core,
+                            );
+                            if (made == null || !mounted) return;
+                            setState(() {
+                              password.text = made;
+                              hidden = false;
+                            });
+                          },
+                        ),
+                      ]),
                     ),
-                  IconButton(
-                    tooltip: 'Pick a date',
-                    icon: const Icon(Icons.event_outlined),
-                    onPressed: pickExpiry,
+                  ),
+                  gap(),
+                  TextField(
+                    controller: totp,
+                    decoration: labeledField(
+                      context,
+                      'One-time code secret (optional)',
+                      hint: 'The key or otpauth:// address from the site',
+                    ),
+                  ),
+                  const SectionHeading('Websites', padding: _heading),
+                  for (var i = 0; i < uris.length; i++) ...[
+                    if (i > 0) gap(),
+                    TextField(
+                      controller: uris[i],
+                      // Someone who can't see the item's passwords can't change
+                      // where autofill sends them (core: vault.rs, encrypt_item_from).
+                      readOnly: !websitesEditable,
+                      keyboardType: TextInputType.url,
+                      decoration: labeledField(
+                        context,
+                        'Website',
+                        hint: 'https://example.com',
+                        suffix: websitesEditable
+                            ? _trailing([
+                                IconButton(
+                                  tooltip: 'Remove',
+                                  icon: Icon(
+                                    Icons.remove_circle_outline,
+                                    size: 20,
+                                    color: c.muted,
+                                  ),
+                                  onPressed: () =>
+                                      setState(() => uris.removeAt(i)),
+                                ),
+                              ])
+                            : null,
+                      ),
+                    ),
+                  ],
+                  if (websitesEditable)
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: InkWell(
+                        borderRadius: BorderRadius.circular(10),
+                        onTap: () =>
+                            setState(() => uris.add(TextEditingController())),
+                        child: const _AddRow('Add a website'),
+                      ),
+                    )
+                  else
+                    const _Footnote(
+                      "Someone who can see this item's passwords can change its websites.",
+                    ),
+                ],
+                // A template's fields, under its name, as in the web vault.
+                SectionHeading(
+                  template != null || templateName != null
+                      ? '${template?['name'] ?? templateName} details'
+                      : 'Custom fields',
+                  padding: _heading,
+                ),
+                for (var i = 0; i < fields.length; i++) ...[
+                  if (i > 0) gap(),
+                  customField(i),
+                ],
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: PopupMenuButton<int>(
+                    tooltip: 'Add a field',
+                    onSelected: addField,
+                    itemBuilder: (_) => [
+                      for (final e in _fieldKinds.entries)
+                        PopupMenuItem(value: e.key, child: Text(e.value)),
+                    ],
+                    child: const _AddRow('Add a field'),
+                  ),
+                ),
+                gap(),
+                // When it expires, and when to be reminded (as the web vault's
+                // "Expires"): the reminders are the app's and the extension's.
+                TextField(
+                  controller: expires,
+                  keyboardType: TextInputType.datetime,
+                  onChanged: (_) => setState(() {}),
+                  decoration: labeledField(
+                    context,
+                    'Expires (optional)',
+                    hint: 'YYYY-MM-DD',
+                    suffix: _trailing([
+                      if (expires.text.isNotEmpty)
+                        IconButton(
+                          tooltip: 'No expiration date',
+                          icon: Icon(
+                            Icons.close_rounded,
+                            size: 20,
+                            color: c.muted,
+                          ),
+                          onPressed: () => setState(expires.clear),
+                        ),
+                      IconButton(
+                        tooltip: 'Pick a date',
+                        icon: Icon(
+                          Icons.event_outlined,
+                          size: 20,
+                          color: c.muted,
+                        ),
+                        onPressed: pickExpiry,
+                      ),
+                    ]),
+                  ),
+                ),
+                if (expires.text.trim().isNotEmpty) ...[
+                  gap(),
+                  DropdownButtonFormField<String>(
+                    key: const ValueKey('remind-me'),
+                    initialValue: remind,
+                    isExpanded: true,
+                    style: _valueStyle,
+                    decoration: labeledField(context, 'Remind me'),
+                    items: [
+                      for (final (value, words) in remindOptions)
+                        DropdownMenuItem(value: value, child: Text(words)),
+                    ],
+                    onChanged: (v) => setState(() => remind = v ?? ''),
                   ),
                 ],
-              ),
-            ),
-          ),
-          if (expires.text.trim().isNotEmpty) ...[
-            gap(),
-            DropdownButtonFormField<String>(
-              key: const ValueKey('remind-me'),
-              initialValue: remind,
-              isExpanded: true,
-              decoration: const InputDecoration(labelText: 'Remind me'),
-              items: [
-                for (final (value, words) in remindOptions)
-                  DropdownMenuItem(value: value, child: Text(words)),
+                gap(),
+                TextField(
+                  controller: notes,
+                  minLines: 3,
+                  maxLines: 8,
+                  decoration: labeledField(context, 'Notes'),
+                ),
+                gap(),
+                folderPicker(),
+                gap(),
+                FieldBox(
+                  child: SwitchListTile(
+                    value: favorite,
+                    onChanged: (v) => setState(() => favorite = v),
+                    title: const Text('Favorite'),
+                    contentPadding: _switchInset,
+                  ),
+                ),
               ],
-              onChanged: (v) => setState(() => remind = v ?? ''),
             ),
-          ],
-          gap(),
-          TextField(
-            controller: notes,
-            minLines: 3,
-            maxLines: 8,
-            decoration: const InputDecoration(labelText: 'Notes'),
-          ),
-          gap(16),
-          folderPicker(),
-          gap(),
-          SwitchListTile(
-            value: favorite,
-            onChanged: (v) => setState(() => favorite = v),
-            title: const Text('Favorite'),
-            contentPadding: EdgeInsets.zero,
           ),
         ],
       ),
     );
   }
+}
+
+/// The editor's spacing, on the scale an item's page and Settings use: 16
+/// from the screen's edge to a box, 16 more to what's in it, 12 between one
+/// field and the next, and a heading over each section as Settings' groups
+/// have theirs.
+const _gutter = 16.0;
+const _between = 12.0;
+const _heading = EdgeInsets.fromLTRB(4, 20, 4, 8);
+
+/// A switch row in a box: its title where the fields' text starts.
+const _switchInset = EdgeInsets.only(left: 16, right: 12);
+
+/// "Add a website" and "Add a field": one look, starting where the
+/// headings do.
+class _AddRow extends StatelessWidget {
+  const _AddRow(this.label);
+
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    final primary = Theme.of(context).colorScheme.primary;
+    return ConstrainedBox(
+      constraints: const BoxConstraints(minHeight: 44),
+      child: Padding(
+        padding: const EdgeInsets.only(right: 10),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Glyph(Glyphs.plus, size: 18, color: primary),
+            const SizedBox(width: 8),
+            Text(
+              label,
+              style: TextStyle(
+                color: primary,
+                fontSize: 15,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// A line under a field or a section, as Settings' groups have theirs.
+class _Footnote extends StatelessWidget {
+  const _Footnote(this.text);
+
+  final String text;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.fromLTRB(4, 8, 4, 0),
+    child: Text(
+      text,
+      style: TextStyle(color: context.colors.muted, fontSize: 13, height: 1.35),
+    ),
+  );
 }
 
 /// The kinds of custom field, as the editor offers them.

@@ -283,6 +283,8 @@ class Core {
   late final _totp = _lib.lookupFunction<_Str2, _Str2>('pb_totp');
   late final _save = _lib.lookupFunction<_Str3, _Str3>('pb_save');
   late final _trash = _lib.lookupFunction<_Str2, _Str2>('pb_trash');
+  late final _bulkPlan = _lib.lookupFunction<_Str3, _Str3>('pb_bulk_plan');
+  late final _bulk = _lib.lookupFunction<_Str4, _Str4>('pb_bulk');
   late final _createFolder = _lib.lookupFunction<_Str2, _Str2>('pb_create_folder');
   late final _renameFolder = _lib.lookupFunction<_Str3, _Str3>('pb_rename_folder');
   late final _deleteFolder = _lib.lookupFunction<_Str2, _Str2>('pb_delete_folder');
@@ -914,6 +916,37 @@ class Core {
 
   static Future<Answer> trash(String id) => _background(
     (c, a) => c._with([a, id], (p) => c._answer(c._trash(p[0], p[1]))),
+  );
+
+  /// What [bulk] would do with several items, from the vault kept here with
+  /// nothing sent: `go`, the ids it would be done for, and `skipped`, each
+  /// item it would leave as it is, with `why`. [action] is what to do:
+  /// `{do: 'favorite', favorite}`, `{do: 'trash'}`, `{do: 'folder',
+  /// folderId}`, or `{do: 'sharedFolder', to, from}`.
+  Answer bulkPlan(List<String> ids, Map<String, dynamic> action) => Answer(
+    _with([
+          account,
+          jsonEncode(ids),
+          jsonEncode(action),
+        ], (p) => _answer(_bulkPlan(p[0], p[1], p[2])))
+        as Map<String, dynamic>,
+  );
+
+  /// Does one thing to several items, then syncs once. [password] is the
+  /// master password, for the items that ask for it; without it they're
+  /// left as they are, and a wrong one does nothing. Answers `done`,
+  /// `skipped` (as [bulkPlan]), and `failed`, with the words to show.
+  static Future<Answer> bulk(
+    List<String> ids,
+    Map<String, dynamic> action, {
+    String password = '',
+  }) => _background(
+    (c, a) => c._with([
+      a,
+      jsonEncode(ids),
+      jsonEncode(action),
+      password,
+    ], (p) => c._answer(c._bulk(p[0], p[1], p[2], p[3]))),
   );
 
   /// Makes a folder, renames one, or deletes one (its items stay, in no
