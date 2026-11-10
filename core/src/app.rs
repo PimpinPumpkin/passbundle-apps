@@ -660,8 +660,7 @@ impl App {
             );
         }
         self.store.save_settings(settings)?;
-        self.secrets
-            .keep(&settings.server, &settings.email, &session.refresh_token);
+        keep_refresh_token(&*self.secrets, &self.store, settings, &session);
         self.session = Some(session);
         self.sync()?;
         self.autolock = AutoLock::new(Instant::now(), SystemTime::now());
@@ -680,9 +679,7 @@ impl App {
 
     fn opened(&mut self, vault: Vault) {
         let settings = self.settings.as_ref().expect("checked before opening");
-        self.session = self
-            .secrets
-            .get(&settings.server, &settings.email)
+        self.session = kept_refresh_token(&*self.secrets, &self.store, settings, vault.user_key())
             .map(|refresh_token| Session {
                 access_token: Default::default(),
                 refresh_token,
@@ -777,20 +774,24 @@ impl App {
     }
 
     /// Turns it off (for the extension too: it's one enrollment). On Android
-    /// the app's own Keystore key and the user key it sealed go instead, and
-    /// on iOS the Keychain item: this account's, by its id on this device.
+    /// the app's own Keystore key and the user key it sealed go instead, on
+    /// iOS the Keychain item, and in the Mac app the user key sealed to the
+    /// Secure Enclave (its Swift): this account's, by its id on this device.
     pub fn remove_biometric(&self) -> Result<()> {
         #[cfg(target_os = "android")]
         {
             crate::android::remove_biometric(&self.id);
             Ok(())
         }
-        #[cfg(all(target_os = "ios", feature = "ffi"))]
+        #[cfg(all(any(target_os = "ios", target_os = "macos"), feature = "ffi"))]
         {
             crate::ffi::remove_biometric(&self.id);
             Ok(())
         }
-        #[cfg(not(any(target_os = "android", all(target_os = "ios", feature = "ffi"))))]
+        #[cfg(not(any(
+            target_os = "android",
+            all(any(target_os = "ios", target_os = "macos"), feature = "ffi")
+        )))]
         self.agent()?.remove()
     }
 
@@ -815,22 +816,21 @@ impl App {
         let (sync, text) = match synced {
             Err(Error::SignedOut) => {
                 self.session = None;
-                self.secrets.forget(&settings.server, &settings.email);
+                forget_refresh_token(&*self.secrets, &self.store, settings);
                 return Err(Error::SignedOut);
             }
             other => other?,
         };
         if let Err(e) = same_account(kept.as_deref(), &sync.profile.id) {
             self.session = None;
-            self.secrets.forget(&settings.server, &settings.email);
+            forget_refresh_token(&*self.secrets, &self.store, settings);
             return Err(e);
         }
         self.store.save_sync(&text)?;
         self.policy = LockPolicy::from_sync(&text);
         self.generator_policy = GeneratorPolicy::from_sync(&text);
         // The server may have issued a new refresh token.
-        self.secrets
-            .keep(&settings.server, &settings.email, &session.refresh_token);
+        keep_refresh_token(&*self.secrets, &self.store, settings, session);
         self.vault = Some(Vault::open(&sync, session.user_key().clone())?);
         // A server without them, or one that's gone for a moment, leaves the
         // generator's settings as they are here.
@@ -1159,7 +1159,7 @@ impl App {
             self.tell_agent(crate::expiration::Counts::default());
         }
         if let Some(s) = &self.settings {
-            self.secrets.forget(&s.server, &s.email);
+            forget_refresh_token(&*self.secrets, &self.store, s);
         }
         self.store.forget_vault();
         self.lock();
@@ -1512,15 +1512,14 @@ impl App {
         let download = match server.attachment_download(session, id, attachment_id) {
             Err(Error::SignedOut) => {
                 self.session = None;
-                self.secrets.forget(&settings.server, &settings.email);
+                forget_refresh_token(&*self.secrets, &self.store, settings);
                 return Err(Error::SignedOut);
             }
             other => other?,
         };
         // Asking may have refreshed the session, and the server may have
         // issued a new refresh token, as for a sync.
-        self.secrets
-            .keep(&settings.server, &settings.email, &session.refresh_token);
+        keep_refresh_token(&*self.secrets, &self.store, settings, session);
         Ok(AttachmentFile {
             name,
             key,
@@ -2366,6 +2365,57 @@ impl SignInRequestsCall {
     pub fn fetch_new_devices(&self) -> Result<serde_json::Value> {
         self.server.waiting_new_devices(&self.access_token)
     }
+}
+
+/// Keeps the session's refresh token: in the OS's secret store, or where
+/// that doesn't keep them (the Mac's: secrets.rs), sealed under a key from
+/// the account's user key in the account's folder.
+fn keep_refresh_token(
+    secrets: &dyn SecretStore,
+    store: &Store,
+    settings: &Settings,
+    session: &Session,
+) {
+    if secrets.keeps_refresh_tokens() {
+        secrets.keep(&settings.server, &settings.email, &session.refresh_token);
+    } else {
+        let sealed = crate::secrets::seal_refresh_token(session.user_key(), &session.refresh_token);
+        if let Err(e) = store.save_sealed_refresh_token(&sealed) {
+            // Nothing to stop for: the session goes on, and at worst the
+            // next unlock asks to sign in again. Said on standard error,
+            // without the token, so a run from a terminal shows why.
+            use std::io::Write;
+            let why = match e {
+                Error::Disk { full: true } => "this device is out of space",
+                _ => "its folder couldn't be written",
+            };
+            let _ = writeln!(
+                std::io::stderr(),
+                "PassBundle: the session wasn't kept for next time ({why}), so the next unlock may ask to sign in again."
+            );
+        }
+    }
+}
+
+/// The refresh token kept for the account, with its vault just opened by
+/// `user_key`: a sealed one opens only with it.
+fn kept_refresh_token(
+    secrets: &dyn SecretStore,
+    store: &Store,
+    settings: &Settings,
+    user_key: &SymmetricKey,
+) -> Option<Zeroizing<String>> {
+    if secrets.keeps_refresh_tokens() {
+        secrets.get(&settings.server, &settings.email)
+    } else {
+        crate::secrets::open_refresh_token(user_key, &store.sealed_refresh_token()?)
+    }
+}
+
+/// Forgets the account's refresh token, wherever it's kept.
+fn forget_refresh_token(secrets: &dyn SecretStore, store: &Store, settings: &Settings) {
+    secrets.forget(&settings.server, &settings.email);
+    store.forget_sealed_refresh_token();
 }
 
 /// A sync is for the account whose vault is kept here, by its id on the

@@ -219,7 +219,7 @@ fn lock_if_due(accounts: &mut Accounts) {
 
 /// The accounts, for a phone's native code: None while a slow call has
 /// them, or before the core is open.
-#[cfg(phone)]
+#[cfg(any(phone, target_os = "macos"))]
 fn accounts_now() -> Option<MutexGuard<'static, Option<Accounts>>> {
     match APP.try_lock() {
         Ok(guard) => Some(guard),
@@ -1073,7 +1073,7 @@ pub unsafe extern "C" fn pb_lock(account: *const c_char) -> *mut c_char {
 /// An account's app, for a phone's native code, after locking each account
 /// whose time is up: None while a slow call has the app, before the core is
 /// open, or for an account that isn't here.
-#[cfg(phone)]
+#[cfg(any(phone, target_os = "macos"))]
 fn on_phone<T>(account: &str, call: impl FnOnce(&mut App) -> Option<T>) -> Option<T> {
     let mut guard = accounts_now()?;
     let accounts = guard.as_mut()?;
@@ -1127,12 +1127,12 @@ pub unsafe extern "C" fn pb_secret(
     Box::into_raw(bytes).cast()
 }
 
-/// Wipes and frees what `pb_secret` returned.
+/// Wipes and frees what `pb_secret` or `pb_user_key` returned.
 ///
 /// # Safety
-/// `bytes` and `len` are what `pb_secret` returned and set, or null, and
-/// aren't used after.
-#[cfg(target_os = "ios")]
+/// `bytes` and `len` are what `pb_secret` or `pb_user_key` returned and set,
+/// or null, and aren't used after.
+#[cfg(any(target_os = "ios", target_os = "macos"))]
 #[no_mangle]
 pub unsafe extern "C" fn pb_free_secret(bytes: *mut u8, len: usize) {
     if bytes.is_null() {
@@ -1142,16 +1142,18 @@ pub unsafe extern "C" fn pb_free_secret(bytes: *mut u8, len: usize) {
     zeroize::Zeroize::zeroize(&mut *owned);
 }
 
-/// An unlocked account's user key, for the iOS app's Swift to keep in the
-/// Keychain for unlocking that account with Face ID or Touch ID
-/// (docs/phones.md, "Unlocking with biometrics"), without passing through
-/// Dart; null while it's locked or busy. `len` gets its length. Free it with
+/// An unlocked account's user key, for the app's Swift to keep for
+/// unlocking that account with Face ID or Touch ID, without passing through
+/// Dart: on iOS in the Keychain (docs/phones.md, "Unlocking with
+/// biometrics"), on the Mac sealed to a Secure Enclave key (the meta repo's
+/// docs/core.md, "The Mac without an Apple developer account"); null while
+/// it's locked or busy. `len` gets its length. Free it with
 /// `pb_free_secret`, which wipes it.
 ///
 /// # Safety
 /// `account` is a NUL-terminated UTF-8 string, and `len` points to writable
 /// memory, for the call.
-#[cfg(target_os = "ios")]
+#[cfg(any(target_os = "ios", target_os = "macos"))]
 #[no_mangle]
 pub unsafe extern "C" fn pb_user_key(account: *const c_char, len: *mut usize) -> *mut u8 {
     let Some(key) = user_key_for_biometric(&text(account)) else {
@@ -1162,15 +1164,16 @@ pub unsafe extern "C" fn pb_user_key(account: *const c_char, len: *mut usize) ->
     Box::into_raw(bytes).cast()
 }
 
-/// Opens an account's kept vault with the user key Swift read from that
-/// account's Keychain item after Face ID or Touch ID: "" if it opened, else
+/// Opens an account's kept vault with the user key Swift opened after Face
+/// ID or Touch ID (the account's Keychain item on iOS, its Secure Enclave
+/// seal on the Mac): "" if it opened, else
 /// the words to show. A key that no longer opens it means biometric unlock
 /// is out of date, and is turned off. Free the answer with `pb_free`.
 ///
 /// # Safety
 /// `account` is a NUL-terminated UTF-8 string, and `key` points to `len`
 /// readable bytes, for the call.
-#[cfg(target_os = "ios")]
+#[cfg(any(target_os = "ios", target_os = "macos"))]
 #[no_mangle]
 pub unsafe extern "C" fn pb_unlock_with_key(
     account: *const c_char,
@@ -1185,15 +1188,15 @@ pub unsafe extern "C" fn pb_unlock_with_key(
     CString::new(why).unwrap_or_default().into_raw()
 }
 
-/// The user key Swift read from an account's Keychain item after Face ID or
-/// Touch ID, given back to confirm it's the person approving a sign-in to
-/// that account, never to unlock: "" if it's that account's open vault's,
-/// else the words to show. Free the answer with `pb_free`.
+/// The user key Swift opened after Face ID or Touch ID, as for
+/// `pb_unlock_with_key`, given back to confirm it's the person approving a
+/// sign-in to that account, never to unlock: "" if it's that account's open
+/// vault's, else the words to show. Free the answer with `pb_free`.
 ///
 /// # Safety
 /// `account` is a NUL-terminated UTF-8 string, and `key` points to `len`
 /// readable bytes, for the call.
-#[cfg(target_os = "ios")]
+#[cfg(any(target_os = "ios", target_os = "macos"))]
 #[no_mangle]
 pub unsafe extern "C" fn pb_confirm_approval_with_key(
     account: *const c_char,
@@ -1209,23 +1212,24 @@ pub unsafe extern "C" fn pb_confirm_approval_with_key(
 }
 
 /// What Swift does when the core turns an account's biometric unlock off
-/// (signing out, or a key that's out of date): it deletes that account's
-/// Keychain item. Swift sets it at start.
-#[cfg(target_os = "ios")]
+/// (signing out, or a key that's out of date): it deletes what it keeps for
+/// that account (its Keychain item on iOS, its sealed key on the Mac). Swift
+/// sets it at start.
+#[cfg(any(target_os = "ios", target_os = "macos"))]
 static REMOVE_BIOMETRIC: std::sync::OnceLock<extern "C" fn(*const c_char)> =
     std::sync::OnceLock::new();
 
 /// Swift's function to turn an account's biometric unlock off (it's given
 /// the account's id on this device), set once at start.
-#[cfg(target_os = "ios")]
+#[cfg(any(target_os = "ios", target_os = "macos"))]
 #[no_mangle]
 pub extern "C" fn pb_set_remove_biometric(remove: extern "C" fn(*const c_char)) {
     let _ = REMOVE_BIOMETRIC.set(remove);
 }
 
-/// Turns an account's biometric unlock off on iOS: Swift deletes its
-/// Keychain item.
-#[cfg(target_os = "ios")]
+/// Turns an account's biometric unlock off on iOS and the Mac: Swift
+/// deletes what it keeps for it.
+#[cfg(any(target_os = "ios", target_os = "macos"))]
 pub(crate) fn remove_biometric(account: &str) {
     let Some(remove) = REMOVE_BIOMETRIC.get() else {
         return;
@@ -1454,7 +1458,7 @@ pub(crate) fn unlock_with_master_password(account: &str, password: &str) -> Valu
 /// An unlocked account's user key, for the phone app to seal for that
 /// account's biometric unlock (android.rs, or `pb_user_key` for iOS's
 /// Keychain). None while it's locked or busy.
-#[cfg(phone)]
+#[cfg(any(phone, target_os = "macos"))]
 pub(crate) fn user_key_for_biometric(account: &str) -> Option<Zeroizing<Vec<u8>>> {
     on_phone(account, |app| {
         Some(Zeroizing::new(app.vault()?.user_key().to_bytes().to_vec()))
@@ -1463,7 +1467,7 @@ pub(crate) fn user_key_for_biometric(account: &str) -> Option<Zeroizing<Vec<u8>>
 
 /// The account a phone's biometric key is given back to, after its prompt:
 /// the error's words when it isn't here or the core is busy.
-#[cfg(phone)]
+#[cfg(any(phone, target_os = "macos"))]
 fn for_biometric(
     account: &str,
     key: &[u8],
@@ -1495,7 +1499,7 @@ fn for_biometric(
 /// `pb_confirm_approval_with_key` for iOS): never to unlock. The error's
 /// words otherwise; a key that isn't that account's open vault's turns its
 /// biometric unlock off, as unlocking does.
-#[cfg(phone)]
+#[cfg(any(phone, target_os = "macos"))]
 pub(crate) fn confirm_approval_with_key_for_biometric(
     account: &str,
     key: &[u8],
@@ -1507,7 +1511,7 @@ pub(crate) fn confirm_approval_with_key_for_biometric(
 /// biometric unlock opened, from that account's own Keystore key or Keychain
 /// item (android.rs, or `pb_unlock_with_key` for iOS); the error's words
 /// otherwise.
-#[cfg(phone)]
+#[cfg(any(phone, target_os = "macos"))]
 pub(crate) fn unlock_with_key_for_biometric(account: &str, key: &[u8]) -> Result<(), String> {
     for_biometric(account, key, App::unlock_with_key)
 }

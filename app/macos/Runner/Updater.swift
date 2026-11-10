@@ -5,7 +5,7 @@
 // Settings. On a click it's downloaded over HTTPS by the app itself, checked
 // against the release's SHA256SUMS, unpacked, and checked to be PassBundle at
 // the release's version, signed so that it meets this copy's own designated
-// requirement (the same certificate, so the keychain keeps trusting it).
+// requirement (the same certificate).
 // Then this copy goes to the Trash, the new one takes its place, and
 // PassBundle restarts.
 //

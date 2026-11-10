@@ -383,9 +383,50 @@ class MainFlutterWindow: NSWindow {
       result(true)
     case "updateReveal":
       result(updater.reveal())
+    // Unlocking with Touch ID (TouchID.swift), each account its own, as the
+    // iPhone app's calls are (app/ios/Runner/AppDelegate.swift).
+    case "biometricStatus":
+      let account = arguments?["account"] as? String ?? ""
+      result(["status": core() == nil ? "unsupported" : TouchID.status(account: account), "method": TouchID.method])
+    case "biometricEnroll":
+      guard let core = core() else { return result(["ok": false, "on": false, "error": TouchID.off]) }
+      TouchID.enroll(account: arguments?["account"] as? String ?? "", core: core) { on, error in
+        result(["ok": error == nil, "on": on, "error": error as Any])
+      }
+    case "biometricUnlock":
+      guard let core = core() else { return result(["ok": false, "unlocked": false, "error": TouchID.off]) }
+      TouchID.unlock(account: arguments?["account"] as? String ?? "", core: core) { unlocked, error in
+        result(["ok": error == nil, "unlocked": unlocked, "error": error as Any])
+      }
+    // Confirming it's the person, to approve a sign-in from another device.
+    case "biometricConfirmApproval":
+      guard let core = core() else { return result(["ok": false, "confirmed": false, "error": TouchID.off]) }
+      TouchID.unlock(
+        account: arguments?["account"] as? String ?? "", core: core, reason: "approve a sign-in", forApproval: true
+      ) { confirmed, error in
+        result(["ok": error == nil, "confirmed": confirmed, "error": error as Any])
+      }
+    case "biometricRemove":
+      TouchID.remove(account: arguments?["account"] as? String ?? "")
+      result(["ok": true])
     default:
       result(FlutterMethodNotImplemented)
     }
+  }
+
+  /// The core Dart opened, for Touch ID, found the first time it's needed
+  /// (Dart opens it before anything asks): it's told how to turn an
+  /// account's Touch ID off, which signing out does.
+  private var loadedCore: LoadedCore?
+  private func core() -> LoadedCore? {
+    if loadedCore == nil, let found = LoadedCore.find() {
+      found.onRemove { account in
+        guard let account else { return }
+        TouchID.remove(account: String(cString: account))
+      }
+      loadedCore = found
+    }
+    return loadedCore
   }
 
   /// The new version is in place: the old copy's desktop agent stops (the

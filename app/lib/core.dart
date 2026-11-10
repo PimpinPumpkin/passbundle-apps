@@ -82,6 +82,26 @@ DynamicLibrary _open() {
 /// browser extension sharing it.
 bool get isPhone => debugPhone ?? (Platform.isAndroid || Platform.isIOS);
 
+/// The Mac app, whose Touch ID is its own too (app/macos/Runner/TouchID.swift),
+/// not the desktop agent's, until the app is signed with an Apple developer
+/// team (the meta repo's docs/core.md, "The Mac without an Apple developer
+/// account"). Tests on a Mac keep the computer's way unless they ask for this.
+bool get isMac => debugMac ?? (Platform.isMacOS && _notTesting);
+
+/// Tests only: the Mac's Touch ID, with a stand-in for its Swift (its method
+/// channel). Null is what this is.
+@visibleForTesting
+bool? debugMac;
+
+/// Biometric unlock is the app's own, through its native code: a phone's
+/// biometrics, and the Mac's Touch ID. Elsewhere it's the desktop agent's.
+bool get ownBiometrics => isPhone || isMac;
+
+/// Not tests: flutter test runs on computers too. A product build never takes
+/// FLUTTER_TEST from its environment.
+final _notTesting =
+    product || !Platform.environment.containsKey('FLUTTER_TEST');
+
 /// Tests only: the phone's screens and words on a computer, with a stand-in
 /// for the phone's own code (its method channel). Null is what this is.
 @visibleForTesting
@@ -732,12 +752,13 @@ class Core {
         ], (p) => c._answer(c._save(p[0], p[1], p[2]))),
       );
 
-  /// Unlocking with Windows Hello or Touch ID, through the desktop agent, or
-  /// on a phone with its own biometrics, through the app's Kotlin or Swift:
-  /// `status` is setUp, notSetUp, unavailable, or noAgent, and `method` its name.
+  /// Unlocking with Windows Hello through the desktop agent, or with the
+  /// phone's own biometrics or the Mac's Touch ID, through the app's Kotlin or
+  /// Swift: `status` is setUp, notSetUp, unavailable, noAgent, or unsupported
+  /// (not offered here), and `method` its name.
   static Future<Map<String, dynamic>> biometricStatus([String? id]) async {
     final asked = id ?? account;
-    if (isPhone) return _onPhone('biometricStatus', {'account': asked});
+    if (ownBiometrics) return _onPhone('biometricStatus', {'account': asked});
     return Map<String, dynamic>.from(
       await Isolate.run(() {
         final core = Core();
@@ -817,15 +838,15 @@ class Core {
       _background((c, _) => c._answer(c._startAgent()));
 
   /// Turns it on for the account the screens show (the agent asks, or the
-  /// phone); `on` says whether the person agreed.
-  static Future<Answer> enrollBiometric() async => isPhone
+  /// phone or the Mac); `on` says whether the person agreed.
+  static Future<Answer> enrollBiometric() async => ownBiometrics
       ? Answer(await _onPhone('biometricEnroll', {'account': account}))
       : _background(
           (c, a) => c._with([a], (p) => c._answer(c._bioEnroll(p[0]))),
         );
 
   /// Unlocks that account with it; `unlocked` is false if the person cancelled.
-  static Future<Answer> unlockWithBiometric() async => isPhone
+  static Future<Answer> unlockWithBiometric() async => ownBiometrics
       ? Answer(await _onPhone('biometricUnlock', {'account': account}))
       : _background(
           (c, a) => c._with([a], (p) => c._answer(c._bioUnlock(p[0]))),
@@ -839,7 +860,7 @@ class Core {
   /// person cancelled.
   static Future<Answer> confirmApprovalWithBiometric([String? id]) async {
     final asked = id;
-    return isPhone
+    return ownBiometrics
         ? Answer(
             await _onPhone('biometricConfirmApproval', {
               'account': asked ?? account,
@@ -853,8 +874,8 @@ class Core {
   }
 
   /// Turns it off for the account the screens show, for the browser
-  /// extension too (on a computer).
-  static Future<Answer> removeBiometric() async => isPhone
+  /// extension too (through the desktop agent).
+  static Future<Answer> removeBiometric() async => ownBiometrics
       ? Answer(await _onPhone('biometricRemove', {'account': account}))
       : _background(
           (c, a) => c._with([a], (p) => c._answer(c._bioRemove(p[0]))),
