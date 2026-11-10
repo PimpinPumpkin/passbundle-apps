@@ -211,8 +211,7 @@ void main() {
   }
 
   const configuration = 'GET /api/config';
-  const firstStep =
-      'POST /identity/accounts/register/send-verification-email';
+  const firstStep = 'POST /identity/accounts/register/send-verification-email';
 
   testWidgets(
     'a server that takes new accounts is offered the form, as before',
@@ -289,23 +288,22 @@ void main() {
     },
   );
 
-  testWidgets(
-    'the link to the contact page is https or it isn\'t there',
-    (tester) async {
-      final ours = await StandIn.start(tester);
-      ours.says(closed: true);
-      await open(tester, ours.url, page: 'http://passbundle.com/contact/');
-      await pumpUntil(tester, inWhatsSaid(notOpenYet));
-      expect(link, findsNothing);
-      expect(find.text(askForOne), findsNothing);
+  testWidgets('the link to the contact page is https or it isn\'t there', (
+    tester,
+  ) async {
+    final ours = await StandIn.start(tester);
+    ours.says(closed: true);
+    await open(tester, ours.url, page: 'http://passbundle.com/contact/');
+    await pumpUntil(tester, inWhatsSaid(notOpenYet));
+    expect(link, findsNothing);
+    expect(find.text(askForOne), findsNothing);
 
-      // And with no page at all.
-      await tester.pumpWidget(const SizedBox());
-      await open(tester, ours.url, page: null);
-      await pumpUntil(tester, inWhatsSaid(notOpenYet));
-      expect(link, findsNothing);
-    },
-  );
+    // And with no page at all.
+    await tester.pumpWidget(const SizedBox());
+    await open(tester, ours.url, page: null);
+    await pumpUntil(tester, inWhatsSaid(notOpenYet));
+    expect(link, findsNothing);
+  });
 
   testWidgets(
     'someone\'s own server, closed: no form, and the person who runs it is who to ask',
@@ -425,7 +423,8 @@ void main() {
       expect(find.text('Create account'), findsOneWidget);
 
       // Something that isn't a PassBundle server.
-      ours.config = '<!DOCTYPE html><html><body>Welcome to nginx!</body></html>';
+      ours.config =
+          '<!DOCTYPE html><html><body>Welcome to nginx!</body></html>';
       await tester.pumpWidget(const SizedBox());
       await open(tester, ours.url);
       await wait(tester, () => ours.asked.length == 3);

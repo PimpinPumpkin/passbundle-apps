@@ -234,6 +234,7 @@ class _SignInScreenState extends State<SignInScreen> {
     serverFocus.dispose();
     super.dispose();
   }
+
   late final email = TextEditingController(text: widget.email ?? '');
   final password = TextEditingController();
   String? error;
@@ -474,9 +475,12 @@ class _SignInScreenState extends State<SignInScreen> {
         const SizedBox(height: 8),
         if (closedHere)
           // The server takes no new accounts: who to ask, not a form that
-          // can only fail.
+          // can only fail. With the link, as tall as "Create account", so
+          // nothing moves as the answer comes.
           Padding(
-            padding: const EdgeInsets.symmetric(vertical: 6),
+            padding: EdgeInsets.symmetric(
+              vertical: onOurs && contactPage != null ? 0 : 12,
+            ),
             child: _noNewAccounts('closed'),
           )
         else
@@ -663,6 +667,7 @@ class _SignInScreenState extends State<SignInScreen> {
     };
     final page = onOurs ? contactPage : null;
     final theme = Theme.of(context);
+    final small = theme.textTheme.bodySmall;
     return Column(
       key: const ValueKey('no-new-accounts'),
       crossAxisAlignment: underEmail
@@ -672,21 +677,30 @@ class _SignInScreenState extends State<SignInScreen> {
         Wrap(
           alignment: underEmail ? WrapAlignment.start : WrapAlignment.center,
           crossAxisAlignment: WrapCrossAlignment.center,
-          spacing: 4,
           children: [
             Text(
               words,
               textAlign: underEmail ? TextAlign.start : TextAlign.center,
               style: underEmail
-                  ? theme.textTheme.bodySmall?.copyWith(
-                      color: theme.colorScheme.error,
-                    )
+                  ? small?.copyWith(color: theme.colorScheme.error)
                   : null,
             ),
             if (page != null)
+              // Next to the sentence, as a link in it; under the email, at
+              // the sentence's size.
               TextButton(
                 key: const ValueKey('ask-for-account'),
                 onPressed: working ? null : () => askForOne(page),
+                style: underEmail
+                    ? TextButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(horizontal: 6),
+                        minimumSize: const Size(0, 32),
+                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        textStyle: small?.copyWith(fontWeight: FontWeight.w600),
+                      )
+                    : TextButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(horizontal: 6),
+                      ),
                 child: const Text(_askForOne),
               ),
           ],
