@@ -130,7 +130,7 @@ class _BiometricOfferState extends State<BiometricOffer> {
     setState(() {
       working = false;
       note = answer.ok
-          ? 'It wasn\'t turned on: ${widget.method} was cancelled.'
+          ? 'It wasn\'t turned on: ${widget.method} was canceled.'
           : answer.error;
     });
   }

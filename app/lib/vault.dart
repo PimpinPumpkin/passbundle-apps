@@ -2999,15 +2999,26 @@ class _ItemPaneState extends State<ItemPane> {
   bool may(Map<String, dynamic> item, String what) =>
       (item['permissions'] as Map?)?[what] == true;
 
+  /// The attachments being downloaded and saved: each one's button spins
+  /// until it's done.
+  final saving = <String>{};
+
   /// Downloads, opens, and saves an attachment to Downloads, through the core.
   Future<void> saveAttachment(String attachmentId, String name) async {
+    if (saving.contains(attachmentId)) return;
     if (asksAgain()) {
       setState(() {});
       return;
     }
-    final answer = await whileBusy(
-      () => Core.saveAttachment(widget.id, attachmentId, name),
-    );
+    setState(() => saving.add(attachmentId));
+    final Answer answer;
+    try {
+      answer = await whileBusy(
+        () => Core.saveAttachment(widget.id, attachmentId, name),
+      );
+    } finally {
+      if (mounted) setState(() => saving.remove(attachmentId));
+    }
     if (!mounted) return;
     showMessage(
       context,
@@ -3517,7 +3528,19 @@ class _ItemPaneState extends State<ItemPane> {
             if (a['opens'] != false)
               action(
                 'Save ${a['name']}',
-                Icon(Icons.download_rounded, size: 20, color: scheme.primary),
+                saving.contains(a['id'])
+                    ? SizedBox.square(
+                        dimension: 20,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          semanticsLabel: 'Saving ${a['name']}',
+                        ),
+                      )
+                    : Icon(
+                        Icons.download_rounded,
+                        size: 20,
+                        color: scheme.primary,
+                      ),
                 () => saveAttachment(a['id'] as String, a['name'] as String),
               ),
           ],

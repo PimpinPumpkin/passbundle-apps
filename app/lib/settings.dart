@@ -200,7 +200,7 @@ class _SettingsListState extends State<SettingsList> {
       if (!answer.ok) {
         note = answer.error;
       } else if (on && answer.body['on'] != true) {
-        note = 'It wasn\'t turned on: $method was cancelled.';
+        note = 'It wasn\'t turned on: $method was canceled.';
       }
     });
     await refresh();

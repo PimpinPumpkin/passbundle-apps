@@ -81,7 +81,7 @@ void main() {
       await tester.tap(find.text('Turn on'));
       await pumpUntil(
         tester,
-        find.text('It wasn\'t turned on: fingerprint was cancelled.'),
+        find.text('It wasn\'t turned on: fingerprint was canceled.'),
       );
       expect(phone.enrolled, 1);
       expect(phone.status, 'notSetUp');
