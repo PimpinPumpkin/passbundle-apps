@@ -1845,8 +1845,9 @@ impl App {
         Ok(name.to_owned())
     }
 
-    /// The logins with a passkey for a site (by its ID), that the core can
-    /// sign with, for a phone's list of passkeys (docs/phones.md, "Passkeys").
+    /// The logins in use with a passkey for a site (by its ID), that the core
+    /// can sign with, for a phone's list of passkeys (docs/phones.md,
+    /// "Passkeys"). Not one in the trash or archived.
     pub fn passkeys_for(&self, rp_id: &str) -> Vec<&Item> {
         let Some(vault) = self.vault.as_ref() else {
             return Vec::new();
@@ -1854,7 +1855,7 @@ impl App {
         vault
             .items
             .iter()
-            .filter(|i| !i.deleted)
+            .filter(|i| i.in_use())
             .filter(|i| {
                 i.passkey
                     .as_ref()
@@ -1885,6 +1886,9 @@ impl App {
         }
         if item.deleted {
             return Err(Error::Refused("that login is in the trash"));
+        }
+        if item.archived {
+            return Err(Error::Refused("that login is archived"));
         }
         // Proof is what the caller just asked for, never an earlier grant.
         let verified = user_verified;

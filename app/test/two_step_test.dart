@@ -361,7 +361,7 @@ void main() {
     expect(find.text('Get a code by email at an***@example.test.'), findsOneWidget);
     await tester.tap(find.text('Email me a code'));
     await tester.pump();
-    expect(find.text('We emailed a code to an***@example.test.'), findsOneWidget);
+    expect(find.text('Your server emailed a code to an***@example.test.'), findsOneWidget);
     await tester.enterText(find.widgetWithText(TextField, 'Code'), '123456');
     await tester.tap(find.text('Continue'));
     await tester.pump();

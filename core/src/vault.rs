@@ -183,6 +183,8 @@ pub struct CipherData {
     #[serde(default)]
     pub favorite: bool,
     pub deleted_date: Option<String>,
+    /// When it was archived in the web vault, if it was.
+    pub archived_date: Option<String>,
     pub login: Option<LoginData>,
     pub fields: Option<Vec<FieldData>>,
     #[serde(default)]
@@ -456,6 +458,8 @@ pub struct Item {
     pub collection_ids: Vec<String>,
     pub favorite: bool,
     pub deleted: bool,
+    /// Archived (upstream's archive): kept, but out of the way (`in_use`).
+    pub archived: bool,
     pub username: Option<String>,
     pub uris: Vec<String>,
     /// How each of `uris` is matched for filling (matching.rs): None is the default.
@@ -665,6 +669,15 @@ pub const PLAIN_DETAILS: [&str; 10] = [
 ];
 
 impl Item {
+    /// In use: neither in the trash nor archived. Only these are listed and
+    /// searched, judged by Health, reminded about, and offered for filling
+    /// and as passkeys (the web vault's lists, search, and autofill leave
+    /// archived ones out too); the others stay in the vault as the server
+    /// sent them.
+    pub fn in_use(&self) -> bool {
+        !self.deleted && !self.archived
+    }
+
     /// Whether a value, by the name the app reveals and copies it with
     /// ("password", "field:2", "cardNumber", "bankAccount.iban"), is one of
     /// the item's secrets, which someone whose shared folder hides
@@ -1719,13 +1732,13 @@ impl Vault {
         self.keys.private.public_key_der()
     }
 
-    /// Items whose name, username, or websites contain every word of the
-    /// query, ignoring case. An empty query matches everything.
+    /// Items in use whose name, username, or websites contain every word of
+    /// the query, ignoring case. An empty query matches every one in use.
     pub fn search<'a>(&'a self, query: &str) -> Vec<&'a Item> {
         let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
         self.items
             .iter()
-            .filter(|i| !i.deleted)
+            .filter(|i| i.in_use())
             .filter(|i| {
                 let mut haystack = format!(
                     "{} {} {}",
@@ -1960,6 +1973,7 @@ impl Keyring {
             collection_ids: c.collection_ids.clone(),
             favorite: c.favorite,
             deleted: c.deleted_date.is_some(),
+            archived: c.archived_date.is_some(),
             username,
             uris,
             uri_matches,

@@ -169,7 +169,7 @@ void main() {
       await tester.tap(find.text('Email me a code'));
       await tester.pump();
       expect(shown.calls.asked, ['email']);
-      expect(find.text('We emailed a code to a***@example.test.'), findsOneWidget);
+      expect(find.text('Your server emailed a code to a***@example.test.'), findsOneWidget);
       expect(find.text('Code from the email'), findsOneWidget);
       expect(find.text('Send another code'), findsOneWidget);
 
