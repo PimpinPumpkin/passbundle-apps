@@ -169,7 +169,7 @@ jobs:
           persist-credentials: false
       - name: Each copy is the meta repo's
         run: |
-          for name in core-v1.json desktop-update-v1.json device-approval-v1.json mac-local-v1.json; do
+          for name in core-v1.json desktop-update-v1.json device-approval-v1.json mac-local-v1.json pin-unlock-v1.json; do
             cmp "core/tests/vectors/$name" "meta/docs/vectors/$name"
           done
 

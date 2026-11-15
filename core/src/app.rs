@@ -30,7 +30,9 @@ use crate::two_step::{self, Offer};
 use crate::vault::{Item, ItemDraft, Sync, Vault};
 
 mod bulk;
+mod pin;
 pub use bulk::{Bulk, Outcome, Plan, Skip};
+pub use pin::PinStatus;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum State {
@@ -154,6 +156,10 @@ pub struct App {
     /// The desktop agent's tray was told of items to be reminded about, so
     /// signing out tells it there are none.
     told_agent: bool,
+    /// A PIN opened the vault that's open now (app/pin.rs): until it locks,
+    /// or the master password unlocks it. Biometric unlock can't be turned
+    /// on meanwhile.
+    opened_with_pin: bool,
 }
 
 /// Importing from the browsers, when an organization keeps items out of
@@ -164,6 +170,10 @@ const KEEPS_ITEMS_OUT: &str = "your organization keeps items out of Personal, so
 /// How long a list that autofill or a passkey showed, having unlocked the
 /// vault with "Immediately" chosen, waits to be picked from (`App::offered`).
 pub const PICK_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Turning biometric unlock on in a vault a PIN opened (app/pin.rs).
+pub(crate) const BIOMETRICS_AFTER_PIN: Error =
+    Error::Refused("unlock with your master password to turn this on");
 
 /// How long confirming it's you lasts, to approve a sign-in.
 const CONFIRMATION_LASTS: std::time::Duration = std::time::Duration::from_secs(60);
@@ -231,6 +241,7 @@ impl App {
             own_health_unheard: false,
             own_weak: Default::default(),
             told_agent: false,
+            opened_with_pin: false,
         }
     }
 
@@ -677,6 +688,11 @@ impl App {
         let text = self.store.sync().ok_or(Error::SignedOut)?;
         let vault = Vault::unlock(&Sync::from_json(&text)?, &settings.prelogin(), password)?;
         self.opened(vault);
+        // The master password, typed and right: wrong PINs before it no
+        // longer count (app/pin.rs). Never from beside the app.
+        if !self.beside {
+            crate::pin::clear_tries(&self.store);
+        }
         Ok(())
     }
 
@@ -701,6 +717,13 @@ impl App {
             .map(GeneratorPolicy::from_sync)
             .unwrap_or_default();
         self.autolock = AutoLock::new(Instant::now(), SystemTime::now());
+        // Whatever opened it; unlocking with a PIN says so afterwards.
+        self.opened_with_pin = false;
+        // A PIN the organization no longer allows goes at the next unlock,
+        // if no sync took it first (app/pin.rs).
+        if self.policy.remove_unlock_with_pin && !self.beside {
+            crate::pin::forget(&self.store);
+        }
     }
 
     /// How long ago the vault kept here was synced, by its file's time.
@@ -738,6 +761,9 @@ impl App {
     /// sealed (the same enrollment as the extension's). Returns whether the person agreed.
     pub fn enroll_biometric(&self) -> Result<bool> {
         let vault = self.vault.as_ref().ok_or(Error::SignedOut)?;
+        if self.opened_with_pin {
+            return Err(BIOMETRICS_AFTER_PIN);
+        }
         self.agent()?.enroll(vault.user_key(), &vault.email)
     }
 
@@ -820,6 +846,9 @@ impl App {
             Err(Error::SignedOut) => {
                 self.session = None;
                 forget_refresh_token(&*self.secrets, &self.store, settings);
+                // How a new master password, new KDF settings, or a rotated
+                // key first shows here: the PIN goes at once (app/pin.rs).
+                crate::pin::forget(&self.store);
                 return Err(Error::SignedOut);
             }
             other => other?,
@@ -832,6 +861,7 @@ impl App {
         self.store.save_sync(&text)?;
         self.policy = LockPolicy::from_sync(&text);
         self.generator_policy = GeneratorPolicy::from_sync(&text);
+        pin::after_sync(&self.store, &self.policy, sync.profile.key.as_deref());
         // The server may have issued a new refresh token.
         keep_refresh_token(&*self.secrets, &self.store, settings, session);
         self.vault = Some(Vault::open(&sync, session.user_key().clone())?);
@@ -1149,10 +1179,12 @@ impl App {
         self.vault = None;
         self.session = None;
         self.pending = None;
+        self.opened_with_pin = false;
     }
 
-    /// Forgets the vault and the session on this device, and unlocking with
-    /// Windows Hello or Touch ID if it was on; keeps the server and email.
+    /// Forgets the vault and the session on this device, unlocking with
+    /// Windows Hello or Touch ID if it was on, and the PIN if one was set
+    /// (`Store::forget_vault`); keeps the server and email.
     pub fn sign_out(&mut self) {
         if self.store.has_sync() {
             let _ = self.remove_biometric();
@@ -1516,6 +1548,8 @@ impl App {
             Err(Error::SignedOut) => {
                 self.session = None;
                 forget_refresh_token(&*self.secrets, &self.store, settings);
+                // As a sync that's answered "signed out" (app/pin.rs).
+                crate::pin::forget(&self.store);
                 return Err(Error::SignedOut);
             }
             other => other?,

@@ -3,7 +3,8 @@
 // Hello or Touch ID"), or with the app's own Touch ID on the Mac and
 // biometrics on phones ("The Mac without an Apple developer account",
 // docs/phones.md), only where it can work (not on a Mac without Touch ID,
-// and not on Linux, which has no agent), and when the app locks by itself
+// and not on Linux, which has no agent); with a PIN (pin.dart), where the
+// device can keep one; and when the app locks by itself
 // ("Locking by itself"), within what an organization's policy allows
 // ("Locking by policy"). On Android, turning on autofill and passkeys (autofill_offer.dart).
 // The account shown, and signing out of it, which says which; on a phone,
@@ -18,6 +19,7 @@ import 'accounts.dart';
 import 'autofill_offer.dart';
 import 'core.dart';
 import 'icons.dart';
+import 'pin.dart';
 import 'sign_in_requests.dart';
 import 'theme.dart';
 import 'unlock_offer.dart';
@@ -108,6 +110,9 @@ class _SettingsListState extends State<SettingsList> {
   late final Map<String, dynamic> policy = core.lockPolicy();
   Map<String, dynamic>? status;
 
+  /// Unlocking with a PIN, as the core says (Core.pinStatus).
+  Map<String, dynamic>? pin;
+
   /// Whether PassBundle's windows may be in screenshots (macOS and Windows).
   late bool screenshots = keepsOutOfScreenshots && core.screenshotsAllowed();
 
@@ -137,6 +142,10 @@ class _SettingsListState extends State<SettingsList> {
   }
 
   Future<void> refresh() async {
+    // A PIN's row comes on its own, so the rest doesn't wait for it.
+    Core.pinStatus().then((next) {
+      if (mounted) setState(() => pin = next);
+    });
     final next = await Core.biometricStatus();
     final trusted = await Core.trustedBrowsers();
     if (mounted) {
@@ -145,6 +154,70 @@ class _SettingsListState extends State<SettingsList> {
         browsers = trusted;
       });
     }
+  }
+
+  /// Sets a PIN (the sheet asks for the master password again), or turns
+  /// it off, once the person says so.
+  Future<void> turnPin(bool on) async {
+    final pin = this.pin;
+    if (pin == null) return;
+    setState(() => note = null);
+    if (on) {
+      await setUpPin(context, pin);
+      await refresh();
+      return;
+    }
+    final sure = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Turn off unlocking with a PIN?'),
+        content: const Text(
+          'PassBundle forgets it on this device. You can set a new one here any time.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Turn off'),
+          ),
+        ],
+      ),
+    );
+    if (sure != true) return;
+    setState(() => working = true);
+    final answer = await whileBusy(Core.removePin);
+    if (!mounted) return;
+    setState(() {
+      working = false;
+      if (!answer.ok) note = answer.error;
+    });
+    await refresh();
+  }
+
+  /// Unlocking with a PIN: a switch, or why it's off. Nothing where this
+  /// device can't keep one.
+  Widget pinRow() {
+    final pin = this.pin;
+    if (!pinOffered(pin)) return const SizedBox.shrink();
+    if (pin!['status'] == 'policy') {
+      return SwitchListTile(
+        key: const ValueKey('pin'),
+        value: false,
+        onChanged: null,
+        title: const Text('Unlock with a PIN'),
+        subtitle: const Text(pinPolicyReason),
+      );
+    }
+    return SwitchListTile(
+      key: const ValueKey('pin'),
+      value: pin['status'] == 'on',
+      onChanged: working ? null : turnPin,
+      title: const Text('Unlock with a PIN'),
+      subtitle: const Text('Instead of your master password, on this device'),
+    );
   }
 
   Future<void> untrust(String package) async {
@@ -210,6 +283,10 @@ class _SettingsListState extends State<SettingsList> {
   /// without Touch ID, or on Linux, which say it's unsupported.
   bool get unlockOffered => status?['status'] != 'unsupported';
 
+  /// Whether the Unlock group has anything to show: biometrics, a PIN, or
+  /// the wait for them.
+  bool get unlockGroup => unlockOffered || pinOffered(pin);
+
   Widget unlock() {
     final status = this.status;
     final method = (status?['method'] as String?) ?? 'Windows Hello';
@@ -224,6 +301,17 @@ class _SettingsListState extends State<SettingsList> {
             child: CircularProgressIndicator(strokeWidth: 2),
           ),
         ),
+      );
+    }
+    // A vault a PIN opened doesn't hand its key to biometrics: the master
+    // password first (the core refuses it too).
+    if (status['status'] == 'notSetUp' && pin?['openedWithPin'] == true) {
+      return SwitchListTile(
+        key: const ValueKey('biometric'),
+        value: false,
+        onChanged: null,
+        title: Text('Unlock with $method'),
+        subtitle: const Text(biometricsAfterPin),
       );
     }
     if (status['status'] == 'setUp' || status['status'] == 'notSetUp') {
@@ -309,12 +397,15 @@ class _SettingsListState extends State<SettingsList> {
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        if (unlockOffered)
+        if (unlockGroup)
           SettingsGroup(
             title: 'Unlock',
             footer: note,
             footerColor: scheme.error,
-            children: [unlock()],
+            children: [
+              if (unlockOffered) unlock(),
+              if (pinOffered(pin)) pinRow(),
+            ],
           )
         else if (note != null)
           // What didn't change, where the Unlock group would have said it.

@@ -170,6 +170,13 @@ class Core {
   late final _bioUnlock = _lib.lookupFunction<_Str1, _Str1>('pb_biometric_unlock');
   late final _bioRemove = _lib.lookupFunction<_Str1, _Str1>('pb_biometric_remove');
   late final _bioConfirmApproval = _lib.lookupFunction<_Str1, _Str1>('pb_confirm_approval_with_biometric');
+  late final _pinStatus = _lib.lookupFunction<_Str1, _Str1>('pb_pin_status');
+  late final _pinSet = _lib.lookupFunction<_Str3, _Str3>('pb_pin_set');
+  late final _pinUnlock = _lib.lookupFunction<_Str2, _Str2>('pb_pin_unlock');
+  late final _pinRemove = _lib.lookupFunction<_Str1, _Str1>('pb_pin_remove');
+  late final _testDeviceSeal = _lib.lookupFunction<_FlagNative, _Flag>(
+    'pb_test_device_seal',
+  );
   late final _state = _lib.lookupFunction<_Str1, _Str1>('pb_state');
   late final _servers = _lib.lookupFunction<_Str0, _Str0>('pb_servers');
   late final _signIn = _lib.lookupFunction<_Str3, _Str3>('pb_sign_in');
@@ -769,6 +776,77 @@ class Core {
       }),
     );
   }
+
+  /// Unlocking with a PIN (pin.dart; DESIGN.md in the meta repo, "Unlock
+  /// with a PIN"), for an account ([id], or the one the screens show):
+  /// `status` is "on", "off", "unsupported" where this device can't keep
+  /// one (the screens don't offer it), or "policy" when an organization
+  /// doesn't allow it; `openedWithPin`, that a PIN opened the vault open
+  /// now; `minCharacters` and `maxCharacters`, a PIN's length.
+  static Future<Map<String, dynamic>> pinStatus([String? id]) async {
+    final asked = id ?? account;
+    await _giveDeviceSeal();
+    return Map<String, dynamic>.from(
+      await Isolate.run(() {
+        final core = Core();
+        return core._with([asked], (p) => core._answer(core._pinStatus(p[0])))
+            as Map;
+      }),
+    );
+  }
+
+  /// Sets the account's PIN, while it's unlocked: the core checks the
+  /// master password first, as unlocking does. Both are wiped once the core
+  /// has them.
+  static Future<Answer> setPin(String masterPassword, String pin) async {
+    await _giveDeviceSeal();
+    return _background(
+      (c, a) => c._with([
+        a,
+        masterPassword,
+        pin,
+      ], (p) => c._answer(c._pinSet(p[0], p[1], p[2]))),
+    );
+  }
+
+  /// Unlocks the account with its PIN: ok, or the words to show, with
+  /// `pinOn` false once there's no PIN to try any more (the fifth wrong
+  /// try in a row turned it off, or it was out of date).
+  static Future<Answer> unlockWithPin(String pin) async {
+    await _giveDeviceSeal();
+    return _background(
+      (c, a) => c._with([a, pin], (p) => c._answer(c._pinUnlock(p[0], p[1]))),
+    );
+  }
+
+  /// Turns the account's PIN off. Answers as [pinStatus].
+  static Future<Answer> removePin() =>
+      _background((c, a) => c._with([a], (p) => c._answer(c._pinRemove(p[0]))));
+
+  /// The Mac's and the iPhone's seal for what a PIN keeps is the app's own
+  /// Swift (DeviceSeal.swift): it's given to the core once, before the core
+  /// is first asked about a PIN. The iPhone gives it at start; the Mac when
+  /// asked. Elsewhere the core has its own (Windows, Android) or none. Once
+  /// it's given, nothing waits on the asking any more (a test's next zone
+  /// never would see it finish).
+  static Future<void>? _asking;
+  static bool _sealGiven = false;
+  static Future<void> _giveDeviceSeal() async {
+    if (_sealGiven || (!isMac && !Platform.isIOS)) return;
+    await (_asking ??= () async {
+      try {
+        await platform.invokeMethod<bool>('deviceSeal');
+      } on Object {
+        // No seal: the core offers no PIN.
+      }
+      _sealGiven = true;
+    }());
+  }
+
+  /// For tests (the core's test-hooks feature): whether the core opened
+  /// next can keep a PIN, standing in for a device's seal. Off until a test
+  /// turns it on, as Linux and a Mac without a Secure Enclave are.
+  void useDeviceSeal(bool seals) => _answer(_testDeviceSeal(seals));
 
   /// A call to the phone's own code (MainActivity.kt, AppDelegate.swift),
   /// answered as the core would.
