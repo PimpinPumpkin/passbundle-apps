@@ -29,6 +29,16 @@ pub enum BadAddress {
     NotAnAddress,
 }
 
+/// Why a server won't make an account (`Error::NoNewAccounts`), as it says
+/// with its refusal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoNewAccounts {
+    /// It takes no new accounts.
+    Closed,
+    /// It takes them from some addresses, and this isn't one.
+    Address,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
     /// The master password didn't open the user key.
@@ -100,6 +110,10 @@ pub enum Error {
     /// signing in to it didn't work, and why: sign in, rather than make it
     /// again.
     AccountMade { sure: bool, why: Box<Error> },
+    /// Making an account: the server takes no new accounts, or none for
+    /// this address, and said which. The sign-in screen says it in the web
+    /// vault's words (docs/core.md, "Making an account").
+    NoNewAccounts(NoNewAccounts),
     /// Adding an account to a device that has the most it keeps
     /// (accounts.rs, `MOST`).
     TooManyAccounts,
@@ -292,6 +306,8 @@ impl fmt::Display for Error {
             Error::ConfirmFirst => write!(f, "Confirm it's you first."),
             Error::AccountMade { sure: true, why } => write!(f, "Your account was made, but signing in to it didn't work: {why} Sign in with it."),
             Error::AccountMade { sure: false, why } => write!(f, "The server may have made your account before the connection dropped: {why} Try signing in with it."),
+            Error::NoNewAccounts(NoNewAccounts::Closed) => write!(f, "This server isn't taking new accounts."),
+            Error::NoNewAccounts(NoNewAccounts::Address) => write!(f, "New accounts aren't open for that address."),
             Error::TooManyAccounts => write!(f, "PassBundle keeps up to {} accounts on this device. Sign out of one to add another.", crate::accounts::MOST),
             Error::AlreadyHere => write!(f, "That account is in PassBundle on this device already, under another email or server. Sign out of it there first."),
             Error::TwoStep(sentence) => write!(f, "{sentence}"),
@@ -387,6 +403,8 @@ mod tests {
             Error::Damaged("no such item"),
             Error::Damaged("bad padding"),
             Error::Server("Username or password is incorrect. Try again".into()),
+            Error::NoNewAccounts(NoNewAccounts::Closed),
+            Error::NoNewAccounts(NoNewAccounts::Address),
         ]
         .map(|e| e.to_string());
         for w in &words {
