@@ -1,6 +1,6 @@
 # Desktop agent
 
-PassBundle's desktop app: a tray app (menu bar on macOS) with no windows, written in Rust. It replaces upstream's Electron desktop app, which we don't ship. The design is in the meta repo's DESIGN.md, "Desktop agent".
+PassBundle's desktop agent: a tray app (menu bar on macOS) with no windows, written in Rust, that runs beside the desktop app (the Flutter app in `app/`). The browser extension talks to it where it would talk to upstream's Electron desktop app, which we don't ship. The design is in the meta repo's DESIGN.md, "Desktop agent".
 
 Version 0.1 is the foundation: the tray icon and menu (the version, Open PassBundle when the app is installed with the agent, Open web vault, Quit, and while the app has said so, "2 items expire soon", which opens the app: the app tells the agent two numbers per account over its socket, `keykeeper.reminders` with `soon` and `expired`, and the agent makes its own words; see `src/reminders.rs`), one agent per signed-in user, settings by policy, and a self-updater that installs only releases signed with our offline update key. It also unlocks the browser extension with Windows Hello (DESIGN.md, "Biometric unlock"): the extension speaks upstream's native-messaging protocol to `passbundle-agent-host`, which the browser starts, and the host pipes it to the agent over a socket only the signed-in user can open.
 

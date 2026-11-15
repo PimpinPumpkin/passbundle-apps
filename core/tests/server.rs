@@ -9,7 +9,12 @@
 //! WebAuthn takes only a domain: PB_TEST_SERVER_LOCALHOST. The new-device
 //! check's test needs a server with the check on, which the others have
 //! off (they sign in on new devices throughout): PB_TEST_SERVER_NEW_DEVICE
-//! (`NEW_DEVICE_CHECK=true tools/test-server.sh ...`).
+//! (`NEW_DEVICE_CHECK=true tools/test-server.sh ...`). The test of new
+//! accounts where they aren't open needs a server that takes none,
+//! PB_TEST_SERVER_CLOSED (`SIGNUPS_ALLOWED=false INVITATIONS_ALLOWED=false
+//! tools/test-server.sh ...`), and one that takes them only from this
+//! file's addresses, PB_TEST_SERVER_SOME_ADDRESSES
+//! (`SIGNUPS_DOMAINS_WHITELIST=core.example.test tools/test-server.sh ...`).
 
 use base64::{engine::general_purpose::STANDARD, Engine};
 use passbundle_core::app::{App, State, Step};
@@ -1089,6 +1094,80 @@ fn an_account_is_made_in_the_app_and_opens_elsewhere() {
     assert!(other.sign_up(&url, &email, None, PASSWORD, None).is_err());
     let _ = std::fs::remove_dir_all(dir);
     let _ = std::fs::remove_dir_all(other_dir);
+}
+
+/// New accounts where they aren't open (docs/core.md, "Making an account").
+/// A server's public settings say whether it takes any, which is what the
+/// sign-in screen goes by: one that takes none says so, and is a PassBundle
+/// server to sign in to all the same; one that takes them only from some
+/// addresses says it takes them. Either refuses an account it won't take at
+/// the first step, with why (`NoNewAccounts`), and an address the second
+/// does take makes an account as anywhere.
+#[test]
+fn a_server_says_it_takes_no_new_accounts_and_refuses_one_with_why() {
+    use passbundle_core::error::NoNewAccounts;
+
+    // The usual test server takes them from anyone.
+    if let Some(server) = server() {
+        assert_eq!(server.takes_new_accounts(), Ok(Some(true)));
+    }
+    let other = |name: &str, how: &str| {
+        let url = std::env::var(name).ok();
+        if url.is_none() {
+            eprintln!("{name} isn't set; skipping that part of the test of new accounts ({how} tools/test-server.sh starts one).");
+        }
+        url
+    };
+    let dir = std::env::temp_dir().join(format!("pb-core-none-{}", uuid::Uuid::new_v4().simple()));
+    let mut app = App::open(Store::new(&dir), Box::new(MemorySecretStore::default()));
+    // The refusal, from a server that says why. One from before it did
+    // (passbundle-server without `new_account_refused`) refuses in its older
+    // words, and this says so rather than pass for the whole test.
+    let refused = |refusal: Option<Error>, why: NoNewAccounts| match refusal {
+        Some(Error::NoNewAccounts(said)) => assert_eq!(said, why),
+        Some(Error::Server(said)) if said == "Registration not allowed or user already exists" => {
+            eprintln!("This server refuses a new account without saying why ({why:?}): it's from before it did, and that part isn't tested against it.");
+        }
+        other => panic!("a new account was refused with {other:?}, not {why:?}"),
+    };
+
+    if let Some(url) = other(
+        "PB_TEST_SERVER_CLOSED",
+        "SIGNUPS_ALLOWED=false INVITATIONS_ALLOWED=false",
+    ) {
+        let server = Server::new(&url, Device::this_one(&Device::new_identifier())).unwrap();
+        assert_eq!(server.takes_new_accounts(), Ok(Some(false)));
+        assert_eq!(server.check(), Ok(()));
+        refused(
+            app.sign_up(&url, &new_email("closed"), None, PASSWORD, None)
+                .err(),
+            NoNewAccounts::Closed,
+        );
+        assert!(matches!(app.state(), State::SignedOut { .. }));
+    }
+
+    if let Some(url) = other(
+        "PB_TEST_SERVER_SOME_ADDRESSES",
+        "SIGNUPS_DOMAINS_WHITELIST=core.example.test",
+    ) {
+        let server = Server::new(&url, Device::this_one(&Device::new_identifier())).unwrap();
+        assert_eq!(server.takes_new_accounts(), Ok(Some(true)));
+        let elsewhere = format!(
+            "elsewhere-{}@other.example.test",
+            &uuid::Uuid::new_v4().to_string()[..8]
+        );
+        refused(
+            app.sign_up(&url, &elsewhere, None, PASSWORD, None).err(),
+            NoNewAccounts::Address,
+        );
+        assert!(matches!(app.state(), State::SignedOut { .. }));
+        // An address it takes.
+        let step = app
+            .sign_up(&url, &new_email("taken"), None, PASSWORD, None)
+            .unwrap();
+        assert!(matches!(step, Step::Done));
+    }
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 /// The generator's settings follow the account (core/src/synced_settings.rs):
