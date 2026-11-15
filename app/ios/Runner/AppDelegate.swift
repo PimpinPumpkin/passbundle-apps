@@ -23,6 +23,9 @@ import UniformTypeIdentifiers
       guard let account else { return }
       Biometric.remove(account: String(cString: account))
     }
+    // Unlocking with a PIN: the core seals what it keeps with the
+    // Keychain's key for this phone (DeviceSeal.swift).
+    pb_set_device_seal(DeviceSeal.sealCall, DeviceSeal.openCall)
     // The one item a build from before several accounts kept, for its one
     // account (now carried over as an account of its own): it goes, and the
     // app offers Face ID again after the next unlock with the master password.
@@ -90,6 +93,9 @@ import UniformTypeIdentifiers
       case "biometricStandIn":
         let on = (call.arguments as? [String: Any])?["on"] as? Bool ?? false
         result(Biometric.useStandIn(on))
+      // The core was given the PIN's seal at start, above.
+      case "deviceSeal":
+        result(true)
       case "biometricRemove":
         Biometric.remove(account: Platform.account(call))
         result(["ok": true])

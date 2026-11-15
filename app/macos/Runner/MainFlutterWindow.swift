@@ -409,6 +409,12 @@ class MainFlutterWindow: NSWindow {
     case "biometricRemove":
       TouchID.remove(account: arguments?["account"] as? String ?? "")
       result(["ok": true])
+    // Unlocking with a PIN: the core is given this Mac's seal for what it
+    // keeps (DeviceSeal.swift) before Dart first asks it about a PIN. False
+    // on a Mac without a Secure Enclave, where no PIN is offered.
+    case "deviceSeal":
+      _ = core()
+      result(sealsToDevice)
     default:
       result(FlutterMethodNotImplemented)
     }
@@ -416,14 +422,17 @@ class MainFlutterWindow: NSWindow {
 
   /// The core Dart opened, for Touch ID, found the first time it's needed
   /// (Dart opens it before anything asks): it's told how to turn an
-  /// account's Touch ID off, which signing out does.
+  /// account's Touch ID off, which signing out does, and given this Mac's
+  /// seal for what unlocking with a PIN keeps, where the Mac has one.
   private var loadedCore: LoadedCore?
+  private var sealsToDevice = false
   private func core() -> LoadedCore? {
     if loadedCore == nil, let found = LoadedCore.find() {
       found.onRemove { account in
         guard let account else { return }
         TouchID.remove(account: String(cString: account))
       }
+      sealsToDevice = found.giveDeviceSeal()
       loadedCore = found
     }
     return loadedCore

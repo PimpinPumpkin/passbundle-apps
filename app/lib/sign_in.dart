@@ -1,12 +1,17 @@
 // Signing in (with two-step login, and the new-device check on a device the
 // account has never used), making an account, and unlocking the vault kept
-// on this device. The master password goes to the core and the
+// on this device, with the master password, biometrics, or a PIN (pin.dart).
+// The master password or PIN goes to the core and the
 // field is cleared at once (docs/core.md, "Memory"). People sign in to
 // PassBundle's own server without being asked; a server an organization set
 // by policy is used and shown; and someone hosting their own types it in,
 // behind "Self-hosted?". Their server is checked as they leave its field, and
 // before anything is sent to it (docs/core.md, "Checking a server"): what's
 // wrong with it is said under that field, not under the master password.
+// A server that says it takes no new accounts isn't offered the form for
+// making one: the screen says so where "Create account" would be, in the web
+// vault's words, and on PassBundle's server links to the website's contact
+// page.
 import 'package:flutter/material.dart';
 
 import 'accounts.dart';
@@ -17,6 +22,40 @@ import 'two_step.dart';
 import 'widgets.dart';
 
 final _measuring = testSetting('PB_MEASURE') == '1';
+
+// What's said where "Create account" would be on a server that takes no new
+// accounts, and under an email the server turned down: the web vault's
+// sentences, word for word (passbundle-clients, brand/messages.en.json, the
+// keys starting keykeeperNewAccounts).
+const _notOpenYet = 'New accounts aren\'t open yet.';
+const _askForOne = 'Ask for one';
+const _ownServer =
+    'This server isn\'t taking new accounts. Ask the person who runs it.';
+const _notThatAddress = 'New accounts aren\'t open for that address.';
+const _notThatAddressOwnServer =
+    'New accounts aren\'t open for that address. Ask the person who runs this server.';
+
+/// Tests only: where to sign in, in place of the core's answer
+/// ([Core.servers]), so a stand-in on this computer can be PassBundle's own
+/// server. Null is what the core says.
+@visibleForTesting
+Map<String, dynamic>? debugServers;
+
+/// Under flutter test, the screen asks a server whether it takes new accounts
+/// as it opens only where the test names the servers ([debugServers]): no
+/// test asks PassBundle's. A product build never takes FLUTTER_TEST from its
+/// environment.
+final _underTest = testSetting('FLUTTER_TEST') != null;
+
+/// A server's address as it's compared with another: the host in lower case,
+/// without a slash at the end.
+String _sameServer(String address) {
+  final typed = address.trim();
+  return (Uri.tryParse(typed)?.toString() ?? typed).replaceAll(
+    RegExp(r'/+$'),
+    '',
+  );
+}
 
 /// A server address as someone typed it, with https:// added when they left
 /// the scheme off ("vault.example.com"). An address that names http:// stays
@@ -55,9 +94,16 @@ class SignInScreen extends StatefulWidget {
 }
 
 class _SignInScreenState extends State<SignInScreen> {
-  final servers = Core().servers();
+  final servers = debugServers ?? Core().servers();
   late final ours = servers['ours'] as String;
   late final managed = servers['managed'] as String?;
+
+  /// The website's page for asking for an account. Only an https address is
+  /// opened, as in the web vault; without one there's no link.
+  late final String? contactPage = switch (servers['contactPage']) {
+    final String page when page.startsWith('https://') => page,
+    _ => null,
+  };
 
   /// Someone's own server: shown when they ask, or when they signed in to one before.
   late bool selfHosted =
@@ -90,7 +136,86 @@ class _SignInScreenState extends State<SignInScreen> {
     final typed = server.text;
     final answer = await Core.checkServer(serverAddress(typed));
     if (!mounted || asked != checks || typed != server.text) return;
-    setState(() => serverError = answer.ok ? null : answer.error);
+    setState(() {
+      serverError = answer.ok ? null : answer.error;
+      heard(serverAddress(typed), answer);
+    });
+  }
+
+  /// The servers that said they take no new accounts, with their answer to
+  /// the check (docs/core.md, "Checking a server"). One that doesn't say, or
+  /// can't be asked, isn't here: the form is offered, and the server answers
+  /// it.
+  final closed = <String>{};
+
+  /// The server signed in to takes no new accounts.
+  bool get closedHere => closed.contains(_sameServer(signInTo));
+
+  /// PassBundle's own server, not one someone else runs.
+  bool get onOurs => _sameServer(signInTo) == _sameServer(ours);
+
+  /// Why the server turned down the email at the form's first step, when it
+  /// said: "closed" or "address". Said under the email until it changes.
+  String? refused;
+
+  /// The browser didn't open the contact page.
+  bool couldntOpen = false;
+
+  /// Takes what a server said about new accounts with its answer to the
+  /// check. Inside setState.
+  void heard(String server, Answer answer) {
+    if (!answer.ok) return;
+    if (answer.body['newAccounts'] == 'closed') {
+      closed.add(_sameServer(server));
+    } else {
+      closed.remove(_sameServer(server));
+    }
+    leaveFormIfClosed();
+  }
+
+  /// Asks the server signed in to whether it takes new accounts: as the
+  /// screen opens, and when the person turns to the other server. Nothing is
+  /// said if it can't be asked.
+  Future<void> askAboutNewAccounts() async {
+    if (_underTest && debugServers == null) return;
+    final server = signInTo;
+    if (server.isEmpty) return;
+    final answer = await Core.checkServer(server);
+    if (mounted) setState(() => heard(server, answer));
+  }
+
+  /// The form for making an account goes once its server is known to take
+  /// none: back to signing in, which says so. Inside setState.
+  void leaveFormIfClosed() {
+    if (!creating || !closedHere) return;
+    creating = false;
+    error = null;
+    refused = null;
+    password.clear();
+    confirm.clear();
+  }
+
+  /// PassBundle's server or the person's own: the other one.
+  void switchServer() {
+    setState(() {
+      selfHosted = !selfHosted;
+      serverError = null;
+      refused = null;
+      leaveFormIfClosed();
+    });
+    askAboutNewAccounts();
+  }
+
+  /// Opens the website's contact page in the browser.
+  Future<void> askForOne(String page) async {
+    final opened = await Core.openWebsite(page);
+    if (mounted) setState(() => couldntOpen = !opened);
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    askAboutNewAccounts();
   }
 
   /// An answer about the server rather than the email or master password,
@@ -110,6 +235,7 @@ class _SignInScreenState extends State<SignInScreen> {
     serverFocus.dispose();
     super.dispose();
   }
+
   late final email = TextEditingController(text: widget.email ?? '');
   final password = TextEditingController();
   String? error;
@@ -210,6 +336,7 @@ class _SignInScreenState extends State<SignInScreen> {
       error = null;
       formErrors = const {};
       serverError = null;
+      refused = null;
     });
     final answer = await whileBusy(
       () => Core.signUp(
@@ -221,6 +348,17 @@ class _SignInScreenState extends State<SignInScreen> {
       ),
     );
     if (!mounted || aboutTheServer(answer)) return;
+    final why = answer.body['newAccounts'];
+    if (!answer.ok && (why == 'closed' || why == 'address')) {
+      // The server turned the email down, and said why: the web vault's
+      // sentence for it, under the email.
+      setState(() {
+        working = false;
+        error = null;
+        refused = why as String;
+      });
+      return;
+    }
     if (answer.body['accountMade'] == true) {
       // The account is there: signing in is what's left, with the same email.
       setState(() {
@@ -358,25 +496,32 @@ class _SignInScreenState extends State<SignInScreen> {
         const SizedBox(height: 16),
         WorkingButton(label: 'Sign in', working: working, onPressed: signIn),
         const SizedBox(height: 8),
-        TextButton(
-          onPressed: working
-              ? null
-              : () => setState(() {
-                  creating = true;
-                  error = null;
-                  password.clear();
-                }),
-          child: const Text('Create account'),
-        ),
-        if (managed == null) ...[
-          const SizedBox(height: 8),
+        if (closedHere)
+          // The server takes no new accounts: who to ask, not a form that
+          // can only fail. With the link, as tall as "Create account", so
+          // nothing moves as the answer comes.
+          Padding(
+            padding: EdgeInsets.symmetric(
+              vertical: onOurs && contactPage != null ? 0 : 12,
+            ),
+            child: _noNewAccounts('closed'),
+          )
+        else
           TextButton(
             onPressed: working
                 ? null
                 : () => setState(() {
-                    selfHosted = !selfHosted;
-                    serverError = null;
+                    creating = true;
+                    error = null;
+                    refused = null;
+                    password.clear();
                   }),
+            child: const Text('Create account'),
+          ),
+        if (managed == null) ...[
+          const SizedBox(height: 8),
+          TextButton(
+            onPressed: working ? null : switchServer,
             child: Text(
               selfHosted ? 'Use PassBundle\'s server' : 'Self-hosted?',
             ),
@@ -403,9 +548,13 @@ class _SignInScreenState extends State<SignInScreen> {
         enabled: !working,
         keyboardType: TextInputType.url,
         autocorrect: false,
-        onChanged: (_) {
-          if (serverError != null) setState(() => serverError = null);
-        },
+        // Another address is another server: what was said about the last
+        // one goes, and what's known about this one shows.
+        onChanged: (_) => setState(() {
+          serverError = null;
+          refused = null;
+          leaveFormIfClosed();
+        }),
         decoration: InputDecoration(
           labelText: 'Server',
           hintText: 'vault.example.com',
@@ -443,12 +592,20 @@ class _SignInScreenState extends State<SignInScreen> {
         enabled: !working,
         keyboardType: TextInputType.emailAddress,
         autofillHints: const [AutofillHints.email],
+        onChanged: (_) {
+          if (refused != null) setState(() => refused = null);
+        },
         decoration: InputDecoration(
           labelText: 'Email',
           errorText: formErrors['email'],
           errorMaxLines: 4,
         ),
       ),
+      if (refused case final why?)
+        Padding(
+          padding: const EdgeInsets.only(left: 14, top: 4),
+          child: _noNewAccounts(why, underEmail: true),
+        ),
       const SizedBox(height: 12),
       TextField(
         controller: name,
@@ -523,16 +680,72 @@ class _SignInScreenState extends State<SignInScreen> {
       ),
       if (managed == null)
         TextButton(
-          onPressed: working
-              ? null
-              : () => setState(() {
-                    selfHosted = !selfHosted;
-                    serverError = null;
-                  }),
+          onPressed: working ? null : switchServer,
           child: Text(selfHosted ? 'Use PassBundle\'s server' : 'Self-hosted?'),
         ),
     ],
   );
+
+  /// A server that takes no new accounts ([why] "closed"), or none for the
+  /// email just tried ("address"): the web vault's sentence for it. On
+  /// PassBundle's server, with its link to the website's contact page; on
+  /// anyone else's, the person who runs it is who to ask.
+  Widget _noNewAccounts(String why, {bool underEmail = false}) {
+    final words = switch ((onOurs, why)) {
+      (true, 'address') => _notThatAddress,
+      (true, _) => _notOpenYet,
+      (false, 'address') => _notThatAddressOwnServer,
+      (false, _) => _ownServer,
+    };
+    final page = onOurs ? contactPage : null;
+    final theme = Theme.of(context);
+    final small = theme.textTheme.bodySmall;
+    return Column(
+      key: const ValueKey('no-new-accounts'),
+      crossAxisAlignment: underEmail
+          ? CrossAxisAlignment.start
+          : CrossAxisAlignment.center,
+      children: [
+        Wrap(
+          alignment: underEmail ? WrapAlignment.start : WrapAlignment.center,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          children: [
+            Text(
+              words,
+              textAlign: underEmail ? TextAlign.start : TextAlign.center,
+              style: underEmail
+                  ? small?.copyWith(color: theme.colorScheme.error)
+                  : null,
+            ),
+            if (page != null)
+              // Next to the sentence, as a link in it; under the email, at
+              // the sentence's size.
+              TextButton(
+                key: const ValueKey('ask-for-account'),
+                onPressed: working ? null : () => askForOne(page),
+                style: underEmail
+                    ? TextButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(horizontal: 6),
+                        minimumSize: const Size(0, 32),
+                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        textStyle: small?.copyWith(fontWeight: FontWeight.w600),
+                      )
+                    : TextButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(horizontal: 6),
+                      ),
+                child: const Text(_askForOne),
+              ),
+          ],
+        ),
+        if (page != null && couldntOpen)
+          Text(
+            'Couldn\'t open $page.',
+            textAlign: underEmail ? TextAlign.start : TextAlign.center,
+            style: TextStyle(color: context.colors.muted, fontSize: 13),
+          ),
+      ],
+    );
+  }
 }
 
 class UnlockScreen extends StatefulWidget {
@@ -574,12 +787,22 @@ class _UnlockScreenState extends State<UnlockScreen> {
     text: _measuring ? (testSetting('PB_MEASURE_PASSWORD') ?? '') : '',
   );
   final passwordFocus = FocusNode();
+  final pin = TextEditingController();
+  final pinFocus = FocusNode();
   String? error;
   bool working = false;
   bool hidden = true;
 
   /// "Windows Hello" or "Touch ID" when this account can unlock with it here.
   String? method;
+
+  /// Whether biometrics' status is known yet ([method] is set if they're on).
+  bool biometricKnown = false;
+
+  /// The account has a PIN here, and the screen shows its field rather than
+  /// the master password's ([usingPin]), until the person asks for that.
+  bool pinOn = false;
+  bool usingPin = false;
 
   /// The prompt asked for by itself is up ([promptIfAsked]).
   bool prompting = false;
@@ -596,16 +819,48 @@ class _UnlockScreenState extends State<UnlockScreen> {
       Core.biometricStatus().then((status) {
         if (!mounted) return;
         final setUp = status['status'] == 'setUp';
+        biometricKnown = true;
         if (setUp) setState(() => method = status['method'] as String);
         // On a phone the field waited for this, so the keyboard doesn't come
         // up under the biometric prompt.
         if (setUp) {
           promptIfAsked();
         } else if (isPhone) {
-          passwordFocus.requestFocus();
+          focusField();
+        }
+      });
+      Core.pinStatus().then((status) {
+        if (!mounted || status['status'] != 'on') return;
+        // The PIN's field, unless the person is already typing their
+        // master password (or unlocking): then only the way to it.
+        final switching = !working && password.text.isEmpty;
+        setState(() {
+          pinOn = true;
+          if (switching) usingPin = true;
+        });
+        // On a phone, not under a biometric prompt to come.
+        if (switching && (!isPhone || (biometricKnown && method == null))) {
+          focusField();
         }
       });
     }
+  }
+
+  /// The field shown, once it's drawn: the PIN's or the master password's.
+  void focusField() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) (usingPin ? pinFocus : passwordFocus).requestFocus();
+    });
+  }
+
+  /// The PIN's field, or the master password's.
+  void usePin(bool on) {
+    setState(() {
+      usingPin = on;
+      error = null;
+      pin.clear();
+    });
+    focusField();
   }
 
   @override
@@ -623,6 +878,8 @@ class _UnlockScreenState extends State<UnlockScreen> {
   @override
   void dispose() {
     passwordFocus.dispose();
+    pin.clear();
+    pinFocus.dispose();
     super.dispose();
   }
 
@@ -695,7 +952,31 @@ class _UnlockScreenState extends State<UnlockScreen> {
       // An out-of-date setup was turned off: the master password, then turn it on again.
       if (!answer.ok) method = null;
     });
-    if (byItself) passwordFocus.requestFocus();
+    if (byItself) focusField();
+  }
+
+  /// Unlocks with the account's PIN. A wrong one says how many tries are
+  /// left; once there's no PIN to try (the fifth wrong try turned it off,
+  /// or it was out of date), the master password's field shows, with why.
+  Future<void> unlockWithPin() async {
+    final typed = pin.text;
+    pin.clear();
+    setState(() {
+      working = true;
+      error = null;
+    });
+    final answer = await whileBusy(() => Core.unlockWithPin(typed));
+    if (!mounted) return;
+    if (answer.ok) {
+      widget.onUnlocked(null);
+      return;
+    }
+    setState(() {
+      working = false;
+      error = answer.error;
+      if (answer.body['pinOn'] == false) pinOn = usingPin = false;
+    });
+    focusField();
   }
 
   Future<void> unlock() async {
@@ -721,33 +1002,77 @@ class _UnlockScreenState extends State<UnlockScreen> {
   Widget build(BuildContext context) => Centered(
     children: [
       heading(context, 'Unlock PassBundle', widget.email),
-      TextField(
-        controller: password,
-        focusNode: passwordFocus,
-        obscureText: hidden,
-        // On a phone, once it's known there's no biometric prompt to come.
-        autofocus: !isPhone,
-        enabled: !working,
-        enableSuggestions: false,
-        autocorrect: false,
-        enableIMEPersonalizedLearning: false,
-        onSubmitted: (_) => unlock(),
-        decoration: InputDecoration(
-          labelText: 'Master password',
-          errorText: error,
-          suffixIcon: IconButton(
-            tooltip: hidden ? 'Show' : 'Hide',
-            icon: Icon(
-              hidden
-                  ? Icons.visibility_outlined
-                  : Icons.visibility_off_outlined,
+      if (usingPin)
+        TextField(
+          key: const ValueKey('unlock-pin'),
+          controller: pin,
+          focusNode: pinFocus,
+          obscureText: hidden,
+          autofocus: !isPhone,
+          enabled: !working,
+          enableSuggestions: false,
+          autocorrect: false,
+          enableIMEPersonalizedLearning: false,
+          onSubmitted: (_) => unlockWithPin(),
+          decoration: InputDecoration(
+            labelText: 'PIN',
+            errorText: error,
+            errorMaxLines: 3,
+            suffixIcon: IconButton(
+              tooltip: hidden ? 'Show' : 'Hide',
+              icon: Icon(
+                hidden
+                    ? Icons.visibility_outlined
+                    : Icons.visibility_off_outlined,
+              ),
+              onPressed: () => setState(() => hidden = !hidden),
             ),
-            onPressed: () => setState(() => hidden = !hidden),
+          ),
+        )
+      else
+        TextField(
+          controller: password,
+          focusNode: passwordFocus,
+          obscureText: hidden,
+          // On a phone, once it's known there's no biometric prompt to come.
+          autofocus: !isPhone,
+          enabled: !working,
+          enableSuggestions: false,
+          autocorrect: false,
+          enableIMEPersonalizedLearning: false,
+          onSubmitted: (_) => unlock(),
+          decoration: InputDecoration(
+            labelText: 'Master password',
+            errorText: error,
+            // Room for why a PIN was turned off, and what to do, in full.
+            errorMaxLines: 3,
+            suffixIcon: IconButton(
+              tooltip: hidden ? 'Show' : 'Hide',
+              icon: Icon(
+                hidden
+                    ? Icons.visibility_outlined
+                    : Icons.visibility_off_outlined,
+              ),
+              onPressed: () => setState(() => hidden = !hidden),
+            ),
           ),
         ),
-      ),
       const SizedBox(height: 16),
-      WorkingButton(label: 'Unlock', working: working, onPressed: unlock),
+      WorkingButton(
+        label: 'Unlock',
+        working: working,
+        onPressed: usingPin ? unlockWithPin : unlock,
+      ),
+      if (pinOn)
+        TextButton(
+          key: const ValueKey('pin-or-password'),
+          onPressed: working ? null : () => usePin(!usingPin),
+          child: Text(
+            usingPin
+                ? 'Use your master password instead'
+                : 'Use your PIN instead',
+          ),
+        ),
       if (method != null) ...[
         const SizedBox(height: 10),
         OutlinedButton.icon(
@@ -763,19 +1088,20 @@ class _UnlockScreenState extends State<UnlockScreen> {
         ),
       ],
       // First run, or a while away: the hint the account was made with.
-      TextButton(
-        key: const ValueKey('password-hint'),
-        onPressed: working || gettingHint ? null : getHint,
-        child: gettingHint
-            ? const SizedBox.square(
-                dimension: 18,
-                child: CircularProgressIndicator(
-                  strokeWidth: 2,
-                  semanticsLabel: 'Getting your master password hint',
-                ),
-              )
-            : const Text('Get your master password hint'),
-      ),
+      if (!usingPin)
+        TextButton(
+          key: const ValueKey('password-hint'),
+          onPressed: working || gettingHint ? null : getHint,
+          child: gettingHint
+              ? const SizedBox.square(
+                  dimension: 18,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    semanticsLabel: 'Getting your master password hint',
+                  ),
+                )
+              : const Text('Get your master password hint'),
+        ),
       const SizedBox(height: 6),
       Text(
         Uri.tryParse(widget.server)?.host ?? widget.server,

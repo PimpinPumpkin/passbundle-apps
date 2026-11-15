@@ -139,6 +139,13 @@ impl Store {
         fs::read_to_string(self.path(name)?).ok()
     }
 
+    /// Removes a file, if it's there.
+    pub(crate) fn remove(&self, name: &str) {
+        if let Some(path) = self.path(name) {
+            let _ = fs::remove_file(path);
+        }
+    }
+
     /// Whether a sync is kept, without reading it.
     pub fn has_sync(&self) -> bool {
         self.path("sync.json").is_some_and(|p| p.is_file())
@@ -230,13 +237,17 @@ impl Store {
         }
     }
 
-    /// Signing out forgets the vault, and the reminders shown for its items;
-    /// the server and email stay, to sign in again.
+    /// Signing out forgets the vault, the reminders shown for its items,
+    /// and the account's PIN (pin.rs); the server and email stay, to sign
+    /// in again.
     pub fn forget_vault(&self) {
-        for name in ["sync.json", "reminders.json", SEALED_REFRESH_TOKEN] {
-            if let Some(path) = self.path(name) {
-                let _ = fs::remove_file(path);
-            }
+        for name in [
+            "sync.json",
+            "reminders.json",
+            SEALED_REFRESH_TOKEN,
+            crate::pin::FILE,
+        ] {
+            self.remove(name);
         }
     }
 

@@ -306,6 +306,13 @@ fn failed(e: Error) -> Value {
         "field": if e.about_the_server() { json!("server") } else { Value::Null },
         // Making an account got to the server: signing in is what's left.
         "accountMade": matches!(e, Error::AccountMade { .. }),
+        // Making an account: the server takes none ("closed"), or none for
+        // this address ("address"). The sign-in screen has the words.
+        "newAccounts": match e {
+            Error::NoNewAccounts(crate::error::NoNewAccounts::Closed) => json!("closed"),
+            Error::NoNewAccounts(crate::error::NoNewAccounts::Address) => json!("address"),
+            _ => Value::Null,
+        },
         // Approving a sign-in waits for biometrics or the master password.
         "confirmFirst": e == Error::ConfirmFirst,
     })
@@ -513,7 +520,7 @@ fn summary(vault: &Vault, item: &Item) -> Value {
 pub unsafe extern "C" fn pb_open(dir: *const c_char, memory_secrets: bool) -> *mut c_char {
     let dir = text(dir);
     let secrets: Arc<dyn SecretStore> = if memory_secrets {
-        Arc::new(MemorySecretStore::default())
+        Arc::new(self::memory_secrets())
     } else {
         Arc::new(OsSecretStore::new(std::path::Path::new(&dir)))
     };
@@ -738,6 +745,169 @@ pub unsafe extern "C" fn pb_biometric_remove(account: *const c_char) -> *mut c_c
     with_app_waiting(&account, |app| done(app.remove_biometric()))
 }
 
+/// Whether this account can unlock with a PIN on this device (DESIGN.md in
+/// the meta repo, "Unlock with a PIN"): `status` is "on", "off",
+/// "unsupported" where the device has nowhere to seal one (the screens
+/// don't show the setting), or "policy" when an organization doesn't allow
+/// it. `openedWithPin` says a PIN opened the vault that's open now, when
+/// biometric unlock can't be turned on. `minCharacters` and `maxCharacters`
+/// are a PIN's length.
+///
+/// # Safety
+/// `account` is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_pin_status(account: *const c_char) -> *mut c_char {
+    let account = text(account);
+    with_app(&account, |app| pin_status(app))
+}
+
+fn pin_status(app: &App) -> Value {
+    json!({
+        "ok": true,
+        "status": app.pin_status().name(),
+        "openedWithPin": app.opened_with_pin(),
+        "minCharacters": crate::pin::MIN_CHARACTERS,
+        "maxCharacters": crate::pin::MAX_CHARACTERS,
+    })
+}
+
+/// Sets the account's PIN, while unlocked: the master password is checked
+/// first, as unlocking checks it. `{ok}`, or the words to show. Neither
+/// string is kept; both are wiped when the call is done.
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_pin_set(
+    account: *const c_char,
+    master_password: *const c_char,
+    pin: *const c_char,
+) -> *mut c_char {
+    let account = text(account);
+    let master_password = Zeroizing::new(text(master_password));
+    let pin = Zeroizing::new(text(pin));
+    with_app(&account, |app| done(app.set_pin(&master_password, &pin)))
+}
+
+/// Unlocks the account with its PIN. `{ok}`, or the words to show, with
+/// `pinOn`: whether the account still has a PIN to try. It doesn't after
+/// the fifth wrong try in a row, or when the PIN was out of date, and the
+/// lock screen then asks for the master password.
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_pin_unlock(account: *const c_char, pin: *const c_char) -> *mut c_char {
+    let account = text(account);
+    let pin = Zeroizing::new(text(pin));
+    with_app(&account, |app| match app.unlock_with_pin(&pin) {
+        Ok(()) => json!({ "ok": true }),
+        Err(e) => {
+            let mut answer = failed(e);
+            answer["pinOn"] = json!(app.pin_status() == crate::app::PinStatus::On);
+            answer
+        }
+    })
+}
+
+/// Turns the account's PIN off. Answers as `pb_pin_status`.
+///
+/// # Safety
+/// `account` is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_pin_remove(account: *const c_char) -> *mut c_char {
+    let account = text(account);
+    with_app(&account, |app| {
+        app.remove_pin();
+        pin_status(app)
+    })
+}
+
+/// The app's Swift gives the core its seal to the device and the opening of
+/// it, once at start and only where the device has what they need (a Mac
+/// with a Secure Enclave, an iPhone): `secrets::DeviceSealCall`. Without
+/// them no PIN is offered. The iPhone's AutoFill extension never calls this.
+#[cfg(any(target_os = "ios", target_os = "macos"))]
+#[no_mangle]
+pub extern "C" fn pb_set_device_seal(
+    seal: crate::secrets::DeviceSealCall,
+    open: crate::secrets::DeviceSealCall,
+) {
+    crate::secrets::set_device_seal(seal, open);
+}
+
+/// The store `pb_open` makes when it's asked to keep secrets in memory. It
+/// seals nothing to the device, as on Linux, so no PIN is offered, unless a
+/// test build was asked to stand in for a device that can
+/// (`pb_test_device_seal`). That stand-in's key is one for the process, so
+/// opening the core again (a test's restart) still opens what was sealed
+/// before.
+fn memory_secrets() -> MemorySecretStore {
+    #[cfg(feature = "test-hooks")]
+    if TEST_DEVICE_SEALS.load(Ordering::SeqCst) {
+        static DEVICE_KEY: std::sync::OnceLock<crate::crypto::SymmetricKey> =
+            std::sync::OnceLock::new();
+        return MemorySecretStore::with_device_key(
+            DEVICE_KEY
+                .get_or_init(crate::crypto::SymmetricKey::generate)
+                .clone(),
+        );
+    }
+    MemorySecretStore::without_device_seal()
+}
+
+/// Whether the memory store `pb_open` makes next can seal to the device,
+/// for tests (the test-hooks feature). Off until a test turns it on: the
+/// screens' tests show a device with no PIN, as Linux and a Mac without a
+/// Secure Enclave are, and the PIN's tests turn it on.
+#[cfg(feature = "test-hooks")]
+static TEST_DEVICE_SEALS: AtomicBool = AtomicBool::new(false);
+
+#[cfg(feature = "test-hooks")]
+#[no_mangle]
+pub extern "C" fn pb_test_device_seal(seals: bool) -> *mut c_char {
+    TEST_DEVICE_SEALS.store(seals, Ordering::SeqCst);
+    out(json!({ "ok": true }))
+}
+
+/// For the Mac's test program (tools/mac-touch-id-test), in test builds:
+/// seals `plain` for `account` with the seal the app's Swift gave
+/// (`pb_set_device_seal`), as setting a PIN does, and opens it again, as
+/// unlocking does. `seals` says whether the core was given one; `sealed` is
+/// what it would keep (base64), `opened` what that opens to, and `asOther`
+/// whether it opened as `other`, another account's, which it never may.
+/// Nothing is kept, and no keychain is read.
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+#[cfg(all(feature = "test-hooks", target_os = "macos"))]
+#[no_mangle]
+pub unsafe extern "C" fn pb_test_device_seal_round_trip(
+    account: *const c_char,
+    other: *const c_char,
+    plain: *const c_char,
+) -> *mut c_char {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let (account, other, plain) = (text(account), text(other), text(plain));
+    let store = OsSecretStore::new(std::path::Path::new("."));
+    let sealed = store.seal_to_device(&account, plain.as_bytes());
+    let opened = sealed
+        .as_deref()
+        .and_then(|sealed| store.open_from_device(&account, sealed))
+        .and_then(|opened| String::from_utf8(opened.to_vec()).ok());
+    let as_other = sealed
+        .as_deref()
+        .and_then(|sealed| store.open_from_device(&other, sealed))
+        .is_some();
+    out(json!({
+        "ok": true,
+        "seals": store.seals_to_device(),
+        "sealed": sealed.map(|sealed| STANDARD.encode(sealed)),
+        "opened": opened,
+        "asOther": as_other,
+    }))
+}
+
 #[no_mangle]
 pub extern "C" fn pb_version() -> *mut c_char {
     out(json!(crate::version()))
@@ -745,9 +915,15 @@ pub extern "C" fn pb_version() -> *mut c_char {
 
 /// Where to sign in: `ours`, PassBundle's own server, and `managed`, the
 /// server an organization set by policy (managed.rs), which then is the one.
+/// And `contactPage`, the website's page for asking for an account while
+/// PassBundle's server takes no new ones.
 #[no_mangle]
 pub extern "C" fn pb_servers() -> *mut c_char {
-    out(json!({ "ours": crate::brand::SERVER, "managed": crate::managed::server() }))
+    out(json!({
+        "ours": crate::brand::SERVER,
+        "managed": crate::managed::server(),
+        "contactPage": crate::brand::CONTACT_PAGE,
+    }))
 }
 
 /// An account's state: signed out, locked, or unlocked, with the server and
@@ -812,23 +988,33 @@ pub unsafe extern "C" fn pb_sign_up(
     let (name, hint) = (given(&name), given(&hint).map(Zeroizing::new));
     // The slow part (the master key, an RSA key pair) away from the app, so
     // nothing else waits on it; a server address that can't be used first.
-    let made = crate::server::Server::new(
-        &server,
-        crate::server::Device::this_one(&crate::server::Device::new_identifier()),
-    )
-    // A PassBundle server there, before the slow part.
-    .and_then(|s| s.check())
-    .and_then(|_| {
-        crate::signup::NewAccount::make(
-            &email,
-            name.as_deref(),
-            &password,
-            hint.as_deref().map(|h| h.as_str()),
-        )
+    // On a thread of the core's own, as the server check waits on the
+    // network (`with_accounts_waiting`): on Dart's own thread, a signal from
+    // Dart ends the read, and the check says the server can't be reached.
+    let made = std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                crate::server::Server::new(
+                    &server,
+                    crate::server::Device::this_one(&crate::server::Device::new_identifier()),
+                )
+                // A PassBundle server there, before the slow part.
+                .and_then(|s| s.check())
+                .and_then(|_| {
+                    crate::signup::NewAccount::make(
+                        &email,
+                        name.as_deref(),
+                        &password,
+                        hint.as_deref().map(|h| h.as_str()),
+                    )
+                })
+            })
+            .join()
     });
     let account = match made {
-        Ok(account) => account,
-        Err(e) => return out(failed(e)),
+        Ok(Ok(account)) => account,
+        Ok(Err(e)) => return out(failed(e)),
+        Err(_) => return out(json!({ "ok": false, "error": STOPPED })),
     };
     with_accounts_waiting(|accounts| {
         let result = accounts.register(&server, &account, &password);
@@ -1022,7 +1208,8 @@ pub unsafe extern "C" fn pb_sync(account: *const c_char) -> *mut c_char {
 
 /// Whether a PassBundle server answers at an address, before signing in or
 /// making an account there (docs/core.md, "Checking a server"): `{ok}`, or
-/// what's wrong, with `field: "server"`.
+/// what's wrong, with `field: "server"`. With `newAccounts`, "open" or
+/// "closed", when the server says whether it takes new accounts.
 ///
 /// # Safety
 /// `server` is null or a NUL-terminated UTF-8 string, valid for the call.
@@ -1034,10 +1221,15 @@ pub unsafe extern "C" fn pb_check_server(server: *const c_char) -> *mut c_char {
         scope
             .spawn(|| {
                 catch_unwind(AssertUnwindSafe(|| {
-                    done(
-                        crate::server::Server::new(&server, crate::server::Device::this_one(""))
-                            .and_then(|s| s.check()),
-                    )
+                    match crate::server::Server::new(&server, crate::server::Device::this_one(""))
+                        .and_then(|s| s.takes_new_accounts())
+                    {
+                        Ok(takes) => json!({
+                            "ok": true,
+                            "newAccounts": takes.map(|yes| if yes { "open" } else { "closed" }),
+                        }),
+                        Err(e) => failed(e),
+                    }
                 }))
                 .unwrap_or_else(|_| json!({ "ok": false, "error": STOPPED }))
             })
@@ -1457,10 +1649,16 @@ pub(crate) fn unlock_with_master_password(account: &str, password: &str) -> Valu
 
 /// An unlocked account's user key, for the phone app to seal for that
 /// account's biometric unlock (android.rs, or `pb_user_key` for iOS's
-/// Keychain). None while it's locked or busy.
+/// Keychain). None while it's locked or busy, and while the vault is one a
+/// PIN opened.
 #[cfg(any(phone, target_os = "macos"))]
 pub(crate) fn user_key_for_biometric(account: &str) -> Option<Zeroizing<Vec<u8>>> {
     on_phone(account, |app| {
+        // Never from a vault a PIN opened: the master password unlocks it
+        // first (app/pin.rs).
+        if app.opened_with_pin() {
+            return None;
+        }
         Some(Zeroizing::new(app.vault()?.user_key().to_bytes().to_vec()))
     })
 }
@@ -1530,7 +1728,8 @@ pub unsafe extern "C" fn pb_preferences(account: *const c_char) -> *mut c_char {
 /// The organizations' "Vault lock" policy (docs/core.md, "Locking by
 /// policy"): `maxMinutes` (the longest wait, or null), `immediately`,
 /// `onSystemLock`, and `signOut`; and `removeUnlockWithPin`, from their
-/// "Remove Unlock with PIN" policy. All off when no organization sets them.
+/// "Remove Unlock with PIN" policy (which `pb_pin_status` answers as
+/// "policy"). All off when no organization sets them.
 ///
 /// # Safety
 /// `account` is null or a NUL-terminated UTF-8 string, valid for the call.

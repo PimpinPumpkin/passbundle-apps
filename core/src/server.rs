@@ -12,7 +12,7 @@ use ureq::Agent;
 use zeroize::Zeroizing;
 
 use crate::crypto::{EncString, SymmetricKey};
-use crate::error::{BadAddress, Error, Result};
+use crate::error::{BadAddress, Error, NoNewAccounts, Result};
 use crate::kdf::{normalize_email, Kdf, MasterKey, Prelogin};
 use crate::new_device::{self, Held};
 use crate::two_step::Offer;
@@ -300,6 +300,28 @@ fn message_of(body: &Value) -> Option<String> {
     None
 }
 
+/// Whether a server takes new accounts, as its public settings say
+/// (`/api/config`, `settings.disableUserRegistration`): `Some(false)` when
+/// it says it takes none. A server that takes them only from some addresses
+/// says it takes them, and refuses the others when asked (`no_new_accounts`).
+/// `None` when it doesn't say, as an older server, or says something else.
+fn takes_new_accounts(config: &Value) -> Option<bool> {
+    config["settings"]["disableUserRegistration"]
+        .as_bool()
+        .map(|closed| !closed)
+}
+
+/// Why a server won't start a new account, when it says which beside its
+/// message (`keykeeperNewAccounts`: "closed" or "address"). Without it, or
+/// with anything else there, the answer is read as any other refusal.
+fn no_new_accounts(refusal: &Value) -> Option<NoNewAccounts> {
+    match refusal["keykeeperNewAccounts"].as_str()? {
+        "closed" => Some(NoNewAccounts::Closed),
+        "address" => Some(NoNewAccounts::Address),
+        _ => None,
+    }
+}
+
 /// The one certificate every connection trusts instead of the OS's, once a
 /// test tool that drives the whole app against a throwaway HTTPS server
 /// says so (`trust_only_for_tests`). Only in builds with the `test-trust`
@@ -462,6 +484,13 @@ impl Server {
     /// anything else is `NotAServer`; a server that can't be reached says
     /// why (`Network`).
     pub fn check(&self) -> Result<()> {
+        self.takes_new_accounts().map(|_| ())
+    }
+
+    /// `check`, and what the same answer says about new accounts
+    /// (`takes_new_accounts`): the sign-in screen offers making one unless
+    /// the server says it takes none.
+    pub fn takes_new_accounts(&self) -> Result<Option<bool>> {
         let (status, body) = self.answer(
             self.agent
                 .get(self.url("/api/config"))
@@ -471,7 +500,7 @@ impl Server {
                 .call(),
         )?;
         match Self::checked(status, body) {
-            Ok(body) if body["version"].is_string() => Ok(()),
+            Ok(body) if body["version"].is_string() => Ok(takes_new_accounts(&body)),
             Err(Error::TooManyTries) => Err(Error::TooManyTries),
             Err(Error::Status(code)) if code >= 500 => Err(Error::Status(code)),
             _ => Err(self.not_a_server()),
@@ -1299,15 +1328,24 @@ impl Server {
     /// as upstream's apps do: asks for a token for the email, then sends the
     /// account with it. A server that emails the token instead (it checks
     /// the address) is refused here: the person finishes from that email.
+    /// A server that takes no new accounts, or none for this address,
+    /// refuses the first step and says which (`NoNewAccounts`).
     pub fn register(&self, account: &crate::signup::NewAccount) -> Result<()> {
-        let token = self.raw_post(
-            "/identity/accounts/register/send-verification-email",
-            json!({
-                "email": account.email,
-                "name": account.name,
-                "receiveMarketingEmails": false,
-            }),
+        let (status, body) = self.answer(
+            self.agent
+                .post(self.url("/identity/accounts/register/send-verification-email"))
+                .send_json(json!({
+                    "email": account.email,
+                    "name": account.name,
+                    "receiveMarketingEmails": false,
+                })),
         )?;
+        if status == 400 {
+            if let Some(why) = no_new_accounts(&body) {
+                return Err(Error::NoNewAccounts(why));
+            }
+        }
+        let token = Self::checked(status, body)?;
         // A token is a JWT: three base64url parts. Anything else (a web page
         // at a wrong address, say) isn't one, and nothing more is sent.
         let jwt = |t: &&str| {
@@ -1599,6 +1637,207 @@ mod tests {
             }
         );
         assert!(refused.about_the_server() && refused.offline());
+    }
+
+    #[test]
+    fn a_server_says_whether_it_takes_new_accounts_with_its_configuration() {
+        let config = |text: &str| serde_json::from_str::<Value>(text).unwrap();
+        // It says it takes none.
+        assert_eq!(
+            takes_new_accounts(&config(
+                r#"{"version":"2026.6.0","settings":{"disableUserRegistration":true}}"#
+            )),
+            Some(false)
+        );
+        // It says it takes them.
+        assert_eq!(
+            takes_new_accounts(&config(
+                r#"{"version":"2026.6.0","settings":{"disableUserRegistration":false}}"#
+            )),
+            Some(true)
+        );
+        // An older server's answer, without its settings, or without that
+        // one: it doesn't say.
+        for older in [
+            r#"{"version":"2026.6.0","server":{"name":"PassBundle"}}"#,
+            r#"{"version":"2026.6.0","settings":{}}"#,
+            r#"{"version":"2026.6.0","settings":null}"#,
+        ] {
+            assert_eq!(takes_new_accounts(&config(older)), None, "{older}");
+        }
+        // Something else where yes or no should be says nothing either.
+        for wrong in [
+            r#"{"settings":{"disableUserRegistration":"true"}}"#,
+            r#"{"settings":{"disableUserRegistration":1}}"#,
+            r#"{"settings":{"disableUserRegistration":null}}"#,
+            r#"{"settings":{"disableUserRegistration":{"closed":true}}}"#,
+            r#"{"settings":[true]}"#,
+            r#"{"settings":"disableUserRegistration"}"#,
+            r#"{"disableUserRegistration":true}"#,
+            r#""closed""#,
+            "null",
+        ] {
+            assert_eq!(takes_new_accounts(&config(wrong)), None, "{wrong}");
+        }
+
+        // Checking a server asks once, and the one answer says both: a
+        // server that takes no new accounts is a PassBundle server all the
+        // same.
+        let json = "Content-Type: application/json\r\n";
+        let closed = br#"{"version":"2026.6.0","settings":{"disableUserRegistration":true}}"#;
+        let open = br#"{"version":"2026.6.0","settings":{"disableUserRegistration":false}}"#;
+        let older = br#"{"version":"2026.6.0"}"#;
+        let (url, served) = answering(vec![
+            answer("200 OK", json, closed),
+            answer("200 OK", json, closed),
+            answer("200 OK", json, open),
+            answer("200 OK", json, older),
+            answer(
+                "200 OK",
+                json,
+                br#"{"settings":{"disableUserRegistration":true}}"#,
+            ),
+            answer("503 Service Unavailable", "", b""),
+        ]);
+        let server = Server::new(&url, Device::this_one("")).unwrap();
+        assert_eq!(server.takes_new_accounts(), Ok(Some(false)));
+        assert_eq!(server.check(), Ok(()));
+        assert_eq!(server.takes_new_accounts(), Ok(Some(true)));
+        assert_eq!(server.takes_new_accounts(), Ok(None));
+        // No version: not a PassBundle server, whatever else it says.
+        assert_eq!(
+            server.takes_new_accounts(),
+            Err(Error::NotAServer(url.trim_start_matches("http://").into()))
+        );
+        assert_eq!(server.takes_new_accounts(), Err(Error::Status(503)));
+        assert_eq!(served.join().unwrap(), ["/api/config"; 6]);
+    }
+
+    /// A new account as the first step sends it: its email, and no name.
+    /// Nothing else of it leaves before the server gives a token.
+    fn new_account(email: &str) -> crate::signup::NewAccount {
+        let key = SymmetricKey::generate();
+        crate::signup::NewAccount {
+            email: email.into(),
+            name: None,
+            hint: None,
+            login_hash: Zeroizing::new("not sent at the first step".into()),
+            kdf: crate::signup::KDF,
+            user_key: key.encrypt(b"user key"),
+            public_key: Vec::new(),
+            private_key: key.encrypt(b"private key"),
+        }
+    }
+
+    /// The server's refusal of a new account's first step, as it sends it
+    /// (passbundle-server, `new_account_refused`), with `code` beside the
+    /// message when there is one.
+    fn refusal(message: &str, code: Option<Value>) -> Vec<u8> {
+        let mut body = json!({
+            "message": message,
+            "error": "",
+            "error_description": "",
+            "validationErrors": { "": [message] },
+            "errorModel": { "message": message, "object": "error" },
+            "exceptionMessage": null,
+            "exceptionStackTrace": null,
+            "innerExceptionMessage": null,
+            "object": "error",
+        });
+        if let Some(code) = code {
+            body["keykeeperNewAccounts"] = code;
+        }
+        answer(
+            "400 Bad Request",
+            "Content-Type: application/json\r\n",
+            body.to_string().as_bytes(),
+        )
+    }
+
+    #[test]
+    fn a_refused_new_account_says_why_when_the_server_does() {
+        let body = |text: &str| serde_json::from_str::<Value>(text).unwrap();
+        assert_eq!(
+            no_new_accounts(&body(r#"{"keykeeperNewAccounts":"closed"}"#)),
+            Some(NoNewAccounts::Closed)
+        );
+        assert_eq!(
+            no_new_accounts(&body(r#"{"keykeeperNewAccounts":"address"}"#)),
+            Some(NoNewAccounts::Address)
+        );
+        // An older server's refusal has no reason; one this app doesn't
+        // know, or something that isn't a reason, is none either.
+        for none in [
+            r#"{"message":"Registration not allowed or user already exists"}"#,
+            r#"{"keykeeperNewAccounts":"later"}"#,
+            r#"{"keykeeperNewAccounts":"Closed"}"#,
+            r#"{"keykeeperNewAccounts":""}"#,
+            r#"{"keykeeperNewAccounts":true}"#,
+            r#"{"keykeeperNewAccounts":1}"#,
+            r#"{"keykeeperNewAccounts":null}"#,
+            r#"{"keykeeperNewAccounts":["closed"]}"#,
+            r#"{"keykeeperNewAccounts":{"reason":"closed"}}"#,
+            r#"{"errorModel":{"keykeeperNewAccounts":"closed"}}"#,
+            r#""closed""#,
+            "null",
+        ] {
+            assert_eq!(no_new_accounts(&body(none)), None, "{none}");
+        }
+
+        // Making an account: the first step's refusal says which, and
+        // nothing more is sent.
+        let account = new_account("ana@example.test");
+        for (code, why, words) in [
+            (
+                "closed",
+                NoNewAccounts::Closed,
+                "This server isn't taking new accounts.",
+            ),
+            (
+                "address",
+                NoNewAccounts::Address,
+                "New accounts aren't open for that address.",
+            ),
+        ] {
+            let (url, served) = answering(vec![refusal(words, Some(json!(code)))]);
+            let server = Server::new(&url, Device::this_one("")).unwrap();
+            let refused = server.register(&account).unwrap_err();
+            assert_eq!(refused, Error::NoNewAccounts(why));
+            assert_eq!(refused.to_string(), words);
+            assert!(!refused.about_the_server() && !refused.offline());
+            assert_eq!(
+                served.join().unwrap(),
+                ["/identity/accounts/register/send-verification-email"]
+            );
+        }
+
+        // An older server's refusal, a reason this app doesn't know, and
+        // one of the wrong kind are said as before: in the server's words.
+        for code in [None, Some(json!("later")), Some(json!(true))] {
+            let (url, served) = answering(vec![refusal(
+                "Registration not allowed or user already exists",
+                code.clone(),
+            )]);
+            let server = Server::new(&url, Device::this_one("")).unwrap();
+            assert_eq!(
+                server.register(&account),
+                Err(Error::Server(
+                    "Registration not allowed or user already exists".into()
+                )),
+                "{code:?}"
+            );
+            assert_eq!(served.join().unwrap().len(), 1);
+        }
+
+        // Only a refusal carries a reason: an answer that isn't one (the
+        // server's own trouble) is read as it was.
+        let (url, _) = answering(vec![answer(
+            "500 Internal Server Error",
+            "Content-Type: application/json\r\n",
+            br#"{"keykeeperNewAccounts":"closed"}"#,
+        )]);
+        let server = Server::new(&url, Device::this_one("")).unwrap();
+        assert_eq!(server.register(&account), Err(Error::Status(500)));
     }
 
     #[test]
