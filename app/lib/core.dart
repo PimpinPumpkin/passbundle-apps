@@ -304,6 +304,7 @@ class Core {
   late final _generate = _lib.lookupFunction<_Str2, _Str2>('pb_generate');
   late final _generatorOptions = _lib.lookupFunction<_Str1, _Str1>('pb_generator_options');
   late final _generatorPolicy = _lib.lookupFunction<_Str1, _Str1>('pb_generator_policy');
+  late final _plans = _lib.lookupFunction<_Str1, _Str1>('pb_plans');
   late final _updateStatus = _lib.lookupFunction<_Str0, _Str0>(
     'pb_update_status',
   );
@@ -1457,6 +1458,13 @@ class Core {
   Map<String, dynamic> generatorPolicy() =>
       _with([account], (p) => _answer(_generatorPolicy(p[0])))
           as Map<String, dynamic>;
+
+  /// The person's plans as the last sync said them (core/src/plans.rs):
+  /// `enforced`, and where it's true, `own`, `premiumFromOrganization`, and
+  /// `organizations` (`id`, `name`, `role`, `plan`) for Settings (plan.dart).
+  Map<String, dynamic> plans() => Map<String, dynamic>.from(
+    _with([account], (p) => _answer(_plans(p[0]))) as Map? ?? const {},
+  );
 
   /// A new password or passphrase for the editor's field: `{ok, password,
   /// options}`, with the choices held to the organizations' policy, or the
