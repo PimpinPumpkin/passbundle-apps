@@ -125,6 +125,8 @@ pub enum Error {
     /// the account's credentials, a Duo answer for another sign-in, a code
     /// that isn't a YubiKey's (two_step.rs, security_key).
     TwoStep(&'static str),
+    /// The person stopped a file's upload. The apps show nothing for it.
+    Canceled,
     /// Unlocking with a PIN: that wasn't the PIN, and how many tries are
     /// left before the PIN is removed (pin.rs). Never the PIN itself.
     WrongPin { left: u32 },
@@ -321,6 +323,7 @@ impl fmt::Display for Error {
             Error::TooManyAccounts => write!(f, "PassBundle keeps up to {} accounts on this device. Sign out of one to add another.", crate::accounts::MOST),
             Error::AlreadyHere => write!(f, "That account is in PassBundle on this device already, under another email or server. Sign out of it there first."),
             Error::TwoStep(sentence) => write!(f, "{sentence}"),
+            Error::Canceled => write!(f, "The upload was canceled."),
             Error::WrongPin { left: 1 } => write!(f, "That PIN isn't right. 1 try left."),
             Error::WrongPin { left } => write!(f, "That PIN isn't right. {left} tries left."),
             Error::PinTurnedOff => write!(
@@ -423,6 +426,8 @@ mod tests {
             Error::Server("Username or password is incorrect. Try again".into()),
             Error::NoNewAccounts(NoNewAccounts::Closed),
             Error::NoNewAccounts(NoNewAccounts::Address),
+            Error::Canceled,
+            Error::Refused("this device doesn't have the memory free for a file that large"),
         ]
         .map(|e| e.to_string());
         for w in &words {

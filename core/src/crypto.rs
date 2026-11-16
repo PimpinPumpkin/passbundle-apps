@@ -72,9 +72,7 @@ impl SymmetricKey {
 
     /// Encrypts with a random IV, as type 2.
     pub fn encrypt(&self, plaintext: &[u8]) -> EncString {
-        let mut iv = [0u8; 16];
-        OsRng.fill_bytes(&mut iv);
-        self.encrypt_with_iv(plaintext, iv)
+        self.encrypt_with_iv(plaintext, new_iv())
     }
 
     pub fn encrypt_str(&self, plaintext: &str) -> EncString {
@@ -95,6 +93,13 @@ impl SymmetricKey {
         mac.update(data);
         mac
     }
+}
+
+/// A new random IV from the OS's source, one for each thing encrypted.
+pub(crate) fn new_iv() -> [u8; 16] {
+    let mut iv = [0u8; 16];
+    OsRng.fill_bytes(&mut iv);
+    iv
 }
 
 impl fmt::Debug for SymmetricKey {
@@ -193,6 +198,103 @@ impl EncString {
     }
 }
 
+/// What an encrypted file starts with, before its ciphertext: the type
+/// byte, the IV, and the MAC.
+const FILE_HEAD: usize = 1 + 16 + 32;
+
+/// How long a file of `plain` bytes is once encrypted (`FileToEncrypt`):
+/// the head, then the file padded up to the next whole block.
+pub fn encrypted_file_len(plain: u64) -> u64 {
+    FILE_HEAD as u64 + (plain / 16 + 1) * 16
+}
+
+/// A file being read to encrypt for an attachment or a file Send, in
+/// upstream's file format (`decrypt_file` opens it). The format's MAC covers
+/// the whole ciphertext, and the server wants the length before the file, so
+/// the file is in memory once: read into this one buffer, which has room for
+/// the head and the padding from the start, and encrypted where it lies. The
+/// buffer never grows, so the plaintext is never copied, and it's zeroized
+/// if the file is dropped before it's encrypted.
+pub struct FileToEncrypt {
+    buffer: Zeroizing<Vec<u8>>,
+    room: usize,
+}
+
+impl FileToEncrypt {
+    /// Room for a file of up to `len` bytes. A device without that much
+    /// memory free says so instead of stopping.
+    pub fn with_room(len: usize) -> Result<Self> {
+        const NO_MEMORY: Error =
+            Error::Refused("this device doesn't have the memory free for a file that large");
+        let total = len.checked_add(FILE_HEAD + 16).ok_or(NO_MEMORY)?;
+        let mut buffer = Vec::new();
+        buffer.try_reserve_exact(total).map_err(|_| NO_MEMORY)?;
+        buffer.resize(FILE_HEAD, 0);
+        Ok(FileToEncrypt {
+            buffer: Zeroizing::new(buffer),
+            room: len,
+        })
+    }
+
+    /// How much of the file is read so far.
+    pub fn len(&self) -> usize {
+        self.buffer.len() - FILE_HEAD
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Whether the room is used up.
+    pub fn is_full(&self) -> bool {
+        self.len() == self.room
+    }
+
+    /// Reads up to `most` more bytes into the room left, straight from the
+    /// reader into the buffer. Answers how many came: 0 at the reader's end,
+    /// or when the room is full.
+    pub fn read_from(
+        &mut self,
+        reader: &mut impl std::io::Read,
+        most: usize,
+    ) -> std::io::Result<usize> {
+        let start = self.buffer.len();
+        let end = start + most.min(self.room - self.len());
+        // Within the room reserved, so nothing moves.
+        self.buffer.resize(end, 0);
+        let read = reader.read(&mut self.buffer[start..end]);
+        self.buffer
+            .truncate(start + read.as_ref().map_or(0, |n| (*n).min(end - start)));
+        read
+    }
+
+    /// The encrypted file, under `key` with a new random IV: what the server
+    /// stores.
+    pub fn encrypt(self, key: &SymmetricKey) -> Vec<u8> {
+        self.encrypt_with_iv(key, new_iv())
+    }
+
+    pub(crate) fn encrypt_with_iv(mut self, key: &SymmetricKey, iv: [u8; 16]) -> Vec<u8> {
+        let plain = self.len();
+        let padded = (plain / 16 + 1) * 16;
+        // Within the room reserved (`with_room` adds a block for the padding).
+        self.buffer.resize(FILE_HEAD + padded, 0);
+        Aes256CbcEnc::new(&key.enc.into(), &iv.into())
+            .encrypt_padded_mut::<Pkcs7>(&mut self.buffer[FILE_HEAD..], plain)
+            .expect("the buffer has room for the padding");
+        let mac: [u8; 32] = key
+            .mac_of(&iv, &self.buffer[FILE_HEAD..])
+            .finalize()
+            .into_bytes()
+            .into();
+        self.buffer[0] = 2;
+        self.buffer[1..17].copy_from_slice(&iv);
+        self.buffer[17..FILE_HEAD].copy_from_slice(&mac);
+        // Only ciphertext is left in it, so it goes out as it is.
+        std::mem::take(&mut *self.buffer)
+    }
+}
+
 /// Opens an attachment's file (docs/core.md, "Attachments"): upstream's
 /// file format, the type byte 2, the IV, the MAC over the IV and ciphertext,
 /// then the ciphertext. The MAC is checked first, in constant time, as for
@@ -200,7 +302,7 @@ impl EncString {
 /// decrypts in place, in the downloaded file's own buffer, so a large file
 /// needs its size in memory once, not three times.
 pub fn decrypt_file(file: Vec<u8>, key: &SymmetricKey) -> Result<Zeroizing<Vec<u8>>> {
-    const HEAD: usize = 1 + 16 + 32;
+    const HEAD: usize = FILE_HEAD;
     // Zeroized however this ends, since it holds plaintext once decrypted.
     let mut file = Zeroizing::new(file);
     let Some(&kind) = file.first() else {
@@ -348,6 +450,81 @@ mod tests {
         assert_ne!(a, b);
         let reparsed = EncString::parse(&a.to_string()).unwrap();
         assert_eq!(&*reparsed.decrypt_string(&key).unwrap(), "hello");
+    }
+
+    fn to_encrypt(plain: &[u8]) -> FileToEncrypt {
+        let mut file = FileToEncrypt::with_room(plain.len()).unwrap();
+        let mut reader = plain;
+        while file.read_from(&mut reader, 7).unwrap() > 0 {}
+        assert_eq!(file.len(), plain.len());
+        assert!(file.is_full());
+        file
+    }
+
+    #[test]
+    fn a_file_encrypts_in_its_own_buffer_and_opens_again() {
+        let key = SymmetricKey::generate();
+        for len in [0usize, 1, 15, 16, 17, 31, 32, 33, 4096, 70_001] {
+            let plain: Vec<u8> = (0..len).map(|i| (i * 31 % 251) as u8).collect();
+            let file = to_encrypt(&plain);
+            let before = (file.buffer.as_ptr(), file.buffer.capacity());
+            let encrypted = file.encrypt(&key);
+            // The same buffer, never moved or grown: no copy of the
+            // plaintext is left anywhere else.
+            assert_eq!((encrypted.as_ptr(), encrypted.capacity()), before);
+            assert_eq!(encrypted.len() as u64, encrypted_file_len(len as u64));
+            assert_eq!(encrypted[0], 2);
+            if len >= 16 {
+                assert!(
+                    !encrypted.windows(16).any(|w| w == &plain[..16]),
+                    "no plaintext left in a file of {len} bytes"
+                );
+            }
+            assert_eq!(
+                *decrypt_file(encrypted, &key).unwrap(),
+                plain,
+                "{len} bytes"
+            );
+        }
+    }
+
+    #[test]
+    fn each_file_gets_a_new_iv() {
+        let key = SymmetricKey::generate();
+        let a = to_encrypt(b"the same file").encrypt(&key);
+        let b = to_encrypt(b"the same file").encrypt(&key);
+        assert_ne!(a[1..17], b[1..17]);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn a_file_never_reads_past_its_room_and_a_changed_one_is_refused() {
+        let mut file = FileToEncrypt::with_room(4).unwrap();
+        let mut reader: &[u8] = b"longer than four";
+        assert_eq!(file.read_from(&mut reader, 64).unwrap(), 4);
+        assert_eq!(file.read_from(&mut reader, 64).unwrap(), 0);
+        assert!(file.is_full());
+        let key = SymmetricKey::generate();
+        let mut encrypted = file.encrypt(&key);
+        assert_eq!(*decrypt_file(encrypted.clone(), &key).unwrap(), b"long");
+        let last = encrypted.len() - 1;
+        encrypted[last] ^= 1;
+        assert_eq!(
+            decrypt_file(encrypted, &key).unwrap_err(),
+            Error::Refused("its integrity check failed")
+        );
+    }
+
+    #[test]
+    fn a_file_too_large_for_memory_is_refused_not_a_crash() {
+        assert!(matches!(
+            FileToEncrypt::with_room(usize::MAX - 8),
+            Err(Error::Refused(_))
+        ));
+        assert!(matches!(
+            FileToEncrypt::with_room(usize::MAX / 2),
+            Err(Error::Refused(_))
+        ));
     }
 
     #[test]

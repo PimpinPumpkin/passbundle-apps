@@ -32,6 +32,8 @@ use crate::vault::{Item, ItemDraft, Sync, Vault};
 mod bulk;
 mod pin;
 pub use bulk::{Bulk, Outcome, Plan, Skip};
+mod files;
+pub use files::{attach, too_large, Adding, Attached, Phase, Progress, MAX_FILE};
 pub use pin::PinStatus;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -107,6 +109,9 @@ pub struct App {
     /// The organizations' "Vault lock" policy, from the kept sync.
     policy: LockPolicy,
     generator_policy: GeneratorPolicy,
+    /// Attachments this app started on the server that the item doesn't
+    /// show: on their way, or to delete there (files.rs). In memory only.
+    uploads: Vec<files::Unfinished>,
     /// The item whose secrets the master password, asked for again, let
     /// out (docs/core.md, "Asking for the master password again"): until
     /// another item asks, or the vault locks.
@@ -226,6 +231,7 @@ impl App {
             preferences,
             policy: LockPolicy::default(),
             generator_policy: GeneratorPolicy::default(),
+            uploads: Vec::new(),
             reprompted: None,
             grant: 0,
             autolock: AutoLock::new(Instant::now(), SystemTime::now()),
@@ -835,6 +841,9 @@ impl App {
         }
         // The account the vault kept here is (its id on the server).
         let kept = self.user_id().ok();
+        // What this app started on the server and didn't finish is deleted
+        // there first, so the vault that comes doesn't list it (files.rs).
+        self.delete_unfinished();
         let (Some(server), Some(settings)) = (&self.server, &self.settings) else {
             return Err(Error::SignedOut);
         };
@@ -865,6 +874,7 @@ impl App {
         // The server may have issued a new refresh token.
         keep_refresh_token(&*self.secrets, &self.store, settings, session);
         self.vault = Some(Vault::open(&sync, session.user_key().clone())?);
+        self.forget_deleted();
         // A server without them, or one that's gone for a moment, leaves the
         // generator's settings as they are here.
         let _ = self.sync_settings();
@@ -1197,6 +1207,7 @@ impl App {
             forget_refresh_token(&*self.secrets, &self.store, s);
         }
         self.store.forget_vault();
+        self.forget_uploads();
         self.lock();
     }
 

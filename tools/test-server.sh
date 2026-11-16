@@ -11,13 +11,16 @@
 # used; NEW_DEVICE_CHECK=true turns it on, for the tests of it. An
 # IP-to-location database (IP_LOCATION_DATABASE, a MaxMind DB file, passed
 # on to the server as it is) is optional: without one, no location is shown.
+# So is a limit on the room an account's attachments may take
+# (USER_ATTACHMENT_LIMIT, in KB, passed on the same way), for the tests of a
+# server that refuses a file.
 #
 # It takes new accounts from anyone, as the tests need. For the tests of a
 # server that doesn't: SIGNUPS_ALLOWED=false INVITATIONS_ALLOWED=false makes
 # one that takes none and says so, and SIGNUPS_DOMAINS_WHITELIST=<domain>
 # one that takes them only from addresses at that domain.
 #
-#   [NEW_DEVICE_CHECK=true] [IP_LOCATION_DATABASE=<file>] \
+#   [NEW_DEVICE_CHECK=true] [IP_LOCATION_DATABASE=<file>] [USER_ATTACHMENT_LIMIT=<KB>] \
 #     [SIGNUPS_ALLOWED=false INVITATIONS_ALLOWED=false] [SIGNUPS_DOMAINS_WHITELIST=<domain>] \
 #     tools/test-server.sh <passbundle-server binary> <port> <data folder> [host name]
 set -euo pipefail
