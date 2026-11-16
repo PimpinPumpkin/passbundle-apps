@@ -529,8 +529,9 @@ void main() {
       await tester.pumpAndSettle();
       await tester.enterText(find.byType(TextField), samplePassword);
       await tester.tap(find.text('Unlock'));
-      // The personal account has only its note.
-      await opened(tester, 'Gate code');
+      // The personal account has only its note: Notes is its one kind.
+      await opened(tester, 'Notes');
+      expect(find.text('Logins'), findsNothing);
       final every = find.byKey(const ValueKey('every-account'));
       await tester.ensureVisible(every);
       await tester.pumpAndSettle();

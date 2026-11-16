@@ -1063,6 +1063,9 @@ void main() {
       await tester.tap(find.byTooltip('Settings'));
       await tester.pump();
       await pumpUntil(tester, find.byKey(const ValueKey('show-icons')));
+      // Under the account, which Settings has first.
+      await tester.ensureVisible(find.byKey(const ValueKey('show-icons')));
+      await tester.pumpAndSettle();
       await tester.tap(find.byKey(const ValueKey('show-icons')));
       await tester.pump();
       await tester.tap(find.text('Close'));
@@ -1184,14 +1187,11 @@ void main() {
       // The sample's folder is called Personal too: the owner comes first,
       // its folder after it.
       Future<void> choose(String place, {bool last = false}) async {
-        // Below the kinds and favorites: the vault's list, not the search's
-        // field, scrolled past the folders.
-        await tester.scrollUntilVisible(
-          find.text('All items'),
-          100,
-          scrollable: find.byType(Scrollable).last,
-        );
-        await tester.tap(last ? find.text(place).last : find.text(place).first);
+        // Below the kinds, Health, and favorites: the vault's list (not the
+        // search's field, nor the kinds' row), scrolled to the place.
+        final target = last ? find.text(place).last : find.text(place).first;
+        await tester.scrollUntilVisible(target, 100, scrollable: vaultScroll);
+        await tester.tap(target);
         await tester.pumpAndSettle();
       }
 
@@ -1259,10 +1259,11 @@ void main() {
           it: {'keykeeperLook': bankLook},
         },
       );
+      // Down the vault's list (not the kinds' row) to the shared folder.
       await tester.scrollUntilVisible(
-        find.text('All items'),
+        find.text('IT'),
         100,
-        scrollable: find.byType(Scrollable).last,
+        scrollable: vaultScroll,
       );
       final tile = bankTiles(find.byType(MaterialApp));
       expect(tile, findsOneWidget);
