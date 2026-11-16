@@ -318,6 +318,14 @@ class PhoneStandIn {
         case 'copy':
           copied.add(Map<String, dynamic>.from(call.arguments as Map));
           return true;
+        // The phone's picker: each pick answers what [picks] has next
+        // (null: the person chose none).
+        case 'pickFile':
+          pickedWith.add(Map<String, dynamic>.from(call.arguments as Map));
+          return picks.isEmpty ? null : picks.removeAt(0);
+        case 'forgetPicked':
+          forgotten++;
+          return null;
         case 'autofillStatus':
           return android?.status ?? iphone?.status;
         case 'turnOnAutofill':
@@ -350,6 +358,12 @@ class PhoneStandIn {
 
   /// What was copied, as the phone's code was asked: `{account, id, what}`.
   final copied = <Map<String, dynamic>>[];
+
+  /// What the phone's picker answers, in turn, and what it was asked with
+  /// (`{limit, send}`); how many times its copies were deleted.
+  final picks = <Map<String, Object?>?>[];
+  final pickedWith = <Map<String, dynamic>>[];
+  var forgotten = 0;
 
   /// Android's autofill and passkeys, on an Android phone.
   final AndroidStandIn? android;

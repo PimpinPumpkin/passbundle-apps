@@ -23,10 +23,12 @@
 //! opens the item's attachment with that name (its contents in base64), and
 //! `{"action": "deleteAttachment", item, name}` deletes it.
 //!
-//! Sends too, through the app's own calls (e2e/tests/core-interop.spec.ts):
+//! Sends too, through the app's own calls (e2e/tests/core-send.spec.ts):
 //! `{"action": "makeSend", name, text, hidden?, password?}` makes a text
-//! Send and prints its link, and `{"action": "sends"}` lists the account's
-//! Sends as the app opens them (their text too).
+//! Send and prints its link, `{"action": "makeFileSend", name, path,
+//! fileName?, password?}` makes a file Send of the file at `path` and prints
+//! its link, and `{"action": "sends"}` lists the account's Sends as the app
+//! opens them (their text and file names too).
 //!
 //!   cargo run --release --features test-trust --example interop -- \
 //!     <server> <certificate.pem> <email> <password> [<draft.json>]
@@ -90,7 +92,7 @@ fn main() {
         let d: Value = serde_json::from_str(&std::fs::read_to_string(path).expect("the draft"))
             .expect("draft JSON");
         if let Some(action) = d["action"].as_str() {
-            if matches!(action, "makeSend" | "sends") {
+            if matches!(action, "makeSend" | "makeFileSend" | "sends") {
                 let answer = sends(action, &d, server_url, &pem, email, password);
                 println!("{}", json!({ "items": items, "send": answer }));
                 return;
@@ -345,6 +347,21 @@ fn sends(action: &str, d: &Value, server: &str, pem: &[u8], email: &str, passwor
                 Ok(json!({ "id": saved.id, "link": app.send_link(&saved.id)?.as_str() }))
             })
         }
+        "makeFileSend" => {
+            let draft = SendDraft {
+                kind: Some(SendKind::File),
+                name: d["name"].as_str().unwrap_or_default().to_owned(),
+                deletion_date: send::date_after(86_400),
+                ..Default::default()
+            };
+            let password = d["password"].as_str().map(|p| Zeroizing::new(p.to_owned()));
+            let path = std::path::Path::new(d["path"].as_str().unwrap_or_default());
+            let file_name = d["fileName"].as_str().unwrap_or_default();
+            app.send_file(&draft, path, file_name, password)
+                .and_then(|saved| {
+                    Ok(json!({ "id": saved.id, "link": app.send_link(&saved.id)?.as_str() }))
+                })
+        }
         _ => Ok(json!(app
             .sends()
             .iter()
@@ -352,6 +369,7 @@ fn sends(action: &str, d: &Value, server: &str, pem: &[u8], email: &str, passwor
                 "name": s.name,
                 "kind": s.kind.word(),
                 "text": s.text.as_deref(),
+                "fileName": s.file_name,
                 "hidden": s.hidden,
                 "hasPassword": s.has_password,
                 "opens": s.opens,

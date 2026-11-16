@@ -231,6 +231,8 @@ class Core {
   late final _sends = _lib.lookupFunction<_Str1, _Str1>('pb_sends');
   late final _send = _lib.lookupFunction<_Str2, _Str2>('pb_send');
   late final _saveSend = _lib.lookupFunction<_Str4, _Str4>('pb_save_send');
+  late final _sendFile = _lib.lookupFunction<_Str5, _Str5>('pb_send_file');
+  late final _sendFileLimit = _lib.lookupFunction<_Str0, _Str0>('pb_send_file_limit');
   late final _removeSendPassword = _lib.lookupFunction<_Str2, _Str2>('pb_remove_send_password');
   late final _deleteSend = _lib.lookupFunction<_Str2, _Str2>('pb_delete_send');
   late final _confirmMasterPassword = _lib.lookupFunction<_Str3, _Str3>('pb_confirm_master_password');
@@ -697,14 +699,20 @@ class Core {
         ], (p) => c._answer(c._deleteAttachment(p[0], p[1], p[2]))),
       );
 
-  /// Asks the person for a file to attach, with the device's own picker:
-  /// `{path, name}`, `{tooLarge: true}` for one larger than [limit] bytes,
-  /// or null when they chose none. A phone copies the file into the app's
-  /// cache (docs/phones.md, "Attachments"), for [forgetPicked] to delete
-  /// once it's uploaded; a computer answers the file where it is.
-  static Future<Map<String, dynamic>?> pickFile(int limit) async {
+  /// Asks the person for a file to attach (or, with [send], to send in a
+  /// file Send), with the device's own picker: `{path, name}`, `{tooLarge:
+  /// true}` for one larger than [limit] bytes, or null when they chose none.
+  /// A phone copies the file into the app's cache (docs/phones.md,
+  /// "Attachments"), for [forgetPicked] to delete once it's uploaded; a
+  /// computer answers the file where it is, and its picker says which it's
+  /// for.
+  static Future<Map<String, dynamic>?> pickFile(
+    int limit, {
+    bool send = false,
+  }) async {
     final picked = await platform.invokeMethod<Map>('pickFile', {
       'limit': limit,
+      if (send) 'send': true,
     });
     return picked == null ? null : Map<String, dynamic>.from(picked);
   }
@@ -740,6 +748,33 @@ class Core {
       password,
     ], (p) => c._answer(c._saveSend(p[0], p[1], p[2], p[3]))),
   );
+
+  /// Makes a file Send of the file at [path], named [name], with the
+  /// options in [draft] (DESIGN.md, "Send in the apps"), with the keys of
+  /// the account the screens show now: `{ok, id, synced}`, or the words to
+  /// show (`canceled` when the person stopped it). [password], empty for
+  /// none, is hashed by the core for the server and wiped. As
+  /// [attachFile]: one file at a time, [uploadProgress] says how far it is,
+  /// [cancelUpload] stops it, and attaching.dart raises the busy flag for
+  /// the moments the upload has the core.
+  static Future<Answer> sendFile(
+    Map<String, dynamic> draft,
+    String path,
+    String name,
+    String password,
+  ) => _background(
+    (c, a) => c._with([
+      a,
+      jsonEncode(draft),
+      path,
+      name,
+      password,
+    ], (p) => c._answer(c._sendFile(p[0], p[1], p[2], p[3], p[4]))),
+  );
+
+  /// The largest file a file Send takes from this device: `{bytes,
+  /// refusal}`, the words for a larger one.
+  Map<String, dynamic> sendFileLimit() => _map(_sendFileLimit());
 
   /// Takes a Send's password away, then syncs: `{ok, synced}`.
   static Future<Answer> removeSendPassword(String id) => _background(
