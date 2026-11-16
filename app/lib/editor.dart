@@ -63,7 +63,10 @@ Future<EditorSaved?> openEditor(
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
         child: ConstrainedBox(
           constraints: const BoxConstraints(maxWidth: 560, maxHeight: 760),
-          child: editor,
+          // Notices of its own: the vault's (a sync's, a copy's) stay with
+          // the vault under the dialog, instead of floating over the
+          // editor's last rows, where they'd take the taps meant for them.
+          child: ScaffoldMessenger(child: editor),
         ),
       ),
     );
