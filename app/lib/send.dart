@@ -1,15 +1,22 @@
-// Send (DESIGN.md, "Send in the apps"): a text shared through a link,
-// encrypted on this device, until a date or a number of times it's opened.
-// The list, the editor, Copy link, and Delete, for the account the screens
-// show. The core encrypts, checks, and hashes; the link goes to the
-// clipboard from the core as a secret, cleared after 30 seconds.
+// Send (DESIGN.md, "Send in the apps"): a text or a file shared through a
+// link, encrypted on this device, until a date or a number of times it's
+// opened. The list, the editor, Copy link, and Delete, for the account the
+// screens show. The core encrypts, checks, and hashes; a file Send's file
+// goes up as an attachment does (attaching.dart), with how far it is and
+// Cancel in the editor; the link goes to the clipboard from the core as a
+// secret, cleared after 30 seconds.
+
+import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import 'attaching.dart';
 import 'core.dart';
 import 'glyphs.dart';
 import 'theme.dart';
+import 'vault.dart' show fileSize, uploadWords;
 import 'widgets.dart';
 
 const _months = [
@@ -210,7 +217,7 @@ class _SendPageState extends State<SendPage> {
                 Padding(
                   padding: const EdgeInsets.fromLTRB(4, 8, 4, 0),
                   child: Text(
-                    'No Sends. A Send shares a text through a link, encrypted on this device. It\'s deleted on the date you choose, and can have a password.',
+                    'No Sends. A Send shares a text or a file through a link, encrypted on this device. It\'s deleted on the date you choose, and can have a password.',
                     style: TextStyle(color: c.muted),
                   ),
                 )
@@ -325,9 +332,9 @@ class _SendRow extends StatelessWidget {
 /// A Send the server took, from the editor.
 typedef SavedSend = ({String id, bool synced});
 
-/// The editor for a new text Send ([id] null) or an existing Send, as a
-/// dialog on a computer and a page of its own on a phone: what it saved,
-/// or null.
+/// The editor for a new Send, of a text or a file ([id] null), or an
+/// existing Send, as a dialog on a computer and a page of its own on a
+/// phone: what it saved, or null.
 Future<SavedSend?> openSendEditor(
   BuildContext context, {
   required Core core,
@@ -405,7 +412,21 @@ class _SendEditorState extends State<SendEditor> {
   String? error;
   bool saving = false;
 
+  /// What it shares: "text" or "file". A Send's kind can't change, so only
+  /// a new one offers the choice.
+  String kind = 'text';
+
+  /// The file chosen for a new file Send: `{path, name, size}` (`size` null
+  /// when this device can't say).
+  Map<String, dynamic>? picked;
+
+  /// The largest file a file Send takes from this device, `{bytes,
+  /// refusal}`, said before a file is chosen.
+  late final Map<String, dynamic> limit = widget.core.sendFileLimit();
+
   bool get editing => widget.id != null;
+
+  bool get newFile => !editing && kind == 'file';
 
   @override
   void initState() {
@@ -414,6 +435,7 @@ class _SendEditorState extends State<SendEditor> {
       final s = widget.core.send(id);
       send = s;
       if (s != null) {
+        kind = s['kind'] as String? ?? 'text';
         name.text = s['name'] as String? ?? '';
         text.text = s['text'] as String? ?? '';
         notes.text = s['notes'] as String? ?? '';
@@ -432,15 +454,76 @@ class _SendEditorState extends State<SendEditor> {
     for (final c in [name, text, notes, most, password]) {
       c.dispose();
     }
+    // A phone's copy of a file chosen and not sent, unless another file is
+    // uploading from that folder now.
+    if (picked != null && uploading.value == null) {
+      unawaited(Core.forgetPicked());
+    }
     super.dispose();
   }
 
   String _after(Duration d) => DateTime.now().toUtc().add(d).toIso8601String();
 
+  /// The limit in words: "500 MB".
+  String get limitWords =>
+      '${((limit['bytes'] as num? ?? 0) / (1024 * 1024)).round()} MB';
+
+  /// Asks for the file with the device's picker. A file larger than a file
+  /// Send takes is said at once, before anything is read or sent.
+  Future<void> chooseFile() async {
+    if (uploading.value != null) {
+      setState(() => error = anotherUploading);
+      return;
+    }
+    // A phone keeps one copy at a time: the last one chosen goes first.
+    if (picked != null && isPhone) {
+      await Core.forgetPicked();
+      if (!mounted) return;
+      setState(() => picked = null);
+    }
+    final largest = (limit['bytes'] as num? ?? 0).toInt();
+    Map<String, dynamic>? chosen;
+    try {
+      chosen = await Core.pickFile(largest, send: true);
+    } on PlatformException catch (e) {
+      chosen = {'error': e.message};
+    } on MissingPluginException {
+      chosen = {'error': null};
+    }
+    if (chosen == null) return;
+    final path = chosen['path'] as String?;
+    final fileName = chosen['name'] as String? ?? '';
+    final why = chosen['error'] as String?;
+    int? size;
+    if (path != null) {
+      try {
+        size = File(path).lengthSync();
+      } on FileSystemException {
+        size = null;
+      }
+    }
+    final tooLarge = chosen['tooLarge'] == true || (size ?? 0) > largest;
+    if (!mounted || path == null || tooLarge) {
+      await Core.forgetPicked();
+      if (!mounted) return;
+      setState(
+        () => error = tooLarge
+            ? limit['refusal'] as String? ?? 'That file is too large.'
+            : why ?? 'PassBundle couldn\'t open that file.',
+      );
+      return;
+    }
+    setState(() {
+      picked = {'path': path, 'name': fileName, 'size': size};
+      error = null;
+      if (name.text.trim().isEmpty) name.text = fileName;
+    });
+  }
+
   Future<void> save() async {
     final count = most.text.trim();
     final draft = <String, dynamic>{
-      'kind': send?['kind'] ?? 'text',
+      'kind': editing ? (send?['kind'] ?? 'text') : kind,
       'name': name.text,
       'notes': notes.text,
       'text': text.text,
@@ -457,6 +540,10 @@ class _SendEditorState extends State<SendEditor> {
       'disabled': off,
       'hideEmail': hideEmail,
     };
+    if (newFile) {
+      await sendTheFile(draft);
+      return;
+    }
     setState(() {
       saving = true;
       error = null;
@@ -473,6 +560,43 @@ class _SendEditorState extends State<SendEditor> {
       });
       return;
     }
+    Navigator.of(context).pop((
+      id: answer.body['id'] as String,
+      synced: answer.body['synced'] != false,
+    ));
+  }
+
+  /// Makes the file Send: the core reads the file, encrypts it here, and
+  /// sends it, with how far it is shown below the file and Cancel. The
+  /// editor stays open until it's done.
+  Future<void> sendTheFile(Map<String, dynamic> draft) async {
+    final file = picked;
+    if (file == null) {
+      setState(() => error = 'Choose a file to send.');
+      return;
+    }
+    setState(() {
+      saving = true;
+      error = null;
+    });
+    final answer = await sendFile(
+      widget.core,
+      draft,
+      file['path'] as String,
+      file['name'] as String? ?? '',
+      password.text,
+    );
+    if (!mounted) return;
+    password.clear();
+    setState(() {
+      saving = false;
+      // A phone's copy is deleted once the upload ends, however it ends.
+      if (isPhone) picked = null;
+      if (!answer.ok && answer.body['canceled'] != true) {
+        error = answer.error ?? 'Couldn\'t send that file.';
+      }
+    });
+    if (!answer.ok) return;
     Navigator.of(context).pop((
       id: answer.body['id'] as String,
       synced: answer.body['synced'] != false,
@@ -515,160 +639,254 @@ class _SendEditorState extends State<SendEditor> {
     },
   );
 
-  @override
-  Widget build(BuildContext context) {
+  /// A new file Send's file: which, how large, and the most a file Send
+  /// takes, said before one is chosen; while it goes, how far it is, and
+  /// Cancel.
+  Widget fileToSend(BuildContext context) {
     final c = context.colors;
-    final isFile = send?['kind'] == 'file';
-    final hasPassword = send?['hasPassword'] == true;
-    final showHideEmail = !widget.noHidingEmail || hideEmail;
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(editing ? 'Edit Send' : 'New Send'),
-        automaticallyImplyLeading: isPhone,
-        leading: isPhone
-            ? null
-            : IconButton(
-                tooltip: 'Close',
-                icon: const Icon(Icons.close_rounded),
-                onPressed: () => Navigator.of(context).pop(),
-              ),
-        actions: [
-          Padding(
-            padding: const EdgeInsets.only(right: 12),
-            child: WorkingButton(
-              label: 'Save',
-              working: saving,
-              onPressed: save,
+    final file = picked;
+    final size = file?['size'] as num?;
+    return ValueListenableBuilder<Uploading?>(
+      valueListenable: uploading,
+      builder: (context, upload, _) => Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (file != null)
+            Text(
+              size == null
+                  ? file['name'] as String
+                  : '${file['name']} · ${fileSize(size)}',
+              key: const ValueKey('send-file'),
+              style: const TextStyle(fontSize: 16),
+              overflow: TextOverflow.ellipsis,
             ),
+          if (saving && upload != null && upload.isSend) ...[
+            const SizedBox(height: 8),
+            LinearProgressIndicator(
+              key: const ValueKey('send-upload-progress'),
+              value: upload.canceling ? null : upload.fraction,
+              borderRadius: BorderRadius.circular(2),
+            ),
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    uploadWords(upload),
+                    style: TextStyle(color: c.muted, fontSize: 13),
+                  ),
+                ),
+                TextButton(
+                  onPressed: upload.canceling
+                      ? null
+                      : () => cancelUpload(widget.core),
+                  child: const Text('Cancel'),
+                ),
+              ],
+            ),
+          ] else
+            Align(
+              alignment: Alignment.centerLeft,
+              child: TextButton.icon(
+                key: const ValueKey('send-choose-file'),
+                onPressed: saving ? null : chooseFile,
+                icon: Icon(
+                  Icons.attach_file_rounded,
+                  size: 18,
+                  color: Theme.of(context).colorScheme.primary,
+                ),
+                label: Text(
+                  file == null ? 'Choose a file' : 'Choose another file',
+                ),
+              ),
+            ),
+          Text(
+            'Up to $limitWords. It\'s encrypted on this device before it\'s sent.',
+            style: TextStyle(color: c.muted, fontSize: 13),
           ),
         ],
       ),
-      body: ListView(
-        padding: const EdgeInsets.fromLTRB(20, 8, 20, 28),
-        children: [
-          if (error case final e?)
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.colors;
+    final isFile = editing && send?['kind'] == 'file';
+    final hasPassword = send?['hasPassword'] == true;
+    final showHideEmail = !widget.noHidingEmail || hideEmail;
+    // While a file goes, the editor stays: Cancel stops it.
+    return PopScope(
+      canPop: !saving,
+      child: Scaffold(
+        appBar: AppBar(
+          title: Text(editing ? 'Edit Send' : 'New Send'),
+          automaticallyImplyLeading: isPhone,
+          leading: isPhone
+              ? null
+              : IconButton(
+                  tooltip: 'Close',
+                  icon: const Icon(Icons.close_rounded),
+                  onPressed: saving ? null : () => Navigator.of(context).pop(),
+                ),
+          actions: [
             Padding(
-              padding: const EdgeInsets.only(bottom: 12),
-              child: Text(
-                e,
-                style: TextStyle(color: Theme.of(context).colorScheme.error),
-              ),
-            ),
-          TextField(
-            key: const ValueKey('send-name'),
-            controller: name,
-            autofocus: !editing,
-            decoration: const InputDecoration(labelText: 'Name'),
-          ),
-          const SizedBox(height: 14),
-          if (isFile)
-            Text(
-              'File: ${send?['fileName'] ?? ''}. A Send\'s file can\'t change.',
-              style: TextStyle(color: c.muted),
-            )
-          else ...[
-            TextField(
-              key: const ValueKey('send-text'),
-              controller: text,
-              minLines: 3,
-              maxLines: 8,
-              decoration: const InputDecoration(labelText: 'Text to share'),
-            ),
-            SwitchListTile(
-              contentPadding: EdgeInsets.zero,
-              value: hidden,
-              onChanged: (on) => setState(() => hidden = on),
-              title: const Text('Hide the text until it\'s shown'),
-              subtitle: const Text(
-                'Whoever opens it presses a button to see it.',
+              padding: const EdgeInsets.only(right: 12),
+              child: WorkingButton(
+                label: 'Save',
+                working: saving,
+                onPressed: save,
               ),
             ),
           ],
-          const SizedBox(height: 8),
-          _dates(
-            key: const ValueKey('send-deletion'),
-            label: 'Deleted',
-            value: deleteIn,
-            keep: editing
-                ? 'On ${sendDate(send?['deletionDate'] as String?)}'
-                : null,
-            onChanged: (d) => setState(() => deleteIn = d),
-          ),
-          const SizedBox(height: 14),
-          _dates(
-            key: const ValueKey('send-expiration'),
-            label: 'Stops opening',
-            value: expireIn,
-            keep: send?['expirationDate'] == null
-                ? null
-                : 'On ${sendDate(send?['expirationDate'] as String?)}',
-            never: 'When it\'s deleted',
-            onChanged: (d) => setState(() => expireIn = d),
-          ),
-          const SizedBox(height: 14),
-          TextField(
-            key: const ValueKey('send-most'),
-            controller: most,
-            keyboardType: TextInputType.number,
-            inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-            decoration: const InputDecoration(
-              labelText: 'Most times it can be opened (optional)',
+        ),
+        body: ListView(
+          padding: const EdgeInsets.fromLTRB(20, 8, 20, 28),
+          children: [
+            if (error case final e?)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 12),
+                child: Text(
+                  e,
+                  style: TextStyle(color: Theme.of(context).colorScheme.error),
+                ),
+              ),
+            if (!editing) ...[
+              SegmentedButton<String>(
+                key: const ValueKey('send-kind'),
+                showSelectedIcon: false,
+                segments: const [
+                  ButtonSegment(value: 'text', label: Text('Text')),
+                  ButtonSegment(value: 'file', label: Text('File')),
+                ],
+                selected: {kind},
+                onSelectionChanged: saving
+                    ? null
+                    : (chosen) => setState(() {
+                        kind = chosen.first;
+                        error = null;
+                      }),
+              ),
+              const SizedBox(height: 14),
+            ],
+            TextField(
+              key: const ValueKey('send-name'),
+              controller: name,
+              autofocus: !editing,
+              decoration: const InputDecoration(labelText: 'Name'),
             ),
-          ),
-          const SizedBox(height: 14),
-          TextField(
-            key: const ValueKey('send-password'),
-            controller: password,
-            obscureText: true,
-            decoration: InputDecoration(
-              labelText: hasPassword
-                  ? 'New password (optional)'
-                  : 'Password (optional)',
-              helperText: hasPassword
-                  ? 'It has a password. Leave this empty to keep it.'
-                  : 'Whoever opens it types this first. Share it another way than the link.',
-              helperMaxLines: 2,
+            const SizedBox(height: 14),
+            if (isFile)
+              Text(
+                'File: ${send?['fileName'] ?? ''}. A Send\'s file can\'t change.',
+                style: TextStyle(color: c.muted),
+              )
+            else if (newFile)
+              fileToSend(context)
+            else ...[
+              TextField(
+                key: const ValueKey('send-text'),
+                controller: text,
+                minLines: 3,
+                maxLines: 8,
+                decoration: const InputDecoration(labelText: 'Text to share'),
+              ),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                value: hidden,
+                onChanged: (on) => setState(() => hidden = on),
+                title: const Text('Hide the text until it\'s shown'),
+                subtitle: const Text(
+                  'Whoever opens it presses a button to see it.',
+                ),
+              ),
+            ],
+            const SizedBox(height: 8),
+            _dates(
+              key: const ValueKey('send-deletion'),
+              label: 'Deleted',
+              value: deleteIn,
+              keep: editing
+                  ? 'On ${sendDate(send?['deletionDate'] as String?)}'
+                  : null,
+              onChanged: (d) => setState(() => deleteIn = d),
             ),
-          ),
-          if (hasPassword)
-            Align(
-              alignment: Alignment.centerLeft,
-              child: TextButton(
-                onPressed: removePassword,
-                child: const Text('Remove password'),
+            const SizedBox(height: 14),
+            _dates(
+              key: const ValueKey('send-expiration'),
+              label: 'Stops opening',
+              value: expireIn,
+              keep: send?['expirationDate'] == null
+                  ? null
+                  : 'On ${sendDate(send?['expirationDate'] as String?)}',
+              never: 'When it\'s deleted',
+              onChanged: (d) => setState(() => expireIn = d),
+            ),
+            const SizedBox(height: 14),
+            TextField(
+              key: const ValueKey('send-most'),
+              controller: most,
+              keyboardType: TextInputType.number,
+              inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+              decoration: const InputDecoration(
+                labelText: 'Most times it can be opened (optional)',
               ),
             ),
-          const SizedBox(height: 14),
-          TextField(
-            key: const ValueKey('send-notes'),
-            controller: notes,
-            minLines: 1,
-            maxLines: 4,
-            decoration: const InputDecoration(
-              labelText: 'Private note',
-              helperText: 'Only you see this.',
+            const SizedBox(height: 14),
+            TextField(
+              key: const ValueKey('send-password'),
+              controller: password,
+              obscureText: true,
+              decoration: InputDecoration(
+                labelText: hasPassword
+                    ? 'New password (optional)'
+                    : 'Password (optional)',
+                helperText: hasPassword
+                    ? 'It has a password. Leave this empty to keep it.'
+                    : 'Whoever opens it types this first. Share it another way than the link.',
+                helperMaxLines: 2,
+              ),
             ),
-          ),
-          if (showHideEmail)
+            if (hasPassword)
+              Align(
+                alignment: Alignment.centerLeft,
+                child: TextButton(
+                  onPressed: removePassword,
+                  child: const Text('Remove password'),
+                ),
+              ),
+            const SizedBox(height: 14),
+            TextField(
+              key: const ValueKey('send-notes'),
+              controller: notes,
+              minLines: 1,
+              maxLines: 4,
+              decoration: const InputDecoration(
+                labelText: 'Private note',
+                helperText: 'Only you see this.',
+              ),
+            ),
+            if (showHideEmail)
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                value: hideEmail,
+                onChanged: (on) => setState(() => hideEmail = on),
+                title: const Text('Hide my email from whoever opens it'),
+                subtitle: widget.noHidingEmail
+                    ? const Text(
+                        'An organization you\'re in doesn\'t allow this. Turn it off to save.',
+                      )
+                    : null,
+              ),
             SwitchListTile(
               contentPadding: EdgeInsets.zero,
-              value: hideEmail,
-              onChanged: (on) => setState(() => hideEmail = on),
-              title: const Text('Hide my email from whoever opens it'),
-              subtitle: widget.noHidingEmail
-                  ? const Text(
-                      'An organization you\'re in doesn\'t allow this. Turn it off to save.',
-                    )
-                  : null,
+              value: off,
+              onChanged: (on) => setState(() => off = on),
+              title: const Text('Turn this Send off'),
+              subtitle: const Text('No one can open it while it\'s off.'),
             ),
-          SwitchListTile(
-            contentPadding: EdgeInsets.zero,
-            value: off,
-            onChanged: (on) => setState(() => off = on),
-            title: const Text('Turn this Send off'),
-            subtitle: const Text('No one can open it while it\'s off.'),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }

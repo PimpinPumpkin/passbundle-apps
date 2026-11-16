@@ -816,6 +816,47 @@ fn a_sends_seed_and_fields_encrypt_and_open_as_the_vectors_say() {
     assert!(!crate::send::Send::open(&data, &SymmetricKey::generate()).opens);
 }
 
+/// A file Send's file is encrypted as an attachment's is, but under the
+/// Send's own key, the one from its seed (no key of its own, as the web
+/// vault encrypts it): byte for byte as plain Node made it, and it opens
+/// again. A file Send as the server keeps it opens with its file's name.
+#[test]
+fn a_file_sends_file_and_name_encrypt_and_open_as_the_vectors_say() {
+    let v = send_vectors();
+    let seed = b64(&v["seed"]);
+    let send_key = crate::send::key_from_seed(&seed);
+    let files = v["files"].as_array().unwrap();
+    assert!(!files.is_empty());
+    for f in files {
+        let plain = b64(&f["plaintext"]);
+        let encrypted = to_encrypt(&plain).encrypt_with_iv(&send_key, iv(&f["iv"]));
+        assert_eq!(encrypted, b64(&f["encrypted"]), "{}", f["name"]);
+        assert_eq!(
+            encrypted.len() as u64,
+            f["encryptedLength"].as_u64().unwrap()
+        );
+        let opened = decrypt_file(encrypted, &send_key).unwrap();
+        assert_eq!(opened.as_slice(), plain.as_slice(), "{}", f["name"]);
+    }
+    let user = key(&v["userKey"]);
+    let file_name = &v["fields"]["fileName"];
+    let data: crate::send::SendData = serde_json::from_value(serde_json::json!({
+        "id": "s", "accessId": "ESIzRFVmd4iZqrvM3e7_AA", "type": 1,
+        "key": v["wrappedSeed"]["encrypted"],
+        "name": v["fields"]["name"]["encrypted"],
+        "file": {
+            "id": "0123abcd", "fileName": file_name["encrypted"],
+            "size": files[0]["encryptedLength"].to_string(),
+        },
+    }))
+    .unwrap();
+    let send = crate::send::Send::open(&data, &user);
+    assert!(send.opens);
+    assert_eq!(send.kind, crate::send::SendKind::File);
+    assert_eq!(send.file_name.as_deref(), file_name["plain"].as_str());
+    assert_eq!(send.file_size, files[0]["encryptedLength"].as_u64());
+}
+
 #[test]
 fn a_sends_password_proof_and_link_are_as_the_vectors_say() {
     let v = send_vectors();

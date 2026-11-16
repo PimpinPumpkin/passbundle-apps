@@ -1,16 +1,20 @@
 // Send (DESIGN.md, "Send in the apps"): the list, making a text Send and
-// copying its link, editing it (its password kept, changed, or taken
-// away), the confirmation before deleting, what the organizations'
+// copying its link, making a file Send from a file the person picks, with
+// how far it is and Cancel, editing a Send (its password kept, changed, or
+// taken away), the confirmation before deleting, what the organizations'
 // policies leave, and the server's refusals in plain words. Against the
 // real core, and for what the server was sent a stand-in for it on this
-// computer. Mostly on a phone, whose copying goes through its own native
-// piece (stood in for here), so nothing lands on this computer's clipboard.
+// computer. Mostly on a phone, whose copying and picking go through its own
+// native piece (stood in for here), so nothing lands on this computer's
+// clipboard.
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:passbundle/attaching.dart';
 import 'package:passbundle/core.dart';
 import 'package:passbundle/main.dart';
 import 'package:passbundle/vault.dart';
@@ -20,13 +24,18 @@ import 'support.dart';
 
 /// A stand-in for PassBundle's server: the sample vault's account
 /// (test/sample), with Sends made, edited, and deleted as the server's
-/// calls for them do. [bodies] has what each call for a Send sent.
+/// calls for them do. [bodies] has what each call for a Send sent, and
+/// [uploaded] each file Send's file as it arrived (the whole form).
 class StandIn {
   StandIn._(this._server);
 
   final HttpServer _server;
   final asked = <String>[];
   final bodies = <Map<String, dynamic>>[];
+  final uploaded = <List<int>>[];
+
+  /// Until it completes, a new file Send isn't answered.
+  Completer<void>? holdStart;
   final Map<String, dynamic> sync = jsonDecode(
     File('test/sample/sync.json').readAsStringSync(),
   ) as Map<String, dynamic>;
@@ -87,7 +96,13 @@ class StandIn {
   Future<void> _answer(HttpRequest request) async {
     final path = request.uri.path;
     asked.add('${request.method} $path');
-    final text = await utf8.decoder.bind(request).join();
+    final List<int> bytes;
+    try {
+      bytes = await request.fold<List<int>>([], (all, b) => all..addAll(b));
+    } on HttpException {
+      // An upload stopped partway: the core canceled it.
+      return;
+    }
     void json(int status, Object? value) {
       request.response.statusCode = status;
       request.response.headers.contentType = ContentType.json;
@@ -96,8 +111,9 @@ class StandIn {
 
     final one = RegExp(r'^/api/sends/([^/]+)(/remove-password)?$')
         .firstMatch(path);
-    final body = text.isNotEmpty && path.startsWith('/api/sends')
-        ? jsonDecode(text) as Map<String, dynamic>
+    final file = RegExp(r'^/api/sends/([^/]+)/file/([^/]+)$').firstMatch(path);
+    final body = bytes.isNotEmpty && path.startsWith('/api/sends') && file == null
+        ? jsonDecode(utf8.decode(bytes)) as Map<String, dynamic>
         : null;
     if (body != null) bodies.add(body);
     switch (path) {
@@ -128,6 +144,33 @@ class StandIn {
         final kept = _kept(body!, 'send${_made++}');
         sync['sends'] = [...sends, kept];
         json(200, kept);
+      // A file Send: made before its file comes, as the server makes one.
+      case '/api/sends/file/v2' when request.method == 'POST':
+        await holdStart?.future;
+        if (refusal != null) {
+          json(400, {'message': refusal});
+          break;
+        }
+        final id = 'send${_made++}';
+        final kept = {
+          ..._kept(body!, id),
+          'file': {
+            ...(body['file'] as Map),
+            'id': 'file$id',
+            'size': '${body['fileLength']}',
+            'sizeName': '${body['fileLength']} Bytes',
+          },
+        }..remove('fileLength');
+        sync['sends'] = [...sends, kept];
+        json(200, {
+          'fileUploadType': 0,
+          'object': 'send-fileUpload',
+          'url': '/sends/$id/file/file$id',
+          'sendResponse': kept,
+        });
+      case _ when file != null && request.method == 'POST':
+        uploaded.add(bytes);
+        json(200, null);
       case _ when one != null && request.method == 'PUT':
         final i = sends.indexWhere((s) => s['id'] == one.group(1));
         if (refusal != null || i < 0) {
@@ -176,6 +219,49 @@ void setSize(WidgetTester tester, Size size) {
   tester.view.physicalSize = size;
   tester.view.devicePixelRatio = 1;
   addTearDown(tester.view.reset);
+}
+
+/// Pumps until something shows, with the app's clock going on too: an
+/// upload's progress is asked on a timer (attaching.dart).
+Future<void> pumpOn(
+  WidgetTester tester,
+  Finder finder, {
+  Duration timeout = const Duration(seconds: 20),
+}) async {
+  final end = DateTime.now().add(timeout);
+  while (DateTime.now().isBefore(end)) {
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 20)),
+    );
+    await tester.pump(uploadPoll);
+    if (finder.evaluate().isNotEmpty) return;
+  }
+  throw TestFailure('Never showed up: $finder');
+}
+
+/// A file on this computer for the picker to answer.
+Map<String, Object?> fileToPick(String name, String contents) {
+  final dir = Directory.systemTemp.createTempSync('pb-app-send-');
+  addTearDown(() => dir.deleteSync(recursive: true));
+  final file = File('${dir.path}/$name')..writeAsStringSync(contents);
+  return {'path': file.path, 'name': name};
+}
+
+/// The editor's choice of what a new Send shares.
+Finder kindChoice(String kind) => find.descendant(
+  of: find.byKey(const ValueKey('send-kind')),
+  matching: find.text(kind),
+);
+
+bool holds(List<int> bytes, List<int> part) {
+  for (var i = 0; i + part.length <= bytes.length; i++) {
+    var all = true;
+    for (var j = 0; j < part.length && all; j++) {
+      all = bytes[i + j] == part[j];
+    }
+    if (all) return true;
+  }
+  return false;
 }
 
 void main() {
@@ -415,6 +501,184 @@ void main() {
     },
   );
 
+  /// Opens a new file Send in the editor, and picks what the phone's picker
+  /// has next.
+  Future<void> newFileSend(WidgetTester tester) async {
+    await tester.tap(find.byKey(const ValueKey('new-send')));
+    await idle(tester);
+    await tester.tap(kindChoice('File'));
+    await tester.pump();
+    await tester.tap(find.byKey(const ValueKey('send-choose-file')));
+    await idle(tester);
+  }
+
+  testWidgets(
+    'a file Send is made from the file the person picks and its link copied, and the server sees neither the file, its name, nor the password',
+    (tester) async {
+      final (standIn, phone) = await onPhone(tester);
+      phone.picks.add(fileToPick('floor plan.pdf', 'the floor plan'));
+      await tester.tap(find.byKey(const ValueKey('new-send')));
+      await idle(tester);
+      await tester.tap(kindChoice('File'));
+      await tester.pump();
+      // The most it takes, said before a file is chosen.
+      expect(
+        find.text(
+          'Up to 500 MB. It\'s encrypted on this device before it\'s sent.',
+        ),
+        findsOneWidget,
+      );
+      expect(find.byKey(const ValueKey('send-text')), findsNothing);
+      await tester.tap(find.byKey(const ValueKey('send-choose-file')));
+      await pumpUntil(tester, find.byKey(const ValueKey('send-file')));
+      expect(find.text('floor plan.pdf · 14 bytes'), findsOneWidget);
+      // Asked of the picker with the most a file Send takes, for a Send.
+      expect(phone.pickedWith.single, {'limit': 500 * 1024 * 1024, 'send': true});
+      // Named after the file until the person names it.
+      expect(find.widgetWithText(TextField, 'floor plan.pdf'), findsOneWidget);
+      await tester.enterText(
+        find.byKey(const ValueKey('send-name')),
+        'Floor plan',
+      );
+      await tester.enterText(
+        find.byKey(const ValueKey('send-password')),
+        'open sesame',
+      );
+      await tester.tap(find.text('Save'));
+      await pumpOn(
+        tester,
+        find.text(
+          'Made the Send and copied its link. It clears in 30 seconds.',
+        ),
+      );
+      await idle(tester);
+      expect(phone.copied.single['what'], 'sendLink');
+      expect(phone.copied.single['id'], 'send0');
+      expect(find.text('Floor plan'), findsOneWidget);
+      expect(find.textContaining('File · deleted'), findsOneWidget);
+      // What went: every field encrypted, the file's name too, the seed
+      // wrapped, the password's proof, and the encrypted file's length (49
+      // bytes and a block); never the file, its name, or the password.
+      final sent = standIn.bodies.single;
+      final said = jsonEncode(sent);
+      for (final plain in [
+        'open sesame',
+        'floor plan',
+        'Floor plan',
+        'the floor plan',
+      ]) {
+        expect(said, isNot(contains(plain)));
+      }
+      expect(sent['type'], 1);
+      for (final field in [
+        sent['name'],
+        sent['key'],
+        (sent['file'] as Map)['fileName'],
+      ]) {
+        expect(field, startsWith('2.'));
+      }
+      expect(sent['text'], isNull);
+      expect(sent['fileLength'], 49 + 16);
+      expect(base64.decode(sent['password'] as String), hasLength(32));
+      final upload = standIn.uploaded.single;
+      expect(holds(upload, utf8.encode('the floor plan')), isFalse);
+      expect(holds(upload, utf8.encode('floor plan.pdf')), isFalse);
+      // Sent under its encrypted name, as the server checks.
+      expect(
+        holds(upload, utf8.encode((sent['file'] as Map)['fileName'] as String)),
+        isTrue,
+      );
+      // The phone's copy is deleted once the upload ends.
+      expect(phone.forgotten, 1);
+      expect(uploading.value, isNull);
+    },
+  );
+
+  testWidgets(
+    'a file larger than a file Send takes is refused when it\'s picked, before any of it is read or sent',
+    (tester) async {
+      final (standIn, phone) = await onPhone(tester);
+      // The phone's picker says so before it copies the file.
+      phone.picks.add({'tooLarge': true});
+      await newFileSend(tester);
+      expect(
+        find.text('That file is larger than 500 MB, the most PassBundle sends.'),
+        findsOneWidget,
+      );
+      expect(find.byKey(const ValueKey('send-file')), findsNothing);
+      expect(phone.forgotten, 1);
+      // A file the picker didn't measure is measured here (sparse: it
+      // takes no room on the disk).
+      final dir = Directory.systemTemp.createTempSync('pb-app-send-');
+      addTearDown(() => dir.deleteSync(recursive: true));
+      final large = File('${dir.path}/video.mov');
+      large.openSync(mode: FileMode.write)
+        ..truncateSync(500 * 1024 * 1024 + 1)
+        ..closeSync();
+      phone.picks.add({'path': large.path, 'name': 'video.mov'});
+      await tester.tap(find.byKey(const ValueKey('send-choose-file')));
+      await idle(tester);
+      expect(
+        find.text('That file is larger than 500 MB, the most PassBundle sends.'),
+        findsOneWidget,
+      );
+      expect(find.byKey(const ValueKey('send-file')), findsNothing);
+      // Nothing goes without a file.
+      await tester.enterText(find.byKey(const ValueKey('send-name')), 'Video');
+      await tester.tap(find.text('Save'));
+      await tester.pump();
+      expect(find.text('Choose a file to send.'), findsOneWidget);
+      expect(standIn.asked.where((a) => a.contains('/file')), isEmpty);
+    },
+  );
+
+  testWidgets(
+    'Cancel stops a file Send while it goes, and the Send the server made is deleted',
+    (tester) async {
+      final (standIn, phone) = await onPhone(tester);
+      phone.picks.add(fileToPick('codes.txt', 'the codes'));
+      await newFileSend(tester);
+      standIn.holdStart = Completer<void>();
+      await tester.tap(find.text('Save'));
+      await pumpOn(tester, find.byKey(const ValueKey('send-upload-progress')));
+      expect(find.byKey(const ValueKey('send-choose-file')), findsNothing);
+      await tester.tap(find.widgetWithText(TextButton, 'Cancel'));
+      await tester.pump();
+      expect(find.text('Canceling'), findsOneWidget);
+      standIn.holdStart!.complete();
+      await pumpOn(tester, find.byKey(const ValueKey('send-choose-file')));
+      await idle(tester);
+      // The editor stays, saying nothing; the server keeps nothing.
+      expect(find.text('New Send'), findsOneWidget);
+      expect(find.byKey(const ValueKey('send-upload-progress')), findsNothing);
+      expect(standIn.uploaded, isEmpty);
+      expect(standIn.asked, contains('DELETE /api/sends/send0'));
+      expect(standIn.sends, isEmpty);
+      expect(uploading.value, isNull);
+      expect(find.byType(SnackBar), findsNothing);
+    },
+  );
+
+  testWidgets(
+    'where the server enforces plans, its own sentence for a file Send on Free is said, and nothing is made',
+    (tester) async {
+      final (standIn, phone) = await onPhone(tester);
+      phone.picks.add(fileToPick('codes.txt', 'the codes'));
+      standIn.refusal = 'Sending files is part of Premium. Sending text is free.';
+      await newFileSend(tester);
+      await tester.tap(find.text('Save'));
+      await pumpOn(
+        tester,
+        find.text(
+          'Your server said: Sending files is part of Premium. Sending text is free.',
+        ),
+      );
+      expect(find.text('New Send'), findsOneWidget);
+      expect(standIn.sends, isEmpty);
+      expect(standIn.uploaded, isEmpty);
+    },
+  );
+
   testWidgets('the server\'s refusal is said in plain words', (tester) async {
     final (standIn, _) = await onPhone(tester);
     standIn.refusal = 'Due to an Enterprise Policy, you are only able to delete an existing Send.';
@@ -462,6 +726,21 @@ void main() {
       await tester.tap(find.byKey(const ValueKey('new-send')));
       await idle(tester);
       expect(find.text('New Send'), findsWidgets);
+      // A file Send is offered, with the most it takes, and nothing goes
+      // without a file.
+      await tester.tap(kindChoice('File'));
+      await tester.pump();
+      expect(
+        find.text(
+          'Up to 500 MB. It\'s encrypted on this device before it\'s sent.',
+        ),
+        findsOneWidget,
+      );
+      await tester.tap(find.text('Save'));
+      await tester.pump();
+      expect(find.text('Choose a file to send.'), findsOneWidget);
+      await tester.tap(kindChoice('Text'));
+      await tester.pump();
       // Nothing goes without a name and a text.
       await tester.tap(find.text('Save'));
       await pumpUntil(tester, find.text('A Send needs a name.'));

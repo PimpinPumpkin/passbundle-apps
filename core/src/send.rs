@@ -390,15 +390,16 @@ impl SendDraft {
     /// The body the server takes for a Send of `kind`: every field encrypted
     /// under the Send's key (from `seed`), each with a new IV; the seed
     /// wrapped under the account's user key, with a new IV; the password's
-    /// proof, or null to leave the password as it is. A file Send's file
-    /// name and the encrypted file's length come in `file`.
+    /// proof, or null to leave the password as it is. A new file Send's
+    /// file name comes in `file_name`; the encrypted file's length is added
+    /// when it's known (`Server::start_file_send`).
     pub fn body(
         &self,
         kind: SendKind,
         seed: &[u8],
         user: &SymmetricKey,
         proof: Option<String>,
-        file: Option<(&str, u64)>,
+        file_name: Option<&str>,
     ) -> Value {
         let key = key_from_seed(seed);
         let encrypt = |text: &str| key.encrypt_str(text).to_string();
@@ -423,9 +424,8 @@ impl SendDraft {
                 });
             }
             SendKind::File => {
-                if let Some((name, length)) = file {
+                if let Some(name) = file_name {
                     body["file"] = json!({ "fileName": encrypt(name) });
-                    body["fileLength"] = json!(length);
                 }
             }
         }
@@ -614,5 +614,51 @@ mod tests {
         assert_eq!(other.name, CANT_OPEN_SEND);
         assert!(other.text.is_none());
         assert!(other.link("https://vault.example.test").is_err());
+    }
+
+    #[test]
+    fn a_file_sends_body_has_its_file_name_under_the_sends_key_and_no_text() {
+        let user = SymmetricKey::generate();
+        let seed = new_seed();
+        let draft = SendDraft {
+            kind: Some(SendKind::File),
+            name: "Floor plan".into(),
+            deletion_date: "2026-11-16T12:00:00Z".into(),
+            ..Default::default()
+        };
+        assert!(draft.check().is_ok());
+        let body = draft.body(
+            SendKind::File,
+            &*seed,
+            &user,
+            None,
+            Some("floor plan (2).pdf"),
+        );
+        assert_eq!(body["type"], 1);
+        assert!(body.get("text").is_none());
+        // The length is the server call's to add, once the file is read.
+        assert!(body.get("fileLength").is_none());
+        let encrypted = body["file"]["fileName"].as_str().unwrap();
+        assert!(!encrypted.contains("floor plan"));
+        assert_eq!(
+            EncString::parse(encrypted)
+                .unwrap()
+                .decrypt_string(&key_from_seed(&*seed))
+                .unwrap()
+                .as_str(),
+            "floor plan (2).pdf"
+        );
+        // As the server answers it: it opens with its file's name.
+        let mut answer = body.clone();
+        answer["id"] = json!("s");
+        answer["accessId"] = json!("abc");
+        answer["file"]["id"] = json!("f");
+        answer["file"]["size"] = json!("81");
+        let data: SendData = serde_json::from_value(answer).unwrap();
+        let send = Send::open(&data, &user);
+        assert!(send.opens);
+        assert_eq!(send.kind, SendKind::File);
+        assert_eq!(send.file_name.as_deref(), Some("floor plan (2).pdf"));
+        assert_eq!(send.file_size, Some(81));
     }
 }

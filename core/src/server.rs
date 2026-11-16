@@ -220,9 +220,10 @@ impl Download {
 /// file before it says so.
 const UPLOAD_ANSWER_TIME: Duration = Duration::from_secs(5 * 60);
 
-/// A file's upload, ready to go (`Server::start_attachment`): where the
-/// encrypted file goes, and the name it's sent under (its encrypted name, as
-/// the other apps send it). Sending needs nothing else of the server, the
+/// A file's upload, ready to go (`Server::start_attachment`,
+/// `Server::start_file_send`): where the encrypted file goes, the name it's
+/// sent under (its encrypted name, as the other apps send it), and how the
+/// server's refusals are said. Sending needs nothing else of the server, the
 /// session, or the app, so the file can travel while the app does other
 /// things, as a `Download` does.
 pub struct Upload {
@@ -230,6 +231,7 @@ pub struct Upload {
     url: String,
     auth: Zeroizing<String>,
     file_name: String,
+    refusal: fn(Error) -> Error,
 }
 
 /// A multipart form with one file in it, read piece by piece, so the file
@@ -274,7 +276,8 @@ impl Upload {
     /// Sends the encrypted file. `sent` hears how many of its bytes have
     /// gone, and stops the upload by answering false (`Error::Canceled`).
     /// The file may take up to half an hour to go, as a download may; the
-    /// server's refusal comes back in plain words (`file_refusal`).
+    /// server's refusal comes back in plain words (`file_refusal`, or
+    /// `send_file_refusal` for a file Send's).
     pub fn send(&self, file: &[u8], sent: &mut dyn FnMut(u64) -> bool) -> Result<()> {
         let boundary = format!("PassBundle-{}", uuid::Uuid::new_v4().simple());
         let head = format!(
@@ -322,7 +325,7 @@ impl Upload {
         let body: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
         // The session was good when the upload started, so a 401 here is
         // the server's refusal, not a reason to sign the person out.
-        Err(file_refusal(
+        Err((self.refusal)(
             message_of(&body).map_or(Error::Status(status), Error::Server),
         ))
     }
@@ -434,6 +437,31 @@ fn setup_two_step_first(body: &Value) -> Option<Vec<String>> {
 fn send_answer(answer: Value) -> Result<crate::send::SendData> {
     serde_json::from_value(answer)
         .map_err(|e| Error::Malformed(format!("a Send the core can't read ({e})")))
+}
+
+/// The server's refusals of a file Send's file, in plain words: its room
+/// for Sends' files (`USER_SEND_LIMIT`, which is the server's, whatever the
+/// person's plan), file Sends turned off, and a file that didn't arrive
+/// whole; then the refusals of any Send (`send_refusal`). Where plans are
+/// enforced, a Free account's refusal ("Sending files is part of Premium")
+/// stays the server's own sentence, as an attachment's does.
+fn send_file_refusal(error: Error) -> Error {
+    let Error::Server(said) = &error else {
+        return error;
+    };
+    let said = said.to_lowercase();
+    let has = |words: &str| said.contains(words);
+    if has("send storage limit reached") {
+        Error::Refused("your server's room for Sends' files is full. Delete some file Sends, or ask whoever runs it for more room")
+    } else if has("send storage limit exceeded") {
+        Error::Refused("your server doesn't have room for this file. Delete some file Sends, or ask whoever runs it for more room")
+    } else if has("file uploads are disabled") {
+        Error::Refused("whoever runs your server has turned off sending files")
+    } else if has("send file size does not match") {
+        Error::Refused("the file didn't arrive whole. Try again")
+    } else {
+        send_refusal(error)
+    }
 }
 
 /// The server's refusals of a Send (DESIGN.md, "Errors in plain words"),
@@ -1420,6 +1448,7 @@ impl Server {
                 url: self.url(&format!("/api/ciphers/{cipher_id}/attachment/{id}")),
                 auth: Zeroizing::new(format!("Bearer {}", session.access_token.as_str())),
                 file_name: file_name.to_owned(),
+                refusal: file_refusal,
             },
         ))
     }
@@ -1481,6 +1510,63 @@ impl Server {
             .call(session, "POST", "/api/sends", Some(body))
             .map_err(send_refusal)?;
         send_answer(answer)
+    }
+
+    /// Starts a file Send (upstream's two steps, as the web vault sends
+    /// one): the server makes the Send and answers it, and the file follows
+    /// (`Upload::send`). `body` is the Send with every field encrypted
+    /// already (`SendDraft::body`), and `size` the encrypted file's length.
+    /// The file goes to this server at the path the other apps use, never
+    /// to an address the answer names; an answer that asks for anything
+    /// else (another kind of storage) is refused, and the Send it made is
+    /// deleted.
+    pub fn start_file_send(
+        &self,
+        session: &mut Session,
+        mut body: Value,
+        size: u64,
+    ) -> Result<(crate::send::SendData, Upload)> {
+        // The name goes into a header's quotes, and the server checks the
+        // file comes under the name it keeps: an encrypted string has
+        // nothing that could end them, and anything else isn't sent.
+        let file_name = body["file"]["fileName"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        if file_name.is_empty()
+            || file_name
+                .bytes()
+                .any(|b| b == b'"' || b == b'\\' || b.is_ascii_control())
+        {
+            return Err(Error::Damaged("a file name that isn't encrypted"));
+        }
+        body["fileLength"] = json!(size);
+        let answer = self
+            .call(session, "POST", "/api/sends/file/v2", Some(body))
+            .map_err(send_file_refusal)?;
+        let send = send_answer(answer["sendResponse"].clone())?;
+        let id = path_id(&send.id)?.to_owned();
+        let file_id = send
+            .file
+            .as_ref()
+            .and_then(|f| f.id.clone())
+            .unwrap_or_default();
+        let direct = answer["fileUploadType"].as_u64() == Some(0);
+        if path_id(&file_id).is_err() || !direct {
+            // It's made already; it never gets a file.
+            let _ = self.delete_send(session, &id);
+            return Err(Error::Malformed(
+                "a way to upload a file that PassBundle doesn't know".into(),
+            ));
+        }
+        let upload = Upload {
+            agent: self.agent.clone(),
+            url: self.url(&format!("/api/sends/{id}/file/{file_id}")),
+            auth: Zeroizing::new(format!("Bearer {}", session.access_token.as_str())),
+            file_name,
+            refusal: send_file_refusal,
+        };
+        Ok((send, upload))
     }
 
     /// Edits one of the person's Sends: its kind and a file Send's file
@@ -3008,5 +3094,187 @@ mod tests {
             .start_attachment(&mut session, ITEM, "2.key", "a\r\nb", 1)
             .is_err());
         assert!(server.delete_attachment(&mut session, ITEM, "a/b").is_err());
+    }
+
+    const SEND: &str = "6a1f7e2c-3b4d-4e5f-8a9b-0c1d2e3f4a5b";
+    const SEND_FILE: &str = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
+    const SEND_FILE_NAME: &str =
+        "2.AAAAAAAAAAAAAAAAAAAAAA==|ZmxvYXI=|AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+
+    /// A file Send's body as `SendDraft::body` makes it, every field
+    /// encrypted already.
+    fn file_send_body() -> Value {
+        json!({
+            "type": 1,
+            "name": "2.name",
+            "notes": null,
+            "key": "2.seed",
+            "maxAccessCount": null,
+            "expirationDate": null,
+            "deletionDate": "2026-11-23T12:00:00Z",
+            "password": null,
+            "emails": null,
+            "disabled": false,
+            "hideEmail": false,
+            "file": { "fileName": SEND_FILE_NAME },
+        })
+    }
+
+    /// The server's answer to a new file Send: the Send, and where its file
+    /// goes (an address the core never uses).
+    fn file_send_made(upload_type: u64) -> Vec<u8> {
+        answer(
+            "200 OK",
+            "",
+            json!({
+                "fileUploadType": upload_type,
+                "object": "send-fileUpload",
+                "url": "https://elsewhere.example.test/upload",
+                "sendResponse": {
+                    "id": SEND, "accessId": "ah8fBzs9TkKj1Qb-AQ", "type": 1,
+                    "name": "2.name", "key": "2.seed",
+                    "file": { "id": SEND_FILE, "fileName": SEND_FILE_NAME, "size": "200000", "sizeName": "195.31 KB" },
+                    "deletionDate": "2026-11-23T12:00:00.000000Z", "object": "send",
+                },
+            })
+            .to_string()
+            .as_bytes(),
+        )
+    }
+
+    #[test]
+    fn a_file_send_goes_up_in_two_steps_as_the_web_vault_sends_one() {
+        let (url, served) = answering_whole(vec![file_send_made(0), answer("200 OK", "", b"")]);
+        let server = Server::new(&url, Device::this_one("sending")).unwrap();
+        let mut session = a_session();
+        let file: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
+        let (send, upload) = server
+            .start_file_send(&mut session, file_send_body(), file.len() as u64)
+            .unwrap();
+        assert_eq!(send.id, SEND);
+        let mut heard = Vec::new();
+        upload
+            .send(&file, &mut |sent| {
+                heard.push(sent);
+                true
+            })
+            .unwrap();
+        assert_eq!(heard.last(), Some(&(file.len() as u64)));
+
+        let asked = served.join().unwrap();
+        // The Send, with the encrypted file's length added.
+        let (head, body) = &asked[0];
+        assert!(head.starts_with("POST /api/sends/file/v2 "), "{head}");
+        let sent: Value = serde_json::from_slice(body).unwrap();
+        let mut expected = file_send_body();
+        expected["fileLength"] = json!(200_000);
+        assert_eq!(sent, expected);
+        // The file goes to this server, at the web vault's path, under the
+        // encrypted name the server keeps, whatever address it named.
+        let (head, body) = &asked[1];
+        assert!(
+            head.starts_with(&format!("POST /api/sends/{SEND}/file/{SEND_FILE} ")),
+            "{head}"
+        );
+        assert!(head
+            .to_lowercase()
+            .contains("authorization: bearer access\r\n"));
+        let disposition = format!(
+            "Content-Disposition: form-data; name=\"data\"; filename=\"{SEND_FILE_NAME}\"\r\n"
+        );
+        assert!(String::from_utf8_lossy(&body[..300]).contains(&disposition));
+        assert!(body.windows(file.len()).any(|w| w == &file[..]));
+    }
+
+    #[test]
+    fn the_servers_refusals_of_a_file_send_are_said_in_plain_words() {
+        let refusal = |words: &str| {
+            answer(
+                "400 Bad Request",
+                "",
+                json!({"message": words, "errorModel": {"message": words}})
+                    .to_string()
+                    .as_bytes(),
+            )
+        };
+        let (url, _served) = answering_whole(vec![
+            refusal("Send storage limit reached! Delete some sends to free up space"),
+            refusal("Send storage limit exceeded with this file"),
+            refusal("File uploads are disabled"),
+            refusal("Due to an Enterprise Policy, you are only able to delete an existing Send."),
+            refusal("Sending files is part of Premium. Sending text is free."),
+            file_send_made(0),
+            refusal("Send file size does not match."),
+            file_send_made(0),
+            refusal("Send not found. Unable to save the file."),
+        ]);
+        let server = Server::new(&url, Device::this_one("sending")).unwrap();
+        let mut session = a_session();
+        let mut start = || {
+            server
+                .start_file_send(&mut session, file_send_body(), 100)
+                .map(|(_, upload)| upload)
+        };
+        let said = |e: Error| e.to_string();
+        assert_eq!(
+            said(start().err().unwrap()),
+            "Your server's room for Sends' files is full. Delete some file Sends, or ask whoever runs it for more room."
+        );
+        assert_eq!(
+            said(start().err().unwrap()),
+            "Your server doesn't have room for this file. Delete some file Sends, or ask whoever runs it for more room."
+        );
+        assert_eq!(
+            said(start().err().unwrap()),
+            "Whoever runs your server has turned off sending files."
+        );
+        assert_eq!(
+            said(start().err().unwrap()),
+            "An organization you're in doesn't let you make or edit Sends. You can still delete them."
+        );
+        // Where plans are enforced, a Free account hears the server's own
+        // sentence, as for an attachment.
+        assert_eq!(
+            said(start().err().unwrap()),
+            "Your server said: Sending files is part of Premium. Sending text is free."
+        );
+        let upload = start().unwrap();
+        assert_eq!(
+            said(upload.send(&[1; 100], &mut |_| true).unwrap_err()),
+            "The file didn't arrive whole. Try again."
+        );
+        let upload = start().unwrap();
+        assert_eq!(
+            said(upload.send(&[1; 100], &mut |_| true).unwrap_err()),
+            "That Send isn't here anymore. Sync to see what's there now."
+        );
+    }
+
+    #[test]
+    fn a_file_send_upload_the_app_doesnt_know_is_refused_and_the_send_deleted() {
+        let (url, served) = answering_whole(vec![file_send_made(1), answer("200 OK", "", b"")]);
+        let server = Server::new(&url, Device::this_one("sending")).unwrap();
+        let mut session = a_session();
+        assert!(matches!(
+            server.start_file_send(&mut session, file_send_body(), 100),
+            Err(Error::Malformed(_))
+        ));
+        let asked = served.join().unwrap();
+        assert!(asked[1]
+            .0
+            .starts_with(&format!("DELETE /api/sends/{SEND} ")));
+        // A name that isn't encrypted, or none, is never sent.
+        let (url, served) = answering_whole(vec![]);
+        let server = Server::new(&url, Device::this_one("sending")).unwrap();
+        for name in [json!("a\"b"), json!("a\r\nb"), json!(""), Value::Null] {
+            let mut body = file_send_body();
+            body["file"]["fileName"] = name;
+            assert_eq!(
+                server.start_file_send(&mut session, body, 1).err(),
+                Some(Error::Damaged("a file name that isn't encrypted"))
+            );
+        }
+        drop(server);
+        assert!(served.join().unwrap().is_empty());
     }
 }

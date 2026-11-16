@@ -33,8 +33,10 @@ mod bulk;
 mod pin;
 pub use bulk::{Bulk, Outcome, Plan, Skip};
 mod files;
-pub use files::{attach, too_large, Adding, Attached, Phase, Progress, MAX_FILE};
+pub use files::{attach, too_large, Adding, Attached, FileUse, Phase, Progress, Reach, MAX_FILE};
 pub use pin::PinStatus;
+mod send_files;
+pub use send_files::{send_file, MakingFileSend};
 mod sends;
 pub use sends::SavedSend;
 
@@ -122,6 +124,9 @@ pub struct App {
     uploads: Vec<files::Unfinished>,
     /// The organizations' Send policies, from the kept sync (send.rs).
     send_policy: crate::send::SendPolicy,
+    /// File Sends this app made on the server that the list doesn't show:
+    /// on their way, or to delete there (send_files.rs). In memory only.
+    unfinished_sends: Vec<send_files::UnfinishedSend>,
     /// The item whose secrets the master password, asked for again, let
     /// out (docs/core.md, "Asking for the master password again"): until
     /// another item asks, or the vault locks.
@@ -248,6 +253,7 @@ impl App {
             generator_policy: GeneratorPolicy::default(),
             uploads: Vec::new(),
             send_policy: crate::send::SendPolicy::default(),
+            unfinished_sends: Vec::new(),
             reprompted: None,
             grant: 0,
             autolock: AutoLock::new(Instant::now(), SystemTime::now()),
@@ -863,8 +869,10 @@ impl App {
         // The account the vault kept here is (its id on the server).
         let kept = self.user_id().ok();
         // What this app started on the server and didn't finish is deleted
-        // there first, so the vault that comes doesn't list it (files.rs).
+        // there first, so the vault that comes doesn't list it (files.rs,
+        // send_files.rs).
         self.delete_unfinished();
+        self.delete_unfinished_sends();
         let (Some(server), Some(settings)) = (&self.server, &self.settings) else {
             return Err(Error::SignedOut);
         };
@@ -897,6 +905,7 @@ impl App {
         keep_refresh_token(&*self.secrets, &self.store, settings, session);
         self.vault = Some(Vault::open(&sync, session.user_key().clone())?);
         self.forget_deleted();
+        self.forget_deleted_sends();
         // A server without them, or one that's gone for a moment, leaves the
         // generator's settings as they are here.
         let _ = self.sync_settings();
@@ -1270,6 +1279,7 @@ impl App {
         }
         self.store.forget_vault();
         self.forget_uploads();
+        self.forget_unfinished_sends();
         self.lock();
     }
 

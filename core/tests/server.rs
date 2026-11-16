@@ -15,6 +15,12 @@
 //! tools/test-server.sh ...`), and one that takes them only from this
 //! file's addresses, PB_TEST_SERVER_SOME_ADDRESSES
 //! (`SIGNUPS_DOMAINS_WHITELIST=core.example.test tools/test-server.sh ...`).
+//! The tests of a server without room for files need one with 64 KB for an
+//! account's attachments and its Sends' files, PB_TEST_SERVER_LITTLE_ROOM
+//! (`USER_ATTACHMENT_LIMIT=64 USER_SEND_LIMIT=64 tools/test-server.sh ...`),
+//! and the test of what a Free account hears where plans are enforced one
+//! that enforces them, PB_TEST_SERVER_PLANS (`PLANS_ENFORCED=true
+//! tools/test-server.sh ...`).
 
 use base64::{engine::general_purpose::STANDARD, Engine};
 use passbundle_core::app::{App, State, Step};
@@ -3030,15 +3036,10 @@ fn a_server_without_room_for_a_file_says_so_in_plain_words() {
     assert_eq!(app.vault().unwrap().item(&id).unwrap().attachments.len(), 2);
 }
 
-/// What the web vault's access page does with a Send's link: asks the
-/// server for a token with the access id (and the password's proof, if
-/// it has one), then for the Send. The Send as the server gives it, or
-/// the server's refusal.
-fn open_by_link(
-    url: &str,
-    access_id: &str,
-    proof: Option<&str>,
-) -> Result<serde_json::Value, String> {
+/// What the web vault's access page does first with a Send's link: asks
+/// the server for a token with the access id (and the password's proof, if
+/// it has one). The token, or the server's refusal.
+fn send_access_token(url: &str, access_id: &str, proof: Option<&str>) -> Result<String, String> {
     let mut form = vec![
         ("grant_type", "send_access"),
         ("client_id", "send"),
@@ -3052,14 +3053,44 @@ fn open_by_link(
         .send_form(form)
         .map_err(|e| e.to_string())?;
     let token: serde_json::Value = token.body_mut().read_json().unwrap();
+    Ok(token["access_token"].as_str().unwrap().to_owned())
+}
+
+/// What the web vault's access page does with a Send's link: with its
+/// token, asks for the Send. The Send as the server gives it, or the
+/// server's refusal.
+fn open_by_link(
+    url: &str,
+    access_id: &str,
+    proof: Option<&str>,
+) -> Result<serde_json::Value, String> {
+    let token = send_access_token(url, access_id, proof)?;
     let mut send = ureq::post(format!("{url}/api/sends/access"))
-        .header(
-            "Authorization",
-            format!("Bearer {}", token["access_token"].as_str().unwrap()),
-        )
+        .header("Authorization", format!("Bearer {token}"))
         .send_empty()
         .map_err(|e| e.to_string())?;
     Ok(send.body_mut().read_json().unwrap())
+}
+
+/// What the web vault's access page does to download a file Send's file:
+/// with the link's token, asks where the file is, then fetches it. The
+/// file as the server keeps it (still encrypted), or the server's refusal.
+fn download_by_link(
+    url: &str,
+    access_id: &str,
+    file_id: &str,
+    proof: Option<&str>,
+) -> Result<Vec<u8>, String> {
+    let token = send_access_token(url, access_id, proof)?;
+    let mut answer = ureq::post(format!("{url}/api/sends/access/file/{file_id}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send_empty()
+        .map_err(|e| e.to_string())?;
+    let answer: serde_json::Value = answer.body_mut().read_json().unwrap();
+    let mut file = ureq::get(answer["url"].as_str().unwrap())
+        .call()
+        .map_err(|e| e.to_string())?;
+    Ok(file.body_mut().read_to_vec().unwrap())
 }
 
 /// A link's access id and seed (`/#/send/<access id>/<seed>`).
@@ -3393,4 +3424,367 @@ fn the_send_policies_bind_members_and_not_the_owner() {
     let mut owners = signed_in_app(&url, &owner);
     assert_eq!(owners.send_policy(), send::SendPolicy::default());
     assert!(owners.save_send(None, &hiding, None).is_ok());
+}
+
+/// A file Send's draft, deleted in a day.
+fn file_send_draft(name: &str) -> passbundle_core::send::SendDraft {
+    use passbundle_core::send::{self, SendDraft, SendKind};
+    SendDraft {
+        kind: Some(SendKind::File),
+        name: name.into(),
+        deletion_date: send::date_after(86_400),
+        ..Default::default()
+    }
+}
+
+/// The account's Sends as the server lists them to another device: their ids.
+fn sends_on_server(server: &Server, session: &mut Session) -> Vec<String> {
+    server.raw(session, "GET", "/api/sends", None).unwrap()["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["id"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+/// A file Send (DESIGN.md, "Send in the apps"), made through the app: its
+/// file and the file's name are encrypted under the key from its seed, as
+/// the web vault encrypts them, so it opens by its link as the web vault's
+/// access page opens it, only with its password's proof, and its file
+/// downloads and opens byte for byte. The server never has the file, the
+/// names, the seed, or the password. Then it's edited (its file, password,
+/// and link stay) and deleted, file and all.
+#[test]
+fn a_file_send_opens_by_its_link_and_its_file_byte_for_byte() {
+    use passbundle_core::crypto::{decrypt_file, encrypted_file_len, EncString};
+    use passbundle_core::send::{self, SendDraft, SendKind};
+
+    let Some(server) = server() else { return };
+    let url = std::env::var("PB_TEST_SERVER").unwrap();
+    let email = new_email("send-file");
+    sign_up(&server, &email);
+    let mut app = signed_in_app(&url, &email);
+    let (path, contents) = file_to_attach("floor plan (2).pdf", 300_000);
+    let draft = SendDraft {
+        notes: secret("For the movers"),
+        max_access_count: Some(3),
+        deletion_date: send::date_after(7 * 86_400),
+        ..file_send_draft("Floor plan")
+    };
+    let saved = app
+        .send_file(&draft, &path, "", secret("open sesame"))
+        .unwrap();
+    assert!(saved.synced);
+    assert!(!app.hides_send(&saved.id));
+    let made = app.vault().unwrap().send(&saved.id).unwrap().clone();
+    assert!(made.opens && made.has_password);
+    assert_eq!(made.kind, SendKind::File);
+    assert_eq!(made.name, "Floor plan");
+    assert_eq!(made.file_name.as_deref(), Some("floor plan (2).pdf"));
+    assert_eq!(made.file_size, Some(encrypted_file_len(300_000)));
+    assert_eq!(made.max_access_count, Some(3));
+
+    let link = app.send_link(&saved.id).unwrap();
+    let (access_id, seed) = link_parts(&link);
+    let key = send::key_from_seed(&seed);
+    let proof = send::password_proof("open sesame", &seed);
+    let open = |v: &serde_json::Value| {
+        EncString::parse(v.as_str().unwrap())
+            .unwrap()
+            .decrypt_string(&key)
+            .unwrap()
+            .as_str()
+            .to_owned()
+    };
+    assert!(open_by_link(&url, &access_id, None).is_err());
+    let opened = open_by_link(&url, &access_id, Some(&proof)).unwrap();
+    assert_eq!(open(&opened["name"]), "Floor plan");
+    assert_eq!(open(&opened["file"]["fileName"]), "floor plan (2).pdf");
+    let file_id = opened["file"]["id"].as_str().unwrap().to_owned();
+    assert!(download_by_link(&url, &access_id, &file_id, None).is_err());
+    let encrypted = download_by_link(&url, &access_id, &file_id, Some(&proof)).unwrap();
+    assert_eq!(encrypted.len() as u64, encrypted_file_len(300_000));
+    assert!(!encrypted.windows(64).any(|w| w == &contents[1000..1064]));
+    assert_eq!(
+        decrypt_file(encrypted, &key).unwrap().as_slice(),
+        &contents[..]
+    );
+
+    let kept = server
+        .raw(
+            &mut sign_in(&server, &email),
+            "GET",
+            &format!("/api/sends/{}", saved.id),
+            None,
+        )
+        .unwrap()
+        .to_string();
+    for plain in ["Floor plan", "floor plan", "For the movers", "open sesame"] {
+        assert!(!kept.contains(plain), "the server has {plain} as it is");
+    }
+    assert!(!kept.contains(&base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&seed)));
+    assert!(!kept.contains(&STANDARD.encode(&seed)));
+
+    // Edited: a new name; its file, its password, and its link stay.
+    let edit = SendDraft {
+        name: "Floor plan, final".into(),
+        ..draft
+    };
+    app.save_send(Some(&saved.id), &edit, None).unwrap();
+    let now = app.vault().unwrap().send(&saved.id).unwrap().clone();
+    assert_eq!(now.name, "Floor plan, final");
+    assert_eq!(now.file_name.as_deref(), Some("floor plan (2).pdf"));
+    assert!(now.has_password);
+    assert_eq!(app.send_link(&saved.id).unwrap(), link);
+    let again = download_by_link(&url, &access_id, &file_id, Some(&proof)).unwrap();
+    assert_eq!(decrypt_file(again, &key).unwrap().as_slice(), &contents[..]);
+
+    // Deleted: gone, file and all.
+    assert!(app.delete_send(&saved.id).unwrap());
+    assert!(download_by_link(&url, &access_id, &file_id, Some(&proof)).is_err());
+}
+
+/// Making a file Send in the apps' steps (src/app/send_files.rs): the
+/// server makes the Send before its file comes, and the app doesn't list it
+/// until the whole file is there. An upload that fails or is canceled
+/// leaves no Send, now or, if the server can't be reached then, before the
+/// next sync; a canceled read never reaches the server.
+#[test]
+fn a_file_send_that_fails_or_is_canceled_leaves_no_send() {
+    use passbundle_core::app::{send_file, Progress};
+
+    let Some(server) = server() else { return };
+    let url = std::env::var("PB_TEST_SERVER").unwrap();
+    let email = new_email("send-half");
+    sign_up(&server, &email);
+    let mut app = signed_in_app(&url, &email);
+    let mut session = sign_in(&server, &email);
+    let draft = file_send_draft("Codes");
+
+    // Step by step. A sync while the file is on its way lists the Send;
+    // this app doesn't show it.
+    let making = app.file_send_to_make(&draft, "codes.txt", None).unwrap();
+    let (half, upload) = app.start_file_send(&making, 1000).unwrap();
+    assert_eq!(sends_on_server(&server, &mut session), vec![half.clone()]);
+    app.sync().unwrap();
+    assert!(app.vault().unwrap().send(&half).is_some());
+    assert!(app.hides_send(&half));
+    // The upload didn't go through: the Send is deleted.
+    assert_eq!(
+        app.finish_file_send(&half, Err(Error::Canceled)).err(),
+        Some(Error::Canceled)
+    );
+    assert!(sends_on_server(&server, &mut session).is_empty());
+    assert!(!app.hides_send(&half));
+    assert!(app.sends().is_empty());
+    drop(upload);
+
+    // The server refuses a file that isn't the length it was told, said in
+    // the app's words, and the Send goes.
+    let making = app.file_send_to_make(&draft, "codes.txt", None).unwrap();
+    let (half, upload) = app.start_file_send(&making, 1000).unwrap();
+    let refused = upload.send(&vec![2u8; 3000], &mut |_| true);
+    let words = Error::Refused("the file didn't arrive whole. Try again");
+    assert_eq!(refused, Err(words.clone()));
+    assert_eq!(app.finish_file_send(&half, refused).err(), Some(words));
+    assert!(sends_on_server(&server, &mut session).is_empty());
+
+    // Start to finish, with the person's Cancel. While the file is read:
+    // the server never hears of it.
+    let (path, contents) = file_to_attach("codes.txt", 300_000);
+    let progress = Progress::new();
+    progress.begin();
+    let mut steps = 0;
+    let canceled = send_file(
+        &mut |call| {
+            steps += 1;
+            call(&mut app);
+            progress.cancel();
+        },
+        &draft,
+        &path,
+        "",
+        None,
+        &progress,
+    );
+    assert_eq!(canceled.err(), Some(Error::Canceled));
+    assert_eq!(steps, 1);
+    assert!(sends_on_server(&server, &mut session).is_empty());
+
+    // While it's sent: the Send is deleted.
+    progress.begin();
+    let mut steps = 0;
+    let canceled = send_file(
+        &mut |call| {
+            steps += 1;
+            call(&mut app);
+            if steps == 2 {
+                progress.cancel();
+            }
+        },
+        &draft,
+        &path,
+        "",
+        None,
+        &progress,
+    );
+    assert_eq!(canceled.err(), Some(Error::Canceled));
+    assert_eq!(steps, 3);
+    assert!(sends_on_server(&server, &mut session).is_empty());
+    assert!(app.sends().is_empty());
+
+    // One that can't be deleted now (the vault locked while the file was on
+    // its way, so nothing is signed in) stays hidden, and is deleted before
+    // the next sync.
+    let making = app.file_send_to_make(&draft, "codes.txt", None).unwrap();
+    let (half, upload) = app.start_file_send(&making, 1000).unwrap();
+    drop(upload);
+    app.lock();
+    assert_eq!(
+        app.finish_file_send(&half, Err(Error::Canceled)).err(),
+        Some(Error::Canceled)
+    );
+    assert_eq!(sends_on_server(&server, &mut session), vec![half.clone()]);
+    app.unlock(PASSWORD).unwrap();
+    assert!(app.hides_send(&half));
+    app.sync().unwrap();
+    assert!(sends_on_server(&server, &mut session).is_empty());
+    assert!(!app.hides_send(&half));
+
+    // The vault locks while the file is sent: the upload finishes with the
+    // session it started with, and the Send is listed once the vault is
+    // open and up to date again.
+    progress.begin();
+    let mut steps = 0;
+    let sent = send_file(
+        &mut |call| {
+            steps += 1;
+            call(&mut app);
+            if steps == 2 {
+                app.lock();
+            }
+        },
+        &draft,
+        &path,
+        "",
+        None,
+        &progress,
+    )
+    .unwrap();
+    assert!(!sent.synced);
+    app.unlock(PASSWORD).unwrap();
+    app.sync().unwrap();
+    assert!(!app.hides_send(&sent.id));
+    let listed = app.vault().unwrap().send(&sent.id).unwrap().clone();
+    assert_eq!(listed.file_name.as_deref(), Some("codes.txt"));
+    assert_eq!(
+        listed.file_size,
+        Some(passbundle_core::crypto::encrypted_file_len(
+            contents.len() as u64
+        ))
+    );
+
+    // Signing out forgets what was hidden: nothing of this account's is
+    // asked of a server again.
+    let making = app.file_send_to_make(&draft, "codes.txt", None).unwrap();
+    let (half, _upload) = app.start_file_send(&making, 1000).unwrap();
+    assert!(app.hides_send(&half));
+    app.sign_out();
+    assert!(!app.hides_send(&half));
+}
+
+/// A server's room for an account's Sends' files (`USER_SEND_LIMIT`, the
+/// server's whatever the plan) is said before the file is sent, in plain
+/// words, and no Send is made.
+#[test]
+fn a_server_without_room_for_a_sends_file_says_so_before_it_goes() {
+    use passbundle_core::send::{self, SendKind};
+
+    let Ok(url) = std::env::var("PB_TEST_SERVER_LITTLE_ROOM") else {
+        eprintln!("PB_TEST_SERVER_LITTLE_ROOM isn't set; skipping the test of a server without room for a Send's file.");
+        return;
+    };
+    let server = Server::new(&url, Device::this_one(&Device::new_identifier())).unwrap();
+    let email = new_email("send-room");
+    sign_up(&server, &email);
+    let mut app = signed_in_app(&url, &email);
+    let mut session = sign_in(&server, &email);
+    let draft = file_send_draft("Large");
+
+    let (large, _) = file_to_attach("large.bin", 100_000);
+    assert_eq!(
+        app.send_file(&draft, &large, "", None).err(),
+        Some(Error::Refused(
+            "your server doesn't have room for this file. Delete some file Sends, or ask whoever runs it for more room"
+        ))
+    );
+    assert!(sends_on_server(&server, &mut session).is_empty());
+
+    // One that fits is sent, and a filler takes the bytes left over (an
+    // encrypted file can't fill 64 KB to the byte); then the room is full.
+    let (fits, _) = file_to_attach("fits.bin", 64 * 1024 - 65);
+    let made = app.send_file(&draft, &fits, "", None).unwrap();
+    let left = 64 * 1024 - passbundle_core::crypto::encrypted_file_len(64 * 1024 - 65);
+    let seed = send::new_seed();
+    let filler = draft.body(
+        SendKind::File,
+        &*seed,
+        session.user_key(),
+        None,
+        Some("filler"),
+    );
+    let (_, upload) = server.start_file_send(&mut session, filler, left).unwrap();
+    upload
+        .send(&vec![2u8; left as usize], &mut |_| true)
+        .unwrap();
+    let (small, _) = file_to_attach("small.txt", 10);
+    assert_eq!(
+        app.send_file(&draft, &small, "", None).err(),
+        Some(Error::Refused(
+            "your server's room for Sends' files is full. Delete some file Sends, or ask whoever runs it for more room"
+        ))
+    );
+    assert_eq!(sends_on_server(&server, &mut session).len(), 2);
+    // Deleting makes room again.
+    assert!(app.delete_send(&made.id).unwrap());
+    assert!(app.send_file(&draft, &small, "", None).unwrap().synced);
+}
+
+/// Where the server enforces plans, a Free account can't make a file Send,
+/// and the app says the server's own sentence, as for an attachment, before
+/// the file goes; a text Send is free. The app has no plan check of its
+/// own: the server decides.
+#[test]
+fn where_plans_are_enforced_a_free_account_hears_the_servers_sentence_for_a_file_send() {
+    use passbundle_core::send::{self, SendDraft, SendKind};
+
+    let Ok(url) = std::env::var("PB_TEST_SERVER_PLANS") else {
+        eprintln!(
+            "PB_TEST_SERVER_PLANS isn't set; skipping the test of a server that enforces plans."
+        );
+        return;
+    };
+    let server = Server::new(&url, Device::this_one(&Device::new_identifier())).unwrap();
+    let email = new_email("send-free");
+    sign_up(&server, &email);
+    let mut app = signed_in_app(&url, &email);
+    let (path, _) = file_to_attach("codes.txt", 1000);
+    let refused = app
+        .send_file(&file_send_draft("Codes"), &path, "", None)
+        .unwrap_err();
+    assert_eq!(
+        refused.to_string(),
+        "Your server said: Sending files is part of Premium. Sending text is free."
+    );
+    assert!(sends_on_server(&server, &mut sign_in(&server, &email)).is_empty());
+    assert!(app.sends().is_empty());
+
+    let text = SendDraft {
+        kind: Some(SendKind::Text),
+        name: "Door code".into(),
+        text: secret("4417#"),
+        deletion_date: send::date_after(86_400),
+        ..Default::default()
+    };
+    assert!(app.save_send(None, &text, None).unwrap().synced);
 }
