@@ -6,6 +6,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/services.dart';
+import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:passbundle/core.dart';
@@ -223,6 +224,13 @@ void showIcons(bool on) {
   final answer = Core().setAppearance({'showIcons': on});
   if (!answer.ok) throw StateError('${answer.error}');
   siteIcons.turn(on);
+}
+
+/// What the generator shows: its digits and symbols are spans of their own
+/// colors (generator.dart, GeneratedText), read here as one string.
+String generatedText(WidgetTester tester) {
+  final text = tester.widget<Text>(find.byKey(const Key('generated')));
+  return text.data ?? text.textSpan!.toPlainText();
 }
 
 /// Pumps until something shows up, giving slow core calls real time.

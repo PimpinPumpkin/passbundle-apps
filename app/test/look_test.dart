@@ -15,6 +15,7 @@ import 'package:passbundle/folder_looks.dart';
 import 'package:passbundle/glyphs.dart';
 import 'package:passbundle/main.dart';
 import 'package:passbundle/theme.dart';
+import 'package:passbundle/vault.dart' show healthReports;
 import 'package:passbundle/widgets.dart';
 
 import 'support.dart';
@@ -131,6 +132,9 @@ void main() {
     'Favorites': Jewel.favorites,
     'Health': Jewel.health,
     'Expiring soon': Jewel.expiring,
+    'All accounts': Jewel.allAccounts,
+    // Health's reports.
+    for (final (key, _, jewel) in healthReports) 'report $key': jewel,
     for (final kind in ItemKind.all) kind.kind: kind,
     ...Categories.all,
     // A shared folder's own colors (folder_looks.dart).

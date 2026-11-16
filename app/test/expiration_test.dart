@@ -65,8 +65,17 @@ void main() {
       Finder entry(String label) =>
           find.descendant(of: menu, matching: find.text(label));
       expect(entry('Expiring soon'), findsOneWidget);
-      // The sample's passwords are strong and used once: Health is these two.
-      await pumpUntil(tester, entry('2 to fix'));
+      // The sample's passwords are strong and used once: Health is these
+      // two, in its pill.
+      final pill = find.descendant(
+        of: menu,
+        matching: find.byKey(const ValueKey('health-count')),
+      );
+      await pumpUntil(tester, pill);
+      expect(
+        find.descendant(of: pill, matching: find.text('2')),
+        findsOneWidget,
+      );
 
       // Show opens Expiring soon, and the reminder goes.
       await tester.tap(find.text('Show'));
@@ -77,11 +86,22 @@ void main() {
       expect(find.text('Backup service'), findsNothing);
       expect(find.text('Everyday card'), findsNothing);
 
-      // Health says what each has to fix.
+      // Health lists them, each with its badge, and says when each expires
+      // once, there; its report says how many.
       await tester.tap(entry('Health'));
       await tester.pumpAndSettle();
-      expect(find.text('Expires in 5 days'), findsNWidgets(2));
+      expect(find.text('Expires in 5 days'), findsOneWidget);
+      expect(find.text('Expired 5 days ago'), findsOneWidget);
       expect(find.text('Backup service'), findsNothing);
+      final reports = find.byKey(const ValueKey('health-reports'));
+      expect(
+        find.descendant(of: reports, matching: find.text('Expiring items')),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(of: reports, matching: find.text('Weak passwords')),
+        findsNothing,
+      );
 
       // The item: its date, how far off, and its own reminder days.
       await tester.tap(find.text('Gate code'));
