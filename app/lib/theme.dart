@@ -351,8 +351,10 @@ class PassBundleColors extends ThemeExtension<PassBundleColors> {
     buttonEdge: Color(0xFFCBD7D2),
     well: Color(0xFFF7FAF9),
     wellEdge: Color(0xFFDCE5E1),
-    chip: Color(0xFFEEF2F0),
-    chipEdge: null,
+    // A shade off the ground, with a hairline, so a where-it-lives chip
+    // reads as one beside a row on the ground (not as stray bold text).
+    chip: Color(0xFFE6ECE9),
+    chipEdge: Color(0xFFD3DDD8),
     chipText: Color(0xFF3C4A45),
     canvas: Color(0xFFFFFFFF),
     dialog: Color(0xFFFFFFFF),
@@ -779,6 +781,14 @@ class Jewel {
     Color(0xFF353B4A),
     Color(0xFFC3C9D6),
   );
+
+  /// The logo's emerald, as All items, with two people: every account
+  /// signed in here, together ("All accounts"), on a computer and a phone.
+  static const allAccounts = Jewel(
+    Glyphs.accounts,
+    Color(0xFF0E7A5A),
+    Color(0xFF5FD6AE),
+  );
 }
 
 /// The kinds of item, each with its jewel, and what the screens call one and
@@ -921,9 +931,28 @@ abstract final class Categories {
   /// A category's jewel; a note's for one the app doesn't know.
   static Jewel of(String? category) => _looks[category] ?? ItemKind.note;
 
+  /// The built-in templates that share their category's tile but have a
+  /// glyph of their own (core/src/templates.rs), by the template's id.
+  static const _templateGlyphs = {
+    'database': Glyphs.database,
+    'router': Glyphs.router,
+    'membership': Glyphs.membership,
+  };
+
+  /// An item's or a template's jewel: its category's, with its built-in
+  /// template's own glyph where it has one ([template] is the template's id).
+  static Jewel forItem(String? category, String? template) {
+    final jewel = of(category);
+    final glyph = _templateGlyphs[template];
+    return glyph == null ? jewel : Jewel(glyph, jewel.light, jewel.dark);
+  }
+
   /// Every category's jewel, by the core's name for it.
   static Map<String, Jewel> get all => _looks;
 }
+
+/// The page under a dialog or a sheet in the dark: the ground, at 85%.
+const _darkDim = Color(0xD9111318);
 
 ThemeData passBundleTheme(Brightness brightness) {
   final dark = brightness == Brightness.dark;
@@ -1024,13 +1053,29 @@ ThemeData passBundleTheme(Brightness brightness) {
         ),
       ),
     ),
-    // In the dark, a choice's border is a quiet hairline, as a field's.
+    // In the dark, a choice's border is a quiet hairline, as a field's, and
+    // the one chosen is the accent's tint, with its text in the accent, so
+    // it stands apart from the others (the generator's Password and
+    // Passphrase).
     segmentedButtonTheme: dark
         ? SegmentedButtonThemeData(
             style: ButtonStyle(
               side: WidgetStatePropertyAll(
                 BorderSide(color: colors.buttonEdge),
               ),
+              backgroundColor: WidgetStateProperty.resolveWith(
+                (states) => states.contains(WidgetState.selected)
+                    ? colors.accent.withValues(alpha: 0.24)
+                    : Colors.transparent,
+              ),
+              foregroundColor: WidgetStateProperty.resolveWith((states) {
+                if (states.contains(WidgetState.disabled)) {
+                  return colors.text.withValues(alpha: 0.38);
+                }
+                return states.contains(WidgetState.selected)
+                    ? colors.accent
+                    : colors.text;
+              }),
             ),
           )
         : null,
@@ -1081,6 +1126,9 @@ ThemeData passBundleTheme(Brightness brightness) {
     dialogTheme: DialogThemeData(
       backgroundColor: colors.dialog,
       surfaceTintColor: Colors.transparent,
+      // In the dark, the page under a dialog is dimmed nearly to the
+      // ground (85%), as the web vault dims it.
+      barrierColor: dark ? _darkDim : null,
       shape: floatingShape,
       // Room for words on a phone: the default leaves a narrow column.
       insetPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 24),
@@ -1089,6 +1137,7 @@ ThemeData passBundleTheme(Brightness brightness) {
       backgroundColor: colors.dialog,
       surfaceTintColor: Colors.transparent,
       modalBackgroundColor: colors.dialog,
+      modalBarrierColor: dark ? _darkDim : null,
       showDragHandle: true,
       shape: RoundedRectangleBorder(
         borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),

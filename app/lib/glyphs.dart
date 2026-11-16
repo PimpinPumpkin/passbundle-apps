@@ -43,6 +43,23 @@ abstract final class Glyphs {
   static const health =
       'M12 3l8 3v6c0 4.5-3.4 8-8 9-4.6-1-8-4.5-8-9V6Z M8.5 12l2.5 2.5 4.5-5';
   static const download = 'M12 4v11 M8 11l4 4 4-4 M4 20h16';
+  // Export, the other way: out of PassBundle.
+  static const upload = 'M12 15V4 M8 8l4-4 4 4 M4 20h16';
+  static const trash =
+      'M4 7h16 M9 7V4h6v3 M6 7l1 13h10l1-13 M10 11v6 M14 11v6';
+  // Every account signed in here, together ("All accounts").
+  static const accounts =
+      'M9 11a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z M3.5 19c.7-3 2.9-4.5 5.5-4.5s4.8 1.5 5.5 4.5 M16 10.5a2.5 2.5 0 1 0 0-5 M17 14c2 .4 3.3 2 3.5 4.5';
+
+  // Built-in templates that share a category's tile, each its own glyph
+  // (the New picker and the item's tile): a database, a router, and a
+  // membership card.
+  static const database =
+      'M4 6c0-1.7 3.6-3 8-3s8 1.3 8 3-3.6 3-8 3-8-1.3-8-3Z M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6 M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3';
+  static const router =
+      'M3 13h18v7H3Z M7 16.5h.01 M11 16.5h.01 M17 13V6 M14.5 6.5a3.5 3.5 0 0 1 5 0';
+  static const membership =
+      'M3 6h18v12H3Z M8.5 9l.9 1.8 2 .3-1.45 1.4.35 2L8.5 13.55l-1.8.95.35-2-1.45-1.4 2-.3Z M14 10h4 M14 14h3';
   static const open = 'M14 4h6v6 M20 4l-9 9 M18 14v6H4V6h6';
   static const history = 'M3 12a9 9 0 1 0 3-6.7 M3 4v5h5 M12 7v5l3 2';
   // A clock, for what expires (the web vault's Expiring items).
