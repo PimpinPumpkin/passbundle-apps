@@ -151,7 +151,8 @@ void main() {
   testWidgets(
     'offered once after signing in: the profiles the rules choose, a Primary Password used once, everything encrypted before it\'s sent, and password saving turned off',
     (tester) async {
-      tester.view.physicalSize = const Size(1280, 1000);
+      // Tall enough for the whole menu, Send too.
+      tester.view.physicalSize = const Size(1280, 1080);
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.reset);
       openEmpty();
@@ -271,7 +272,8 @@ void main() {
   testWidgets(
     'Not now reads nothing, and a browser that keeps its passwords to itself goes to its own Export, said in plain words',
     (tester) async {
-      tester.view.physicalSize = const Size(1280, 1000);
+      // Tall enough for the whole menu, Send too.
+      tester.view.physicalSize = const Size(1280, 1080);
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.reset);
       openEmpty();
