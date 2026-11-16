@@ -21,13 +21,14 @@ pub struct SavedSend {
     pub synced: bool,
 }
 
-const DISABLED: Error = Error::Refused(
+pub(super) const DISABLED: Error = Error::Refused(
     "an organization you're in doesn't let you make or edit Sends. You can still delete them",
 );
 const NO_HIDING_EMAIL: Error = Error::Refused(
     "an organization you're in doesn't let Sends hide your email. Turn off \"Hide my email\" to save it",
 );
-const NOT_AS_SENT: Error = Error::Damaged("a Send the server didn't keep as it was sent");
+pub(super) const NOT_AS_SENT: Error =
+    Error::Damaged("a Send the server didn't keep as it was sent");
 
 impl App {
     /// The organizations' Send policies, from the kept sync.
@@ -50,14 +51,8 @@ impl App {
         draft: &SendDraft,
         password: Option<Zeroizing<String>>,
     ) -> Result<SavedSend> {
+        self.may_save_send(draft)?;
         let vault = self.vault.as_ref().ok_or(Error::SignedOut)?;
-        if self.send_policy.disabled {
-            return Err(DISABLED);
-        }
-        draft.check()?;
-        if draft.hide_email && self.send_policy.no_hiding_email {
-            return Err(NO_HIDING_EMAIL);
-        }
         let user = vault.user_key().clone();
         let editing = match id {
             Some(id) => {
@@ -107,8 +102,39 @@ impl App {
         let id = answer.id;
         Ok(SavedSend {
             id,
-            synced: self.sync().is_ok(),
+            synced: self.synced_with(kept),
         })
+    }
+
+    /// What the policies and the draft must allow before a Send is made or
+    /// edited (the server checks again).
+    pub(super) fn may_save_send(&self, draft: &SendDraft) -> Result<()> {
+        if self.vault.is_none() {
+            return Err(Error::SignedOut);
+        }
+        if self.send_policy.disabled {
+            return Err(DISABLED);
+        }
+        draft.check()?;
+        if draft.hide_email && self.send_policy.no_hiding_email {
+            return Err(NO_HIDING_EMAIL);
+        }
+        Ok(())
+    }
+
+    /// Syncs after the server took a Send (`kept`, as it answered, opened
+    /// and checked): whether the sync came through. When it didn't, the
+    /// Send is listed as the server answered it until the next one, so its
+    /// link can be copied at once.
+    pub(super) fn synced_with(&mut self, kept: Send) -> bool {
+        if self.sync().is_ok() {
+            return true;
+        }
+        if let Some(vault) = self.vault.as_mut() {
+            vault.sends.retain(|s| s.id != kept.id);
+            vault.sends.push(kept);
+        }
+        false
     }
 
     /// Takes a Send's password away, then syncs: whether the sync came

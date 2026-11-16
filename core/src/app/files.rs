@@ -118,18 +118,18 @@ impl Progress {
         )
     }
 
-    fn enter(&self, phase: Phase, total: u64) {
+    pub(super) fn enter(&self, phase: Phase, total: u64) {
         self.done.store(0, Ordering::SeqCst);
         self.total.store(total, Ordering::SeqCst);
         self.phase.store(phase as u8 + 1, Ordering::SeqCst);
     }
 
-    fn set(&self, done: u64) {
+    pub(super) fn set(&self, done: u64) {
         self.done.store(done, Ordering::SeqCst);
     }
 
     /// Stops here if the person canceled.
-    fn go_on(&self) -> Result<()> {
+    pub(super) fn go_on(&self) -> Result<()> {
         if self.canceled() {
             Err(Error::Canceled)
         } else {
@@ -165,13 +165,37 @@ pub(super) struct Unfinished {
     delete: bool,
 }
 
-/// What the person hears for a file larger than `MAX_FILE`.
+/// What a file is read for: attaching it to an item, or sending it in a
+/// file Send (send_files.rs). Only the words differ.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FileUse {
+    Attaching,
+    Sending,
+}
+
+impl FileUse {
+    /// What the person hears for a file larger than `MAX_FILE`.
+    pub fn too_large(self) -> Error {
+        Error::Refused(match (self, cfg!(phone)) {
+            (FileUse::Attaching, true) => "that file is larger than 100 MB, the most PassBundle attaches on a phone. Attach it from a computer",
+            (FileUse::Attaching, false) => "that file is larger than 500 MB, the most PassBundle attaches",
+            (FileUse::Sending, true) => "that file is larger than 100 MB, the most PassBundle sends from a phone. Send it from a computer",
+            (FileUse::Sending, false) => "that file is larger than 500 MB, the most PassBundle sends",
+        })
+    }
+
+    /// What the person hears for a folder, or anything else that isn't a file.
+    fn not_a_file(self) -> Error {
+        Error::Refused(match self {
+            FileUse::Attaching => "that isn't a file PassBundle can attach",
+            FileUse::Sending => "that isn't a file PassBundle can send",
+        })
+    }
+}
+
+/// What the person hears for a file larger than `MAX_FILE`, to attach.
 pub fn too_large() -> Error {
-    Error::Refused(if cfg!(phone) {
-        "that file is larger than 100 MB, the most PassBundle attaches on a phone. Attach it from a computer"
-    } else {
-        "that file is larger than 500 MB, the most PassBundle attaches"
-    })
+    FileUse::Attaching.too_large()
 }
 
 /// Whether the person may change an item's attachments now: the rule the
@@ -196,15 +220,15 @@ fn may_change(vault: &Vault, item: &Item, may_use: bool) -> Result<()> {
 
 /// Reads the file at `path`, whole, into the room its encrypted form needs
 /// (`FileToEncrypt`), a piece at a time, so it's in memory once. Its length
-/// is checked before any of it is read.
-pub fn read_file(path: &Path, progress: &Progress) -> Result<FileToEncrypt> {
+/// is checked before any of it is read. `purpose` picks the words.
+pub fn read_file(path: &Path, progress: &Progress, purpose: FileUse) -> Result<FileToEncrypt> {
     use std::io::Read;
     /// Read at a time, so progress is said, and Cancel heard, often.
     const PIECE: usize = 1024 * 1024;
     let unread = Error::Refused(
         "PassBundle couldn't read that file. Check that it's still there and that you may open it",
     );
-    let not_a_file = Error::Refused("that isn't a file PassBundle can attach");
+    let not_a_file = purpose.not_a_file();
     // Asked before it's opened too: Windows won't open a folder as a file.
     if std::fs::metadata(path).is_ok_and(|about| !about.is_file()) {
         return Err(not_a_file);
@@ -216,7 +240,7 @@ pub fn read_file(path: &Path, progress: &Progress) -> Result<FileToEncrypt> {
     }
     let len = about.len();
     if len > MAX_FILE {
-        return Err(too_large());
+        return Err(purpose.too_large());
     }
     progress.enter(Phase::Reading, len);
     let mut room = FileToEncrypt::with_room(len as usize)?;
@@ -249,7 +273,7 @@ pub type OnApp<'a> = &'a mut dyn FnMut(&mut App);
 pub type Reach<'a> = &'a mut dyn FnMut(OnApp<'_>);
 
 /// One step of an upload that needs the app.
-fn ask<T>(on_app: Reach<'_>, call: impl FnOnce(&mut App) -> Result<T>) -> Result<T> {
+pub(super) fn ask<T>(on_app: Reach<'_>, call: impl FnOnce(&mut App) -> Result<T>) -> Result<T> {
     let mut call = Some(call);
     let mut answer = Err(Error::SignedOut);
     on_app(&mut |app| {
@@ -285,7 +309,7 @@ pub fn attach(
         name
     };
     let adding = ask(on_app, |app| app.attachment_to_add(item, name))?;
-    let file = read_file(path, progress)?;
+    let file = read_file(path, progress, FileUse::Attaching)?;
     progress.go_on()?;
     progress.enter(Phase::Encrypting, 0);
     // In place: after this the buffer holds the encrypted file only.
@@ -520,7 +544,7 @@ mod tests {
         std::fs::write(&path, &contents).unwrap();
         let progress = Progress::new();
         progress.begin();
-        let file = read_file(&path, &progress).unwrap();
+        let file = read_file(&path, &progress, FileUse::Attaching).unwrap();
         assert_eq!(file.len(), contents.len());
         assert_eq!(progress.phase(), Some(Phase::Reading));
         assert_eq!(progress.amounts(), (3_000_000, 3_000_000));
@@ -536,20 +560,27 @@ mod tests {
         let dir = new_dir();
         let progress = Progress::new();
         assert_eq!(
-            read_file(&dir, &progress).err(),
+            read_file(&dir, &progress, FileUse::Attaching).err(),
             Some(Error::Refused("that isn't a file PassBundle can attach"))
         );
+        assert_eq!(
+            read_file(&dir, &progress, FileUse::Sending).err(),
+            Some(Error::Refused("that isn't a file PassBundle can send"))
+        );
         assert!(matches!(
-            read_file(&dir.join("gone.txt"), &progress),
+            read_file(&dir.join("gone.txt"), &progress, FileUse::Sending),
             Err(Error::Refused(why)) if why.starts_with("PassBundle couldn't read that file")
         ));
         let path = dir.join("codes.txt");
         std::fs::write(&path, b"backup codes").unwrap();
         progress.cancel();
-        assert_eq!(read_file(&path, &progress).err(), Some(Error::Canceled));
+        assert_eq!(
+            read_file(&path, &progress, FileUse::Attaching).err(),
+            Some(Error::Canceled)
+        );
         // A new upload isn't canceled by the last one's Cancel.
         progress.begin();
-        assert!(read_file(&path, &progress).is_ok());
+        assert!(read_file(&path, &progress, FileUse::Attaching).is_ok());
         progress.end();
         assert_eq!(progress.phase(), None);
         let _ = std::fs::remove_dir_all(dir);
@@ -566,8 +597,17 @@ mod tests {
         drop(file);
         let progress = Progress::new();
         progress.begin();
-        assert_eq!(read_file(&path, &progress).err(), Some(too_large()));
+        assert_eq!(
+            read_file(&path, &progress, FileUse::Attaching).err(),
+            Some(too_large())
+        );
         // Nothing was read: the phase never got an amount.
+        assert_eq!(progress.amounts(), (0, 0));
+        // A file Send says it in its own words, as early.
+        assert_eq!(
+            read_file(&path, &progress, FileUse::Sending).err(),
+            Some(FileUse::Sending.too_large())
+        );
         assert_eq!(progress.amounts(), (0, 0));
         let _ = std::fs::remove_dir_all(dir);
     }

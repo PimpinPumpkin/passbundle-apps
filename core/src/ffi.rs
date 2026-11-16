@@ -2633,16 +2633,30 @@ pub unsafe extern "C" fn pb_attach_file(
     out(attach_file(&account, &id, &path, &name))
 }
 
-/// What `pb_attach_file` does, on a thread of the core's own (as
-/// `with_app_waiting`), taking the app only when `attach` asks for it.
+/// What `pb_attach_file` does.
 fn attach_file(account: &str, id: &str, path: &str, name: &str) -> Value {
+    upload_file(account, |on_app| {
+        let path = std::path::Path::new(path);
+        match crate::app::attach(on_app, id, path, name, &UPLOAD) {
+            Ok(attached) => json!({ "ok": true, "id": attached.id, "synced": attached.synced }),
+            Err(e) => failed(e),
+        }
+    })
+}
+
+/// A file's upload (an attachment's or a file Send's), on a thread of the
+/// core's own (as `with_app_waiting`): `go` runs the upload, taking the
+/// account's app only when it asks for it, and only once the screens have
+/// stopped reading from the core (`pb_upload_go`), or after a short wait.
+/// One file at a time.
+fn upload_file(account: &str, go: impl FnOnce(crate::app::Reach<'_>) -> Value + Send) -> Value {
     if UPLOADING.swap(true, Ordering::SeqCst) {
         return failed(Error::Refused(
             "another file is still uploading. Wait for it to finish, or cancel it",
         ));
     }
     UPLOAD.begin();
-    let attached = std::thread::scope(|scope| {
+    let done = std::thread::scope(|scope| {
         scope
             .spawn(|| {
                 catch_unwind(AssertUnwindSafe(|| {
@@ -2661,13 +2675,7 @@ fn attach_file(account: &str, id: &str, path: &str, name: &str) -> Value {
                         });
                         UPLOAD_WANTS_APP.store(0, Ordering::SeqCst);
                     };
-                    let path = std::path::Path::new(path);
-                    match crate::app::attach(&mut on_app, id, path, name, &UPLOAD) {
-                        Ok(attached) => {
-                            json!({ "ok": true, "id": attached.id, "synced": attached.synced })
-                        }
-                        Err(e) => failed(e),
-                    }
+                    go(&mut on_app)
                 }))
                 .unwrap_or_else(|_| json!({ "ok": false, "error": STOPPED }))
             })
@@ -2678,7 +2686,7 @@ fn attach_file(account: &str, id: &str, path: &str, name: &str) -> Value {
     // A step that stopped partway (a panic) leaves nothing said to have it.
     UPLOAD_WANTS_APP.store(0, Ordering::SeqCst);
     UPLOADING.store(false, Ordering::SeqCst);
-    attached
+    done
 }
 
 /// How far the upload under way is: `{phase, done, total, wantsApp}`, the
@@ -4053,7 +4061,13 @@ pub unsafe extern "C" fn pb_sends(account: *const c_char) -> *mut c_char {
             return Value::Null;
         }
         let now = crate::vault::now_iso8601();
-        let mut sends: Vec<&crate::send::Send> = app.sends().iter().collect();
+        // A file Send whose file is still on its way, or that's to be
+        // deleted, isn't listed (app/send_files.rs).
+        let mut sends: Vec<&crate::send::Send> = app
+            .sends()
+            .iter()
+            .filter(|s| !app.hides_send(&s.id))
+            .collect();
         sends.sort_by(|a, b| b.revision_date.cmp(&a.revision_date));
         let policy = app.send_policy();
         json!({
@@ -4139,6 +4153,66 @@ pub unsafe extern "C" fn pb_save_send(
             Err(e) => failed(e),
         }
     })
+}
+
+/// Makes a file Send of the file at `path`, named `name` (the file's own
+/// name when empty), with the account's keys (docs/core.md, "Send"):
+/// `{ok, id, synced}`, or the words to show (`canceled` when the person
+/// stopped it, with nothing to say). `draft` is the editor's JSON
+/// (`send_draft`); `password`, empty for none, comes apart from it, is
+/// hashed with the Send's seed for the server, and is wiped. `synced` is
+/// false when the Send is made but the sync after didn't come through; it's
+/// listed all the same, and its link can be copied.
+///
+/// Slow: from a background isolate. As `pb_attach_file`, the app is held
+/// only for the moments that need it (app/send_files.rs, `send_file`), with
+/// the same `pb_upload_progress`, `pb_upload_go`, and `pb_upload_cancel`.
+/// One file at a time, of either kind.
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_send_file(
+    account: *const c_char,
+    draft: *const c_char,
+    path: *const c_char,
+    name: *const c_char,
+    password: *const c_char,
+) -> *mut c_char {
+    let account = text(account);
+    let draft_json = Zeroizing::new(text(draft));
+    let (path, name) = (text(path), text(name));
+    let password = Zeroizing::new(text(password));
+    let d: Value = match serde_json::from_str(&draft_json) {
+        Ok(d) => d,
+        Err(e) => {
+            return out(failed(Error::Malformed(format!(
+                "a draft the core can't read ({e})"
+            ))))
+        }
+    };
+    let mut draft = send_draft(&d);
+    draft.kind = Some(crate::send::SendKind::File);
+    let password = Some(password).filter(|p| !p.is_empty());
+    out(upload_file(&account, |on_app| {
+        let path = std::path::Path::new(&path);
+        match crate::app::send_file(on_app, &draft, path, &name, password, &UPLOAD) {
+            Ok(saved) => json!({ "ok": true, "id": saved.id, "synced": saved.synced }),
+            Err(e) => failed(e),
+        }
+    }))
+}
+
+/// The largest file a file Send takes from this device (app/files.rs,
+/// `MAX_FILE`, under what the server takes): `{bytes, refusal}`, the words
+/// for a larger one, so the screen says the limit before a file is chosen
+/// and a phone's picker doesn't copy a larger one.
+#[no_mangle]
+pub extern "C" fn pb_send_file_limit() -> *mut c_char {
+    out(json!({
+        "bytes": crate::app::MAX_FILE,
+        "refusal": crate::app::FileUse::Sending.too_large().to_string(),
+    }))
 }
 
 /// Takes a Send's password away, then syncs: `{ok, synced}`. Slow.
