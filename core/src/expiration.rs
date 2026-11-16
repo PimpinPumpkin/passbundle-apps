@@ -431,10 +431,10 @@ pub struct Check {
 }
 
 /// The items a person is reminded about: theirs and their organizations',
-/// not in the trash, and not an MSP's template copies (which only their
-/// Templates folder shows).
+/// in use (not in the trash or archived), and not an MSP's template copies
+/// (which only their Templates folder shows).
 fn remindable(item: &Item) -> bool {
-    !item.deleted && !crate::templates::is_msp_copy(item)
+    item.in_use() && !crate::templates::is_msp_copy(item)
 }
 
 /// Looks for reminders due today and marks them shown in `shown`, which

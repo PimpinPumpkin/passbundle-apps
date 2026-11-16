@@ -104,7 +104,7 @@ fn fits(uri: &str, match_type: Option<u8>, target: &Target) -> bool {
 /// Whether the item is a login for the target.
 pub fn matches(item: &Item, target: &Target) -> bool {
     item.kind == ItemKind::Login
-        && !item.deleted
+        && item.in_use()
         && item
             .uris
             .iter()
@@ -156,11 +156,11 @@ pub struct PasskeySuggestion<'a> {
 }
 
 /// What iOS may suggest of an item's passkey: one the core can sign with,
-/// that a site can find by itself (discoverable), in a login not in the
-/// trash.
+/// that a site can find by itself (discoverable), in a login in use (not in
+/// the trash or archived).
 pub fn passkey_suggested(item: &Item) -> Option<PasskeySuggestion<'_>> {
     let passkey = item.passkey.as_ref()?;
-    if item.deleted || item.kind != ItemKind::Login || !passkey.usable || !passkey.discoverable {
+    if !item.in_use() || item.kind != ItemKind::Login || !passkey.usable || !passkey.discoverable {
         return None;
     }
     let credential_id = crate::passkey::credential_id(&passkey.credential_id).ok()?;
@@ -188,7 +188,7 @@ pub fn passkey_suggested(item: &Item) -> Option<PasskeySuggestion<'_>> {
 pub fn suggested(item: &Item) -> Vec<Suggestion<'_>> {
     let mut found = Vec::new();
     let username = match item.username.as_deref() {
-        Some(u) if !u.is_empty() && item.kind == ItemKind::Login && !item.deleted => u,
+        Some(u) if !u.is_empty() && item.kind == ItemKind::Login && item.in_use() => u,
         _ => return found,
     };
     let mut domains = HashSet::new();
@@ -241,6 +241,7 @@ mod tests {
             collection_ids: vec![],
             favorite: false,
             deleted: false,
+            archived: false,
             username: Some("ana@example.test".into()),
             uris: uris.iter().map(|(u, _)| (*u).to_owned()).collect(),
             uri_matches: uris.iter().map(|(_, m)| *m).collect(),
@@ -357,6 +358,9 @@ mod tests {
         let mut item = login(&[("https://example.com", None)]);
         item.deleted = true;
         assert!(!matches(&item, &Target::Website("example.com")));
+        let mut archived = login(&[("https://example.com", None)]);
+        archived.archived = true;
+        assert!(!matches(&archived, &Target::Website("example.com")));
         let mut note = login(&[("https://example.com", None)]);
         note.kind = ItemKind::SecureNote;
         assert!(!matches(&note, &Target::Website("example.com")));
@@ -411,11 +415,15 @@ mod tests {
             deleted: true,
             ..login(&[("https://example.com", None)])
         };
+        let archived = Item {
+            archived: true,
+            ..login(&[("https://example.com", None)])
+        };
         let note = Item {
             kind: ItemKind::SecureNote,
             ..login(&[("https://example.com", None)])
         };
-        for item in [no_username, deleted, note] {
+        for item in [no_username, deleted, archived, note] {
             assert!(suggested(&item).is_empty());
         }
     }

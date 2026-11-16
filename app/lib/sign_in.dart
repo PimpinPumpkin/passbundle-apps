@@ -248,6 +248,11 @@ class _SignInScreenState extends State<SignInScreen> {
   final confirm = TextEditingController();
   final hint = TextEditingController();
 
+  /// What's wrong in the form for making an account, each said under its
+  /// own field: `email` (with what the server said about the account),
+  /// `password`, `confirm` (the master password again), and `hint`.
+  Map<String, String> formErrors = const {};
+
   /// The second step, once the server asks for one: what it offers (two_step.dart).
   Map<String, dynamic>? twoStep;
 
@@ -305,19 +310,23 @@ class _SignInScreenState extends State<SignInScreen> {
     if (working) return;
     final typed = password.text;
     final again = confirm.text;
-    String? wrong;
-    if (email.text.trim().isEmpty) {
-      wrong = 'Enter your email address.';
-    } else if (typed.characters.length < 12) {
-      wrong = 'Use at least 12 characters.';
-    } else if (typed != again) {
-      wrong = 'The two master passwords don\'t match.';
-    } else if (hint.text.trim().isNotEmpty &&
-        hint.text.trim().toLowerCase().contains(typed.trim().toLowerCase())) {
-      wrong = 'The hint can\'t give away your master password.';
-    }
-    if (wrong != null) {
-      setState(() => error = wrong);
+    final hinted = hint.text.trim().toLowerCase();
+    final wrong = {
+      if (email.text.trim().isEmpty) 'email': 'Enter your email address.',
+      if (typed.characters.length < 12)
+        'password': 'Use at least 12 characters.'
+      else if (typed != again)
+        'confirm': 'The two master passwords don\'t match.',
+      if (typed.trim().isNotEmpty &&
+          hinted.isNotEmpty &&
+          hinted.contains(typed.trim().toLowerCase()))
+        'hint': 'The hint can\'t give away your master password.',
+    };
+    if (wrong.isNotEmpty) {
+      setState(() {
+        error = null;
+        formErrors = wrong;
+      });
       return;
     }
     password.clear();
@@ -325,6 +334,7 @@ class _SignInScreenState extends State<SignInScreen> {
     setState(() {
       working = true;
       error = null;
+      formErrors = const {};
       serverError = null;
       refused = null;
     });
@@ -358,6 +368,17 @@ class _SignInScreenState extends State<SignInScreen> {
       });
       return;
     }
+    if (!answer.ok) {
+      // What the server or the core said about the new account, such as
+      // an email it has already: under the email.
+      setState(() {
+        working = false;
+        formErrors = {
+          'email': answer.error ?? 'Couldn\'t make the account. Try again.',
+        };
+      });
+      return;
+    }
     signedIn(answer);
   }
 
@@ -388,6 +409,7 @@ class _SignInScreenState extends State<SignInScreen> {
         setState(() {
           creating = false;
           error = null;
+          formErrors = const {};
           password.clear();
           confirm.clear();
         });
@@ -573,7 +595,11 @@ class _SignInScreenState extends State<SignInScreen> {
         onChanged: (_) {
           if (refused != null) setState(() => refused = null);
         },
-        decoration: const InputDecoration(labelText: 'Email'),
+        decoration: InputDecoration(
+          labelText: 'Email',
+          errorText: formErrors['email'],
+          errorMaxLines: 4,
+        ),
       ),
       if (refused case final why?)
         Padding(
@@ -599,6 +625,7 @@ class _SignInScreenState extends State<SignInScreen> {
         decoration: InputDecoration(
           labelText: 'Master password',
           helperText: 'At least 12 characters',
+          errorText: formErrors['password'],
           suffixIcon: _hideButton(),
         ),
       ),
@@ -610,7 +637,10 @@ class _SignInScreenState extends State<SignInScreen> {
         enableSuggestions: false,
         autocorrect: false,
         enableIMEPersonalizedLearning: false,
-        decoration: const InputDecoration(labelText: 'Master password again'),
+        decoration: InputDecoration(
+          labelText: 'Master password again',
+          errorText: formErrors['confirm'],
+        ),
       ),
       const SizedBox(height: 12),
       TextField(
@@ -620,7 +650,7 @@ class _SignInScreenState extends State<SignInScreen> {
         decoration: InputDecoration(
           labelText: 'Hint (optional)',
           helperText: 'Something that reminds you, never the password',
-          errorText: error,
+          errorText: formErrors['hint'],
           errorMaxLines: 3,
         ),
       ),
@@ -642,6 +672,7 @@ class _SignInScreenState extends State<SignInScreen> {
             : () => setState(() {
                 creating = false;
                 error = null;
+                formErrors = const {};
                 password.clear();
                 confirm.clear();
               }),
@@ -776,6 +807,9 @@ class _UnlockScreenState extends State<UnlockScreen> {
   /// The prompt asked for by itself is up ([promptIfAsked]).
   bool prompting = false;
 
+  /// Asking the server for the hint: its link spins meanwhile.
+  bool gettingHint = false;
+
   @override
   void initState() {
     super.initState();
@@ -868,18 +902,20 @@ class _UnlockScreenState extends State<UnlockScreen> {
   /// The master password hint, from the account's server: emailed to the
   /// account's email, or shown here when the server is set to show it.
   Future<void> getHint() async {
-    setState(() => working = true);
+    setState(() => gettingHint = true);
     final answer = await whileBusy(Core.passwordHint);
     if (!mounted) return;
-    setState(() => working = false);
+    setState(() => gettingHint = false);
     final hint = answer.body['hint'] as String?;
     await showDialog<void>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('Master password hint'),
+        title: Text(
+          answer.ok ? 'Master password hint' : 'Couldn\'t get your hint',
+        ),
         content: Text(
           !answer.ok
-              ? answer.error ?? 'Couldn\'t get your hint. Try again.'
+              ? answer.error ?? 'Try again in a moment.'
               : hint != null
               ? 'Your hint: $hint'
               : 'If your account has a hint, your server emailed it to ${widget.email}.',
@@ -1055,8 +1091,16 @@ class _UnlockScreenState extends State<UnlockScreen> {
       if (!usingPin)
         TextButton(
           key: const ValueKey('password-hint'),
-          onPressed: working ? null : getHint,
-          child: const Text('Get your master password hint'),
+          onPressed: working || gettingHint ? null : getHint,
+          child: gettingHint
+              ? const SizedBox.square(
+                  dimension: 18,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    semanticsLabel: 'Getting your master password hint',
+                  ),
+                )
+              : const Text('Get your master password hint'),
         ),
       const SizedBox(height: 6),
       Text(

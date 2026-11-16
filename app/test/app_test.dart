@@ -266,7 +266,11 @@ void main() {
         tester,
         find.text('You\'ve been signed out. Sign in again.'),
       );
+      // Not saved, so closing asks before it throws the new password away.
       await tester.tap(find.byTooltip('Cancel'));
+      await tester.pumpAndSettle();
+      expect(find.text('Discard your changes?'), findsOneWidget);
+      await tester.tap(find.text('Discard'));
       await tester.pumpAndSettle();
 
       await tester.tap(find.text('Lock'));

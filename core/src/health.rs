@@ -63,13 +63,13 @@ pub struct Login {
     pub unsecured: bool,
 }
 
-/// The logins to judge: those with a password the person may see, not in
-/// the trash.
+/// The logins to judge: those with a password the person may see, in use
+/// (not in the trash or archived).
 pub fn logins(vault: &Vault) -> Vec<Login> {
     vault
         .items
         .iter()
-        .filter(|i| i.kind == ItemKind::Login && !i.deleted)
+        .filter(|i| i.kind == ItemKind::Login && i.in_use())
         .filter(|i| vault.grid(i).see_passwords)
         .filter_map(|i| {
             let password = i.password.as_ref().filter(|p| !p.is_empty())?;

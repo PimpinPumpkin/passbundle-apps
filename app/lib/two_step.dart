@@ -353,7 +353,7 @@ class _TwoStepScreenState extends State<TwoStepScreen> {
     Method.authenticator => 'Enter the code from your authenticator app.',
     Method.email =>
       emailSent
-          ? 'We emailed a code to ${widget.offer['email'] ?? 'you'}.'
+          ? 'Your server emailed a code to ${widget.offer['email'] ?? 'you'}.'
           : 'Get a code by email${widget.offer['email'] == null ? '' : ' at ${widget.offer['email']}'}.',
     Method.recoveryCode => 'Enter the recovery code you saved.',
   };
