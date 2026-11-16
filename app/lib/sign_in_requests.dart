@@ -1,6 +1,6 @@
 // Approving a sign-in from another device (docs/core.md, "Approving a
 // sign-in"; DESIGN.md in the meta repo): someone signing in on the web vault
-// or the browser extension picks "Log in with device", and approves it here.
+// or the browser extension picks "Sign in with a device", and approves it here.
 // While the vault is open and the app is on screen, it asks the server every
 // 10 seconds for sign-ins waiting for this account's answer, and prompts over
 // the vault once per requesting device every 15 minutes (a request sent again
@@ -1108,7 +1108,7 @@ class _SignInRequestsSettingsState extends State<SignInRequestsSettings> {
       title: 'Sign-in requests',
       footer:
           note ??
-          'When you sign in on a new device, or choose "Log in with device" '
+          'When you sign in on a new device, or choose "Sign in with a device" '
               'on the web vault or in the browser extension, approve it here.${isPhone ? ' Requests show while PassBundle is open.' : ''}',
       footerColor: note == null ? null : Theme.of(context).colorScheme.error,
       children: [

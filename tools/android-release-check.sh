@@ -35,6 +35,8 @@ org.rustls.platformverifier.CertificateVerifier verifyCertificateChain
 org.rustls.platformverifier.VerificationResult <init>
 com.passbundle.app.Keystore seal
 com.passbundle.app.Keystore open
+com.passbundle.app.Keystore sealPin
+com.passbundle.app.Keystore openPin
 com.passbundle.app.Biometric remove
 com.passbundle.app.Core init
 com.passbundle.app.SecurityKeys start

@@ -15,7 +15,7 @@
 
 use std::ffi::{c_char, CStr, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -306,8 +306,17 @@ fn failed(e: Error) -> Value {
         "field": if e.about_the_server() { json!("server") } else { Value::Null },
         // Making an account got to the server: signing in is what's left.
         "accountMade": matches!(e, Error::AccountMade { .. }),
+        // Making an account: the server takes none ("closed"), or none for
+        // this address ("address"). The sign-in screen has the words.
+        "newAccounts": match e {
+            Error::NoNewAccounts(crate::error::NoNewAccounts::Closed) => json!("closed"),
+            Error::NoNewAccounts(crate::error::NoNewAccounts::Address) => json!("address"),
+            _ => Value::Null,
+        },
         // Approving a sign-in waits for biometrics or the master password.
         "confirmFirst": e == Error::ConfirmFirst,
+        // The person stopped an upload: nothing to say.
+        "canceled": e == Error::Canceled,
     })
 }
 
@@ -513,7 +522,7 @@ fn summary(vault: &Vault, item: &Item) -> Value {
 pub unsafe extern "C" fn pb_open(dir: *const c_char, memory_secrets: bool) -> *mut c_char {
     let dir = text(dir);
     let secrets: Arc<dyn SecretStore> = if memory_secrets {
-        Arc::new(MemorySecretStore::default())
+        Arc::new(self::memory_secrets())
     } else {
         Arc::new(OsSecretStore::new(std::path::Path::new(&dir)))
     };
@@ -738,6 +747,169 @@ pub unsafe extern "C" fn pb_biometric_remove(account: *const c_char) -> *mut c_c
     with_app_waiting(&account, |app| done(app.remove_biometric()))
 }
 
+/// Whether this account can unlock with a PIN on this device (DESIGN.md in
+/// the meta repo, "Unlock with a PIN"): `status` is "on", "off",
+/// "unsupported" where the device has nowhere to seal one (the screens
+/// don't show the setting), or "policy" when an organization doesn't allow
+/// it. `openedWithPin` says a PIN opened the vault that's open now, when
+/// biometric unlock can't be turned on. `minCharacters` and `maxCharacters`
+/// are a PIN's length.
+///
+/// # Safety
+/// `account` is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_pin_status(account: *const c_char) -> *mut c_char {
+    let account = text(account);
+    with_app(&account, |app| pin_status(app))
+}
+
+fn pin_status(app: &App) -> Value {
+    json!({
+        "ok": true,
+        "status": app.pin_status().name(),
+        "openedWithPin": app.opened_with_pin(),
+        "minCharacters": crate::pin::MIN_CHARACTERS,
+        "maxCharacters": crate::pin::MAX_CHARACTERS,
+    })
+}
+
+/// Sets the account's PIN, while unlocked: the master password is checked
+/// first, as unlocking checks it. `{ok}`, or the words to show. Neither
+/// string is kept; both are wiped when the call is done.
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_pin_set(
+    account: *const c_char,
+    master_password: *const c_char,
+    pin: *const c_char,
+) -> *mut c_char {
+    let account = text(account);
+    let master_password = Zeroizing::new(text(master_password));
+    let pin = Zeroizing::new(text(pin));
+    with_app(&account, |app| done(app.set_pin(&master_password, &pin)))
+}
+
+/// Unlocks the account with its PIN. `{ok}`, or the words to show, with
+/// `pinOn`: whether the account still has a PIN to try. It doesn't after
+/// the fifth wrong try in a row, or when the PIN was out of date, and the
+/// lock screen then asks for the master password.
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_pin_unlock(account: *const c_char, pin: *const c_char) -> *mut c_char {
+    let account = text(account);
+    let pin = Zeroizing::new(text(pin));
+    with_app(&account, |app| match app.unlock_with_pin(&pin) {
+        Ok(()) => json!({ "ok": true }),
+        Err(e) => {
+            let mut answer = failed(e);
+            answer["pinOn"] = json!(app.pin_status() == crate::app::PinStatus::On);
+            answer
+        }
+    })
+}
+
+/// Turns the account's PIN off. Answers as `pb_pin_status`.
+///
+/// # Safety
+/// `account` is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_pin_remove(account: *const c_char) -> *mut c_char {
+    let account = text(account);
+    with_app(&account, |app| {
+        app.remove_pin();
+        pin_status(app)
+    })
+}
+
+/// The app's Swift gives the core its seal to the device and the opening of
+/// it, once at start and only where the device has what they need (a Mac
+/// with a Secure Enclave, an iPhone): `secrets::DeviceSealCall`. Without
+/// them no PIN is offered. The iPhone's AutoFill extension never calls this.
+#[cfg(any(target_os = "ios", target_os = "macos"))]
+#[no_mangle]
+pub extern "C" fn pb_set_device_seal(
+    seal: crate::secrets::DeviceSealCall,
+    open: crate::secrets::DeviceSealCall,
+) {
+    crate::secrets::set_device_seal(seal, open);
+}
+
+/// The store `pb_open` makes when it's asked to keep secrets in memory. It
+/// seals nothing to the device, as on Linux, so no PIN is offered, unless a
+/// test build was asked to stand in for a device that can
+/// (`pb_test_device_seal`). That stand-in's key is one for the process, so
+/// opening the core again (a test's restart) still opens what was sealed
+/// before.
+fn memory_secrets() -> MemorySecretStore {
+    #[cfg(feature = "test-hooks")]
+    if TEST_DEVICE_SEALS.load(Ordering::SeqCst) {
+        static DEVICE_KEY: std::sync::OnceLock<crate::crypto::SymmetricKey> =
+            std::sync::OnceLock::new();
+        return MemorySecretStore::with_device_key(
+            DEVICE_KEY
+                .get_or_init(crate::crypto::SymmetricKey::generate)
+                .clone(),
+        );
+    }
+    MemorySecretStore::without_device_seal()
+}
+
+/// Whether the memory store `pb_open` makes next can seal to the device,
+/// for tests (the test-hooks feature). Off until a test turns it on: the
+/// screens' tests show a device with no PIN, as Linux and a Mac without a
+/// Secure Enclave are, and the PIN's tests turn it on.
+#[cfg(feature = "test-hooks")]
+static TEST_DEVICE_SEALS: AtomicBool = AtomicBool::new(false);
+
+#[cfg(feature = "test-hooks")]
+#[no_mangle]
+pub extern "C" fn pb_test_device_seal(seals: bool) -> *mut c_char {
+    TEST_DEVICE_SEALS.store(seals, Ordering::SeqCst);
+    out(json!({ "ok": true }))
+}
+
+/// For the Mac's test program (tools/mac-touch-id-test), in test builds:
+/// seals `plain` for `account` with the seal the app's Swift gave
+/// (`pb_set_device_seal`), as setting a PIN does, and opens it again, as
+/// unlocking does. `seals` says whether the core was given one; `sealed` is
+/// what it would keep (base64), `opened` what that opens to, and `asOther`
+/// whether it opened as `other`, another account's, which it never may.
+/// Nothing is kept, and no keychain is read.
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+#[cfg(all(feature = "test-hooks", target_os = "macos"))]
+#[no_mangle]
+pub unsafe extern "C" fn pb_test_device_seal_round_trip(
+    account: *const c_char,
+    other: *const c_char,
+    plain: *const c_char,
+) -> *mut c_char {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let (account, other, plain) = (text(account), text(other), text(plain));
+    let store = OsSecretStore::new(std::path::Path::new("."));
+    let sealed = store.seal_to_device(&account, plain.as_bytes());
+    let opened = sealed
+        .as_deref()
+        .and_then(|sealed| store.open_from_device(&account, sealed))
+        .and_then(|opened| String::from_utf8(opened.to_vec()).ok());
+    let as_other = sealed
+        .as_deref()
+        .and_then(|sealed| store.open_from_device(&other, sealed))
+        .is_some();
+    out(json!({
+        "ok": true,
+        "seals": store.seals_to_device(),
+        "sealed": sealed.map(|sealed| STANDARD.encode(sealed)),
+        "opened": opened,
+        "asOther": as_other,
+    }))
+}
+
 #[no_mangle]
 pub extern "C" fn pb_version() -> *mut c_char {
     out(json!(crate::version()))
@@ -745,9 +917,15 @@ pub extern "C" fn pb_version() -> *mut c_char {
 
 /// Where to sign in: `ours`, PassBundle's own server, and `managed`, the
 /// server an organization set by policy (managed.rs), which then is the one.
+/// And `contactPage`, the website's page for asking for an account while
+/// PassBundle's server takes no new ones.
 #[no_mangle]
 pub extern "C" fn pb_servers() -> *mut c_char {
-    out(json!({ "ours": crate::brand::SERVER, "managed": crate::managed::server() }))
+    out(json!({
+        "ours": crate::brand::SERVER,
+        "managed": crate::managed::server(),
+        "contactPage": crate::brand::CONTACT_PAGE,
+    }))
 }
 
 /// An account's state: signed out, locked, or unlocked, with the server and
@@ -812,23 +990,33 @@ pub unsafe extern "C" fn pb_sign_up(
     let (name, hint) = (given(&name), given(&hint).map(Zeroizing::new));
     // The slow part (the master key, an RSA key pair) away from the app, so
     // nothing else waits on it; a server address that can't be used first.
-    let made = crate::server::Server::new(
-        &server,
-        crate::server::Device::this_one(&crate::server::Device::new_identifier()),
-    )
-    // A PassBundle server there, before the slow part.
-    .and_then(|s| s.check())
-    .and_then(|_| {
-        crate::signup::NewAccount::make(
-            &email,
-            name.as_deref(),
-            &password,
-            hint.as_deref().map(|h| h.as_str()),
-        )
+    // On a thread of the core's own, as the server check waits on the
+    // network (`with_accounts_waiting`): on Dart's own thread, a signal from
+    // Dart ends the read, and the check says the server can't be reached.
+    let made = std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                crate::server::Server::new(
+                    &server,
+                    crate::server::Device::this_one(&crate::server::Device::new_identifier()),
+                )
+                // A PassBundle server there, before the slow part.
+                .and_then(|s| s.check())
+                .and_then(|_| {
+                    crate::signup::NewAccount::make(
+                        &email,
+                        name.as_deref(),
+                        &password,
+                        hint.as_deref().map(|h| h.as_str()),
+                    )
+                })
+            })
+            .join()
     });
     let account = match made {
-        Ok(account) => account,
-        Err(e) => return out(failed(e)),
+        Ok(Ok(account)) => account,
+        Ok(Err(e)) => return out(failed(e)),
+        Err(_) => return out(json!({ "ok": false, "error": STOPPED })),
     };
     with_accounts_waiting(|accounts| {
         let result = accounts.register(&server, &account, &password);
@@ -1022,7 +1210,8 @@ pub unsafe extern "C" fn pb_sync(account: *const c_char) -> *mut c_char {
 
 /// Whether a PassBundle server answers at an address, before signing in or
 /// making an account there (docs/core.md, "Checking a server"): `{ok}`, or
-/// what's wrong, with `field: "server"`.
+/// what's wrong, with `field: "server"`. With `newAccounts`, "open" or
+/// "closed", when the server says whether it takes new accounts.
 ///
 /// # Safety
 /// `server` is null or a NUL-terminated UTF-8 string, valid for the call.
@@ -1034,10 +1223,15 @@ pub unsafe extern "C" fn pb_check_server(server: *const c_char) -> *mut c_char {
         scope
             .spawn(|| {
                 catch_unwind(AssertUnwindSafe(|| {
-                    done(
-                        crate::server::Server::new(&server, crate::server::Device::this_one(""))
-                            .and_then(|s| s.check()),
-                    )
+                    match crate::server::Server::new(&server, crate::server::Device::this_one(""))
+                        .and_then(|s| s.takes_new_accounts())
+                    {
+                        Ok(takes) => json!({
+                            "ok": true,
+                            "newAccounts": takes.map(|yes| if yes { "open" } else { "closed" }),
+                        }),
+                        Err(e) => failed(e),
+                    }
                 }))
                 .unwrap_or_else(|_| json!({ "ok": false, "error": STOPPED }))
             })
@@ -1457,10 +1651,16 @@ pub(crate) fn unlock_with_master_password(account: &str, password: &str) -> Valu
 
 /// An unlocked account's user key, for the phone app to seal for that
 /// account's biometric unlock (android.rs, or `pb_user_key` for iOS's
-/// Keychain). None while it's locked or busy.
+/// Keychain). None while it's locked or busy, and while the vault is one a
+/// PIN opened.
 #[cfg(any(phone, target_os = "macos"))]
 pub(crate) fn user_key_for_biometric(account: &str) -> Option<Zeroizing<Vec<u8>>> {
     on_phone(account, |app| {
+        // Never from a vault a PIN opened: the master password unlocks it
+        // first (app/pin.rs).
+        if app.opened_with_pin() {
+            return None;
+        }
         Some(Zeroizing::new(app.vault()?.user_key().to_bytes().to_vec()))
     })
 }
@@ -1530,7 +1730,8 @@ pub unsafe extern "C" fn pb_preferences(account: *const c_char) -> *mut c_char {
 /// The organizations' "Vault lock" policy (docs/core.md, "Locking by
 /// policy"): `maxMinutes` (the longest wait, or null), `immediately`,
 /// `onSystemLock`, and `signOut`; and `removeUnlockWithPin`, from their
-/// "Remove Unlock with PIN" policy. All off when no organization sets them.
+/// "Remove Unlock with PIN" policy (which `pb_pin_status` answers as
+/// "policy"). All off when no organization sets them.
 ///
 /// # Safety
 /// `account` is null or a NUL-terminated UTF-8 string, valid for the call.
@@ -1816,13 +2017,20 @@ pub unsafe extern "C" fn pb_item(account: *const c_char, id: *const c_char) -> *
                 "hasCode": card.code.as_ref().is_some_and(|c| !c.is_empty()),
             });
         }
+        // Not one whose file is still on its way, or that's to be deleted
+        // on the server (app/files.rs).
         view["attachments"] = item
             .attachments
             .iter()
+            .filter(|a| !app.hides_attachment(&a.id))
             .map(
                 |a| json!({ "id": a.id, "name": a.name, "size": a.size, "opens": a.key.is_some() }),
             )
             .collect();
+        // Whether files may be attached to it and its attachments deleted
+        // (app/files.rs, `may_change`): where the person may edit it, out
+        // of the trash. As the web vault, without needing to see passwords.
+        view["changesAttachments"] = json!(vault.grid(item).edit && !item.deleted);
         // A login's passkey: who it's for, never its key.
         if let Some(passkey) = &item.passkey {
             view["passkey"] = json!({
@@ -2379,6 +2587,164 @@ pub unsafe extern "C" fn pb_save_attachment_in(
             Err(e) => failed(e),
         },
     ))
+}
+
+/// The upload under way, for every screen that asks (`pb_upload_progress`)
+/// and the person's Cancel (`pb_upload_cancel`). One at a time.
+static UPLOAD: crate::app::Progress = crate::app::Progress::new();
+static UPLOADING: AtomicBool = AtomicBool::new(false);
+/// The upload's step that has the app, or waits for it (0 when none): the
+/// screens don't read from the core then, as with any slow call. Each step
+/// has a number of its own, so the go-ahead for one never lets another by.
+static UPLOAD_WANTS_APP: AtomicU64 = AtomicU64::new(0);
+static UPLOAD_STEPS: AtomicU64 = AtomicU64::new(0);
+/// The step the screens have stopped reading from the core for
+/// (`pb_upload_go`).
+static UPLOAD_GO: AtomicU64 = AtomicU64::new(0);
+/// How long a step waits for the screens' go-ahead before it takes the app
+/// anyway: a screen's read then waits for the step, which is all the
+/// go-ahead spares it.
+const UPLOAD_GO_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Attaches the file at `path` to an item, under `name` (the file's own
+/// name when empty), with the item's account's keys (docs/core.md,
+/// "Attachments"): `{ok, id, synced}`, or the words to show (`canceled`
+/// when the person stopped it, with nothing to say). `synced` is false when
+/// the server has the file but the sync after didn't come through.
+///
+/// Slow: from a background isolate. The app is held only for the moments
+/// that need it (app/files.rs, `attach`), so the screens' reads, locking,
+/// and `pb_upload_progress` go on while the file travels. Before each of
+/// those moments, `pb_upload_progress` says `wantsApp`, and the step waits
+/// for the screens to stop reading from the core (`pb_upload_go`). One
+/// file at a time: a second call while one runs is refused.
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_attach_file(
+    account: *const c_char,
+    id: *const c_char,
+    path: *const c_char,
+    name: *const c_char,
+) -> *mut c_char {
+    let account = text(account);
+    let (id, path, name) = (text(id), text(path), text(name));
+    out(attach_file(&account, &id, &path, &name))
+}
+
+/// What `pb_attach_file` does, on a thread of the core's own (as
+/// `with_app_waiting`), taking the app only when `attach` asks for it.
+fn attach_file(account: &str, id: &str, path: &str, name: &str) -> Value {
+    if UPLOADING.swap(true, Ordering::SeqCst) {
+        return failed(Error::Refused(
+            "another file is still uploading. Wait for it to finish, or cancel it",
+        ));
+    }
+    UPLOAD.begin();
+    let attached = std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                catch_unwind(AssertUnwindSafe(|| {
+                    let mut on_app = |call: &mut dyn FnMut(&mut App)| {
+                        let step = UPLOAD_STEPS.fetch_add(1, Ordering::SeqCst) + 1;
+                        UPLOAD_WANTS_APP.store(step, Ordering::SeqCst);
+                        let asked = Instant::now();
+                        while UPLOAD_GO.load(Ordering::SeqCst) != step
+                            && asked.elapsed() < UPLOAD_GO_WAIT
+                        {
+                            std::thread::sleep(std::time::Duration::from_millis(5));
+                        }
+                        app_value(account, |app| {
+                            call(app);
+                            Value::Null
+                        });
+                        UPLOAD_WANTS_APP.store(0, Ordering::SeqCst);
+                    };
+                    let path = std::path::Path::new(path);
+                    match crate::app::attach(&mut on_app, id, path, name, &UPLOAD) {
+                        Ok(attached) => {
+                            json!({ "ok": true, "id": attached.id, "synced": attached.synced })
+                        }
+                        Err(e) => failed(e),
+                    }
+                }))
+                .unwrap_or_else(|_| json!({ "ok": false, "error": STOPPED }))
+            })
+            .join()
+            .unwrap_or_else(|_| json!({ "ok": false, "error": STOPPED }))
+    });
+    UPLOAD.end();
+    // A step that stopped partway (a panic) leaves nothing said to have it.
+    UPLOAD_WANTS_APP.store(0, Ordering::SeqCst);
+    UPLOADING.store(false, Ordering::SeqCst);
+    attached
+}
+
+/// How far the upload under way is: `{phase, done, total, wantsApp}`, the
+/// phase one of "reading", "encrypting", "sending", "finishing", or null
+/// when no file is uploading; `done` and `total` are bytes of that phase
+/// (`total` 0 when it has no amount to show); `wantsApp` the number of the
+/// step that has the app or waits for it, 0 when none: the screens don't
+/// read from the core until it's 0 again, and say so with `pb_upload_go`.
+/// Never waits for the app.
+#[no_mangle]
+pub extern "C" fn pb_upload_progress() -> *mut c_char {
+    let (done, total) = UPLOAD.amounts();
+    out(json!({
+        "phase": UPLOAD.phase().map(crate::app::Phase::word),
+        "done": done,
+        "total": total,
+        "wantsApp": UPLOAD_WANTS_APP.load(Ordering::SeqCst),
+    }))
+}
+
+/// The screens have stopped reading from the core for the upload's step
+/// numbered `step` (`pb_upload_progress`, `wantsApp`): it may take the app.
+#[no_mangle]
+pub extern "C" fn pb_upload_go(step: u64) {
+    UPLOAD_GO.store(step, Ordering::SeqCst);
+}
+
+/// The largest file the app attaches here (app/files.rs, `MAX_FILE`):
+/// `{bytes, refusal}`, the words for a larger one. A phone's picker asks
+/// before it copies a file into the app's cache, so one that's too large is
+/// never copied.
+#[no_mangle]
+pub extern "C" fn pb_attach_limit() -> *mut c_char {
+    out(json!({
+        "bytes": crate::app::MAX_FILE,
+        "refusal": crate::app::too_large().to_string(),
+    }))
+}
+
+/// The person's Cancel for the upload under way: it stops at the next
+/// piece, and the record the server made for it is deleted. Once the server
+/// has the whole file, it's attached. Never waits for the app.
+#[no_mangle]
+pub extern "C" fn pb_upload_cancel() {
+    UPLOAD.cancel();
+}
+
+/// Deletes one of an item's attachments, then syncs: `{ok, synced}`, or the
+/// words to show. Slow: from a background isolate.
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_delete_attachment(
+    account: *const c_char,
+    id: *const c_char,
+    attachment_id: *const c_char,
+) -> *mut c_char {
+    let account = text(account);
+    let (id, attachment_id) = (text(id), text(attachment_id));
+    with_app_waiting(&account, |app| {
+        match app.delete_attachment(&id, &attachment_id) {
+            Ok(synced) => json!({ "ok": true, "synced": synced }),
+            Err(e) => failed(e),
+        }
+    })
 }
 
 /// Writes an attachment into a file Android opened for it (android.rs):

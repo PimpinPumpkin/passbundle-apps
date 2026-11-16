@@ -354,6 +354,20 @@ class MainFlutterWindow: NSWindow {
         return
       }
       result(NSWorkspace.shared.open(url))
+    // A file to attach to an item (app/lib/attaching.dart): its path and
+    // name, or nil if the person gave up. The core reads it where it is,
+    // so nothing is copied.
+    case "pickFile":
+      let panel = NSOpenPanel()
+      panel.canChooseFiles = true
+      panel.canChooseDirectories = false
+      panel.allowsMultipleSelection = false
+      panel.message = "Choose a file to attach"
+      panel.prompt = "Attach"
+      panel.beginSheetModal(for: self) { response in
+        guard response == .OK, let url = panel.url else { return result(nil) }
+        result(["path": url.path, "name": url.lastPathComponent])
+      }
     // Duo's Universal Prompt at sign-in (app/lib/two_step.dart): the link
     // it comes back with, or nil if the person gave up.
     case "duoSignIn":
@@ -409,6 +423,12 @@ class MainFlutterWindow: NSWindow {
     case "biometricRemove":
       TouchID.remove(account: arguments?["account"] as? String ?? "")
       result(["ok": true])
+    // Unlocking with a PIN: the core is given this Mac's seal for what it
+    // keeps (DeviceSeal.swift) before Dart first asks it about a PIN. False
+    // on a Mac without a Secure Enclave, where no PIN is offered.
+    case "deviceSeal":
+      _ = core()
+      result(sealsToDevice)
     default:
       result(FlutterMethodNotImplemented)
     }
@@ -416,14 +436,17 @@ class MainFlutterWindow: NSWindow {
 
   /// The core Dart opened, for Touch ID, found the first time it's needed
   /// (Dart opens it before anything asks): it's told how to turn an
-  /// account's Touch ID off, which signing out does.
+  /// account's Touch ID off, which signing out does, and given this Mac's
+  /// seal for what unlocking with a PIN keeps, where the Mac has one.
   private var loadedCore: LoadedCore?
+  private var sealsToDevice = false
   private func core() -> LoadedCore? {
     if loadedCore == nil, let found = LoadedCore.find() {
       found.onRemove { account in
         guard let account else { return }
         TouchID.remove(account: String(cString: account))
       }
+      sealsToDevice = found.giveDeviceSeal()
       loadedCore = found
     }
     return loadedCore

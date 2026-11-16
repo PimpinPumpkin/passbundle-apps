@@ -23,6 +23,13 @@ uint8_t *pb_user_key(const char *account, size_t *len);
 char *pb_unlock_with_key(const char *account, const uint8_t *key, size_t len);
 char *pb_confirm_approval_with_key(const char *account, const uint8_t *key, size_t len);
 void pb_set_remove_biometric(void (*remove)(const char *account));
+// Unlocking with a PIN: the app's seal for what the core keeps, and the
+// opening of it (DeviceSeal.swift), given once at start. Each reads
+// `input_len` bytes at `input` for the account, writes at most `capacity`
+// bytes to `output`, and returns how many it wrote, or a negative number.
+typedef intptr_t (*pb_device_seal_call)(
+    const char *account, const uint8_t *input, size_t input_len, uint8_t *output, size_t capacity);
+void pb_set_device_seal(pb_device_seal_call seal, pb_device_seal_call open);
 // Saves an attachment in `dir` (the app's Documents folder): {"ok", "path"} or the words to show.
 char *pb_save_attachment_in(const char *account, const char *id, const char *attachment_id, const char *dir);
 void pb_free(char *ptr);

@@ -212,7 +212,9 @@ class _NewDeviceScreenState extends State<NewDeviceScreen> {
       final to = check['emailTo'] as String?;
       return [
         Text(
-          to == null ? 'We emailed you a code.' : 'We emailed a code to $to.',
+          to == null
+              ? 'Your server emailed you a code.'
+              : 'Your server emailed a code to $to.',
         ),
         const SizedBox(height: 12),
         TextField(

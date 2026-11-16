@@ -8,9 +8,11 @@
 //!
 //! With it, upstream's "Remove Unlock with PIN" policy, type 14, which has no
 //! data: an organization that turns it on doesn't want quicker ways than the
-//! master password pushed on its members, so the phone apps don't offer
-//! unlocking with biometrics on their own (they still let the person turn it
-//! on in Settings, as upstream's apps do).
+//! master password pushed on its members. So the apps' own PIN is refused
+//! and removed (app/pin.rs; DESIGN.md in the meta repo, "Unlock with a
+//! PIN"), and the phone apps don't offer unlocking with biometrics on their
+//! own (they still let the person turn it on in Settings, as upstream's apps
+//! do).
 
 use std::collections::HashSet;
 
@@ -39,8 +41,9 @@ pub struct LockPolicy {
     pub on_system_lock: bool,
     /// Sign out instead of locking, when it's time.
     pub sign_out: bool,
-    /// An organization's "Remove Unlock with PIN" is on: the apps don't
-    /// offer quicker unlocking on their own.
+    /// An organization's "Remove Unlock with PIN" is on: no PIN in the
+    /// apps (one set before is removed), and they don't offer quicker
+    /// unlocking on their own.
     pub remove_unlock_with_pin: bool,
 }
 

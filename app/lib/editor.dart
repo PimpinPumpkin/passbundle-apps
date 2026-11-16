@@ -4,8 +4,13 @@
 // the New item picker (new_item.dart): a kind, or a template with its
 // fields. Where it goes is one Folder picker, grouped by owner, as the web
 // vault has it: Personal and its folders, then each organization's shared
-// folders the person may add items to.
+// folders the person may add items to. Closing it with anything changed
+// (Cancel, Escape, or Android's Back) asks first, as the web vault does; a
+// click outside it never closes it.
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import 'core.dart';
 import 'generator.dart';
@@ -26,7 +31,7 @@ class EditorSaved {
   final bool synced;
 }
 
-/// Opens the editor; resolves to what was saved, or null if cancelled. A
+/// Opens the editor; resolves to what was saved, or null if canceled. A
 /// new item is the kind or template `choice` picked, going to `place` (as
 /// [_ItemEditorState.place] says it) unless the person picks another.
 Future<EditorSaved?> openEditor(
@@ -50,6 +55,9 @@ Future<EditorSaved?> openEditor(
   if (asDialog) {
     return showDialog<EditorSaved>(
       context: context,
+      // Only Cancel, Escape, and Save close it: a click beside it could
+      // throw away what was typed.
+      barrierDismissible: false,
       builder: (context) => Dialog(
         clipBehavior: Clip.antiAlias,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
@@ -278,6 +286,7 @@ class _ItemEditorState extends State<ItemEditor> {
       if (uri.isNotEmpty) uris.add(TextEditingController(text: uri));
     }
     if (uris.isEmpty && kind == 'login') uris.add(TextEditingController());
+    _opened = _fingerprint();
   }
 
   /// The Folder picker's value: `personal:` and the folder's id (none for
@@ -388,51 +397,68 @@ class _ItemEditorState extends State<ItemEditor> {
     ];
   }
 
+  /// What saving sends: the item as the fields have it now.
+  Map<String, dynamic> get draft => {
+    'note': note,
+    if (kind == 'card')
+      'card': {
+        for (final e in card.entries) e.key: e.value.text.trim(),
+        'brand': brand,
+        'expMonth': expMonth,
+      },
+    if (kind == 'identity')
+      'identity': {
+        for (final e in identity.entries) e.key: e.value.text.trim(),
+      },
+    'name': name.text.trim(),
+    'username': username.text.trim(),
+    'password': password.text,
+    'totp': totp.text.trim(),
+    'notes': notes.text,
+    'uris': [for (final u in uris) u.text.trim()],
+    'fields': [
+      for (final f in fields)
+        // Names as they are: one with spaces around it is the web
+        // vault's too, and stays so.
+        if (f.name.text.trim().isNotEmpty)
+          {
+            'name': f.name.text,
+            'value': f.boolean ? (f.yes ? 'true' : 'false') : f.value.text,
+            'type': f.kind,
+          },
+    ],
+    'folderId': folderId,
+    'organizationId': organizationId,
+    'collectionIds': collectionIds,
+    'favorite': favorite,
+    // An empty date clears it and its reminder days (core/src/ffi.rs,
+    // pb_save). A card's date is its expiration month and year: a draft
+    // without these keeps any other the card has as it is.
+    if (kind != 'card') ...{'expires': expires.text.trim(), 'remind': remind},
+    'grant': ?grant,
+    if (template != null)
+      'template': {'id': template!['id'], 'name': template!['name']},
+  };
+
+  /// The draft as the editor opened, as a fingerprint rather than a copy,
+  /// so its secrets aren't kept twice: whether anything changed since.
+  late final int _opened;
+  int _fingerprint() => jsonEncode(draft).hashCode;
+  bool get changed => _fingerprint() != _opened;
+
+  /// Cancel, Escape, or Android's Back: closes it as it is when nothing
+  /// changed, else once the person says to discard the changes.
+  Future<void> close() async {
+    if (changed && !await askToDiscard(context)) return;
+    if (mounted) Navigator.of(context).pop();
+  }
+
   Future<void> save() async {
     setState(() {
       working = true;
       error = null;
     });
-    final draft = {
-      'note': note,
-      if (kind == 'card')
-        'card': {
-          for (final e in card.entries) e.key: e.value.text.trim(),
-          'brand': brand,
-          'expMonth': expMonth,
-        },
-      if (kind == 'identity')
-        'identity': {
-          for (final e in identity.entries) e.key: e.value.text.trim(),
-        },
-      'name': name.text.trim(),
-      'username': username.text.trim(),
-      'password': password.text,
-      'totp': totp.text.trim(),
-      'notes': notes.text,
-      'uris': [for (final u in uris) u.text.trim()],
-      'fields': [
-        for (final f in fields)
-          // Names as they are: one with spaces around it is the web
-          // vault's too, and stays so.
-          if (f.name.text.trim().isNotEmpty)
-            {
-              'name': f.name.text,
-              'value': f.boolean ? (f.yes ? 'true' : 'false') : f.value.text,
-              'type': f.kind,
-            },
-      ],
-      'folderId': folderId,
-      'organizationId': organizationId,
-      'collectionIds': collectionIds,
-      'favorite': favorite,
-      // An empty date clears it and its reminder days (core/src/ffi.rs, pb_save).
-      'expires': expires.text.trim(),
-      'remind': remind,
-      'grant': ?grant,
-      if (template != null)
-        'template': {'id': template!['id'], 'name': template!['name']},
-    };
+    final draft = this.draft;
     final answer = await whileBusy(() => Core.save(widget.id, draft));
     if (!mounted) return;
     if (answer.ok) {
@@ -512,6 +538,11 @@ class _ItemEditorState extends State<ItemEditor> {
     controller: controller,
     obscureText: secret && hidden,
     keyboardType: keyboard,
+    // A secret isn't learned or suggested by the keyboard, as the master
+    // password's field isn't.
+    enableSuggestions: !secret,
+    autocorrect: !secret,
+    enableIMEPersonalizedLearning: !secret,
     decoration: labeledField(
       context,
       label,
@@ -704,6 +735,9 @@ class _ItemEditorState extends State<ItemEditor> {
     return TextField(
       controller: f.value,
       obscureText: f.hidden && hidden,
+      enableSuggestions: !f.hidden,
+      autocorrect: !f.hidden,
+      enableIMEPersonalizedLearning: !f.hidden,
       decoration: labeledField(
         context,
         f.name.text,
@@ -797,14 +831,14 @@ class _ItemEditorState extends State<ItemEditor> {
     final c = context.colors;
     final scheme = Theme.of(context).colorScheme;
     Widget gap([double h = _between]) => SizedBox(height: h);
-    return Scaffold(
+    final editor = Scaffold(
       appBar: AppBar(
         title: Text(title),
         automaticallyImplyLeading: false,
         leading: IconButton(
           tooltip: 'Cancel',
           icon: const Icon(Icons.close_rounded),
-          onPressed: () => Navigator.of(context).pop(),
+          onPressed: () => Navigator.of(context).maybePop(),
         ),
         actions: [
           Padding(
@@ -859,6 +893,9 @@ class _ItemEditorState extends State<ItemEditor> {
                   TextField(
                     controller: password,
                     obscureText: hidden,
+                    enableSuggestions: false,
+                    autocorrect: false,
+                    enableIMEPersonalizedLearning: false,
                     decoration: labeledField(
                       context,
                       'Password',
@@ -889,10 +926,15 @@ class _ItemEditorState extends State<ItemEditor> {
                   gap(),
                   TextField(
                     controller: totp,
+                    obscureText: hidden,
+                    enableSuggestions: false,
+                    autocorrect: false,
+                    enableIMEPersonalizedLearning: false,
                     decoration: labeledField(
                       context,
                       'One-time code secret (optional)',
                       hint: 'The key or otpauth:// address from the site',
+                      suffix: _trailing([_showOrHide()]),
                     ),
                   ),
                   const SectionHeading('Websites', padding: _heading),
@@ -963,41 +1005,45 @@ class _ItemEditorState extends State<ItemEditor> {
                     child: const _AddRow('Add a field'),
                   ),
                 ),
-                gap(),
                 // When it expires, and when to be reminded (as the web vault's
                 // "Expires"): the reminders are the app's and the extension's.
-                TextField(
-                  controller: expires,
-                  keyboardType: TextInputType.datetime,
-                  onChanged: (_) => setState(() {}),
-                  decoration: labeledField(
-                    context,
-                    'Expires (optional)',
-                    hint: 'YYYY-MM-DD',
-                    suffix: _trailing([
-                      if (expires.text.isNotEmpty)
+                // A card's own expiration month and year are its date, as in the
+                // web vault, so it has no other.
+                if (kind != 'card') ...[
+                  gap(),
+                  TextField(
+                    controller: expires,
+                    keyboardType: TextInputType.datetime,
+                    onChanged: (_) => setState(() {}),
+                    decoration: labeledField(
+                      context,
+                      'Expires (optional)',
+                      hint: 'YYYY-MM-DD',
+                      suffix: _trailing([
+                        if (expires.text.isNotEmpty)
+                          IconButton(
+                            tooltip: 'No expiration date',
+                            icon: Icon(
+                              Icons.close_rounded,
+                              size: 20,
+                              color: c.muted,
+                            ),
+                            onPressed: () => setState(expires.clear),
+                          ),
                         IconButton(
-                          tooltip: 'No expiration date',
+                          tooltip: 'Pick a date',
                           icon: Icon(
-                            Icons.close_rounded,
+                            Icons.event_outlined,
                             size: 20,
                             color: c.muted,
                           ),
-                          onPressed: () => setState(expires.clear),
+                          onPressed: pickExpiry,
                         ),
-                      IconButton(
-                        tooltip: 'Pick a date',
-                        icon: Icon(
-                          Icons.event_outlined,
-                          size: 20,
-                          color: c.muted,
-                        ),
-                        onPressed: pickExpiry,
-                      ),
-                    ]),
+                      ]),
+                    ),
                   ),
-                ),
-                if (expires.text.trim().isNotEmpty) ...[
+                ],
+                if (kind != 'card' && expires.text.trim().isNotEmpty) ...[
                   gap(),
                   DropdownButtonFormField<String>(
                     key: const ValueKey('remind-me'),
@@ -1036,8 +1082,52 @@ class _ItemEditorState extends State<ItemEditor> {
         ],
       ),
     );
+    // Android's Back and Escape close it as Cancel does (close). Escape is
+    // the editor's own, wherever the person is in it, a field included: a
+    // click outside doesn't close it, so the dialog's own Escape is off too.
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (popped, _) {
+        if (!popped) close();
+      },
+      child: CallbackShortcuts(
+        bindings: {
+          const SingleActivator(LogicalKeyboardKey.escape): () =>
+              Navigator.of(context).maybePop(),
+        },
+        child: FocusScope(autofocus: true, child: editor),
+      ),
+    );
   }
 }
+
+/// Closing the editor with something changed: true once the person says to
+/// discard it, as the web vault asks.
+Future<bool> askToDiscard(BuildContext context) async =>
+    await showDialog<bool>(
+      context: context,
+      builder: (context) {
+        final scheme = Theme.of(context).colorScheme;
+        return AlertDialog(
+          title: const Text('Discard your changes?'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Keep editing'),
+            ),
+            FilledButton(
+              style: FilledButton.styleFrom(
+                backgroundColor: scheme.error,
+                foregroundColor: scheme.onError,
+              ),
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Discard'),
+            ),
+          ],
+        );
+      },
+    ) ==
+    true;
 
 /// The editor's spacing, on the scale an item's page and Settings use: 16
 /// from the screen's edge to a box, 16 more to what's in it, 12 between one
@@ -1112,7 +1202,7 @@ const _remindOptions = [
   ('none', "Don't remind me"),
 ];
 
-/// A field's name, asked for: null when cancelled.
+/// A field's name, asked for: null when canceled.
 Future<String?> askFieldName(
   BuildContext context,
   String title, [

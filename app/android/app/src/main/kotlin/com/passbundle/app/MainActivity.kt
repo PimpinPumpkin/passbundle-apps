@@ -26,6 +26,13 @@ class MainActivity : FlutterActivity() {
         // The vault stays out of screenshots, screen recordings, and the
         // app switcher's preview (docs/phones.md, "Locking").
         window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        // A copy of a file to attach left by a run that stopped partway.
+        Picker.forgetLeftOver(this)
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == Picker.REQUEST) Picker.picked(this, resultCode, data)
     }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -117,6 +124,13 @@ class MainActivity : FlutterActivity() {
                         } else {
                             Attachments.saveToDownloads(this, account, id, attachment, name) { answer -> result.success(answer) }
                         }
+                    }
+                    // A file to attach (Picker.kt): copied into the app's cache,
+                    // up to the size the app attaches, and deleted after.
+                    "pickFile" -> Picker.pick(this, call.argument<Number>("limit")?.toLong() ?: 0L, result)
+                    "forgetPicked" -> {
+                        Picker.forget(this)
+                        result.success(null)
                     }
                     // A login's website, in the browser: only http and https.
                     "openUrl" -> {

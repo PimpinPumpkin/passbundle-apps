@@ -186,6 +186,8 @@ pub struct CipherData {
     #[serde(default)]
     pub favorite: bool,
     pub deleted_date: Option<String>,
+    /// When it was archived in the web vault, if it was.
+    pub archived_date: Option<String>,
     pub login: Option<LoginData>,
     pub fields: Option<Vec<FieldData>>,
     #[serde(default)]
@@ -459,6 +461,8 @@ pub struct Item {
     pub collection_ids: Vec<String>,
     pub favorite: bool,
     pub deleted: bool,
+    /// Archived (upstream's archive): kept, but out of the way (`in_use`).
+    pub archived: bool,
     pub username: Option<String>,
     pub uris: Vec<String>,
     /// How each of `uris` is matched for filling (matching.rs): None is the default.
@@ -632,6 +636,36 @@ pub struct Attachment {
     pub key: Option<SymmetricKey>,
 }
 
+/// A file about to be attached (DESIGN.md in the meta repo, "Attachments in
+/// the apps"): the new key its file is encrypted with, and what the server
+/// gets, which is that key and the file's name, each encrypted with its own
+/// new IV under the key the item's values are under.
+pub struct NewAttachment {
+    pub key: SymmetricKey,
+    pub wrapped_key: String,
+    pub file_name: String,
+}
+
+impl NewAttachment {
+    pub(crate) fn wrapped_with(
+        wrapping: &SymmetricKey,
+        key: SymmetricKey,
+        name: &str,
+        key_iv: [u8; 16],
+        name_iv: [u8; 16],
+    ) -> Self {
+        NewAttachment {
+            wrapped_key: wrapping
+                .encrypt_with_iv(&key.to_bytes(), key_iv)
+                .to_string(),
+            file_name: wrapping
+                .encrypt_with_iv(name.as_bytes(), name_iv)
+                .to_string(),
+            key,
+        }
+    }
+}
+
 /// An SSH key (docs/core.md, "Items"): its public key and fingerprint, and
 /// its private key, a secret like a password. The web vault makes and edits
 /// them; the apps show and copy them.
@@ -668,6 +702,15 @@ pub const PLAIN_DETAILS: [&str; 10] = [
 ];
 
 impl Item {
+    /// In use: neither in the trash nor archived. Only these are listed and
+    /// searched, judged by Health, reminded about, and offered for filling
+    /// and as passkeys (the web vault's lists, search, and autofill leave
+    /// archived ones out too); the others stay in the vault as the server
+    /// sent them.
+    pub fn in_use(&self) -> bool {
+        !self.deleted && !self.archived
+    }
+
     /// Whether a value, by the name the app reveals and copies it with
     /// ("password", "field:2", "cardNumber", "bankAccount.iban"), is one of
     /// the item's secrets, which someone whose shared folder hides
@@ -1444,6 +1487,30 @@ impl Vault {
             .collect()
     }
 
+    /// A new attachment for `item`, for a file called `name`: a new random
+    /// key for the file, wrapped under the item's own key if it has one,
+    /// else its organization's, else the person's, as the other apps do.
+    pub fn new_attachment(&self, item: &Item, name: &str) -> Result<NewAttachment> {
+        Ok(NewAttachment::wrapped_with(
+            self.item_value_key(item)?,
+            SymmetricKey::generate(),
+            name,
+            crate::crypto::new_iv(),
+            crate::crypto::new_iv(),
+        ))
+    }
+
+    /// Whether `item` lists the attachment `id` with this key and this name:
+    /// what an upload checks after the sync that follows it, before anything
+    /// is shown as attached.
+    pub fn has_attachment(&self, item: &str, id: &str, key: &SymmetricKey, name: &str) -> bool {
+        self.item(item).is_some_and(|item| {
+            item.attachments
+                .iter()
+                .any(|a| a.id == id && a.key.as_ref() == Some(key) && a.name == name)
+        })
+    }
+
     /// The key an item's values are under: its own, or its owner's.
     fn item_value_key<'a>(&'a self, item: &'a Item) -> Result<&'a SymmetricKey> {
         if let Some(key) = item.kept.item_key.as_ref() {
@@ -1730,13 +1797,13 @@ impl Vault {
         self.keys.private.public_key_der()
     }
 
-    /// Items whose name, username, or websites contain every word of the
-    /// query, ignoring case. An empty query matches everything.
+    /// Items in use whose name, username, or websites contain every word of
+    /// the query, ignoring case. An empty query matches every one in use.
     pub fn search<'a>(&'a self, query: &str) -> Vec<&'a Item> {
         let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
         self.items
             .iter()
-            .filter(|i| !i.deleted)
+            .filter(|i| i.in_use())
             .filter(|i| {
                 let mut haystack = format!(
                     "{} {} {}",
@@ -1971,6 +2038,7 @@ impl Keyring {
             collection_ids: c.collection_ids.clone(),
             favorite: c.favorite,
             deleted: c.deleted_date.is_some(),
+            archived: c.archived_date.is_some(),
             username,
             uris,
             uri_matches,

@@ -170,6 +170,13 @@ class Core {
   late final _bioUnlock = _lib.lookupFunction<_Str1, _Str1>('pb_biometric_unlock');
   late final _bioRemove = _lib.lookupFunction<_Str1, _Str1>('pb_biometric_remove');
   late final _bioConfirmApproval = _lib.lookupFunction<_Str1, _Str1>('pb_confirm_approval_with_biometric');
+  late final _pinStatus = _lib.lookupFunction<_Str1, _Str1>('pb_pin_status');
+  late final _pinSet = _lib.lookupFunction<_Str3, _Str3>('pb_pin_set');
+  late final _pinUnlock = _lib.lookupFunction<_Str2, _Str2>('pb_pin_unlock');
+  late final _pinRemove = _lib.lookupFunction<_Str1, _Str1>('pb_pin_remove');
+  late final _testDeviceSeal = _lib.lookupFunction<_FlagNative, _Flag>(
+    'pb_test_device_seal',
+  );
   late final _state = _lib.lookupFunction<_Str1, _Str1>('pb_state');
   late final _servers = _lib.lookupFunction<_Str0, _Str0>('pb_servers');
   late final _signIn = _lib.lookupFunction<_Str3, _Str3>('pb_sign_in');
@@ -215,6 +222,12 @@ class Core {
   );
   late final _unlock = _lib.lookupFunction<_Str2, _Str2>('pb_unlock');
   late final _saveAttachment = _lib.lookupFunction<_Str3, _Str3>('pb_save_attachment');
+  late final _attachFile = _lib.lookupFunction<_Str4, _Str4>('pb_attach_file');
+  late final _uploadProgress = _lib.lookupFunction<_Str0, _Str0>('pb_upload_progress');
+  late final _uploadGo = _lib.lookupFunction<Void Function(Uint64), void Function(int)>('pb_upload_go');
+  late final _uploadCancel = _lib.lookupFunction<Void Function(), void Function()>('pb_upload_cancel');
+  late final _attachLimit = _lib.lookupFunction<_Str0, _Str0>('pb_attach_limit');
+  late final _deleteAttachment = _lib.lookupFunction<_Str3, _Str3>('pb_delete_attachment');
   late final _sends = _lib.lookupFunction<_Str1, _Str1>('pb_sends');
   late final _send = _lib.lookupFunction<_Str2, _Str2>('pb_send');
   late final _saveSend = _lib.lookupFunction<_Str4, _Str4>('pb_save_send');
@@ -640,6 +653,66 @@ class Core {
           ], (p) => c._answer(c._saveAttachment(p[0], p[1], p[2]))),
         );
 
+  /// Attaches the file at [path] to an item, named [name] (docs/core.md,
+  /// "Attachments"), with the keys of the account the screens show now:
+  /// `{ok, id, synced}`, or the words to show (`canceled` when the person
+  /// stopped it). One file at a time; [uploadProgress] says how far it is,
+  /// [cancelUpload] stops it. Not under [whileBusy]: the file travels with
+  /// the screens reading from the core, and attaching.dart raises the busy
+  /// flag for the moments the upload has the app.
+  static Future<Answer> attachFile(String id, String path, String name) =>
+      _background(
+        (c, a) => c._with([
+          a,
+          id,
+          path,
+          name,
+        ], (p) => c._answer(c._attachFile(p[0], p[1], p[2], p[3]))),
+      );
+
+  /// How far the upload under way is: `{phase, done, total, wantsApp}`
+  /// (core/src/ffi.rs, `pb_upload_progress`). Never waits for the core.
+  Map<String, dynamic> uploadProgress() => _map(_uploadProgress());
+
+  /// The screens have stopped reading from the core for the upload's step
+  /// numbered [step] (`wantsApp`): it may go on.
+  void uploadGo(int step) => _uploadGo(step);
+
+  /// Stops the upload under way; the server keeps nothing of it, unless it
+  /// already has the whole file, which is then attached.
+  void cancelUpload() => _uploadCancel();
+
+  /// The largest file the app attaches on this device: `{bytes, refusal}`,
+  /// the words for a larger one.
+  Map<String, dynamic> attachLimit() => _map(_attachLimit());
+
+  /// Deletes one of an item's attachments, then syncs: `{ok, synced}`.
+  static Future<Answer> deleteAttachment(String id, String attachmentId) =>
+      _background(
+        (c, a) => c._with([
+          a,
+          id,
+          attachmentId,
+        ], (p) => c._answer(c._deleteAttachment(p[0], p[1], p[2]))),
+      );
+
+  /// Asks the person for a file to attach, with the device's own picker:
+  /// `{path, name}`, `{tooLarge: true}` for one larger than [limit] bytes,
+  /// or null when they chose none. A phone copies the file into the app's
+  /// cache (docs/phones.md, "Attachments"), for [forgetPicked] to delete
+  /// once it's uploaded; a computer answers the file where it is.
+  static Future<Map<String, dynamic>?> pickFile(int limit) async {
+    final picked = await platform.invokeMethod<Map>('pickFile', {
+      'limit': limit,
+    });
+    return picked == null ? null : Map<String, dynamic>.from(picked);
+  }
+
+  /// Deletes the copies a phone's picker made in the app's cache.
+  static Future<void> forgetPicked() async {
+    if (isPhone) await platform.invokeMethod<void>('forgetPicked');
+  }
+
   /// The account's Sends (DESIGN.md, "Send in the apps"), newest change
   /// first, and the organizations' Send policies: `{sends, policy:
   /// {disabled, noHidingEmail}}`, or null while it's locked.
@@ -815,6 +888,77 @@ class Core {
       }),
     );
   }
+
+  /// Unlocking with a PIN (pin.dart; DESIGN.md in the meta repo, "Unlock
+  /// with a PIN"), for an account ([id], or the one the screens show):
+  /// `status` is "on", "off", "unsupported" where this device can't keep
+  /// one (the screens don't offer it), or "policy" when an organization
+  /// doesn't allow it; `openedWithPin`, that a PIN opened the vault open
+  /// now; `minCharacters` and `maxCharacters`, a PIN's length.
+  static Future<Map<String, dynamic>> pinStatus([String? id]) async {
+    final asked = id ?? account;
+    await _giveDeviceSeal();
+    return Map<String, dynamic>.from(
+      await Isolate.run(() {
+        final core = Core();
+        return core._with([asked], (p) => core._answer(core._pinStatus(p[0])))
+            as Map;
+      }),
+    );
+  }
+
+  /// Sets the account's PIN, while it's unlocked: the core checks the
+  /// master password first, as unlocking does. Both are wiped once the core
+  /// has them.
+  static Future<Answer> setPin(String masterPassword, String pin) async {
+    await _giveDeviceSeal();
+    return _background(
+      (c, a) => c._with([
+        a,
+        masterPassword,
+        pin,
+      ], (p) => c._answer(c._pinSet(p[0], p[1], p[2]))),
+    );
+  }
+
+  /// Unlocks the account with its PIN: ok, or the words to show, with
+  /// `pinOn` false once there's no PIN to try any more (the fifth wrong
+  /// try in a row turned it off, or it was out of date).
+  static Future<Answer> unlockWithPin(String pin) async {
+    await _giveDeviceSeal();
+    return _background(
+      (c, a) => c._with([a, pin], (p) => c._answer(c._pinUnlock(p[0], p[1]))),
+    );
+  }
+
+  /// Turns the account's PIN off. Answers as [pinStatus].
+  static Future<Answer> removePin() =>
+      _background((c, a) => c._with([a], (p) => c._answer(c._pinRemove(p[0]))));
+
+  /// The Mac's and the iPhone's seal for what a PIN keeps is the app's own
+  /// Swift (DeviceSeal.swift): it's given to the core once, before the core
+  /// is first asked about a PIN. The iPhone gives it at start; the Mac when
+  /// asked. Elsewhere the core has its own (Windows, Android) or none. Once
+  /// it's given, nothing waits on the asking any more (a test's next zone
+  /// never would see it finish).
+  static Future<void>? _asking;
+  static bool _sealGiven = false;
+  static Future<void> _giveDeviceSeal() async {
+    if (_sealGiven || (!isMac && !Platform.isIOS)) return;
+    await (_asking ??= () async {
+      try {
+        await platform.invokeMethod<bool>('deviceSeal');
+      } on Object {
+        // No seal: the core offers no PIN.
+      }
+      _sealGiven = true;
+    }());
+  }
+
+  /// For tests (the core's test-hooks feature): whether the core opened
+  /// next can keep a PIN, standing in for a device's seal. Off until a test
+  /// turns it on, as Linux and a Mac without a Secure Enclave are.
+  void useDeviceSeal(bool seals) => _answer(_testDeviceSeal(seals));
 
   /// A call to the phone's own code (MainActivity.kt, AppDelegate.swift),
   /// answered as the core would.

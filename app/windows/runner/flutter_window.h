@@ -43,6 +43,10 @@ class FlutterWindow : public Win32Window {
   // buttons, the other way.
   std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>> window_;
 
+  // What only Windows' own code does for the app (app/lib/core.dart,
+  // Core.platform): a file to attach, with Windows' picker.
+  std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>> platform_;
+
   // The window's state, as the app hears it (|window_|'s "frame").
   flutter::EncodableValue Frame() const;
 };
