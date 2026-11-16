@@ -428,9 +428,9 @@ static void chrome_call_cb(FlMethodChannel* channel, FlMethodCall* call,
   fl_method_call_respond_success(call, answer, nullptr);
 }
 
-// The file the person chose to attach to an item (app/lib/attaching.dart):
-// its path and name, or null when they chose none. The core reads the file
-// where it is, so nothing is copied.
+// The file the person chose to attach to an item, or to send in a file Send
+// (app/lib/attaching.dart): its path and name, or null when they chose none.
+// The core reads the file where it is, so nothing is copied.
 static void picked_cb(GtkNativeDialog* dialog, gint response,
                       gpointer user_data) {
   g_autoptr(FlMethodCall) call = FL_METHOD_CALL(user_data);
@@ -453,9 +453,17 @@ static void platform_call_cb(FlMethodChannel* channel, FlMethodCall* call,
                              gpointer user_data) {
   MyApplication* self = MY_APPLICATION(user_data);
   if (g_strcmp0(fl_method_call_get_name(call), "pickFile") == 0) {
+    FlValue* arguments = fl_method_call_get_args(call);
+    FlValue* wanted =
+        arguments != nullptr && fl_value_get_type(arguments) == FL_VALUE_TYPE_MAP
+            ? fl_value_lookup_string(arguments, "send")
+            : nullptr;
+    const gboolean sending = wanted != nullptr &&
+                             fl_value_get_type(wanted) == FL_VALUE_TYPE_BOOL &&
+                             fl_value_get_bool(wanted);
     GtkFileChooserNative* dialog = gtk_file_chooser_native_new(
-        "Attach a file", self->window, GTK_FILE_CHOOSER_ACTION_OPEN, "Attach",
-        "Cancel");
+        sending ? "Choose a file to send" : "Attach a file", self->window,
+        GTK_FILE_CHOOSER_ACTION_OPEN, sending ? "Choose" : "Attach", "Cancel");
     gtk_native_dialog_set_modal(GTK_NATIVE_DIALOG(dialog), TRUE);
     gtk_file_chooser_set_local_only(GTK_FILE_CHOOSER(dialog), TRUE);
     g_signal_connect(dialog, "response", G_CALLBACK(picked_cb),

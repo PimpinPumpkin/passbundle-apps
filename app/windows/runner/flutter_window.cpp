@@ -103,10 +103,13 @@ void AllowCapture(HWND window, bool allowed) {
   }
 }
 
-// Asks the person for a file to attach to an item, with Windows' own picker
-// (app/lib/attaching.dart): its path and name, or null when they chose none.
-// The core reads the file where it is, so nothing is copied.
-void PickFile(HWND owner, flutter::MethodResult<EncodableValue>& result) {
+// Asks the person for a file to attach to an item, or to send in a file Send
+// (`sending`), with Windows' own picker (app/lib/attaching.dart): its path
+// and name, or null when they chose none. The core reads the file where it
+// is, so nothing is copied.
+void PickFile(HWND owner,
+              bool sending,
+              flutter::MethodResult<EncodableValue>& result) {
   IFileOpenDialog* dialog = nullptr;
   if (FAILED(::CoCreateInstance(CLSID_FileOpenDialog, nullptr,
                                 CLSCTX_INPROC_SERVER,
@@ -118,8 +121,8 @@ void PickFile(HWND owner, flutter::MethodResult<EncodableValue>& result) {
   dialog->GetOptions(&options);
   dialog->SetOptions(options | FOS_FORCEFILESYSTEM | FOS_FILEMUSTEXIST |
                      FOS_PATHMUSTEXIST);
-  dialog->SetTitle(L"Attach a file");
-  dialog->SetOkButtonLabel(L"Attach");
+  dialog->SetTitle(sending ? L"Choose a file to send" : L"Attach a file");
+  dialog->SetOkButtonLabel(sending ? L"Choose" : L"Attach");
   const HRESULT shown = dialog->Show(owner);
   std::string path;
   IShellItem* item = nullptr;
@@ -202,7 +205,17 @@ bool FlutterWindow::OnCreate() {
              std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>>
                  result) {
         if (call.method_name() == "pickFile") {
-          PickFile(GetHandle(), *result);
+          const auto* arguments =
+              std::get_if<flutter::EncodableMap>(call.arguments());
+          bool sending = false;
+          if (arguments) {
+            const auto wanted =
+                arguments->find(flutter::EncodableValue("send"));
+            sending = wanted != arguments->end() &&
+                      std::holds_alternative<bool>(wanted->second) &&
+                      std::get<bool>(wanted->second);
+          }
+          PickFile(GetHandle(), sending, *result);
         } else {
           result->NotImplemented();
         }

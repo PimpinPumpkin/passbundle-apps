@@ -354,16 +354,17 @@ class MainFlutterWindow: NSWindow {
         return
       }
       result(NSWorkspace.shared.open(url))
-    // A file to attach to an item (app/lib/attaching.dart): its path and
-    // name, or nil if the person gave up. The core reads it where it is,
-    // so nothing is copied.
+    // A file to attach to an item, or to send in a file Send ("send": true;
+    // app/lib/attaching.dart): its path and name, or nil if the person gave
+    // up. The core reads it where it is, so nothing is copied.
     case "pickFile":
+      let sending = arguments?["send"] as? Bool ?? false
       let panel = NSOpenPanel()
       panel.canChooseFiles = true
       panel.canChooseDirectories = false
       panel.allowsMultipleSelection = false
-      panel.message = "Choose a file to attach"
-      panel.prompt = "Attach"
+      panel.message = sending ? "Choose a file to send" : "Choose a file to attach"
+      panel.prompt = sending ? "Choose" : "Attach"
       panel.beginSheetModal(for: self) { response in
         guard response == .OK, let url = panel.url else { return result(nil) }
         result(["path": url.path, "name": url.lastPathComponent])
