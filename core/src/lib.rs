@@ -31,6 +31,7 @@ pub mod places;
 pub mod plans;
 pub mod secrets;
 pub mod security_key;
+pub mod send;
 pub mod server;
 pub mod signup;
 pub mod store;

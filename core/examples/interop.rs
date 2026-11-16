@@ -23,6 +23,11 @@
 //! opens the item's attachment with that name (its contents in base64), and
 //! `{"action": "deleteAttachment", item, name}` deletes it.
 //!
+//! Sends too, through the app's own calls (e2e/tests/core-interop.spec.ts):
+//! `{"action": "makeSend", name, text, hidden?, password?}` makes a text
+//! Send and prints its link, and `{"action": "sends"}` lists the account's
+//! Sends as the app opens them (their text too).
+//!
 //!   cargo run --release --features test-trust --example interop -- \
 //!     <server> <certificate.pem> <email> <password> [<draft.json>]
 //!
@@ -85,6 +90,11 @@ fn main() {
         let d: Value = serde_json::from_str(&std::fs::read_to_string(path).expect("the draft"))
             .expect("draft JSON");
         if let Some(action) = d["action"].as_str() {
+            if matches!(action, "makeSend" | "sends") {
+                let answer = sends(action, &d, server_url, &pem, email, password);
+                println!("{}", json!({ "items": items, "send": answer }));
+                return;
+            }
             if matches!(action, "signInRequests" | "approveSignIn" | "denySignIn") {
                 let answer = sign_in_request(action, &d, server_url, &pem, email, password);
                 println!("{}", json!({ "items": items, "signIn": answer }));
@@ -308,4 +318,46 @@ fn attachment(
     };
     let _ = std::fs::remove_dir_all(dir);
     done.unwrap_or_else(|e| json!({ "refused": e.to_string() }))
+}
+
+/// A Send action, through the app's own calls, signed in afresh: a text
+/// Send made (its link), or the account's Sends listed. What the app
+/// refuses comes back as `refused`, in its words.
+fn sends(action: &str, d: &Value, server: &str, pem: &[u8], email: &str, password: &str) -> Value {
+    use passbundle_core::send::{self, SendDraft, SendKind};
+
+    passbundle_core::server::trust_only_for_tests(pem);
+    let dir = std::env::temp_dir().join(format!("pb-interop-{}", uuid::Uuid::new_v4().simple()));
+    let mut app = App::open(Store::new(&dir), Box::new(MemorySecretStore::default()));
+    app.sign_in(server, email, password).expect("signing in");
+    let answer = match action {
+        "makeSend" => {
+            let draft = SendDraft {
+                kind: Some(SendKind::Text),
+                name: d["name"].as_str().unwrap_or_default().to_owned(),
+                text: d["text"].as_str().map(|t| Zeroizing::new(t.to_owned())),
+                hidden: d["hidden"] == true,
+                deletion_date: send::date_after(86_400),
+                ..Default::default()
+            };
+            let password = d["password"].as_str().map(|p| Zeroizing::new(p.to_owned()));
+            app.save_send(None, &draft, password).and_then(|saved| {
+                Ok(json!({ "id": saved.id, "link": app.send_link(&saved.id)?.as_str() }))
+            })
+        }
+        _ => Ok(json!(app
+            .sends()
+            .iter()
+            .map(|s| json!({
+                "name": s.name,
+                "kind": s.kind.word(),
+                "text": s.text.as_deref(),
+                "hidden": s.hidden,
+                "hasPassword": s.has_password,
+                "opens": s.opens,
+            }))
+            .collect::<Vec<_>>())),
+    };
+    let _ = std::fs::remove_dir_all(dir);
+    answer.unwrap_or_else(|e| json!({ "refused": e.to_string() }))
 }

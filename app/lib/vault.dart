@@ -27,6 +27,7 @@ import 'icons.dart';
 import 'new_item.dart';
 import 'places.dart';
 import 'selection.dart';
+import 'send.dart';
 import 'settings.dart';
 import 'sign_in_requests.dart';
 import 'theme.dart';
@@ -191,7 +192,8 @@ class VaultScreenState extends State<VaultScreen> {
   /// time it opens.
   int? offline;
 
-  /// On a phone: the items (0), the generator (1), or Settings (2).
+  /// On a phone: the items (0), the generator (1), Send (2), or Settings
+  /// (3).
   int tab = 0;
 
   /// On a phone, the search field, kept across the tabs.
@@ -851,6 +853,29 @@ class VaultScreenState extends State<VaultScreen> {
     ),
   );
 
+  /// Send, in a dialog (a computer's Tools; send.dart).
+  Future<void> openSendTool() => showDialog<void>(
+    context: context,
+    builder: (context) => Dialog(
+      clipBehavior: Clip.antiAlias,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 560, maxHeight: 720),
+        child: Scaffold(
+          appBar: AppBar(
+            title: const Text('Send'),
+            automaticallyImplyLeading: false,
+            leading: IconButton(
+              tooltip: 'Close',
+              icon: const Icon(Icons.close_rounded),
+              onPressed: () => Navigator.of(context).pop(),
+            ),
+          ),
+          body: SendPage(core: widget.core, title: false),
+        ),
+      ),
+    ),
+  );
+
   /// Importing the passwords saved in this computer's browsers
   /// (browser_import.dart); the vault shows what came in.
   Future<void> importFromBrowsers() async {
@@ -878,7 +903,7 @@ class VaultScreenState extends State<VaultScreen> {
     if (!mounted) return;
     if (!isWide(context)) {
       setState(() {
-        tab = 2;
+        tab = 3;
         checked.clear();
         anchor = null;
       });
@@ -1121,6 +1146,7 @@ class VaultScreenState extends State<VaultScreen> {
                   items: everything,
                   toFix: health.length,
                   onGenerator: openGeneratorTool,
+                  onSend: openSendTool,
                   onBrowsers: isPhone ? null : importFromBrowsers,
                   onImport: () => openWebVault('/#/tools/import'),
                   onExport: () => openWebVault('/#/tools/export'),
@@ -1249,6 +1275,9 @@ class VaultScreenState extends State<VaultScreen> {
                         ? GeneratorPage(core: widget.core)
                         : const SizedBox.shrink(),
                     tab == 2
+                        ? SendPage(core: widget.core)
+                        : const SizedBox.shrink(),
+                    tab == 3
                         ? SettingsPage(
                             email: widget.email,
                             server: widget.server,
@@ -1286,8 +1315,8 @@ class VaultScreenState extends State<VaultScreen> {
             : NavigationBar(
                 selectedIndex: tab,
                 onDestinationSelected: (i) => setState(() => tab = i),
-                // The web vault's glyphs: all items, the generator, and the
-                // gear. Send, the extension's fourth, isn't in the apps yet.
+                // The extension's: all items, the generator, Send, and the
+                // gear.
                 destinations: const [
                   NavigationDestination(
                     icon: Glyph(Glyphs.grid, size: 22),
@@ -1296,6 +1325,10 @@ class VaultScreenState extends State<VaultScreen> {
                   NavigationDestination(
                     icon: Glyph(Glyphs.generator, size: 22),
                     label: 'Generator',
+                  ),
+                  NavigationDestination(
+                    icon: Glyph(Glyphs.send, size: 22),
+                    label: 'Send',
                   ),
                   NavigationDestination(
                     icon: Glyph(Glyphs.settings, size: 22),
@@ -2180,6 +2213,7 @@ class Sidebar extends StatelessWidget {
     required this.items,
     this.toFix = 0,
     this.onGenerator,
+    this.onSend,
     this.onBrowsers,
     this.onImport,
     this.onExport,
@@ -2216,6 +2250,9 @@ class Sidebar extends StatelessWidget {
   /// The Tools: the generator, and import and export (the web vault's,
   /// which open there).
   final VoidCallback? onGenerator;
+
+  /// Send (send.dart), in a window of its own.
+  final VoidCallback? onSend;
 
   /// Importing from this computer's browsers (browser_import.dart).
   final VoidCallback? onBrowsers;
@@ -2361,13 +2398,21 @@ class Sidebar extends StatelessWidget {
             ),
           );
     // The tools, pinned under the menu's list, so they never scroll out of
-    // sight: the generator, then importing (a file in the web vault, and this
-    // computer's browsers), then exporting.
+    // sight: the generator, Send, then importing (a file in the web vault, and
+    // this computer's browsers), then exporting.
     final tools = [
       if (onGenerator case final open?)
         entry(
           tile: outline(Glyphs.generator),
           label: 'Generator',
+          on: false,
+          tap: open,
+          height: 34,
+        ),
+      if (onSend case final open?)
+        entry(
+          tile: outline(Glyphs.send),
+          label: 'Send',
           on: false,
           tap: open,
           height: 34,

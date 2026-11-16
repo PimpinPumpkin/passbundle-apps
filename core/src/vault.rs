@@ -22,6 +22,9 @@ pub struct Sync {
     pub collections: Vec<CollectionData>,
     #[serde(default)]
     pub ciphers: Vec<CipherData>,
+    /// The account's Sends (send.rs).
+    #[serde(default)]
+    pub sends: Vec<crate::send::SendData>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -966,7 +969,7 @@ pub(crate) fn now_iso8601() -> String {
 
 /// Seconds since 1970 as a date, by the proleptic Gregorian calendar
 /// (Howard Hinnant's days-to-civil).
-fn iso8601(secs: u64, millis: u32) -> String {
+pub(crate) fn iso8601(secs: u64, millis: u32) -> String {
     let days = (secs / 86_400) as i64;
     let rest = secs % 86_400;
     let z = days + 719_468;
@@ -1165,6 +1168,8 @@ pub struct Vault {
     pub makes_folders: std::collections::HashSet<String>,
     pub items: Vec<Item>,
     pub damaged: Vec<DamagedItem>,
+    /// The account's Sends, each opened with the user key (send.rs).
+    pub sends: Vec<crate::send::Send>,
     keys: Keyring,
 }
 
@@ -1321,6 +1326,7 @@ impl Vault {
             makes_folders,
             items,
             damaged,
+            sends: crate::send::open_all(&sync.sends, &keys.user),
             keys,
         })
     }
@@ -1334,6 +1340,11 @@ impl Vault {
             .get(organization_id)
             .ok_or(Error::Damaged("that organization's key doesn't open"))?;
         Ok(key.encrypt_str(name).to_string())
+    }
+
+    /// One of the account's Sends.
+    pub fn send(&self, id: &str) -> Option<&crate::send::Send> {
+        self.sends.iter().find(|s| s.id == id)
     }
 
     /// What the person may do with an item (docs/core.md, "Folders and
