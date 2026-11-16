@@ -9,6 +9,7 @@ pub mod asset_links;
 pub mod autolock;
 #[cfg(not(phone))]
 pub mod browser_import;
+pub mod change_password;
 pub mod clipboard;
 pub mod crypto;
 pub mod device_approval;

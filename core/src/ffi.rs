@@ -499,7 +499,9 @@ fn summary(vault: &Vault, item: &Item) -> Value {
         "organization": item.organization_id.as_ref().and_then(|o| vault.organizations.get(o)),
         "collectionIds": item.collection_ids,
         "where": place(vault, item),
-        "template": template.map(|(_, name, _)| name),
+        "template": template.as_ref().map(|(_, name, _)| name),
+        // Its template's id, for a built-in template's own glyph.
+        "templateId": template.as_ref().map(|(id, _, _)| id),
         // A custom template (a note that defines one), and a copy an MSP
         // keeps in its clients' Templates folder, which lists show only
         // while that folder is open.
@@ -1240,6 +1242,60 @@ pub unsafe extern "C" fn pb_check_server(server: *const c_char) -> *mut c_char {
     }))
 }
 
+/// The master password hint for an email on a server, from the sign-in
+/// screen, before any account is here (`Server::password_hint`): `{ok,
+/// hint}`, the hint when the server shows it, or null when it emailed it (as
+/// it answers for an email with no account); or the words to show, about the
+/// server's address with `field`.
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_password_hint_at(
+    server: *const c_char,
+    email: *const c_char,
+) -> *mut c_char {
+    let (server, email) = (text(server), text(email));
+    if email.trim().is_empty() {
+        return out(failed(Error::Refused(
+            "type your email first, then ask for your hint",
+        )));
+    }
+    out(waiting(|| {
+        match crate::server::Server::new(&server, crate::server::Device::this_one(""))
+            .and_then(|s| s.password_hint(email.trim()))
+        {
+            Ok(hint) => json!({ "ok": true, "hint": hint }),
+            Err(e) => failed(e),
+        }
+    }))
+}
+
+/// How strong a master password is as it's typed, by zxcvbn (health.rs),
+/// with the words that make it easy to guess (`hints`, a JSON array: the
+/// email and name): `{score, word}`, 0 to 4 and "weak", "good", or
+/// "strong". Nothing is kept or sent.
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_password_strength(
+    password: *const c_char,
+    hints: *const c_char,
+) -> *mut c_char {
+    let password = Zeroizing::new(text(password));
+    let hints: Vec<String> = serde_json::from_str(&text(hints)).unwrap_or_default();
+    // An email's parts count as words too ("ana.lopez@example.test").
+    let words: Vec<&str> = hints
+        .iter()
+        .flat_map(|h| h.split(|c: char| !c.is_alphanumeric()))
+        .chain(hints.iter().map(String::as_str))
+        .filter(|w| w.chars().count() >= 3)
+        .collect();
+    let score = crate::health::strength(&password, &words);
+    out(json!({ "score": score, "word": crate::health::word(score) }))
+}
+
 /// Saves the generator's settings to the server now, or takes its newer ones
 /// (synced_settings): the apps call it when the generator closes.
 ///
@@ -1890,7 +1946,12 @@ pub unsafe extern "C" fn pb_places(account: *const c_char) -> *mut c_char {
                     })
                 })
                 .collect();
-                json!({ "id": id, "name": name, "collections": collections })
+                // Whether the person may make shared folders there (owners
+                // and admins; the server refuses anyone else).
+                json!({
+                    "id": id, "name": name, "collections": collections,
+                    "canMakeFolders": vault.makes_folders.contains(id),
+                })
             })
             .collect();
         json!({ "folders": folders, "organizations": organizations })
@@ -2509,6 +2570,77 @@ pub unsafe extern "C" fn pb_create_folder(
         Ok(id) => json!({ "ok": true, "id": id }),
         Err(e) => failed(e),
     })
+}
+
+/// Makes a shared folder in an organization where the person may
+/// (`App::create_collection`), then syncs: `{ok, id}`, or the words to show.
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_create_collection(
+    account: *const c_char,
+    organization: *const c_char,
+    name: *const c_char,
+) -> *mut c_char {
+    let (account, organization, name) = (text(account), text(organization), text(name));
+    with_app_waiting(&account, |app| {
+        match app.create_collection(&organization, &name) {
+            Ok(id) => json!({ "ok": true, "id": id }),
+            Err(e) => failed(e),
+        }
+    })
+}
+
+/// "Change password" for a login (change_password.rs): the site's own
+/// change-password page from Apple's list; else, for someone who shows
+/// websites' icons, the one the server's icon service knows; else the
+/// website itself: `{ok, url}`, or the words to show for a login with no
+/// website. The server is asked without holding up the app's other calls.
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_change_password_page(
+    account: *const c_char,
+    id: *const c_char,
+) -> *mut c_char {
+    let (account, id) = (text(account), text(id));
+    let mut websites = Vec::new();
+    let mut source = None;
+    let asked = app_value(&account, |app| match app.change_password_websites(&id) {
+        Ok(found) => {
+            websites = found;
+            source = app.icon_source();
+            json!({ "ok": true })
+        }
+        Err(e) => failed(e),
+    });
+    if asked["ok"] != true {
+        return out(asked);
+    }
+    let Some((first, _)) = websites.first() else {
+        return out(failed(Error::Refused("this login has no website to open")));
+    };
+    if let Some(page) = websites
+        .iter()
+        .find_map(|(_, host)| crate::change_password::listed_page(host))
+    {
+        return out(json!({ "ok": true, "url": page }));
+    }
+    let first = first.clone();
+    let Some((server, _)) = source else {
+        return out(json!({ "ok": true, "url": first }));
+    };
+    out(waiting(move || {
+        let server = crate::server::Server::new(&server, crate::server::Device::this_one(""));
+        let found = server.ok().and_then(|server| {
+            websites.iter().find_map(|(address, host)| {
+                server.change_password_uri(address, host).ok().flatten()
+            })
+        });
+        json!({ "ok": true, "url": found.unwrap_or(first) })
+    }))
 }
 
 /// Renames a folder: `{ok}`, or the words to show.
@@ -3309,7 +3441,9 @@ pub unsafe extern "C" fn pb_totp(account: *const c_char, id: *const c_char) -> *
 /// template: {id, name}}`: a field's `type` is upstream's (0 text, 1
 /// hidden, 2 yes or no), and `template` names the template a new item is
 /// made from. For an organization's item being edited, `collectionIds` are
-/// the shared folders it's to be in. Answers `{ok, id, synced}`.
+/// the shared folders it's to be in. `reprompt` (true or false) sets whether
+/// it asks for the master password; without it, it stays as it is. Answers
+/// `{ok, id, synced}`.
 ///
 /// # Safety
 /// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
@@ -3422,6 +3556,9 @@ pub unsafe extern "C" fn pb_save(
                 _ => None,
             },
             expiration: None,
+            // The editor's "Ask for master password"; a draft that doesn't
+            // say keeps what the item does.
+            reprompt: d["reprompt"].as_bool(),
         };
         // The editor's "Expires" and "Remind me": a draft that names them
         // sets both (no date clears them); one that doesn't keeps the item's.
@@ -3581,6 +3718,41 @@ pub unsafe extern "C" fn pb_keep_generated(
     let account = text(account);
     let shown = Zeroizing::new(text(shown));
     with_app(&account, |app| done(app.keep_generated(&shown)))
+}
+
+/// The generator's history (`App::generator_history`): what it made that the
+/// person copied or used since the vault was unlocked, newest first, `{ok,
+/// history: [{value, at}]}`, `at` in seconds since 1970. In memory only, and
+/// forgotten when the vault locks.
+///
+/// # Safety
+/// `account` is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_generator_history(account: *const c_char) -> *mut c_char {
+    let account = text(account);
+    with_app(&account, |app| match app.generator_history() {
+        Ok(kept) => json!({
+            "ok": true,
+            "history": kept
+                .iter()
+                .map(|(value, at)| json!({ "value": value.as_str(), "at": at }))
+                .collect::<Vec<_>>(),
+        }),
+        Err(e) => failed(e),
+    })
+}
+
+/// Forgets the generator's history now: `{ok}`.
+///
+/// # Safety
+/// `account` is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_clear_generator_history(account: *const c_char) -> *mut c_char {
+    let account = text(account);
+    with_app(&account, |app| {
+        app.clear_generator_history();
+        json!({ "ok": true })
+    })
 }
 
 /// The generator's last choices on this device (`generator::Options`), held
@@ -3750,7 +3922,7 @@ fn profile_json(profile: &passbundle_browsers::Profile) -> Value {
 /// the rules for this account (DESIGN.md, "Which browser profiles"): `{ok,
 /// profiles: [{id, browser, browserName, browserShort, name, email,
 /// managedBy, default, chosen, rule, personal, open, savingOn}], guided:
-/// [{browser, browserName, words}], ask, keepsItemsOut}`. `rule` is
+/// [{browser, browserName, browserShort, words}], ask, keepsItemsOut}`. `rule` is
 /// "yourEmail", "workDomain", "browserDefault", or null; `ask` that no rule
 /// chose any. Reads no passwords. Unlocked only.
 ///
@@ -3783,6 +3955,7 @@ pub unsafe extern "C" fn pb_browser_profiles(account: *const c_char) -> *mut c_c
                 "guided": found.guided.iter().map(|b| json!({
                     "browser": b.key(),
                     "browserName": b.name(),
+                    "browserShort": b.short(),
                     "words": crate::browser_import::guided_words(*b, crate::browser_import::Why::OnlyTheBrowser),
                 })).collect::<Vec<_>>(),
                 "ask": found.ask,

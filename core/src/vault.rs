@@ -41,6 +41,30 @@ pub struct OrganizationData {
     pub id: String,
     pub name: String,
     pub key: Option<String>,
+    /// The person's role there, as upstream numbers it: 0 owner, 1 admin,
+    /// 2 user, 3 manager, 4 custom.
+    #[serde(rename = "type", default)]
+    pub role: Option<i64>,
+    /// What a custom role may do (upstream's `permissions`), of which the
+    /// apps read `createNewCollections`.
+    #[serde(default)]
+    pub permissions: Option<serde_json::Value>,
+}
+
+impl OrganizationData {
+    /// Whether the person may make shared folders there, as the server
+    /// decides it (passbundle-server, `post_organization_collections`):
+    /// owners and admins, and a role whose permissions say it may (the
+    /// server sends that for managers with access to all items). The server
+    /// refuses anyone else.
+    pub fn makes_folders(&self) -> bool {
+        matches!(self.role, Some(0 | 1))
+            || self
+                .permissions
+                .as_ref()
+                .and_then(|p| p["createNewCollections"].as_bool())
+                == Some(true)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -988,6 +1012,11 @@ pub struct ItemDraft {
     /// The editor's "Expires" and "Remind me" (expiration.rs), replacing
     /// the item's; None keeps the item's as they are.
     pub expiration: Option<Expiration>,
+    /// The editor's "Ask for master password": whether the item asks for the
+    /// master password before its secrets are used, as upstream's `reprompt`;
+    /// None keeps what the item (or the version restored) does, and a new
+    /// item doesn't ask.
+    pub reprompt: Option<bool>,
 }
 
 /// An item's expiration date and when it reminds, as the editor sets them:
@@ -1061,6 +1090,7 @@ impl ItemDraft {
             favorite: item.favorite,
             template: None,
             expiration: None,
+            reprompt: None,
         }
     }
 }
@@ -1130,6 +1160,9 @@ pub struct Vault {
     /// Each shared folder's icon and color, opened, for those that have one.
     pub collection_looks: HashMap<String, crate::places::Look>,
     pub organizations: HashMap<String, String>,
+    /// The organizations whose key the person has where they may make shared
+    /// folders (`OrganizationData::makes_folders`).
+    pub makes_folders: std::collections::HashSet<String>,
     pub items: Vec<Item>,
     pub damaged: Vec<DamagedItem>,
     keys: Keyring,
@@ -1203,6 +1236,13 @@ impl Vault {
                 }
             }
         }
+        let makes_folders = sync
+            .profile
+            .organizations
+            .iter()
+            .filter(|o| o.makes_folders() && organization_keys.contains_key(&o.id))
+            .map(|o| o.id.clone())
+            .collect();
         let keys = Keyring {
             user,
             private,
@@ -1278,10 +1318,22 @@ impl Vault {
             collection_grids,
             collection_looks,
             organizations,
+            makes_folders,
             items,
             damaged,
             keys,
         })
+    }
+
+    /// A shared folder's name, encrypted with its organization's key, as the
+    /// web vault encrypts it for a new one.
+    pub fn encrypt_collection_name(&self, organization_id: &str, name: &str) -> Result<String> {
+        let key = self
+            .keys
+            .organizations
+            .get(organization_id)
+            .ok_or(Error::Damaged("that organization's key doesn't open"))?;
+        Ok(key.encrypt_str(name).to_string())
     }
 
     /// What the person may do with an item (docs/core.md, "Folders and
@@ -1702,7 +1754,10 @@ impl Vault {
             "name": enc(&draft.name),
             "notes": enc_opt(draft.notes.as_deref().map(String::as_str)),
             "favorite": draft.favorite,
-            "reprompt": from.map_or(0, |k| k.reprompt),
+            "reprompt": match draft.reprompt {
+                Some(asks) => u8::from(asks),
+                None => from.map_or(0, |k| k.reprompt),
+            },
             "key": kept.and_then(|k| k.key.clone()),
             "fields": fields,
             "passwordHistory": if history.is_empty() { serde_json::Value::Null } else { history.into() },
@@ -2113,5 +2168,36 @@ mod tests {
             .as_deref(),
             Some("62701")
         );
+    }
+
+    #[test]
+    fn owners_admins_and_roles_that_may_make_shared_folders_do() {
+        let org =
+            |json: serde_json::Value| -> OrganizationData { serde_json::from_value(json).unwrap() };
+        let base = serde_json::json!({ "id": "o", "name": "Acme" });
+        let with = |extra: serde_json::Value| {
+            let mut json = base.clone();
+            json.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            org(json)
+        };
+        assert!(with(serde_json::json!({ "type": 0 })).makes_folders());
+        assert!(with(serde_json::json!({ "type": 1 })).makes_folders());
+        // A member doesn't; a manager or custom role only when the server
+        // says so (a manager with access to all items).
+        assert!(!with(serde_json::json!({ "type": 2 })).makes_folders());
+        assert!(!with(serde_json::json!({
+            "type": 4,
+            "permissions": { "createNewCollections": false },
+        }))
+        .makes_folders());
+        assert!(with(serde_json::json!({
+            "type": 4,
+            "permissions": { "createNewCollections": true },
+        }))
+        .makes_folders());
+        // A server that doesn't say: no.
+        assert!(!org(base).makes_folders());
     }
 }

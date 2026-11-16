@@ -1236,6 +1236,58 @@ impl Server {
         Ok(Some(bytes).filter(|b| !crate::icons::is_fallback(b) && crate::icons::acceptable(b)))
     }
 
+    /// A website's change-password page from the server's icon service
+    /// (`<server>/icons/change-password-uri?uri=`), as the web vault asks for
+    /// it: no session, at most 64 KB and 10 seconds. None where the server
+    /// has none, answers anything but 200, or answers with a page that isn't
+    /// on the website's own host (change_password.rs, `answer_fits`).
+    pub fn change_password_uri(&self, website: &str, host: &str) -> Result<Option<String>> {
+        let mut response = self
+            .agent
+            .get(self.url("/icons/change-password-uri"))
+            .query("uri", website)
+            .config()
+            .timeout_global(Some(Duration::from_secs(10)))
+            .max_redirects(0)
+            .build()
+            .call()
+            .map_err(|e| Error::unreached(&self.base, &e))?;
+        if response.status().as_u16() != 200 {
+            return Ok(None);
+        }
+        let text = response
+            .body_mut()
+            .with_config()
+            .limit(64 * 1024)
+            .read_to_string()
+            .map_err(|e| Error::unreached(&self.base, &e))?;
+        let page = serde_json::from_str::<Value>(&text)
+            .ok()
+            .and_then(|answer| answer["uri"].as_str().map(str::to_owned));
+        Ok(page.filter(|page| crate::change_password::answer_fits(page, host)))
+    }
+
+    /// Makes a shared folder in an organization (upstream's collection),
+    /// its name already encrypted with the organization's key, given to
+    /// nobody: owners and admins see every one. Answers its id.
+    pub fn create_collection(
+        &self,
+        session: &mut Session,
+        organization_id: &str,
+        name: &str,
+    ) -> Result<String> {
+        let answer = self.call(
+            session,
+            "POST",
+            &format!("/api/organizations/{organization_id}/collections"),
+            Some(json!({ "name": name, "externalId": null, "groups": [], "users": [] })),
+        )?;
+        answer["id"]
+            .as_str()
+            .map(str::to_owned)
+            .ok_or_else(|| Error::Malformed("a shared folder answer with no id".into()))
+    }
+
     /// An attachment's file, as the server stores it (still encrypted).
     pub fn attachment(
         &self,
@@ -1769,6 +1821,41 @@ mod tests {
         assert_eq!(
             setup_two_step_first(&json!({ "message": "Username or password is incorrect." })),
             None
+        );
+    }
+
+    #[test]
+    fn a_change_password_page_from_the_server_is_only_ever_on_the_sites_own_host() {
+        let json = "Content-Type: application/json\r\n";
+        let (url, asked) = answering(vec![
+            answer(
+                "200 OK",
+                json,
+                br#"{"uri":"https://shop.example.test/.well-known/change-password"}"#,
+            ),
+            // Another site's page is never opened for this one.
+            answer(
+                "200 OK",
+                json,
+                br#"{"uri":"https://evil.example.test/.well-known/change-password"}"#,
+            ),
+            answer("200 OK", json, br#"{"uri":null}"#),
+            answer("404 Not Found", json, b"{}"),
+        ]);
+        let server = Server::new(&url, Device::this_one("")).unwrap();
+        let ask =
+            || server.change_password_uri("https://shop.example.test/sign-in", "shop.example.test");
+        assert_eq!(
+            ask().unwrap().as_deref(),
+            Some("https://shop.example.test/.well-known/change-password")
+        );
+        assert_eq!(ask().unwrap(), None);
+        assert_eq!(ask().unwrap(), None);
+        assert_eq!(ask().unwrap(), None);
+        let asked = asked.join().unwrap();
+        assert_eq!(
+            asked[0],
+            "/icons/change-password-uri?uri=https%3A%2F%2Fshop.example.test%2Fsign-in"
         );
     }
 
@@ -2579,6 +2666,28 @@ mod tests {
 
     const ITEM: &str = "0b6f4a4e-7d1c-4e7e-9d57-3d8a5a1c2f10";
     const FILE: &str = "8Qv2kLm4TzYp1WcXn0Rs";
+
+    #[test]
+    fn a_shared_folder_is_made_with_its_encrypted_name_given_to_nobody() {
+        let (url, served) = answering_with_bodies(vec![answer(
+            "200 OK",
+            "Content-Type: application/json\r\n",
+            br#"{"id":"c1","object":"collection"}"#,
+        )]);
+        let server = Server::new(&url, Device::this_one("folders")).unwrap();
+        let mut session = a_session();
+        let id = server
+            .create_collection(&mut session, "o1", "2.name")
+            .unwrap();
+        assert_eq!(id, "c1");
+        let (path, body) = served.join().unwrap().remove(0);
+        assert_eq!(path, "/api/organizations/o1/collections");
+        let body: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(
+            body,
+            json!({ "name": "2.name", "externalId": null, "groups": [], "users": [] })
+        );
+    }
 
     fn started() -> Vec<u8> {
         answer(
