@@ -154,6 +154,11 @@ class _ItemEditorState extends State<ItemEditor> {
   };
   bool favorite = false;
 
+  /// The item asks for the master password before its secrets are shown,
+  /// copied, or filled (upstream's `reprompt`), as the web vault's editor
+  /// sets it.
+  bool reprompt = false;
+
   /// Whether the person may change the item's websites: always for a new
   /// item, and for an existing one only when they can see its passwords.
   bool get websitesEditable => !editing || permissions['seePasswords'] == true;
@@ -240,6 +245,7 @@ class _ItemEditorState extends State<ItemEditor> {
         );
       }
       favorite = item['favorite'] == true;
+      reprompt = item['reprompt'] == true;
       expires.text = (item['expires'] ?? '') as String;
       final itemRemind = item['remind'] as Map?;
       remind = (itemRemind?['value'] as String?) ?? '';
@@ -431,6 +437,7 @@ class _ItemEditorState extends State<ItemEditor> {
     'organizationId': organizationId,
     'collectionIds': collectionIds,
     'favorite': favorite,
+    'reprompt': reprompt,
     // An empty date clears it and its reminder days (core/src/ffi.rs,
     // pb_save). A card's date is its expiration month and year: a draft
     // without these keeps any other the card has as it is.
@@ -933,7 +940,7 @@ class _ItemEditorState extends State<ItemEditor> {
                     decoration: labeledField(
                       context,
                       'One-time code secret (optional)',
-                      hint: 'The key or otpauth:// address from the site',
+                      hint: 'Setup key or otpauth:// link',
                       suffix: _trailing([_showOrHide()]),
                     ),
                   ),
@@ -1018,7 +1025,7 @@ class _ItemEditorState extends State<ItemEditor> {
                     decoration: labeledField(
                       context,
                       'Expires (optional)',
-                      hint: 'YYYY-MM-DD',
+                      hint: 'Such as 2027-03-31',
                       suffix: _trailing([
                         if (expires.text.isNotEmpty)
                           IconButton(
@@ -1073,6 +1080,19 @@ class _ItemEditorState extends State<ItemEditor> {
                     value: favorite,
                     onChanged: (v) => setState(() => favorite = v),
                     title: const Text('Favorite'),
+                    contentPadding: _switchInset,
+                  ),
+                ),
+                gap(),
+                FieldBox(
+                  child: SwitchListTile(
+                    key: const ValueKey('ask-for-master-password'),
+                    value: reprompt,
+                    onChanged: (v) => setState(() => reprompt = v),
+                    title: const Text('Ask for master password'),
+                    subtitle: const Text(
+                      'Before its secrets are shown, copied, or filled',
+                    ),
                     contentPadding: _switchInset,
                   ),
                 ),

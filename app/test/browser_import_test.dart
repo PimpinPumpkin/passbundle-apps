@@ -163,8 +163,10 @@ void main() {
       // Then the profiles, found away from the screen.
       await pumpUntil(tester, find.text('Not now'));
       // Every profile, which is which, and why it's chosen or not.
-      expect(find.text('Google Chrome'), findsOneWidget);
+      // Each browser by the name people call it.
+      expect(find.text('Chrome'), findsOneWidget);
       expect(find.text('Firefox'), findsOneWidget);
+      expect(find.text('Google Chrome'), findsNothing);
       expect(find.textContaining('Signed in as $email'), findsOneWidget);
       expect(
         find.textContaining('Chosen: your PassBundle email'),
@@ -185,7 +187,9 @@ void main() {
       expect(checked(tester, 'Work'), isTrue);
       expect(checked(tester, 'Person 1'), isFalse);
       expect(checked(tester, 'Home'), isFalse);
-      expect(checked(tester, 'default-release'), isTrue);
+      // Firefox's own name for its default profile reads as such.
+      expect(checked(tester, 'Default'), isTrue);
+      expect(find.text('default-release'), findsNothing);
       // Nothing is read before Import.
       expect(core.testBrowsersRead(), isEmpty);
 
@@ -211,12 +215,15 @@ void main() {
       // The Work profile's mail login has another password than the vault's
       // "Example Mail", so it's in the folder to compare.
       expect(find.text('2 new passwords are in your vault.'), findsOneWidget);
+      // The one to compare is besides the new ones, never among them.
       expect(
         find.text(
-          '1 has a different password from one you already have, so it\'s in "Check these: from Google Chrome" for you to compare.',
+          '1 more has a different password from a login you already have, so it\'s in "Check these: from Google Chrome" for you to compare.',
         ),
         findsOneWidget,
       );
+      expect(find.text('Chrome: Work'), findsOneWidget);
+      expect(find.text('Firefox: Default'), findsOneWidget);
       expect(
         find.textContaining('Password saving is off now.'),
         findsNWidgets(2),
@@ -290,14 +297,17 @@ void main() {
       await pumpUntil(tester, find.text('Import from your browsers'));
       // Then the profiles, found away from the screen.
       await pumpUntil(tester, find.text('Not now'));
-      expect(find.text('Microsoft Edge'), findsOneWidget);
+      expect(find.text('Edge'), findsOneWidget);
       // Only Edge's default profile: nothing else to read.
-      for (final name in ['Work', 'default-release']) {
+      for (final name in ['Work', 'Default']) {
         await tester.tap(find.text(name));
       }
       await tester.pump();
       await tester.tap(find.widgetWithText(FilledButton, 'Import'));
-      await pumpUntil(tester, find.text('Imported from your browsers'));
+      // Nothing was: the title doesn't say it was.
+      await pumpUntil(tester, find.text('Nothing was imported.'));
+      expect(find.text('Imported from your browsers'), findsNothing);
+      expect(find.text('Import from your browsers'), findsOneWidget);
       expect(
         find.text(
           'Edge protects its passwords on this computer so that only Edge can read them, and PassBundle doesn\'t get around that. Export them from Edge instead.',
