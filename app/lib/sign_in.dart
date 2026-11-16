@@ -242,6 +242,67 @@ class _SignInScreenState extends State<SignInScreen> {
   bool working = false;
   bool hidden = true;
 
+  /// What's wrong with the email, under it: asking for a hint without one.
+  String? emailError;
+
+  /// Asking the server for the hint: its link spins meanwhile.
+  bool gettingHint = false;
+
+  /// How strong the new master password is, as it's typed (making an
+  /// account): the core's `score` and `word`, or null with nothing typed.
+  Map<String, dynamic>? strength;
+
+  void judge() {
+    final typed = password.text;
+    setState(() {
+      strength = typed.isEmpty
+          ? null
+          : Core().passwordStrength(typed, [email.text.trim(), name.text.trim()]);
+    });
+  }
+
+  /// "Get your master password hint", before signing in, as the web vault
+  /// has it: for the email typed, on the server shown. The server emails it,
+  /// or shows it where it's set to, as the lock screen's does.
+  Future<void> getHint() async {
+    final address = email.text.trim();
+    if (address.isEmpty) {
+      setState(() => emailError = 'Type your email first, then ask for your hint.');
+      return;
+    }
+    setState(() {
+      gettingHint = true;
+      emailError = null;
+      serverError = null;
+    });
+    final answer = await whileBusy(() => Core.passwordHintAt(signInTo, address));
+    if (!mounted) return;
+    setState(() => gettingHint = false);
+    if (aboutTheServer(answer)) return;
+    final hint = answer.body['hint'] as String?;
+    await showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(
+          answer.ok ? 'Master password hint' : 'Couldn\'t get your hint',
+        ),
+        content: Text(
+          !answer.ok
+              ? answer.error ?? 'Try again in a moment.'
+              : hint != null
+              ? 'Your hint: $hint'
+              : 'If $address has an account with a hint, its server emailed the hint there.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('OK'),
+          ),
+        ],
+      ),
+    );
+  }
+
   /// Making an account instead (docs/core.md, "Making an account").
   bool creating = false;
   final name = TextEditingController();
@@ -465,7 +526,13 @@ class _SignInScreenState extends State<SignInScreen> {
           enabled: !working,
           keyboardType: TextInputType.emailAddress,
           autofillHints: const [AutofillHints.email],
-          decoration: const InputDecoration(labelText: 'Email'),
+          onChanged: (_) {
+            if (emailError != null) setState(() => emailError = null);
+          },
+          decoration: InputDecoration(
+            labelText: 'Email',
+            errorText: emailError,
+          ),
         ),
         const SizedBox(height: 12),
         TextField(
@@ -495,6 +562,19 @@ class _SignInScreenState extends State<SignInScreen> {
         ),
         const SizedBox(height: 16),
         WorkingButton(label: 'Sign in', working: working, onPressed: signIn),
+        TextButton(
+          key: const ValueKey('sign-in-hint'),
+          onPressed: working || gettingHint ? null : getHint,
+          child: gettingHint
+              ? const SizedBox.square(
+                  dimension: 18,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    semanticsLabel: 'Getting your master password hint',
+                  ),
+                )
+              : const Text('Get your master password hint'),
+        ),
         const SizedBox(height: 8),
         if (closedHere)
           // The server takes no new accounts: who to ask, not a form that
@@ -507,36 +587,43 @@ class _SignInScreenState extends State<SignInScreen> {
             child: _noNewAccounts('closed'),
           )
         else
-          TextButton(
+          // The other way in, a step quieter than Sign in.
+          OutlinedButton(
             onPressed: working
                 ? null
                 : () => setState(() {
                     creating = true;
                     error = null;
+                    emailError = null;
                     refused = null;
                     password.clear();
+                    strength = null;
                   }),
             child: const Text('Create account'),
           ),
+        // Then the server, and the way back: quieter still.
         if (managed == null) ...[
           const SizedBox(height: 8),
-          TextButton(
-            onPressed: working ? null : switchServer,
-            child: Text(
-              selfHosted ? 'Use PassBundle\'s server' : 'Self-hosted?',
-            ),
+          _quiet(
+            selfHosted ? 'Use PassBundle\'s server' : 'Self-hosted?',
+            working ? null : switchServer,
           ),
         ],
-        if (widget.onCancel != null) ...[
-          const SizedBox(height: 8),
-          TextButton(
-            onPressed: working ? null : widget.onCancel,
-            child: Text(widget.adding ? 'Cancel' : 'Back to my vault'),
+        if (widget.onCancel != null)
+          _quiet(
+            widget.adding ? 'Cancel' : 'Back to my vault',
+            working ? null : widget.onCancel,
           ),
-        ],
       ],
     );
   }
+
+  /// A link that isn't the screen's main way on: in the muted color.
+  Widget _quiet(String label, VoidCallback? onPressed) => TextButton(
+    style: TextButton.styleFrom(foregroundColor: context.colors.muted),
+    onPressed: onPressed,
+    child: Text(label),
+  );
 
   /// The server someone hosts themselves, with what's wrong with it.
   Widget _serverField() => Column(
@@ -622,6 +709,7 @@ class _SignInScreenState extends State<SignInScreen> {
         enableSuggestions: false,
         autocorrect: false,
         enableIMEPersonalizedLearning: false,
+        onChanged: (_) => judge(),
         decoration: InputDecoration(
           labelText: 'Master password',
           helperText: 'At least 12 characters',
@@ -629,6 +717,11 @@ class _SignInScreenState extends State<SignInScreen> {
           suffixIcon: _hideButton(),
         ),
       ),
+      if (strength case final judged?)
+        PasswordStrength(
+          score: (judged['score'] as num?)?.toInt() ?? 0,
+          word: judged['word'] as String? ?? 'weak',
+        ),
       const SizedBox(height: 12),
       TextField(
         controller: confirm,
@@ -675,13 +768,14 @@ class _SignInScreenState extends State<SignInScreen> {
                 formErrors = const {};
                 password.clear();
                 confirm.clear();
+                strength = null;
               }),
         child: const Text('I have an account: sign in'),
       ),
       if (managed == null)
-        TextButton(
-          onPressed: working ? null : switchServer,
-          child: Text(selfHosted ? 'Use PassBundle\'s server' : 'Self-hosted?'),
+        _quiet(
+          selfHosted ? 'Use PassBundle\'s server' : 'Self-hosted?',
+          working ? null : switchServer,
         ),
     ],
   );
@@ -744,6 +838,66 @@ class _SignInScreenState extends State<SignInScreen> {
             style: TextStyle(color: context.colors.muted, fontSize: 13),
           ),
       ],
+    );
+  }
+}
+
+/// How strong a new master password is, as it's typed: four bars and a
+/// word, by zxcvbn in the core (the measure the web vault's and Health's
+/// is): weak in red, good in amber, strong in green, as an item's password
+/// line says it.
+class PasswordStrength extends StatelessWidget {
+  const PasswordStrength({super.key, required this.score, required this.word});
+
+  /// zxcvbn's score, 0 to 4.
+  final int score;
+
+  /// "weak", "good", or "strong".
+  final String word;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.colors;
+    final scheme = Theme.of(context).colorScheme;
+    final tone = switch (word) {
+      'strong' => scheme.primary,
+      'good' => ItemKind.note.color(Theme.of(context).brightness),
+      _ => scheme.error,
+    };
+    final bars = score.clamp(1, 4);
+    final said = '${word[0].toUpperCase()}${word.substring(1)}';
+    return Semantics(
+      label: 'Master password strength: $word',
+      excludeSemantics: true,
+      child: Padding(
+        key: const ValueKey('password-strength'),
+        padding: const EdgeInsets.fromLTRB(4, 8, 4, 0),
+        child: Row(
+          children: [
+            for (var i = 0; i < 4; i++) ...[
+              if (i > 0) const SizedBox(width: 4),
+              Expanded(
+                child: Container(
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: i < bars ? tone : c.line,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+              ),
+            ],
+            const SizedBox(width: 10),
+            Text(
+              said,
+              style: TextStyle(
+                color: tone,
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
@@ -1001,7 +1155,13 @@ class _UnlockScreenState extends State<UnlockScreen> {
   @override
   Widget build(BuildContext context) => Centered(
     children: [
-      heading(context, 'Unlock PassBundle', widget.email),
+      // The account, and under it the server it's on.
+      heading(
+        context,
+        'Unlock PassBundle',
+        widget.email,
+        detail: Uri.tryParse(widget.server)?.host ?? widget.server,
+      ),
       if (usingPin)
         TextField(
           key: const ValueKey('unlock-pin'),
@@ -1076,6 +1236,8 @@ class _UnlockScreenState extends State<UnlockScreen> {
       if (method != null) ...[
         const SizedBox(height: 10),
         OutlinedButton.icon(
+          // As tall as Unlock above it.
+          style: OutlinedButton.styleFrom(minimumSize: const Size(64, 48)),
           onPressed: working ? null : unlockWithBiometric,
           // Face ID (or a phone's face unlock) by its face, as the offer
           // to turn it on shows it; a fingerprint otherwise.
@@ -1102,29 +1264,16 @@ class _UnlockScreenState extends State<UnlockScreen> {
                 )
               : const Text('Get your master password hint'),
         ),
-      const SizedBox(height: 6),
-      Text(
-        Uri.tryParse(widget.server)?.host ?? widget.server,
-        textAlign: TextAlign.center,
-        style: TextStyle(color: context.colors.muted, fontSize: 12),
-      ),
+      // The others: a phone's sheet, or a dialog over a computer's screen,
+      // without Sign out (the screen's own is below).
       if (widget.menu case final menu? when menu.several)
-        Center(
-          child: AccountMenuButton(
-            menu: menu,
-            // The lock screen's own Sign out is below.
-            signOut: false,
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-              child: Text(
-                'Switch account',
-                style: TextStyle(
-                  color: Theme.of(context).colorScheme.primary,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ),
-          ),
+        TextButton(
+          onPressed: working
+              ? null
+              : () => isPhone
+                    ? showAccounts(context, menu, signOut: false)
+                    : showAccountsDialog(context, menu),
+          child: const Text('Switch account'),
         ),
       TextButton(
         onPressed: working

@@ -395,10 +395,78 @@ class _SettingsListState extends State<SettingsList> {
     final onMode = widget.onMode;
     final email = widget.email;
     final webVault = widget.server;
+    // With more than one account here: this one's name and color, and
+    // whether these settings are its own or the device's.
+    final named = widget.named ?? _shownOf(widget.menu);
+    final several = named != null;
+    Future<void> openWebVault(String path) async {
+      final opened = await Core.openWebsite('$webVault$path');
+      if (!opened && mounted) {
+        setState(() => note = 'Couldn\'t open the web vault.');
+      }
+    }
+
+    // The master password, two-step login, and the rest of the account's
+    // own settings are the web vault's, a click away on every device.
+    final accountSettings = webVault == null
+        ? null
+        : ListTile(
+            key: const ValueKey('web-account-settings'),
+            title: const Text('Account settings'),
+            subtitle: const Text(
+              'Your master password, two-step login, and more, in the web vault',
+            ),
+            trailing: const Icon(Icons.open_in_new_rounded, size: 20),
+            onTap: () => openWebVault('/#/settings/account'),
+          );
     return Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
+        // On a computer, the account first, in one group: who it is, its
+        // name and color where there are others, its settings in the web
+        // vault, and signing out of it. What follows is its own until the
+        // device's settings, which say so.
+        if (widget.menu == null && email != null)
+          SettingsGroup(
+            title: 'Account',
+            footer: several
+                ? 'Unlock, locking, and sign-in requests below are this account\'s. Each account has its own.'
+                : null,
+            children: [
+              ListTile(
+                title: Text(
+                  named?.label ?? email,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                subtitle: Text(
+                  [
+                    if (named?.name != null) email,
+                    if (widget.server case final server?)
+                      Uri.tryParse(server)?.host ?? server,
+                  ].join(' · '),
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              if (named != null)
+                AccountLabelEditor(key: ValueKey(named.id), entry: named),
+              ?accountSettings,
+              // Signing out of this account, by name; the others stay.
+              if (widget.onSignOut case final signOut?)
+                ListTile(
+                  key: const ValueKey('settings-sign-out'),
+                  leading: const Icon(Icons.logout_rounded),
+                  title: Text(
+                    'Sign out of ${named?.label ?? email}',
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  onTap: signOut,
+                ),
+            ],
+          ),
         if (unlockGroup)
           SettingsGroup(
             title: 'Unlock',
@@ -448,6 +516,11 @@ class _SettingsListState extends State<SettingsList> {
         ),
         SettingsGroup(
           title: 'Appearance',
+          // With more than one account, this and what follows are this
+          // device's, for every account on it.
+          footer: several
+              ? 'This device\'s, for every account on it, as are the settings under it.'
+              : null,
           children: [
             // Each icon tells the server a website the person has a login
             // for; upstream's apps let them turn that off.
@@ -521,7 +594,8 @@ class _SettingsListState extends State<SettingsList> {
           ),
         if (updates case final updates?) UpdatesSection(updates: updates),
         // On a phone, which has no menu for them: importing and exporting
-        // are the web vault's, which opens in the browser.
+        // are the web vault's, which opens in the browser, with the
+        // account's own settings there.
         if (isPhone && webVault != null)
           SettingsGroup(
             title: 'Web vault',
@@ -536,66 +610,27 @@ class _SettingsListState extends State<SettingsList> {
                   key: ValueKey(key),
                   title: Text(label),
                   trailing: const Icon(Icons.open_in_new_rounded, size: 20),
-                  onTap: () async {
-                    final opened = await Core.openWebsite('$webVault$path');
-                    if (!opened && mounted) {
-                      setState(() => note = 'Couldn\'t open the web vault.');
-                    }
-                  },
+                  onTap: () => openWebVault(path),
                 ),
+              ?accountSettings,
             ],
           ),
         // The plans, where the server enforces them (plan.dart): their
         // state, never a way to pay.
         const PlanSettings(),
-        // With more than one account: what this one's called where they're
-        // listed together, and its color.
-        if (widget.named ?? _shownOf(widget.menu) case final entry?)
-          SettingsGroup(
-            title: 'This account',
-            footer: 'Its name and color label its items where accounts are listed together. Kept on this device.',
-            children: [AccountLabelEditor(key: ValueKey(entry.id), entry: entry)],
-          ),
         // On a phone: each account (the one these settings are for marked),
-        // adding one, and signing out of this one.
+        // adding one, and signing out of this one; then, with more than one,
+        // this one's name and color, in the same group.
         if (widget.menu case final menu?)
           SettingsGroup(
             title: 'Accounts',
             footer: menu.several
-                ? 'These settings are for ${email ?? 'the account shown'}. Each account has its own.'
+                ? 'These settings are for ${email ?? 'the account shown'}. Each account has its own; the name and color are kept on this device.'
                 : null,
-            children: [AccountsList(menu: menu)],
-          )
-        else if (email != null)
-          SettingsGroup(
-            title: 'Account',
             children: [
-              ListTile(
-                title: Text(
-                  email,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-                subtitle: widget.server == null
-                    ? null
-                    : Text(
-                        Uri.tryParse(widget.server!)?.host ?? widget.server!,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-              ),
-              // Signing out of this account, by name; the others stay.
-              if (widget.onSignOut case final signOut?)
-                ListTile(
-                  key: const ValueKey('settings-sign-out'),
-                  leading: const Icon(Icons.logout_rounded),
-                  title: Text(
-                    'Sign out of $email',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  onTap: signOut,
-                ),
+              AccountsList(menu: menu),
+              if (named != null)
+                AccountLabelEditor(key: ValueKey(named.id), entry: named),
             ],
           ),
         // About: the logo, and this version where the app knows it.
@@ -703,14 +738,6 @@ class SettingsDialog extends StatelessWidget {
               style: Theme.of(context).textTheme.headlineSmall,
             ),
           ),
-          if (account case final account?)
-            Padding(
-              padding: const EdgeInsets.fromLTRB(24, 4, 24, 0),
-              child: Text(
-                'For $account. Each account has its own.',
-                style: TextStyle(color: context.colors.muted, fontSize: 13),
-              ),
-            ),
           // Scrolls on a small screen, or with a large text size.
           Flexible(
             child: SingleChildScrollView(
