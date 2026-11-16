@@ -104,7 +104,7 @@ void main() {
           ),
           'plan-own',
         ),
-        ['Paid through December 15, 2026', 'Renews on December 15, 2026'],
+        ['Renews on December 15, 2026'],
       );
       expect(
         linesOf(
@@ -113,7 +113,7 @@ void main() {
           ),
           'plan-own',
         ),
-        ['Paid through December 15, 2026', 'Ends on December 15, 2026'],
+        ['Ends on December 15, 2026'],
       );
     });
 

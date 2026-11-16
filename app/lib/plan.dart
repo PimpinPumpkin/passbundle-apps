@@ -68,10 +68,13 @@ List<String> planStatus(
       ];
     case 'active':
       if (until is! String) return const ['Active'];
+      // One date, said once.
       return [
-        'Paid through ${date(until)}',
-        if (plan['renews'] == true) 'Renews on ${date(until)}',
-        if (plan['renews'] == false) 'Ends on ${date(until)}',
+        switch (plan['renews']) {
+          true => 'Renews on ${date(until)}',
+          false => 'Ends on ${date(until)}',
+          _ => 'Paid through ${date(until)}',
+        },
       ];
     case 'paymentDue':
       if (until is! String) return const ['Payment due'];
