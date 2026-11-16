@@ -1473,6 +1473,7 @@ class VaultScreenState extends State<VaultScreen> {
           child: RefreshIndicator(
             onRefresh: sync,
             child: CustomScrollView(
+              key: const ValueKey('vault-scroll'),
               physics: const AlwaysScrollableScrollPhysics(),
               slivers: phoneSlivers(context),
             ),
@@ -2288,7 +2289,6 @@ class Sidebar extends StatelessWidget {
       int depth = 0,
       bool strong = false,
       Widget? note,
-      double height = 38,
     }) => Padding(
       padding: EdgeInsets.only(top: 1, bottom: 1, left: 20.0 * depth),
       child: Material(
@@ -2298,7 +2298,7 @@ class Sidebar extends StatelessWidget {
           borderRadius: BorderRadius.circular(10),
           onTap: tap,
           child: ConstrainedBox(
-            constraints: BoxConstraints(minHeight: height),
+            constraints: const BoxConstraints(minHeight: 38),
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
               child: Row(
@@ -2397,9 +2397,10 @@ class Sidebar extends StatelessWidget {
               ),
             ),
           );
-    // The tools, pinned under the menu's list, so they never scroll out of
-    // sight: the generator, Send, then importing (a file in the web vault, and
-    // this computer's browsers), then exporting.
+    // The tools, after a line under the folders and the trash, as the web
+    // vault's menu has them: the generator and Send, then importing (a
+    // file in the web vault, and this computer's browsers), then exporting.
+    // The list fades at its foot, so whatever is past it reads as more.
     final tools = [
       if (onGenerator case final open?)
         entry(
@@ -2407,7 +2408,6 @@ class Sidebar extends StatelessWidget {
           label: 'Generator',
           on: false,
           tap: open,
-          height: 34,
         ),
       if (onSend case final open?)
         entry(
@@ -2415,7 +2415,6 @@ class Sidebar extends StatelessWidget {
           label: 'Send',
           on: false,
           tap: open,
-          height: 34,
         ),
       if (onImport case final open?)
         entry(
@@ -2424,7 +2423,6 @@ class Sidebar extends StatelessWidget {
           on: false,
           tap: open,
           trailing: webVaultMark,
-          height: 34,
         ),
       if (onBrowsers case final open?)
         entry(
@@ -2432,7 +2430,6 @@ class Sidebar extends StatelessWidget {
           label: 'Import from browsers',
           on: false,
           tap: open,
-          height: 34,
         ),
       if (onExport case final open?)
         entry(
@@ -2441,7 +2438,6 @@ class Sidebar extends StatelessWidget {
           on: false,
           tap: open,
           trailing: webVaultMark,
-          height: 34,
         ),
     ];
     // The window's buttons at the top left (a Mac's traffic lights, or
@@ -2588,20 +2584,17 @@ class Sidebar extends StatelessWidget {
                     tap: open,
                     trailing: webVaultMark,
                   ),
+                if (tools.isNotEmpty) ...[
+                  const Padding(
+                    padding: EdgeInsets.symmetric(horizontal: 6, vertical: 10),
+                    child: Divider(),
+                  ),
+                  ...tools,
+                ],
               ],
             ),
             ),
           ),
-          if (tools.isNotEmpty) ...[
-            const Divider(indent: 14, endIndent: 14),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(8, 4, 8, 4),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: tools,
-              ),
-            ),
-          ],
           const Divider(indent: 14, endIndent: 14),
           // The account shown: its email, which opens the account menu
           // (switching, adding one, signing out).

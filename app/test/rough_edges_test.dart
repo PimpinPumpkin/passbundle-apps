@@ -247,6 +247,12 @@ void main() {
     (tester) async {
       await unlockOnComputer(tester);
       final menu = find.byType(Sidebar);
+      // The tools, after the folders and the trash: the menu's list to its end.
+      await tester.drag(
+        find.descendant(of: menu, matching: find.byType(Scrollable)).first,
+        const Offset(0, -1000),
+      );
+      await tester.pumpAndSettle();
       // Import and Export, each the web vault's.
       for (final tool in ['Import', 'Export']) {
         expect(

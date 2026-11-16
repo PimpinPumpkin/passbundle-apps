@@ -263,10 +263,10 @@ void main() {
       expect(find.text('Unlock PassBundle'), findsOneWidget);
       await tester.enterText(find.byType(TextField), samplePassword);
       await tester.tap(find.text('Unlock'));
-      await pumpUntil(tester, find.text('Import from browsers'));
+      await pumpUntil(tester, find.text('crm.example.test'));
       expect(await tester.runAsync(Core.browserImportOffer), isFalse);
       expect(find.text('Import from your browsers'), findsNothing);
-      await tester.tap(find.text('Import from browsers'));
+      await tester.tap(await menuEntry(tester, 'Import from browsers'));
       await pumpUntil(tester, find.text('Import from your browsers'));
       // Then the profiles, found away from the screen.
       await pumpUntil(tester, find.text('Not now'));
@@ -295,7 +295,7 @@ void main() {
       await tester.pumpAndSettle();
       expect(core.testBrowsersRead(), isEmpty);
 
-      await tester.tap(find.text('Import from browsers'));
+      await tester.tap(await menuEntry(tester, 'Import from browsers'));
       await pumpUntil(tester, find.text('Import from your browsers'));
       // Then the profiles, found away from the screen.
       await pumpUntil(tester, find.text('Not now'));

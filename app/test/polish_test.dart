@@ -1,6 +1,6 @@
 // The apps' polish and parity gaps (the apps check's sections 2 and 3),
-// against the real core: the menu's tools pinned in their order, the trash
-// beside the folders, Favorites only once something is one, an empty vault
+// against the real core: the menu's tools in their order after the folders
+// and the trash, the list fading at its foot, Favorites only once something is one, an empty vault
 // saying what to do first, red last steps, notices clear of the menu, the
 // New picker naming what only the web vault makes and as tall as what's in
 // it, a new folder going where the person says, the generator's history,
@@ -15,6 +15,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:passbundle/core.dart';
+import 'package:passbundle/editor.dart' show ItemEditor;
 import 'package:passbundle/generator.dart';
 import 'package:passbundle/glyphs.dart';
 import 'package:passbundle/main.dart';
@@ -53,7 +54,7 @@ void main() {
 
   group('the menu on a computer', () {
     testWidgets(
-      'pins its tools in order under the list, with the trash after the folders and Favorites only once something is one',
+      'has its tools in order after the folders and the trash, fades at its foot, and shows Favorites only once something is one',
       (tester) async {
         await unlock(
           tester,
@@ -69,7 +70,8 @@ void main() {
         expect(top('Generator'), lessThan(top('Import')));
         expect(top('Import'), lessThan(top('Import from browsers')));
         expect(top('Import from browsers'), lessThan(top('Export')));
-        // Pinned: under the list, past its last folder and the trash.
+        // After a line, past the last folder and the trash, as the web
+        // vault's menu has them.
         expect(top('Trash'), lessThan(top('Generator')));
         // Export goes out of PassBundle: its own glyph, not Import's.
         expect(
@@ -259,7 +261,7 @@ void main() {
     (tester) async {
       await unlock(tester, computer);
       expect(Core().generatorHistory(), isEmpty);
-      await tester.tap(inMenu(find.text('Generator')));
+      await tester.tap(await menuEntry(tester, 'Generator'));
       await tester.pumpAndSettle();
       final made = generatedText(tester);
       final shown = tester.widget<GeneratedText>(
@@ -302,8 +304,22 @@ void main() {
         await signIn(tester, standIn);
         await edit(tester, 'Example Mail');
         final ask = find.byKey(const ValueKey('ask-for-master-password'));
-        await tester.ensureVisible(ask);
-        await tester.pumpAndSettle();
+        // At the editor's foot, past what its list has built yet.
+        Future<void> down() async {
+          await tester.scrollUntilVisible(
+            ask,
+            200,
+            scrollable: find
+                .descendant(
+                  of: find.byType(ItemEditor),
+                  matching: find.byType(Scrollable),
+                )
+                .first,
+          );
+          await tester.pumpAndSettle();
+        }
+
+        await down();
         expect(tester.widget<SwitchListTile>(ask).value, isFalse);
         await tester.tap(ask);
         await tester.pump();
@@ -323,8 +339,7 @@ void main() {
         await pumpUntil(tester, find.widgetWithText(OutlinedButton, 'Edit'));
         await tester.tap(find.widgetWithText(OutlinedButton, 'Edit'));
         await tester.pumpAndSettle();
-        await tester.ensureVisible(ask);
-        await tester.pumpAndSettle();
+        await down();
         expect(tester.widget<SwitchListTile>(ask).value, isTrue);
         await tester.tap(ask);
         await tester.pump();
