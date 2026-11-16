@@ -153,19 +153,21 @@ class Avatar extends StatelessWidget {
     required this.name,
     required this.kind,
     this.category,
+    this.template,
     this.iconHost,
     this.account,
     this.size = 36,
   });
 
-  /// Its summary from the core (`name`, `kind`, `category`, `iconHost`), as
-  /// lists have it.
+  /// Its summary from the core (`name`, `kind`, `category`, `templateId`,
+  /// `iconHost`), as lists have it.
   Avatar.of(Map<String, dynamic> item, {Key? key, double size = 36})
     : this(
         key: key,
         name: item['name'] as String,
         kind: item['kind'] as String,
         category: item['category'] as String?,
+        template: item['templateId'] as String?,
         iconHost: item['iconHost'] as String?,
         account: item['account'] as String?,
         size: size,
@@ -176,6 +178,10 @@ class Avatar extends StatelessWidget {
 
   /// Its category (core/src/templates.rs), its kind's when null.
   final String? category;
+
+  /// The template it was made from, by id: a built-in one may have a glyph
+  /// of its own on its category's tile (a database, a router).
+  final String? template;
 
   /// A login's website, for its icon (core/src/icons.rs).
   final String? iconHost;
@@ -200,7 +206,9 @@ class Avatar extends StatelessWidget {
     final category = this.category ?? (kind == 'login' ? 'login' : null);
     if (category != 'login') {
       return JewelTile(
-        jewel: category == null ? ItemKind.of(kind) : Categories.of(category),
+        jewel: category == null
+            ? ItemKind.of(kind)
+            : Categories.forItem(category, template),
         size: size,
       );
     }
@@ -498,7 +506,14 @@ class Centered extends StatelessWidget {
   }
 }
 
-Widget heading(BuildContext context, String title, String? subtitle) => Column(
+/// The logo, the screen's title, and under it what it's about (an email),
+/// with [detail] smaller under that (its server).
+Widget heading(
+  BuildContext context,
+  String title,
+  String? subtitle, {
+  String? detail,
+}) => Column(
   children: [
     const Center(child: Wordmark(size: 44)),
     const SizedBox(height: 28),
@@ -516,9 +531,84 @@ Widget heading(BuildContext context, String title, String? subtitle) => Column(
         style: TextStyle(color: context.colors.muted),
       ),
     ],
+    if (detail != null) ...[
+      const SizedBox(height: 2),
+      Text(
+        detail,
+        textAlign: TextAlign.center,
+        style: TextStyle(color: context.colors.muted, fontSize: 12),
+      ),
+    ],
     const SizedBox(height: 28),
   ],
 );
+
+/// The last step of something that can't be undone (moving to the trash,
+/// deleting, clearing history): a red button, as the web vault's
+/// confirmations have it, in place of the green one.
+ButtonStyle dangerButton(BuildContext context) {
+  final scheme = Theme.of(context).colorScheme;
+  return FilledButton.styleFrom(
+    backgroundColor: scheme.error,
+    foregroundColor: scheme.onError,
+  );
+}
+
+/// What's in a dialog on a computer, under its title and Close: as tall as
+/// what's in it, up to the dialog's most, scrolling past that. A phone shows
+/// the same on a page of its own, with its top bar.
+class DialogPage extends StatelessWidget {
+  const DialogPage({
+    super.key,
+    required this.title,
+    required this.children,
+    this.closeTooltip = 'Close',
+    this.onClose,
+    this.padding = const EdgeInsets.fromLTRB(20, 4, 20, 24),
+  });
+
+  final String title;
+  final List<Widget> children;
+  final String closeTooltip;
+
+  /// What Close does: closes the dialog without an answer, unless given.
+  final VoidCallback? onClose;
+  final EdgeInsetsGeometry padding;
+
+  @override
+  Widget build(BuildContext context) => Column(
+    mainAxisSize: MainAxisSize.min,
+    crossAxisAlignment: CrossAxisAlignment.stretch,
+    children: [
+      Padding(
+        padding: const EdgeInsets.fromLTRB(8, 8, 16, 4),
+        child: Row(
+          children: [
+            IconButton(
+              tooltip: closeTooltip,
+              icon: const Icon(Icons.close_rounded),
+              onPressed: onClose ?? () => Navigator.of(context).maybePop(),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Semantics(
+                header: true,
+                child: Text(
+                  title,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.titleLarge,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+      Flexible(
+        child: ListView(shrinkWrap: true, padding: padding, children: children),
+      ),
+    ],
+  );
+}
 
 /// A button that shows a spinner while its work runs.
 class WorkingButton extends StatelessWidget {
@@ -527,14 +617,19 @@ class WorkingButton extends StatelessWidget {
     required this.label,
     required this.working,
     required this.onPressed,
+    this.style,
   });
 
   final String label;
   final bool working;
   final VoidCallback onPressed;
 
+  /// Its look, where it isn't the primary one ([dangerButton]).
+  final ButtonStyle? style;
+
   @override
   Widget build(BuildContext context) => FilledButton(
+    style: style,
     onPressed: working ? null : onPressed,
     child: working
         ? const SizedBox(

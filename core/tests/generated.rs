@@ -49,9 +49,37 @@ fn the_generators_copy_is_its_last_password_until_the_vault_locks() {
     app.keep_generated(first.as_str()).unwrap();
     assert_eq!(app.value("", "generated").unwrap().as_str(), first.as_str());
 
+    // What the person copied or used is the generator's history, newest
+    // first, each once; what was only made isn't.
+    app.keep_generated(made.as_str()).unwrap();
+    app.keep_generated(first.as_str()).unwrap();
+    let history: Vec<String> = app
+        .generator_history()
+        .unwrap()
+        .iter()
+        .map(|(value, _)| value.as_str().to_owned())
+        .collect();
+    assert_eq!(history, vec![first.as_str(), made.as_str()]);
+    // It keeps the newest ones only.
+    for n in 0..30 {
+        app.keep_generated(&format!("made-{n}")).unwrap();
+    }
+    let history = app.generator_history().unwrap();
+    assert_eq!(history.len(), passbundle_core::app::GENERATOR_HISTORY);
+    assert_eq!(history[0].0.as_str(), "made-29");
+    assert!(history[0].1 > 0);
+    app.clear_generator_history();
+    assert!(app.generator_history().unwrap().is_empty());
+    app.keep_generated(first.as_str()).unwrap();
+
     app.lock();
     assert!(app.value("", "generated").is_err());
     assert!(app.keep_generated("anything").is_err());
+    // Locking forgets the history.
+    assert!(app.generator_history().is_err());
+    app.unlock(v["account"]["password"].as_str().unwrap())
+        .unwrap();
+    assert!(app.generator_history().unwrap().is_empty());
 
     // An icons folder an earlier build kept next to the vault goes when the
     // app opens: icons are in memory only.

@@ -65,6 +65,25 @@ class VaultStart {
 /// screens below it.
 const wideWidth = 900.0;
 
+/// The web vault's trash: restoring and deleting for good are its, for now.
+const trashPath = '/#/vault?type=trash';
+
+/// The menu's width on a computer, and the room around it.
+const sidebarWidth = 248.0;
+
+/// The item's pane beside the list on a computer, in a window this wide.
+double paneWidth(double window) => (window * 0.42).clamp(380, 552);
+
+/// Where a notice floats on a computer: over the list's column, clear of
+/// the menu (its Lock and Settings) and, where the list has room, the
+/// item's pane.
+EdgeInsets noticeInsets(double window) {
+  const left = 12 + sidebarWidth + 16;
+  final pane = paneWidth(window);
+  final right = window - left - pane >= 360 ? pane + 8 : 12.0;
+  return EdgeInsets.fromLTRB(left, 5, right, 12);
+}
+
 /// Settings asked for from outside the vault's screens (the Mac's PassBundle
 /// menu, Settings…): the vault shown opens them.
 final settingsAsked = ValueNotifier<int>(0);
@@ -160,6 +179,10 @@ class VaultScreenState extends State<VaultScreen> {
   /// The logins with something to fix, by id (core/src/health.rs): judged
   /// on a background isolate after each change.
   Map<String, Map<String, dynamic>> health = const {};
+
+  /// The report Health shows (`weak`, `reused`, `unsecured`, `expiring`),
+  /// or null for everything it has to fix.
+  String? report;
   bool syncing = false;
   bool signedOut = false;
 
@@ -432,13 +455,43 @@ class VaultScreenState extends State<VaultScreen> {
 
   List<Map<String, dynamic>> get shown => [
     for (final i in filter == Filter.everyAccount ? everyAccount : all)
-      if (shows(i, filter, filterId, health: health))
-        // Health says what each login has to fix.
+      if (shows(i, filter, filterId, health: health) &&
+          (filter != Filter.health ||
+              report == null ||
+              inReport(health[i['id']]!, report!)))
+        // Health says what each login has to fix; when it expires is its
+        // badge's to say, so it isn't said twice.
         if (filter == Filter.health)
-          {...i, 'subtitle': healthIssues(health[i['id']]!)}
+          {
+            ...i,
+            'subtitle': switch (healthIssues(
+              health[i['id']]!,
+              expiry: expiringLabel(i) == null,
+            )) {
+              '' => i['subtitle'],
+              final issues => issues,
+            },
+          }
         else
           i,
   ];
+
+  /// Nothing's in this account's vault yet, and nothing narrows the list:
+  /// the list says what to do first instead.
+  bool get emptyVault =>
+      everything.isEmpty &&
+      query.isEmpty &&
+      (filter == Filter.all || filter == Filter.everyAccount) &&
+      (filter != Filter.everyAccount || everyAccount.isEmpty);
+
+  /// What an empty vault offers: New, and the imports.
+  Widget emptyVaultNote() => EmptyVault(
+    onNew: newItem,
+    onBrowsers: isPhone ? null : importFromBrowsers,
+    onImport: widget.server == null
+        ? null
+        : () => openWebVault('/#/tools/import'),
+  );
 
   /// What the list shows, by name, for its header.
   String? get placeName => switch (filter) {
@@ -493,6 +546,8 @@ class VaultScreenState extends State<VaultScreen> {
     setState(() {
       filter = f;
       filterId = id;
+      // Health opens on everything it has to fix.
+      report = null;
       // What's selected is of the list shown.
       checked.clear();
       anchor = null;
@@ -500,6 +555,18 @@ class VaultScreenState extends State<VaultScreen> {
     // The search is every account's there, and this one's elsewhere.
     if (searchesChange && query.isNotEmpty) reload();
   }
+
+  /// Health's reports, each with how many items, as a row of choices over
+  /// its list: picking one shows only its items.
+  Widget get healthReportsBar => HealthReports(
+    health: health,
+    report: report,
+    onReport: (picked) => setState(() {
+      report = picked;
+      checked.clear();
+      anchor = null;
+    }),
+  );
 
   /// The selected items, in the list's order.
   List<String> get checkedIds => [
@@ -676,7 +743,7 @@ class VaultScreenState extends State<VaultScreen> {
       inPlace: true,
       // Restoring them is the web vault's: its trash, a tap away.
       action: action.kind == BulkKind.trash && outcome.done.isNotEmpty
-          ? ('Open trash', () => openWebVault('/#/vault?type=trash'))
+          ? ('Open trash', () => openWebVault(trashPath))
           : null,
     );
   }
@@ -700,11 +767,12 @@ class VaultScreenState extends State<VaultScreen> {
     }
   }
 
-  /// New item: which account it goes in, with more than one unlocked (the
-  /// chosen account's vault opens to make it there), then the picker (the
-  /// main kinds, then templates), then its editor.
+  /// New item: from "All accounts", which account it goes in, with more
+  /// than one unlocked (the chosen account's vault opens to make it there);
+  /// anywhere else it's the account shown's, which the menu names. Then the
+  /// picker (the main kinds, then templates), then its editor.
   Future<void> newItem({bool ask = true}) async {
-    if (ask && widget.menu != null) {
+    if (ask && widget.menu != null && filter == Filter.everyAccount) {
       final account = await chooseAccount(context, widget.menu!);
       if (account == null || !mounted) return;
       if (account != Core.account && widget.onOpenIn != null) {
@@ -724,6 +792,7 @@ class VaultScreenState extends State<VaultScreen> {
       context,
       templates: widget.core.templates(),
       asDialog: wide,
+      onWebVault: widget.server == null ? null : () => openWebVault('/#/vault'),
     );
     if (choice == null || !mounted) return;
     await edit(null, null, choice);
@@ -771,25 +840,15 @@ class VaultScreenState extends State<VaultScreen> {
     );
   }
 
-  /// The generator on its own, in a dialog (a computer's Tools).
+  /// The generator on its own, in a dialog (a computer's Tools), as tall
+  /// as what's in it.
   Future<void> openGeneratorTool() => showDialog<void>(
     context: context,
     builder: (context) => Dialog(
       clipBehavior: Clip.antiAlias,
       child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 480, maxHeight: 720),
-        child: Scaffold(
-          appBar: AppBar(
-            title: const Text('Generator'),
-            automaticallyImplyLeading: false,
-            leading: IconButton(
-              tooltip: 'Close',
-              icon: const Icon(Icons.close_rounded),
-              onPressed: () => Navigator.of(context).pop(),
-            ),
-          ),
-          body: GeneratorPage(core: widget.core, title: false),
-        ),
+        constraints: const BoxConstraints(maxWidth: 480, maxHeight: 760),
+        child: GeneratorPage(core: widget.core, title: false),
       ),
     ),
   );
@@ -877,6 +936,7 @@ class VaultScreenState extends State<VaultScreen> {
             child: const Text('Cancel'),
           ),
           FilledButton(
+            style: dangerButton(context),
             onPressed: () => Navigator.pop(context, true),
             child: const Text('Move to trash'),
           ),
@@ -896,23 +956,37 @@ class VaultScreenState extends State<VaultScreen> {
     showMessage(
       context,
       'Moved $name to the trash.',
-      action: ('Open trash', () => openWebVault('/#/vault?type=trash')),
+      action: ('Open trash', () => openWebVault(trashPath)),
     );
     return true;
   }
 
-  /// Makes a folder, then shows it.
+  /// Makes a folder where the person says, as the web vault's New folder
+  /// asks: in Personal, or in an organization where they may make shared
+  /// folders, at the top or inside another one. Then shows it.
   Future<void> newFolder() async {
-    final name = await askFolderName(context, 'New folder');
-    if (name == null || !mounted) return;
-    final answer = await whileBusy(() => Core.createFolder(name));
+    final made = await askNewFolder(context, places);
+    if (made == null || !mounted) return;
+    final organization = made.organization;
+    final answer = await whileBusy(
+      () => organization == null
+          ? Core.createFolder(made.name)
+          : Core.createCollection(organization, made.name),
+    );
     if (!mounted) return;
     reload();
     if (!answer.ok) {
       showMessage(context, answer.error ?? 'Couldn\'t make the folder.');
       return;
     }
-    choose(Filter.folder, answer.body['id'] as String?);
+    final id = answer.body['id'] as String?;
+    if (organization == null) {
+      choose(Filter.folder, id);
+    } else if (places.collection(id) != null) {
+      choose(Filter.collection, id);
+    } else {
+      choose(Filter.organization, organization);
+    }
   }
 
   Future<void> renameFolder(String id, String name) async {
@@ -931,7 +1005,7 @@ class VaultScreenState extends State<VaultScreen> {
     final sure = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        title: Text('Delete the folder $name?'),
+        title: Text('Delete the $name folder?'),
         content: const Text('Its items stay in Personal, in no folder.'),
         actions: [
           TextButton(
@@ -939,6 +1013,7 @@ class VaultScreenState extends State<VaultScreen> {
             child: const Text('Cancel'),
           ),
           FilledButton(
+            style: dangerButton(context),
             onPressed: () => Navigator.pop(context, true),
             child: const Text('Delete folder'),
           ),
@@ -965,6 +1040,7 @@ class VaultScreenState extends State<VaultScreen> {
         places: places,
         server: widget.server,
         phone: true,
+        atRisk: atRisk(health[id]),
         onEdit: () => edit(id),
         onChanged: reload,
         onTrash: (name) async {
@@ -1037,14 +1113,23 @@ class VaultScreenState extends State<VaultScreen> {
             id: selected!,
             places: places,
             server: widget.server,
+            atRisk: atRisk(health[selected]),
             onEdit: () => edit(selected),
             onChanged: reload,
             onTrash: (name) => trash(selected!, name),
           );
     // The top band is the window's (window_chrome.dart): the menu's top, the
     // list's search, and the item's actions sit where a title bar would, so
-    // the signed-out banner goes in the list, under its search.
-    return Scaffold(
+    // the signed-out banner goes in the list, under its search. Notices float
+    // over the list's column, clear of the menu's Lock and Settings.
+    final theme = Theme.of(context);
+    return Theme(
+      data: theme.copyWith(
+        snackBarTheme: theme.snackBarTheme.copyWith(
+          insetPadding: noticeInsets(MediaQuery.sizeOf(context).width),
+        ),
+      ),
+      child: Scaffold(
       body: Column(
         children: [
           Expanded(
@@ -1065,6 +1150,7 @@ class VaultScreenState extends State<VaultScreen> {
                   onBrowsers: isPhone ? null : importFromBrowsers,
                   onImport: () => openWebVault('/#/tools/import'),
                   onExport: () => openWebVault('/#/tools/export'),
+                  onTrash: () => openWebVault(trashPath),
                   onChoose: choose,
                   onNewFolder: newFolder,
                   onRenameFolder: renameFolder,
@@ -1077,6 +1163,10 @@ class VaultScreenState extends State<VaultScreen> {
                     title: placeName ?? 'All items',
                     banner: banners,
                     items: shown,
+                    emptyState: emptyVault ? emptyVaultNote() : null,
+                    header: filter == Filter.health && health.isNotEmpty
+                        ? healthReportsBar
+                        : null,
                     badges: !const {
                       Filter.folder,
                       Filter.noFolder,
@@ -1120,23 +1210,24 @@ class VaultScreenState extends State<VaultScreen> {
                 // The item, beside the list, as the web vault's side panel:
                 // up to 520 wide, the list taking the rest.
                 SizedBox(
-                  width: (MediaQuery.sizeOf(context).width * 0.42).clamp(
-                    380,
-                    552,
-                  ),
+                  width: paneWidth(MediaQuery.sizeOf(context).width),
+                  // Nothing to choose from, nothing said.
                   child:
                       pane ??
-                      Center(
-                        child: Text(
-                          'Choose an item',
-                          style: TextStyle(color: context.colors.muted),
-                        ),
-                      ),
+                      (shown.isEmpty
+                          ? const SizedBox.shrink()
+                          : Center(
+                              child: Text(
+                                'Choose an item',
+                                style: TextStyle(color: context.colors.muted),
+                              ),
+                            )),
                 ),
               ],
             ),
           ),
         ],
+      ),
       ),
     );
   }
@@ -1382,6 +1473,7 @@ class VaultScreenState extends State<VaultScreen> {
           child: RefreshIndicator(
             onRefresh: sync,
             child: CustomScrollView(
+              key: const ValueKey('vault-scroll'),
               physics: const AlwaysScrollableScrollPhysics(),
               slivers: phoneSlivers(context),
             ),
@@ -1395,10 +1487,48 @@ class VaultScreenState extends State<VaultScreen> {
     final c = context.colors;
     // Room under the last row for New item, which floats over it.
     const end = SliverToBoxAdapter(child: SizedBox(height: 96));
+    int count(Filter f, [String? id]) =>
+        all.where((i) => shows(i, f, id)).length;
     if (filter != Filter.all || query.isNotEmpty) {
       final list = shown;
+      // A folder's page lists the folders inside it first, as the menu
+      // nests them (not while searching).
+      final inside = query.isNotEmpty
+          ? const <PlaceEntry>[]
+          : [
+              for (final e in PlaceEntry.all(places))
+                if (e.id != null &&
+                    !e.owner &&
+                    (filter == Filter.folder || filter == Filter.collection) &&
+                    e.filter == filter &&
+                    (filter == Filter.folder
+                            ? places.folder(e.id)
+                            : places.collection(e.id))?['parentId'] ==
+                        filterId)
+                  PlaceEntry(
+                    label: e.label,
+                    glyph: e.glyph,
+                    depth: 1,
+                    filter: e.filter,
+                    id: e.id,
+                    ownFolder: e.ownFolder,
+                    look: e.look,
+                  ),
+            ];
       return [
-        if (list.isEmpty)
+        if (filter == Filter.health && health.isNotEmpty && query.isEmpty)
+          SliverPadding(
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+            sliver: SliverToBoxAdapter(child: healthReportsBar),
+          ),
+        if (inside.isNotEmpty) ...[
+          const SliverToBoxAdapter(child: SizedBox(height: 8)),
+          placeCard([
+            for (final e in inside)
+              (e, count(e.filter, e.id), () => choose(e.filter, e.id)),
+          ]),
+        ],
+        if (list.isEmpty && inside.isEmpty)
           SliverFillRemaining(
             hasScrollBody: false,
             child: Center(
@@ -1412,7 +1542,7 @@ class VaultScreenState extends State<VaultScreen> {
               ),
             ),
           )
-        else ...[
+        else if (list.isNotEmpty) ...[
           const SliverToBoxAdapter(child: SizedBox(height: 8)),
           itemCard(list),
           end,
@@ -1429,8 +1559,6 @@ class VaultScreenState extends State<VaultScreen> {
         trailing: trailing,
       ),
     );
-    int count(Filter f, [String? id]) =>
-        all.where((i) => shows(i, f, id)).length;
     // Each owner on a card of its own: Personal and its folders, then each
     // organization and its shared folders.
     final owners = <List<PlaceEntry>>[];
@@ -1440,7 +1568,7 @@ class VaultScreenState extends State<VaultScreen> {
     }
     return [
       SliverPadding(
-        padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+        padding: const EdgeInsets.only(top: 8),
         sliver: SliverToBoxAdapter(
           child: CategoryTiles(
             counts: {
@@ -1461,6 +1589,11 @@ class VaultScreenState extends State<VaultScreen> {
         const SliverToBoxAdapter(child: SizedBox(height: 12)),
         expiringCard(count(Filter.expiring)),
       ],
+      // Health, as a computer's menu has it: what to fix, by report.
+      if (all.isNotEmpty) ...[
+        const SliverToBoxAdapter(child: SizedBox(height: 12)),
+        healthCard(),
+      ],
       if (favorites.isNotEmpty) ...[heading('Favorites'), itemCard(favorites)],
       heading(
         'Folders',
@@ -1477,15 +1610,25 @@ class VaultScreenState extends State<VaultScreen> {
             (e, count(e.filter, e.id), () => choose(e.filter, e.id)),
         ]),
       ],
+      // The trash is the web vault's, after the folders as there.
+      if (widget.server != null) ...[
+        const SliverToBoxAdapter(child: SizedBox(height: 10)),
+        trashCard(),
+      ],
       heading('All items'),
       if (listed.isEmpty)
         SliverToBoxAdapter(
           child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-            child: Text(
-              'Nothing here yet. New item adds one.',
-              style: TextStyle(color: c.muted),
-            ),
+            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+            child: emptyVault
+                ? emptyVaultNote()
+                : Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 16,
+                      vertical: 8,
+                    ),
+                    child: Text(emptyNote, style: TextStyle(color: c.muted)),
+                  ),
           ),
         )
       else
@@ -1493,6 +1636,53 @@ class VaultScreenState extends State<VaultScreen> {
       end,
     ];
   }
+
+  /// The trash, on a phone: a row that opens the web vault's.
+  Widget trashCard() => card(1, (context, i, radius) {
+    final c = context.colors;
+    return InkWell(
+      key: const ValueKey('trash'),
+      borderRadius: radius,
+      onTap: () => openWebVault(trashPath),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: 56),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 8, 12, 8),
+          child: Row(
+            children: [
+              Container(
+                width: 40,
+                height: 40,
+                decoration: BoxDecoration(
+                  color: c.tint,
+                  borderRadius: BorderRadius.circular(11),
+                ),
+                alignment: Alignment.center,
+                child: Glyph(
+                  Glyphs.trash,
+                  size: 21,
+                  color: Theme.of(context).colorScheme.primary,
+                ),
+              ),
+              const SizedBox(width: 12),
+              const Expanded(
+                child: Text(
+                  'Trash',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w500),
+                ),
+              ),
+              Tooltip(
+                message: 'Opens the web vault',
+                child: Icon(Icons.open_in_new_rounded, size: 18, color: c.muted),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  });
 
   /// Rows on a resting card, built as they scroll into view.
   Widget card(int count, Widget Function(BuildContext, int, BorderRadius) row) {
@@ -1577,6 +1767,61 @@ class VaultScreenState extends State<VaultScreen> {
     );
   });
 
+  /// Health, on a phone: a card of its own, with how many items have
+  /// something to fix in a topaz pill, as a computer's menu has it.
+  Widget healthCard() => card(1, (context, i, radius) {
+    final brightness = Theme.of(context).brightness;
+    final c = context.colors;
+    return InkWell(
+      key: const ValueKey('health'),
+      borderRadius: radius,
+      onTap: () => choose(Filter.health),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: 56),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 8, 12, 8),
+          child: Row(
+            children: [
+              const JewelTile(jewel: Jewel.health, size: 40),
+              const SizedBox(width: 12),
+              const Expanded(
+                child: Text(
+                  'Health',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+                ),
+              ),
+              if (health.isNotEmpty)
+                DecoratedBox(
+                  decoration: BoxDecoration(
+                    color: ItemKind.note.tint(brightness),
+                    borderRadius: BorderRadius.circular(9),
+                  ),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 2,
+                    ),
+                    child: Text(
+                      '${health.length} to fix',
+                      style: TextStyle(
+                        color: ItemKind.note.color(brightness),
+                        fontSize: 13,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                ),
+              const SizedBox(width: 6),
+              Glyph(Glyphs.chevron, size: 18, color: c.muted, strokeWidth: 2),
+            ],
+          ),
+        ),
+      ),
+    );
+  });
+
   /// "All accounts", on a phone: a card of its own, above the favorites.
   Widget everyAccountCard() => card(1, (context, i, radius) {
     final c = context.colors;
@@ -1590,7 +1835,7 @@ class VaultScreenState extends State<VaultScreen> {
           padding: const EdgeInsets.fromLTRB(16, 8, 12, 8),
           child: Row(
             children: [
-              const JewelTile(jewel: Jewel.allItems, size: 40),
+              const JewelTile(jewel: Jewel.allAccounts, size: 40),
               const SizedBox(width: 12),
               const Expanded(
                 child: Text(
@@ -1698,10 +1943,10 @@ void showMessage(
   );
 }
 
-/// The kinds of item on a phone, each its jewel tile with how many there
-/// are: two to a row, or one when the names' words need the room (a large
-/// text size, a narrow phone). Only kinds that have items, as the web vault lists
-/// them.
+/// The kinds of item on a phone, each a chip with its jewel tile and how
+/// many there are, in one row that scrolls sideways: every name on one line,
+/// at any text size, so the favorites under them stay in sight. Only kinds
+/// that have items, as the web vault lists them.
 class CategoryTiles extends StatelessWidget {
   const CategoryTiles({
     super.key,
@@ -1712,96 +1957,52 @@ class CategoryTiles extends StatelessWidget {
   final Map<String, int> counts;
   final ValueChanged<String> onChoose;
 
-  static const _gap = 10.0;
-  static const _name = TextStyle(
-    fontFamily: passBundleFontFamily,
-    fontSize: 15,
-    fontWeight: FontWeight.w600,
-  );
-  static const _count = TextStyle(
-    fontFamily: passBundleFontFamily,
-    fontSize: 14,
-  );
-
-  double _width(String text, TextStyle style, TextScaler scaler) {
-    final painter = TextPainter(
-      text: TextSpan(text: text, style: style),
-      textScaler: scaler,
-      textDirection: TextDirection.ltr,
-      maxLines: 1,
-    )..layout();
-    final width = painter.width;
-    painter.dispose();
-    return width;
-  }
-
   @override
-  Widget build(BuildContext context) => LayoutBuilder(
-    builder: (context, constraints) {
-      final scaler = MediaQuery.textScalerOf(context);
-      final kinds = ItemKind.all
-          .where((k) => (counts[k.kind] ?? 0) > 0)
-          .toList();
-      if (kinds.isEmpty) return const SizedBox.shrink();
-      // A name may take two lines ("Bank / accounts"), but no word breaks.
-      final widest = kinds
-          .expand((k) => k.many.split(' '))
-          .map((w) => _width(w, _name, scaler))
-          .reduce(math.max);
-      final most = counts.values.fold(0, math.max);
-      // A tile: its padding, the jewel, the name, and the count.
-      final needs =
-          12 + 34 + 10 + widest + 8 + _width('$most', _count, scaler) + 12;
-      final columns = needs <= (constraints.maxWidth - _gap) / 2 ? 2 : 1;
-      return Column(
+  Widget build(BuildContext context) {
+    final kinds = ItemKind.all
+        .where((k) => (counts[k.kind] ?? 0) > 0)
+        .toList();
+    if (kinds.isEmpty) return const SizedBox.shrink();
+    return SingleChildScrollView(
+      key: const ValueKey('kinds'),
+      scrollDirection: Axis.horizontal,
+      padding: const EdgeInsets.symmetric(horizontal: 16),
+      child: Row(
         children: [
-          for (var i = 0; i < kinds.length; i += columns) ...[
-            if (i > 0) const SizedBox(height: _gap),
-            IntrinsicHeight(
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  for (var j = i; j < i + columns; j++) ...[
-                    if (j > i) const SizedBox(width: _gap),
-                    Expanded(
-                      child: j < kinds.length
-                          ? _tile(context, kinds[j])
-                          : const SizedBox.shrink(),
-                    ),
-                  ],
-                ],
-              ),
-            ),
+          for (final (i, kind) in kinds.indexed) ...[
+            if (i > 0) const SizedBox(width: 8),
+            _chip(context, kind),
           ],
         ],
-      );
-    },
-  );
+      ),
+    );
+  }
 
-  Widget _tile(BuildContext context, ItemKind kind) => RestingCard(
+  Widget _chip(BuildContext context, ItemKind kind) => RestingCard(
     radius: 14,
     child: InkWell(
       onTap: () => onChoose(kind.kind),
       child: ConstrainedBox(
-        constraints: const BoxConstraints(minHeight: 56),
+        constraints: const BoxConstraints(minHeight: 52),
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+          padding: const EdgeInsets.fromLTRB(8, 8, 14, 8),
           child: Row(
+            mainAxisSize: MainAxisSize.min,
             children: [
               JewelTile(jewel: kind, size: 34),
               const SizedBox(width: 10),
-              Expanded(
-                child: Text(
-                  kind.many,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: _name,
+              Text(
+                kind.many,
+                maxLines: 1,
+                style: const TextStyle(
+                  fontSize: 15,
+                  fontWeight: FontWeight.w600,
                 ),
               ),
               const SizedBox(width: 8),
               Text(
                 '${counts[kind.kind] ?? 0}',
-                style: _count.copyWith(color: context.colors.muted),
+                style: TextStyle(fontSize: 14, color: context.colors.muted),
               ),
             ],
           ),
@@ -2002,7 +2203,7 @@ String? ago(String? iso, [DateTime? now]) {
 class Sidebar extends StatelessWidget {
   const Sidebar({
     super.key,
-    this.width = 248,
+    this.width = sidebarWidth,
     required this.email,
     this.server,
     this.menu,
@@ -2017,6 +2218,7 @@ class Sidebar extends StatelessWidget {
     this.onBrowsers,
     this.onImport,
     this.onExport,
+    this.onTrash,
     required this.onChoose,
     required this.onNewFolder,
     required this.onRenameFolder,
@@ -2057,6 +2259,9 @@ class Sidebar extends StatelessWidget {
   final VoidCallback? onBrowsers;
   final VoidCallback? onImport;
   final VoidCallback? onExport;
+
+  /// The trash, which is the web vault's: restoring and deleting for good.
+  final VoidCallback? onTrash;
   final void Function(Filter, [String?]) onChoose;
   final VoidCallback onNewFolder;
   final void Function(String id, String name) onRenameFolder;
@@ -2083,7 +2288,7 @@ class Sidebar extends StatelessWidget {
       Widget? trailing,
       int depth = 0,
       bool strong = false,
-      String? note,
+      Widget? note,
     }) => Padding(
       padding: EdgeInsets.only(top: 1, bottom: 1, left: 20.0 * depth),
       child: Material(
@@ -2114,9 +2319,11 @@ class Sidebar extends StatelessWidget {
                       ),
                     ),
                   ),
-                  if (note != null || count != null)
+                  if (note case final pill?)
+                    pill
+                  else if (count != null)
                     Text(
-                      note ?? '$count',
+                      '$count',
                       style: TextStyle(color: c.muted, fontSize: 12),
                     ),
                   ?trailing,
@@ -2162,6 +2369,77 @@ class Sidebar extends StatelessWidget {
               (filter == Filter.kind && filterId == k.kind),
         )
         .toList();
+    // Health's count of items to fix, as the web vault has it: a topaz pill,
+    // hidden at none.
+    final brightness = Theme.of(context).brightness;
+    final toFixPill = toFix == 0
+        ? null
+        : Semantics(
+            label: '$toFix to fix',
+            child: ExcludeSemantics(
+              child: DecoratedBox(
+                key: const ValueKey('health-count'),
+                decoration: BoxDecoration(
+                  color: ItemKind.note.tint(brightness),
+                  borderRadius: BorderRadius.circular(9),
+                ),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+                  child: Text(
+                    '$toFix',
+                    style: TextStyle(
+                      color: ItemKind.note.color(brightness),
+                      fontSize: 12,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          );
+    // The tools, after a line under the folders and the trash, as the web
+    // vault's menu has them: the generator and Send, then importing (a
+    // file in the web vault, and this computer's browsers), then exporting.
+    // The list fades at its foot, so whatever is past it reads as more.
+    final tools = [
+      if (onGenerator case final open?)
+        entry(
+          tile: outline(Glyphs.generator),
+          label: 'Generator',
+          on: false,
+          tap: open,
+        ),
+      if (onSend case final open?)
+        entry(
+          tile: outline(Glyphs.send),
+          label: 'Send',
+          on: false,
+          tap: open,
+        ),
+      if (onImport case final open?)
+        entry(
+          tile: outline(Glyphs.download),
+          label: 'Import',
+          on: false,
+          tap: open,
+          trailing: webVaultMark,
+        ),
+      if (onBrowsers case final open?)
+        entry(
+          tile: outline(Glyphs.download),
+          label: 'Import from browsers',
+          on: false,
+          tap: open,
+        ),
+      if (onExport case final open?)
+        entry(
+          tile: outline(Glyphs.upload),
+          label: 'Export',
+          on: false,
+          tap: open,
+          trailing: webVaultMark,
+        ),
+    ];
     // The window's buttons at the top left (a Mac's traffic lights, or
     // Linux's on the left) sit in the menu's top, in the window's band, and
     // the menu starts under them, as 1Password's does.
@@ -2184,14 +2462,29 @@ class Sidebar extends StatelessWidget {
             ),
           ),
           Expanded(
-            child: ListView(
-              padding: const EdgeInsets.symmetric(horizontal: 8),
+            // The list fades out at its foot rather than cutting an entry in
+            // half, as the web vault's menu does; scrolled to its end, the
+            // last entry sits above the fade.
+            child: ShaderMask(
+              blendMode: BlendMode.dstIn,
+              shaderCallback: (bounds) => LinearGradient(
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter,
+                colors: const [Colors.black, Colors.black, Colors.transparent],
+                stops: [
+                  0,
+                  bounds.height <= 28 ? 0 : 1 - 28 / bounds.height,
+                  1,
+                ],
+              ).createShader(bounds),
+              child: ListView(
+              padding: const EdgeInsets.fromLTRB(8, 0, 8, 28),
               children: [
                 // Every unlocked account's items together, with more than
                 // one account signed in; "All items" are this one's.
                 if (menu?.several ?? false)
                   entry(
-                    tile: const Icon(Icons.layers_outlined, size: 20),
+                    tile: const JewelTile(jewel: Jewel.allAccounts, size: 24),
                     label: 'All accounts',
                     on: filter == Filter.everyAccount,
                     tap: () => onChoose(Filter.everyAccount),
@@ -2204,13 +2497,15 @@ class Sidebar extends StatelessWidget {
                   tap: () => onChoose(Filter.all),
                   count: count(Filter.all),
                 ),
-                entry(
-                  tile: const JewelTile(jewel: Jewel.favorites, size: 24),
-                  label: 'Favorites',
-                  on: filter == Filter.favorites,
-                  tap: () => onChoose(Filter.favorites),
-                  count: count(Filter.favorites),
-                ),
+                // Once something is a favorite (or while it's shown).
+                if (count(Filter.favorites) > 0 || filter == Filter.favorites)
+                  entry(
+                    tile: const JewelTile(jewel: Jewel.favorites, size: 24),
+                    label: 'Favorites',
+                    on: filter == Filter.favorites,
+                    tap: () => onChoose(Filter.favorites),
+                    count: count(Filter.favorites),
+                  ),
                 // What's expired or expires within 30 days, while there's any.
                 if (count(Filter.expiring) > 0 || filter == Filter.expiring)
                   entry(
@@ -2227,7 +2522,7 @@ class Sidebar extends StatelessWidget {
                   label: 'Health',
                   on: filter == Filter.health,
                   tap: () => onChoose(Filter.health),
-                  note: toFix == 0 ? null : '$toFix to fix',
+                  note: toFixPill,
                 ),
                 if (kinds.isNotEmpty) heading('Categories'),
                 for (final k in kinds)
@@ -2280,51 +2575,24 @@ class Sidebar extends StatelessWidget {
                           )
                         : null,
                   ),
-                if (onGenerator != null || onImport != null || onBrowsers != null) ...[
+                // The trash is the web vault's, after the folders as there.
+                if (onTrash case final open?)
+                  entry(
+                    tile: outline(Glyphs.trash),
+                    label: 'Trash',
+                    on: false,
+                    tap: open,
+                    trailing: webVaultMark,
+                  ),
+                if (tools.isNotEmpty) ...[
                   const Padding(
                     padding: EdgeInsets.symmetric(horizontal: 6, vertical: 10),
                     child: Divider(),
                   ),
-                  if (onGenerator != null)
-                    entry(
-                      tile: outline(Glyphs.generator),
-                      label: 'Generator',
-                      on: false,
-                      tap: onGenerator!,
-                    ),
-                  if (onSend != null)
-                    entry(
-                      tile: outline(Glyphs.send),
-                      label: 'Send',
-                      on: false,
-                      tap: onSend!,
-                    ),
-                  if (onImport != null)
-                    entry(
-                      tile: outline(Glyphs.download),
-                      label: 'Import',
-                      on: false,
-                      tap: onImport!,
-                      trailing: webVaultMark,
-                    ),
-                  if (onExport != null)
-                    entry(
-                      tile: outline(Glyphs.download),
-                      label: 'Export',
-                      on: false,
-                      tap: onExport!,
-                      trailing: webVaultMark,
-                    ),
-                  if (onBrowsers != null)
-                    entry(
-                      tile: outline(Glyphs.download),
-                      label: 'Import from browsers',
-                      on: false,
-                      tap: onBrowsers!,
-                    ),
+                  ...tools,
                 ],
-                const SizedBox(height: 8),
               ],
+            ),
             ),
           ),
           const Divider(indent: 14, endIndent: 14),
@@ -2396,6 +2664,8 @@ class ItemList extends StatefulWidget {
     this.accounts,
     this.banner,
     this.empty = 'Nothing here yet.',
+    this.emptyState,
+    this.header,
     this.checked = const {},
     this.onCheck,
     this.onCheckTo,
@@ -2406,6 +2676,13 @@ class ItemList extends StatefulWidget {
 
   /// What it says with nothing to show: why, by what it shows.
   final String empty;
+
+  /// What it shows in place of [empty] when the vault has nothing in it yet:
+  /// what to do first ([EmptyVault]).
+  final Widget? emptyState;
+
+  /// Over the rows, under the title: Health's reports.
+  final Widget? header;
 
   /// What the list shows: All items, a kind, a folder.
   final String title;
@@ -2620,18 +2897,26 @@ class _ItemListState extends State<ItemList> {
                     if (selection != null) Positioned.fill(child: selection),
                   ],
                 ),
+                if (widget.header case final header?)
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(20, 2, 18, 10),
+                    child: header,
+                  ),
                 Expanded(
                   child: items.isEmpty
-                      ? Center(
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 24),
-                            child: Text(
-                              widget.empty,
-                              textAlign: TextAlign.center,
-                              style: TextStyle(color: c.muted),
-                            ),
-                          ),
-                        )
+                      ? widget.emptyState ??
+                            Center(
+                              child: Padding(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 24,
+                                ),
+                                child: Text(
+                                  widget.empty,
+                                  textAlign: TextAlign.center,
+                                  style: TextStyle(color: c.muted),
+                                ),
+                              ),
+                            )
                       : ListView.builder(
                           padding: const EdgeInsets.fromLTRB(10, 2, 10, 12),
                           itemCount: items.length,
@@ -2663,6 +2948,187 @@ class _ItemListState extends State<ItemList> {
           ),
         ),
       ],
+    );
+  }
+}
+
+/// Health's reports, each with its tile, as the web vault's Reports page
+/// draws them (weak ruby, reused topaz, unsecured websites aquamarine,
+/// expiring items onyx): its key (`inReport`), its name, and its jewel.
+const healthReports = [
+  (
+    'weak',
+    'Weak passwords',
+    Jewel(Glyphs.key, Color(0xFFB01E54), Color(0xFFFF92B8)),
+  ),
+  (
+    'reused',
+    'Reused passwords',
+    Jewel(Glyphs.copy, Color(0xFFA9600C), Color(0xFFF2B766)),
+  ),
+  (
+    'unsecured',
+    'Unsecured websites',
+    Jewel(Glyphs.globe, Color(0xFF1C7FB8), Color(0xFF7CC4EF)),
+  ),
+  ('expiring', 'Expiring items', Jewel.expiring),
+];
+
+/// Health's summary: each report with something in it, with how many
+/// items, as choices over the list. Picking one shows only its items;
+/// picking it again shows everything to fix.
+class HealthReports extends StatelessWidget {
+  const HealthReports({
+    super.key,
+    required this.health,
+    required this.report,
+    required this.onReport,
+  });
+
+  /// What each item has to fix, by its id.
+  final Map<String, Map<String, dynamic>> health;
+  final String? report;
+  final ValueChanged<String?> onReport;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.colors;
+    final counts = {
+      for (final (key, _, _) in healthReports)
+        key: health.values.where((i) => inReport(i, key)).length,
+    };
+    final reports = [
+      for (final r in healthReports)
+        if (counts[r.$1]! > 0 || r.$1 == report) r,
+    ];
+    if (reports.isEmpty) return const SizedBox.shrink();
+    return Wrap(
+      key: const ValueKey('health-reports'),
+      spacing: 8,
+      runSpacing: 8,
+      children: [
+        for (final (key, label, jewel) in reports)
+          Semantics(
+            button: true,
+            selected: report == key,
+            child: Material(
+              color: report == key ? c.tint : c.pane,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12),
+                side: BorderSide(
+                  color: report == key ? c.selectedRing : c.line,
+                ),
+              ),
+              child: InkWell(
+                customBorder: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                onTap: () => onReport(report == key ? null : key),
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(8, 7, 12, 7),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      JewelTile(jewel: jewel, size: 28),
+                      const SizedBox(width: 8),
+                      Text(
+                        label,
+                        style: const TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Text(
+                        '${counts[key]}',
+                        style: TextStyle(color: c.muted, fontSize: 13),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+/// A vault with nothing in it yet, on a computer or a phone: what to do
+/// first, with New and the ways to bring passwords in, in place of a list.
+class EmptyVault extends StatelessWidget {
+  const EmptyVault({
+    super.key,
+    required this.onNew,
+    this.onBrowsers,
+    this.onImport,
+  });
+
+  final VoidCallback onNew;
+
+  /// This computer's browsers (browser_import.dart).
+  final VoidCallback? onBrowsers;
+
+  /// The web vault's import, for a file from another password manager.
+  final VoidCallback? onImport;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.colors;
+    return Center(
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 24),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 360),
+          child: Column(
+            key: const ValueKey('empty-vault'),
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              const Center(child: JewelTile(jewel: Jewel.allItems, size: 56)),
+              const SizedBox(height: 16),
+              const Text(
+                'Nothing saved yet',
+                textAlign: TextAlign.center,
+                style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700),
+              ),
+              const SizedBox(height: 6),
+              Text(
+                'Add your first item, or bring in the passwords you have now.',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: c.muted, height: 1.35),
+              ),
+              const SizedBox(height: 18),
+              FilledButton.icon(
+                onPressed: onNew,
+                icon: Glyph(
+                  Glyphs.plus,
+                  size: 18,
+                  strokeWidth: 2.4,
+                  color: Theme.of(context).colorScheme.onPrimary,
+                ),
+                label: const Text('New item'),
+              ),
+              if (onBrowsers case final browsers?) ...[
+                const SizedBox(height: 8),
+                OutlinedButton.icon(
+                  onPressed: browsers,
+                  icon: Glyph(Glyphs.download, size: 18, color: c.muted),
+                  label: const Text('Import from browsers'),
+                ),
+              ],
+              if (onImport case final fromFile?) ...[
+                const SizedBox(height: 8),
+                OutlinedButton.icon(
+                  onPressed: fromFile,
+                  icon: Icon(Icons.open_in_new_rounded, size: 16, color: c.muted),
+                  label: const Text('Import a file in the web vault'),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
     );
   }
 }
@@ -2904,7 +3370,12 @@ class ItemPane extends StatefulWidget {
     this.onChanged,
     this.server,
     this.phone = false,
+    this.atRisk = false,
   });
+
+  /// Health has something to fix with its password (a weak or reused one,
+  /// or a website without https): "Change password" opens the site's page.
+  final bool atRisk;
 
   /// It changed here (favorited, a version restored): the list reads again.
   final VoidCallback? onChanged;
@@ -3057,6 +3528,26 @@ class _ItemPaneState extends State<ItemPane> {
     '${widget.server}/#/vault?itemId=${Uri.encodeQueryComponent(widget.id)}&action=edit',
   );
 
+  /// Opening the site's change-password page: its button spins meanwhile.
+  bool changing = false;
+
+  /// "Change password", as the web vault has it on an at-risk login: the
+  /// site's own change-password page, in the browser (the core finds it:
+  /// core/src/change_password.rs).
+  Future<void> changePassword() async {
+    if (changing) return;
+    setState(() => changing = true);
+    final answer = await Core.changePasswordPage(widget.id);
+    if (!mounted) return;
+    setState(() => changing = false);
+    final page = answer.body['url'] as String?;
+    if (!answer.ok || page == null) {
+      showMessage(context, answer.error ?? 'Couldn\'t find the site\'s page.');
+      return;
+    }
+    await openSite(page);
+  }
+
   /// Whether the person may do something with the item (`edit`,
   /// `seePasswords`, `delete`, ...), as their shared folders allow (the
   /// core says yes for their own items); no when the core doesn't say.
@@ -3165,6 +3656,7 @@ class _ItemPaneState extends State<ItemPane> {
             child: const Text('Cancel'),
           ),
           FilledButton(
+            style: dangerButton(context),
             onPressed: () => Navigator.pop(context, true),
             child: const Text('Delete'),
           ),
@@ -3341,27 +3833,16 @@ class _ItemPaneState extends State<ItemPane> {
         padding: const EdgeInsets.symmetric(horizontal: 4),
         child: OutlinedButton(onPressed: edit, child: const Text('Edit')),
       )
-    else if (item['editInWebVault'] == true && widget.server != null)
-      // A phone's top bar has room for an icon only.
-      widget.phone
-          ? IconButton(
-              key: const ValueKey('edit-in-web-vault'),
-              tooltip: 'Edit in web vault',
-              icon: const Icon(Icons.open_in_new_rounded),
-              onPressed: editInWebVault,
-            )
-          : Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 4),
-              child: Tooltip(
-                message: 'PassBundle edits this kind in the web vault, for now',
-                child: OutlinedButton.icon(
-                  key: const ValueKey('edit-in-web-vault'),
-                  onPressed: editInWebVault,
-                  icon: const Icon(Icons.open_in_new_rounded, size: 16),
-                  label: const Text('Edit in web vault'),
-                ),
-              ),
-            ),
+    // A phone's top bar has room for icons only, and an unlabeled one would
+    // look like Open website: there it's a labeled button under the item's
+    // name ([webVaultButton]).
+    else if (item['editInWebVault'] == true &&
+        widget.server != null &&
+        !widget.phone)
+      Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 4),
+        child: webVaultButton(),
+      ),
     if (may(item, 'delete'))
       IconButton(
         tooltip: 'Move to trash',
@@ -3369,6 +3850,17 @@ class _ItemPaneState extends State<ItemPane> {
         onPressed: () => widget.onTrash(item['name'] as String),
       ),
   ];
+
+  /// Edit in web vault, for a kind the app doesn't edit yet, saying so.
+  Widget webVaultButton() => Tooltip(
+    message: 'PassBundle edits this kind in the web vault, for now',
+    child: OutlinedButton.icon(
+      key: const ValueKey('edit-in-web-vault'),
+      onPressed: editInWebVault,
+      icon: const Icon(Icons.open_in_new_rounded, size: 16),
+      label: const Text('Edit in web vault'),
+    ),
+  );
 
   /// Its details, each a row on a card with what can be done with it.
   Widget details(BuildContext context, Map<String, dynamic> item) {
@@ -3431,7 +3923,9 @@ class _ItemPaneState extends State<ItemPane> {
         );
     // Whether the person's shared folder lets them see the item's secrets.
     final sees = may(item, 'seePasswords');
-    Widget secretRow(String label, String what, {bool canCopy = true}) => row(
+    // Notes are plain to the person's shared folder: shown and copied by
+    // anyone who can open the item.
+    Widget secretRow(String label, String what) => row(
       label,
       // Google Sans Flex, like everything else: no system font, so it looks
       // the same everywhere. Not selectable: the system's own Copy would put
@@ -3452,7 +3946,7 @@ class _ItemPaneState extends State<ItemPane> {
             ),
             onPressed: () => toggle(what),
           ),
-        if (canCopy && sees) copyButton(label.toLowerCase(), what),
+        if (sees || what == 'notes') copyButton(label.toLowerCase(), what),
       ],
     );
 
@@ -3799,7 +4293,7 @@ class _ItemPaneState extends State<ItemPane> {
       }
     }
     if (item['hasNotes'] == true) {
-      rows.add(secretRow('Notes', 'notes', canCopy: false));
+      rows.add(secretRow('Notes', 'notes'));
     }
 
     final kind = ItemKind.of(item['kind'] as String);
@@ -3813,7 +4307,10 @@ class _ItemPaneState extends State<ItemPane> {
     final where = whereIs(item, widget.places);
     final jewel = item['category'] == null
         ? kind
-        : Categories.of(item['category'] as String);
+        : Categories.forItem(
+            item['category'] as String,
+            item['templateId'] as String?,
+          );
     // Someone whose shared folder hides passwords is told why they can't see them.
     if (!sees) {
       rows.add(
@@ -3865,6 +4362,29 @@ class _ItemPaneState extends State<ItemPane> {
                 ),
               ),
             ],
+          ),
+        ),
+      // A login with something to fix: the site's change-password page.
+      if (widget.atRisk && item['kind'] == 'login' && may(item, 'edit'))
+        Padding(
+          padding: const EdgeInsets.only(top: 10),
+          child: Align(
+            alignment: Alignment.centerLeft,
+            child: TextButton.icon(
+              key: const ValueKey('change-password'),
+              onPressed: changing ? null : changePassword,
+              icon: changing
+                  ? const SizedBox.square(
+                      dimension: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : Icon(
+                      Icons.open_in_new_rounded,
+                      size: 18,
+                      color: scheme.primary,
+                    ),
+              label: const Text('Change password'),
+            ),
           ),
         ),
       if (changesAttachments && !(upload?.isFor(widget.id) ?? false))
@@ -3950,6 +4470,12 @@ class _ItemPaneState extends State<ItemPane> {
             textAlign: TextAlign.center,
             style: TextStyle(color: c.muted, fontSize: 14),
           ),
+          if (item['editInWebVault'] == true &&
+              item['editable'] == false &&
+              widget.server != null) ...[
+            const SizedBox(height: 14),
+            Center(child: webVaultButton()),
+          ],
           const SizedBox(height: 22),
           if (rows.isNotEmpty) card,
           ...extras,
@@ -3994,7 +4520,7 @@ class _ItemPaneState extends State<ItemPane> {
                             ),
                             const SizedBox(height: 2),
                             Text(
-                              '$what · $where',
+                              '$what in $where',
                               style: TextStyle(color: c.muted, fontSize: 13),
                             ),
                           ],
@@ -4181,7 +4707,171 @@ class FolderMenu extends StatelessWidget {
   }
 }
 
-/// A folder's name, asked for: null when cancelled.
+/// A new folder, as [askNewFolder] gives it: its whole name (a nested one
+/// after its parent's, "Work/Clients", as upstream's apps nest them), and
+/// the organization it's in, or null for Personal.
+typedef NewFolder = ({String name, String? organization});
+
+/// Asks for a new folder's name and where it goes: Personal or an
+/// organization where the person may make shared folders (`canMakeFolders`),
+/// at the top or inside one of its folders. Null when canceled.
+Future<NewFolder?> askNewFolder(BuildContext context, Places places) =>
+    showDialog<NewFolder>(
+      context: context,
+      builder: (context) => _NewFolderDialog(places: places),
+    );
+
+class _NewFolderDialog extends StatefulWidget {
+  const _NewFolderDialog({required this.places});
+
+  final Places places;
+
+  @override
+  State<_NewFolderDialog> createState() => _NewFolderDialogState();
+}
+
+class _NewFolderDialogState extends State<_NewFolderDialog> {
+  final field = TextEditingController();
+
+  /// Where it can go, in the menu's order: (what the list says, how deep,
+  /// whether it's an owner, the organization, the parent's whole name).
+  late final List<(String, int, bool, String?, String?)> places = [
+    ('Personal', 0, true, null, null),
+    for (final f in widget.places.folders)
+      (
+        f['label'] as String,
+        1 + (f['depth'] as int),
+        false,
+        null,
+        f['name'] as String,
+      ),
+    for (final o in widget.places.organizations)
+      if (o['canMakeFolders'] == true) ...[
+        (o['name'] as String, 0, true, o['id'] as String, null),
+        for (final c in (o['collections'] as List).cast<Map<String, dynamic>>())
+          (
+            c['label'] as String,
+            1 + (c['depth'] as int),
+            false,
+            o['id'] as String,
+            c['name'] as String,
+          ),
+      ],
+  ];
+  int at = 0;
+
+  @override
+  void dispose() {
+    field.dispose();
+    super.dispose();
+  }
+
+  void done() {
+    final name = field.text.trim();
+    if (name.isEmpty) return;
+    final (_, _, _, organization, parent) = places[at];
+    Navigator.pop<NewFolder>(context, (
+      name: parent == null ? name : '$parent/$name',
+      organization: organization,
+    ));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.colors;
+    return AlertDialog(
+      title: const Text('New folder'),
+      content: SizedBox(
+        width: 380,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            TextField(
+              controller: field,
+              autofocus: true,
+              decoration: const InputDecoration(labelText: 'Name'),
+              onChanged: (_) => setState(() {}),
+              onSubmitted: (_) => done(),
+            ),
+            // Where it goes, when there's more than Personal's top.
+            if (places.length > 1) ...[
+              const SizedBox(height: 16),
+              DropdownButtonFormField<int>(
+                key: const ValueKey('new-folder-in'),
+                initialValue: at,
+                isExpanded: true,
+                decoration: const InputDecoration(labelText: 'In'),
+                selectedItemBuilder: (_) => [
+                  for (final (label, _, _, _, _) in places)
+                    Align(
+                      alignment: AlignmentDirectional.centerStart,
+                      child: Text(label, overflow: TextOverflow.ellipsis),
+                    ),
+                ],
+                items: [
+                  for (final (i, (label, depth, owner, _, _)) in places.indexed)
+                    DropdownMenuItem(
+                      value: i,
+                      child: Padding(
+                        padding: EdgeInsets.only(left: 18.0 * depth),
+                        child: Row(
+                          children: [
+                            Glyph(
+                              owner
+                                  ? (i == 0 ? Glyphs.person : Glyphs.building)
+                                  : places[i].$4 == null
+                                  ? Glyphs.folder
+                                  : Glyphs.sharedFolder,
+                              size: 18,
+                              color: owner
+                                  ? Theme.of(context).colorScheme.onSurface
+                                  : c.muted,
+                            ),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Text(
+                                label,
+                                overflow: TextOverflow.ellipsis,
+                                style: owner
+                                    ? const TextStyle(fontWeight: FontWeight.w700)
+                                    : null,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                ],
+                onChanged: (i) => setState(() => at = i ?? 0),
+              ),
+              if (places[at].$4 != null)
+                Padding(
+                  padding: const EdgeInsets.only(top: 8),
+                  child: Text(
+                    'Owners and admins see it, and give others access in the web vault.',
+                    style: TextStyle(color: c.muted, fontSize: 13),
+                  ),
+                ),
+            ],
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: field.text.trim().isEmpty ? null : done,
+          child: const Text('Save'),
+        ),
+      ],
+    );
+  }
+}
+
+/// A folder's name, asked for: null when canceled.
 Future<String?> askFolderName(
   BuildContext context,
   String title, [

@@ -231,8 +231,7 @@ void main() {
       // The generator: a password, then a passphrase, which it remembers.
       await tester.tap(find.byTooltip('Generate a password'));
       await tester.pumpAndSettle();
-      String generated() =>
-          tester.widget<Text>(find.byKey(const Key('generated'))).data!;
+      String generated() => generatedText(tester);
       expect(generated(), hasLength(20));
       await tester.tap(find.text('0-9'));
       await tester.pumpAndSettle();
@@ -336,9 +335,7 @@ void main() {
         ' ',
       );
       await tester.pumpAndSettle();
-      final made = tester
-          .widget<Text>(find.byKey(const Key('generated')))
-          .data!;
+      final made = generatedText(tester);
       expect(made.split(' '), hasLength(8));
       expect(made, matches(RegExp(r'^([A-Z][a-z-]+ ){7}[A-Z][a-z-]+$')));
       // The generator's count, not the one-time code's seconds behind it.
@@ -607,7 +604,7 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(find.text('Delete'));
       await tester.pumpAndSettle();
-      expect(find.text('Delete the folder Personal?'), findsOneWidget);
+      expect(find.text('Delete the Personal folder?'), findsOneWidget);
       expect(
         find.text('Its items stay in Personal, in no folder.'),
         findsOneWidget,
@@ -1066,6 +1063,9 @@ void main() {
       await tester.tap(find.byTooltip('Settings'));
       await tester.pump();
       await pumpUntil(tester, find.byKey(const ValueKey('show-icons')));
+      // Under the account, which Settings has first.
+      await tester.ensureVisible(find.byKey(const ValueKey('show-icons')));
+      await tester.pumpAndSettle();
       await tester.tap(find.byKey(const ValueKey('show-icons')));
       await tester.pump();
       await tester.tap(find.text('Close'));
@@ -1187,14 +1187,11 @@ void main() {
       // The sample's folder is called Personal too: the owner comes first,
       // its folder after it.
       Future<void> choose(String place, {bool last = false}) async {
-        // Below the kinds and favorites: the vault's list, not the search's
-        // field, scrolled past the folders.
-        await tester.scrollUntilVisible(
-          find.text('All items'),
-          100,
-          scrollable: find.byType(Scrollable).last,
-        );
-        await tester.tap(last ? find.text(place).last : find.text(place).first);
+        // Below the kinds, Health, and favorites: the vault's list (not the
+        // search's field, nor the kinds' row), scrolled to the place.
+        final target = last ? find.text(place).last : find.text(place).first;
+        await tester.scrollUntilVisible(target, 100, scrollable: vaultScroll);
+        await tester.tap(target);
         await tester.pumpAndSettle();
       }
 
@@ -1262,10 +1259,11 @@ void main() {
           it: {'keykeeperLook': bankLook},
         },
       );
+      // Down the vault's list (not the kinds' row) to the shared folder.
       await tester.scrollUntilVisible(
-        find.text('All items'),
+        find.text('IT'),
         100,
-        scrollable: find.byType(Scrollable).last,
+        scrollable: vaultScroll,
       );
       final tile = bankTiles(find.byType(MaterialApp));
       expect(tile, findsOneWidget);
@@ -1283,9 +1281,7 @@ void main() {
       await unlockOnPhone(tester, const Size(390, 844));
       await tester.tap(find.byTooltip('Generator'));
       await tester.pumpAndSettle();
-      final made = tester
-          .widget<Text>(find.byKey(const Key('generated')))
-          .data!;
+      final made = generatedText(tester);
       expect(made, hasLength(20));
       await tester.tap(find.text('Copy password'));
       await tester.pump();
@@ -1313,6 +1309,10 @@ void main() {
         // locks"), with biometrics already on, so nothing is offered.
         PhoneStandIn(tester, status: 'setUp');
         await unlockOnPhone(tester, size);
+        // The kinds scroll sideways, in one row: SSH keys may be past the
+        // edge.
+        await tester.ensureVisible(find.text('SSH keys'));
+        await tester.pumpAndSettle();
         await tester.tap(find.text('SSH keys'));
         await tester.pumpAndSettle();
         await tester.tap(find.text('Build server'));

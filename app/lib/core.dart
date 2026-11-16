@@ -186,6 +186,12 @@ class Core {
   late final _passwordHint = _lib.lookupFunction<_Str1, _Str1>(
     'pb_password_hint',
   );
+  late final _passwordHintAt = _lib.lookupFunction<_Str2, _Str2>(
+    'pb_password_hint_at',
+  );
+  late final _passwordStrength = _lib.lookupFunction<_Str2, _Str2>(
+    'pb_password_strength',
+  );
   late final _signUp = _lib.lookupFunction<_Str5, _Str5>('pb_sign_up');
   late final _finish = _lib.lookupFunction<_FinishNative, _Finish>(
     'pb_finish_sign_in',
@@ -258,6 +264,8 @@ class Core {
   late final _icon = _lib.lookupFunction<_Str2, _Str2>('pb_icon');
   late final _testIcons = _lib.lookupFunction<_Str1, _Str1>('pb_test_icons');
   late final _keepGenerated = _lib.lookupFunction<_Str2, _Str2>('pb_keep_generated');
+  late final _generatorHistory = _lib.lookupFunction<_Str1, _Str1>('pb_generator_history');
+  late final _clearGeneratorHistory = _lib.lookupFunction<_Str1, _Str1>('pb_clear_generator_history');
   late final _appearance = _lib.lookupFunction<_Str0, _Str0>('pb_appearance');
   late final _setAppearance = _lib.lookupFunction<_Str1, _Str1>(
     'pb_set_appearance',
@@ -306,6 +314,8 @@ class Core {
   late final _bulkPlan = _lib.lookupFunction<_Str3, _Str3>('pb_bulk_plan');
   late final _bulk = _lib.lookupFunction<_Str4, _Str4>('pb_bulk');
   late final _createFolder = _lib.lookupFunction<_Str2, _Str2>('pb_create_folder');
+  late final _createCollection = _lib.lookupFunction<_Str3, _Str3>('pb_create_collection');
+  late final _changePasswordPage = _lib.lookupFunction<_Str2, _Str2>('pb_change_password_page');
   late final _renameFolder = _lib.lookupFunction<_Str3, _Str3>('pb_rename_folder');
   late final _deleteFolder = _lib.lookupFunction<_Str2, _Str2>('pb_delete_folder');
   late final _generate = _lib.lookupFunction<_Str2, _Str2>('pb_generate');
@@ -530,6 +540,28 @@ class Core {
   static Future<Answer> passwordHint() => _background(
     (c, a) => c._with([a], (p) => c._answer(c._passwordHint(p[0]))),
   );
+
+  /// The master password hint for an email on a server, from the sign-in
+  /// screen before any account is here: its server emails it (`hint` null),
+  /// or shows it (`hint`), as it's set to.
+  static Future<Answer> passwordHintAt(String server, String email) =>
+      _background(
+        (c, _) => c._with([
+          server,
+          email,
+        ], (p) => c._answer(c._passwordHintAt(p[0], p[1]))),
+      );
+
+  /// How strong a new master password is as it's typed (zxcvbn, in the
+  /// core): `score` (0 to 4) and `word` ("weak", "good", or "strong"), with
+  /// [hints] (the email and name) counting as easy to guess. Nothing is kept
+  /// or sent.
+  Map<String, dynamic> passwordStrength(String password, List<String> hints) =>
+      _with([
+            password,
+            jsonEncode(hints),
+          ], (p) => _answer(_passwordStrength(p[0], p[1])))
+          as Map<String, dynamic>;
 
   /// A sign-in that's done names the account signed in to: the screens show it.
   static Future<Answer> _signedIn(Future<Answer> signing) async {
@@ -1182,6 +1214,27 @@ class Core {
         c._with([a, name], (p) => c._answer(c._createFolder(p[0], p[1]))),
   );
 
+  /// Makes a shared folder in an organization where the person may
+  /// (`canMakeFolders` in [places]), then syncs: `id`, or the words to show.
+  static Future<Answer> createCollection(String organizationId, String name) =>
+      _background(
+        (c, a) => c._with([
+          a,
+          organizationId,
+          name,
+        ], (p) => c._answer(c._createCollection(p[0], p[1], p[2]))),
+      );
+
+  /// "Change password" for a login with something to fix: the site's own
+  /// change-password page (`url`), found as the web vault finds it
+  /// (core/src/change_password.rs), or the words to show.
+  static Future<Answer> changePasswordPage(String id) => _background(
+    (c, a) => c._with([
+      a,
+      id,
+    ], (p) => c._answer(c._changePasswordPage(p[0], p[1]))),
+  );
+
   static Future<Answer> renameFolder(String id, String name) => _background(
     (c, a) => c._with([
       a,
@@ -1374,6 +1427,29 @@ class Core {
     if (!kept.ok) return kept;
     return copy('', 'generated');
   }
+
+  /// A password or passphrase from the generator that the person used in
+  /// an item: it goes in the generator's history ([generatorHistory]), as a
+  /// copied one does.
+  Answer rememberGenerated(String used) => Answer(
+    _with([account, used], (p) => _answer(_keepGenerated(p[0], p[1])))
+        as Map<String, dynamic>,
+  );
+
+  /// The generator's history: what it made that the person copied or used
+  /// since the vault was unlocked, newest first, each `{value, at}` (`at` in
+  /// seconds since 1970). The core keeps it in memory only, and forgets it
+  /// when the vault locks.
+  List<Map<String, dynamic>> generatorHistory() {
+    final answer =
+        _with([account], (p) => _answer(_generatorHistory(p[0])))
+            as Map<String, dynamic>;
+    return ((answer['history'] as List?) ?? const [])
+        .cast<Map<String, dynamic>>();
+  }
+
+  void clearGeneratorHistory() =>
+      _with([account], (p) => _answer(_clearGeneratorHistory(p[0])));
 
   /// How the app looks on this device: `showIcons`.
   Map<String, dynamic> appearance() =>

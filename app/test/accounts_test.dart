@@ -413,19 +413,42 @@ void main() {
   );
 
   testWidgets(
-    'a new item asks which account it goes in, and is made in the one chosen',
+    'from All accounts, a new item asks which account it goes in, and is made in the one chosen',
+    (tester) async {
+      wideWindow(tester);
+      final [w, p] = await unlockBoth(tester);
+      expect(Core.account, p);
+      await tester.tap(find.text('All accounts'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('New item'));
+      await tester.pumpAndSettle();
+      expect(find.text('Save it in which account?'), findsOneWidget);
+      // Cancel asks nothing more.
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+      expect(find.text('Save it in which account?'), findsNothing);
+      expect(find.text('What are you saving?'), findsNothing);
+      await tester.tap(find.byTooltip('New item'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(ValueKey('choose-account-$w')));
+      // The work account's vault, and New item's picker there.
+      await pumpUntil(tester, find.text('What are you saving?'));
+      expect(Core.account, w);
+      expect(states(), {w: 'unlocked', p: 'unlocked'});
+    },
+  );
+
+  testWidgets(
+    'in one account\'s own items, a new item is that account\'s, without asking',
     (tester) async {
       wideWindow(tester);
       final [w, p] = await unlockBoth(tester);
       expect(Core.account, p);
       await tester.tap(find.byTooltip('New item'));
       await tester.pumpAndSettle();
-      expect(find.text('Save it in which account?'), findsOneWidget);
-      await tester.tap(find.byKey(ValueKey('choose-account-$w')));
-      // The work account's vault, and New item's picker there.
-      await pumpUntil(tester, find.text('What are you saving?'));
-      expect(Core.account, w);
-      expect(states(), {w: 'unlocked', p: 'unlocked'});
+      expect(find.text('Save it in which account?'), findsNothing);
+      expect(find.text('What are you saving?'), findsOneWidget);
+      expect(Core.account, p);
     },
   );
 
@@ -454,7 +477,17 @@ void main() {
       await pumpUntil(tester, find.text('Lock after'));
       await pumpUntilGone(tester, find.byKey(const ValueKey('unlock-loading')));
       await tester.pump(const Duration(milliseconds: 400));
-      expect(find.textContaining('For $home'), findsOneWidget);
+      // The account first, by its email; what's its own, and what's the
+      // device's, each said.
+      expect(find.text(home), findsWidgets);
+      expect(
+        find.textContaining('are this account\'s. Each account has its own.'),
+        findsOneWidget,
+      );
+      expect(
+        find.textContaining('This device\'s, for every account on it'),
+        findsOneWidget,
+      );
       final name = find.byKey(const ValueKey('account-name'));
       await tester.ensureVisible(name);
       await tester.pump();
@@ -496,8 +529,9 @@ void main() {
       await tester.pumpAndSettle();
       await tester.enterText(find.byType(TextField), samplePassword);
       await tester.tap(find.text('Unlock'));
-      // The personal account has only its note.
-      await opened(tester, 'Gate code');
+      // The personal account has only its note: Notes is its one kind.
+      await opened(tester, 'Notes');
+      expect(find.text('Logins'), findsNothing);
       final every = find.byKey(const ValueKey('every-account'));
       await tester.ensureVisible(every);
       await tester.pumpAndSettle();

@@ -213,14 +213,34 @@ String whereIs(Map<String, dynamic> item, Places places) {
 }
 
 /// What an item has to fix, said briefly: "Weak password · used 3 times",
-/// "Expires in 5 days".
-String healthIssues(Map<String, dynamic> issues) {
+/// "Expires in 5 days". Without [expiry], when it expires is left out (a
+/// badge beside it says that).
+String healthIssues(Map<String, dynamic> issues, {bool expiry = true}) {
   final reused = (issues['reused'] as num?)?.toInt() ?? 0;
   return [
     if (issues['weak'] == true) 'Weak password',
     if (reused > 0)
       reused == 1 ? 'Password used twice' : 'Password used ${reused + 1} times',
     if (issues['unsecured'] == true) 'Unsecured website',
-    if (issues['expires'] case final String expires) expires,
+    if (expiry)
+      if (issues['expires'] case final String expires) expires,
   ].join(' · ');
 }
+
+/// Whether what an item has to fix is in one of Health's reports: `weak`,
+/// `reused`, `unsecured`, or `expiring`.
+bool inReport(Map<String, dynamic> issues, String report) => switch (report) {
+  'weak' => issues['weak'] == true,
+  'reused' => ((issues['reused'] as num?)?.toInt() ?? 0) > 0,
+  'unsecured' => issues['unsecured'] == true,
+  'expiring' => issues['expires'] != null,
+  _ => true,
+};
+
+/// Whether a login is at risk (core/src/health.rs): a weak or reused
+/// password, or a website saved with http://. What "Change password" is for.
+bool atRisk(Map<String, dynamic>? issues) =>
+    issues != null &&
+    (issues['weak'] == true ||
+        ((issues['reused'] as num?)?.toInt() ?? 0) > 0 ||
+        issues['unsecured'] == true);

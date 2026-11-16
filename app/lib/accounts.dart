@@ -133,9 +133,10 @@ class AccountsMenu {
 
   String get fullNote => 'Up to $most accounts on this device';
 
-  /// What signing out says, naming the account it's for: the one shown.
+  /// What signing out says, naming the account it's for: the one shown, by
+  /// its name (Work), else its email.
   String get signOutLabel => switch (entry(shown)) {
-    final shown? => 'Sign out of ${shown.email}',
+    final shown? => 'Sign out of ${shown.label}',
     null => 'Sign out',
   };
 }
@@ -191,6 +192,8 @@ class AccountMenuButton extends StatelessWidget {
     return PopupMenuButton<_Choice>(
       tooltip: 'Accounts',
       position: PopupMenuPosition.over,
+      // Wide enough for an email and "Sign out of" it.
+      constraints: const BoxConstraints(minWidth: 260, maxWidth: 360),
       onSelected: (choice) => _chosen(menu, choice),
       itemBuilder: (context) => [
         for (final a in menu.accounts)
@@ -227,6 +230,7 @@ class AccountMenuButton extends StatelessWidget {
                           if (a.name != null) a.email else a.host,
                           if (!a.unlocked) 'Locked',
                         ].join(' · '),
+                        maxLines: 2,
                         overflow: TextOverflow.ellipsis,
                         style: TextStyle(color: c.muted, fontSize: 12),
                       ),
@@ -266,6 +270,7 @@ class AccountMenuButton extends StatelessWidget {
                 Expanded(
                   child: Text(
                     menu.signOutLabel,
+                    maxLines: 2,
                     overflow: TextOverflow.ellipsis,
                   ),
                 ),
@@ -299,21 +304,37 @@ class AccountFooter extends StatelessWidget {
               AccountDot(entry: shown),
               const SizedBox(width: 6),
             ],
+            // The account shown, by its name (and its email under it), or
+            // its email; the arrows say the menu has the others.
             Flexible(
-              child: Text(
-                menu.entry(menu.shown)?.label ?? email,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(color: c.muted, fontSize: 12),
-              ),
-            ),
-            if (menu.several)
-              Padding(
-                padding: const EdgeInsets.only(left: 6),
-                child: Text(
-                  '+${menu.accounts.length - 1}',
+              child: switch (menu.entry(menu.shown)) {
+                final shown? when shown.name != null => Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      shown.label,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    Text(
+                      shown.email,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(color: c.muted, fontSize: 12),
+                    ),
+                  ],
+                ),
+                final shown => Text(
+                  shown?.label ?? email,
+                  overflow: TextOverflow.ellipsis,
                   style: TextStyle(color: c.muted, fontSize: 12),
                 ),
-              ),
+              },
+            ),
+            const SizedBox(width: 4),
             Icon(Icons.unfold_more_rounded, size: 16, color: c.muted),
           ],
         ),
@@ -326,12 +347,20 @@ class AccountFooter extends StatelessWidget {
 /// header: each account (tap to switch), Add account, and Sign out of this
 /// account.
 class AccountsList extends StatelessWidget {
-  const AccountsList({super.key, required this.menu, this.done});
+  const AccountsList({
+    super.key,
+    required this.menu,
+    this.done,
+    this.signOut = true,
+  });
 
   final AccountsMenu menu;
 
   /// Closes the sheet it's on before acting, if it's on one.
   final VoidCallback? done;
+
+  /// With Sign out of the account shown (the lock screen has its own).
+  final bool signOut;
 
   @override
   Widget build(BuildContext context) {
@@ -374,7 +403,7 @@ class AccountsList extends StatelessWidget {
                 if (a.name != null) a.email else a.host,
                 if (!a.unlocked) 'Locked',
               ].join(' · '),
-              maxLines: 1,
+              maxLines: 2,
               overflow: TextOverflow.ellipsis,
             ),
             onTap: () => choose(_SwitchTo(a.id)),
@@ -387,28 +416,82 @@ class AccountsList extends StatelessWidget {
           enabled: !menu.full,
           onTap: () => choose(const _Add()),
         ),
-        ListTile(
-          key: const ValueKey('sign-out-account'),
-          leading: const Icon(Icons.logout_rounded),
-          title: Text(
-            menu.signOutLabel,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
+        if (signOut)
+          ListTile(
+            key: const ValueKey('sign-out-account'),
+            leading: const Icon(Icons.logout_rounded),
+            title: Text(
+              menu.signOutLabel,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+            ),
+            onTap: () => choose(const _SignOut()),
           ),
-          onTap: () => choose(const _SignOut()),
-        ),
       ],
     );
   }
 }
 
-/// The phone's account sheet, from its vault's header.
-Future<void> showAccounts(BuildContext context, AccountsMenu menu) =>
-    showModalBottomSheet<void>(
+/// The phone's account sheet, from its vault's header and its lock screen
+/// (without Sign out there, which the lock screen has).
+Future<void> showAccounts(
+  BuildContext context,
+  AccountsMenu menu, {
+  bool signOut = true,
+}) => showModalBottomSheet<void>(
+  context: context,
+  showDragHandle: true,
+  builder: (sheet) => SafeArea(
+    child: AccountsList(
+      menu: menu,
+      signOut: signOut,
+      done: () => Navigator.pop(sheet),
+    ),
+  ),
+);
+
+/// The accounts, from a computer's lock screen: a dialog over it, as wide
+/// as an email needs, rather than a menu beside the link.
+Future<void> showAccountsDialog(BuildContext context, AccountsMenu menu) =>
+    showDialog<void>(
       context: context,
-      showDragHandle: true,
-      builder: (sheet) => SafeArea(
-        child: AccountsList(menu: menu, done: () => Navigator.pop(sheet)),
+      builder: (dialog) => Dialog(
+        clipBehavior: Clip.antiAlias,
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 420, maxHeight: 560),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(24, 20, 24, 8),
+                child: Text(
+                  'Switch account',
+                  style: Theme.of(dialog).textTheme.titleLarge,
+                ),
+              ),
+              Flexible(
+                child: SingleChildScrollView(
+                  child: AccountsList(
+                    menu: menu,
+                    signOut: false,
+                    done: () => Navigator.pop(dialog),
+                  ),
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(24, 4, 16, 12),
+                child: Align(
+                  alignment: Alignment.centerRight,
+                  child: TextButton(
+                    onPressed: () => Navigator.pop(dialog),
+                    child: const Text('Cancel'),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
 
@@ -553,6 +636,16 @@ Future<String?> chooseAccount(BuildContext context, AccountsMenu menu) async {
               ],
             ),
           ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+          child: Align(
+            alignment: Alignment.centerRight,
+            child: TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cancel'),
+            ),
+          ),
+        ),
       ],
     ),
   );

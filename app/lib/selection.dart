@@ -749,6 +749,10 @@ class _BulkDialogState extends State<_BulkDialog> {
                 label: action.button,
                 working: working,
                 onPressed: go,
+                // Moving to the trash: the red last step.
+                style: action.kind == BulkKind.trash
+                    ? dangerButton(context)
+                    : null,
               ),
             ],
     );

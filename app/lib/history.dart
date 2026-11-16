@@ -11,8 +11,13 @@ import 'core.dart';
 import 'theme.dart';
 import 'widgets.dart';
 
-/// Opens an item's history: a page on a phone, a dialog on a computer.
-/// True if a version was restored, so the item changed.
+/// How wide the history's dialogs are on a computer, its list's and a
+/// version's alike.
+const _dialogWidth = 760.0;
+
+/// Opens an item's history: a page on a phone, a dialog on a computer, as
+/// tall as what's in it. True if a version was restored, so the item
+/// changed.
 Future<bool> openHistory(
   BuildContext context, {
   required Core core,
@@ -27,7 +32,10 @@ Future<bool> openHistory(
           builder: (context) => Dialog(
             clipBehavior: Clip.antiAlias,
             child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 720, maxHeight: 760),
+              constraints: const BoxConstraints(
+                maxWidth: _dialogWidth,
+                maxHeight: 760,
+              ),
               child: view,
             ),
           ),
@@ -61,12 +69,14 @@ String whenSaved(String? iso) {
   return '${months[at.month - 1]} ${at.day}, ${at.year}, $hour:$minute $half';
 }
 
-/// Asks before something that can't be undone: true to go ahead.
+/// Asks before something that can't be undone: true to go ahead. Deleting
+/// ([danger]) has a red last step.
 Future<bool> _sure(
   BuildContext context, {
   required String title,
   required String content,
   required String action,
+  bool danger = false,
 }) async =>
     await showDialog<bool>(
       context: context,
@@ -79,6 +89,7 @@ Future<bool> _sure(
             child: const Text('Cancel'),
           ),
           FilledButton(
+            style: danger ? dangerButton(context) : null,
             onPressed: () => Navigator.pop(context, true),
             child: Text(action),
           ),
@@ -109,6 +120,18 @@ class _HistoryViewState extends State<HistoryView> {
   Map<String, dynamic>? history;
   String? error;
   bool working = false;
+
+  /// In a dialog, what clearing did, said in it (the page under it is
+  /// dimmed); on a phone's page, a notice.
+  String? said;
+
+  void say(String words) {
+    if (widget.asDialog) {
+      setState(() => said = words);
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(words)));
+    }
+  }
 
   @override
   void initState() {
@@ -141,19 +164,14 @@ class _HistoryViewState extends State<HistoryView> {
       title: 'Clear this item\'s history?',
       content: 'Its earlier versions are deleted for everyone who can open it. The item stays as it is now.',
       action: 'Clear history',
+      danger: true,
     );
     if (!go || !mounted) return;
     setState(() => working = true);
     final answer = await whileBusy(() => Core.deleteHistory(widget.id));
     if (!mounted) return;
     setState(() => working = false);
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          answer.ok ? 'History cleared' : answer.error ?? 'Couldn\'t clear it.',
-        ),
-      ),
-    );
+    say(answer.ok ? 'History cleared' : answer.error ?? 'Couldn\'t clear it.');
     await load();
   }
 
@@ -164,6 +182,7 @@ class _HistoryViewState extends State<HistoryView> {
       id: widget.id,
       version: version,
       canDelete: history['canClear'] == true,
+      asDialog: widget.asDialog,
     );
     final done = widget.asDialog
         ? await showDialog<String>(
@@ -172,7 +191,7 @@ class _HistoryViewState extends State<HistoryView> {
               clipBehavior: Clip.antiAlias,
               child: ConstrainedBox(
                 constraints: const BoxConstraints(
-                  maxWidth: 820,
+                  maxWidth: _dialogWidth,
                   maxHeight: 760,
                 ),
                 child: view,
@@ -197,21 +216,7 @@ class _HistoryViewState extends State<HistoryView> {
         .cast<Map<String, dynamic>>();
     final hidden = history?['hidePasswords'] == true;
     final unreadable = (history?['unreadable'] as num?)?.toInt() ?? 0;
-    return Scaffold(
-      appBar: AppBar(
-        automaticallyImplyLeading: !widget.asDialog,
-        leading: widget.asDialog
-            ? IconButton(
-                tooltip: 'Close',
-                icon: const Icon(Icons.close_rounded),
-                onPressed: () => Navigator.of(context).pop(false),
-              )
-            : null,
-        title: const Text('Version history'),
-      ),
-      body: ListView(
-        padding: const EdgeInsets.fromLTRB(20, 4, 20, 28),
-        children: [
+    final children = [
           Text(
             widget.name,
             style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
@@ -273,7 +278,27 @@ class _HistoryViewState extends State<HistoryView> {
               ),
             ),
           ],
-        ],
+          if (said case final said?)
+            Padding(
+              padding: const EdgeInsets.only(top: 10),
+              child: Semantics(
+                liveRegion: true,
+                child: Text(said, style: TextStyle(color: c.muted)),
+              ),
+            ),
+    ];
+    if (widget.asDialog) {
+      return DialogPage(
+        title: 'Version history',
+        onClose: () => Navigator.of(context).pop(false),
+        children: children,
+      );
+    }
+    return Scaffold(
+      appBar: AppBar(title: const Text('Version history')),
+      body: ListView(
+        padding: const EdgeInsets.fromLTRB(20, 4, 20, 28),
+        children: children,
       ),
     );
   }
@@ -313,12 +338,17 @@ class VersionView extends StatefulWidget {
     required this.id,
     required this.version,
     required this.canDelete,
+    this.asDialog = false,
   });
 
   final Core core;
   final String id;
   final Map<String, dynamic> version;
   final bool canDelete;
+
+  /// In a dialog on a computer, as tall as what's in it; else a phone's
+  /// page.
+  final bool asDialog;
 
   @override
   State<VersionView> createState() => _VersionViewState();
@@ -329,6 +359,17 @@ class _VersionViewState extends State<VersionView> {
       .cast<Map<String, dynamic>>();
   bool shown = false;
   bool working = false;
+
+  /// In a dialog, why restoring or deleting didn't go through, said in it.
+  String? said;
+
+  void say(String words) {
+    if (widget.asDialog) {
+      setState(() => said = words);
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(words)));
+    }
+  }
 
   String get versionId => widget.version['id'] as String;
   String get when => whenSaved(widget.version['revisionDate'] as String?);
@@ -377,9 +418,7 @@ class _VersionViewState extends State<VersionView> {
       Navigator.of(context).pop('restored');
       return;
     }
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(answer.error ?? 'Couldn\'t restore it.')),
-    );
+    say(answer.error ?? 'Couldn\'t restore it.');
   }
 
   Future<void> delete() async {
@@ -389,6 +428,7 @@ class _VersionViewState extends State<VersionView> {
       content:
           'The version from $when is deleted for everyone who can open this item.',
       action: 'Delete',
+      danger: true,
     );
     if (!go || !mounted) return;
     setState(() => working = true);
@@ -401,9 +441,7 @@ class _VersionViewState extends State<VersionView> {
       Navigator.of(context).pop('deleted');
       return;
     }
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(answer.error ?? 'Couldn\'t delete it.')),
-    );
+    say(answer.error ?? 'Couldn\'t delete it.');
   }
 
   @override
@@ -412,13 +450,11 @@ class _VersionViewState extends State<VersionView> {
     final scheme = Theme.of(context).colorScheme;
     final secrets = rows.any((r) => r['secret'] == true);
     final changes = rows.where((r) => r['changed'] == true).length;
-    return Scaffold(
-      appBar: AppBar(title: Text('Version from $when')),
-      body: LayoutBuilder(
+    final table = LayoutBuilder(
         builder: (context, constraints) {
           // Side by side where there's room; on a phone, each field's two
           // values one over the other.
-          final wide = constraints.maxWidth >= 560;
+          final wide = constraints.maxWidth >= 560 - 40;
           String value(Map<String, dynamic> r, String which) {
             final v = r[which] as String?;
             if (v == null) return '••••••••';
@@ -459,7 +495,7 @@ class _VersionViewState extends State<VersionView> {
               ),
             ),
           );
-          final table = Column(
+          return Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               if (wide)
@@ -547,53 +583,82 @@ class _VersionViewState extends State<VersionView> {
               ],
             ],
           );
-          return ListView(
-            padding: const EdgeInsets.fromLTRB(20, 4, 20, 28),
-            children: [
-              Text(
-                [
-                  ?widget.version['savedBy'] as String?,
-                  changes == 0
-                      ? 'It looks the same as the item does now.'
-                      : changes == 1
-                      ? '1 field differs from now.'
-                      : '$changes fields differ from now.',
-                ].join(' · '),
-                style: TextStyle(color: c.muted, fontSize: 13),
-              ),
-              const SizedBox(height: 12),
-              Wrap(
-                spacing: 8,
-                runSpacing: 8,
-                children: [
-                  if (widget.version['restorable'] == true)
-                    WorkingButton(
-                      label: 'Restore this version',
-                      working: working,
-                      onPressed: restore,
-                    ),
-                  if (secrets)
-                    OutlinedButton(
-                      onPressed: toggle,
-                      child: Text(
-                        shown ? 'Hide hidden values' : 'Show hidden values',
-                      ),
-                    ),
-                  if (widget.canDelete)
-                    TextButton(
-                      style: TextButton.styleFrom(
-                        foregroundColor: scheme.error,
-                      ),
-                      onPressed: working ? null : delete,
-                      child: const Text('Delete this version'),
-                    ),
-                ],
-              ),
-              const SizedBox(height: 16),
-              RestingCard(child: table),
-            ],
-          );
         },
+    );
+    final buttons = [
+      if (widget.version['restorable'] == true)
+        WorkingButton(
+          label: 'Restore this version',
+          working: working,
+          onPressed: restore,
+        ),
+      if (secrets)
+        OutlinedButton(
+          onPressed: toggle,
+          child: Text(shown ? 'Hide hidden values' : 'Show hidden values'),
+        ),
+      if (widget.canDelete)
+        TextButton(
+          style: TextButton.styleFrom(foregroundColor: scheme.error),
+          onPressed: working ? null : delete,
+          child: const Text('Delete this version'),
+        ),
+    ];
+    final children = [
+      // On a phone the top bar is short: when it was saved heads the page.
+      if (!widget.asDialog)
+        Padding(
+          padding: const EdgeInsets.only(bottom: 4),
+          child: Text(
+            when,
+            style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
+          ),
+        ),
+      Text(
+        [
+          ?widget.version['savedBy'] as String?,
+          changes == 0
+              ? 'It looks the same as the item does now.'
+              : changes == 1
+              ? '1 field differs from now.'
+              : '$changes fields differ from now.',
+        ].join(' · '),
+        style: TextStyle(color: c.muted, fontSize: 13),
+      ),
+      const SizedBox(height: 12),
+      // In a row on a computer; on a phone, one over the other, each as wide
+      // as the page, so none wraps on its own.
+      if (widget.asDialog)
+        Wrap(spacing: 8, runSpacing: 8, children: buttons)
+      else
+        Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            for (var i = 0; i < buttons.length; i++) ...[
+              if (i > 0) const SizedBox(height: 8),
+              buttons[i],
+            ],
+          ],
+        ),
+      if (said case final said?)
+        Padding(
+          padding: const EdgeInsets.only(top: 10),
+          child: Semantics(
+            liveRegion: true,
+            child: Text(said, style: TextStyle(color: scheme.error)),
+          ),
+        ),
+      const SizedBox(height: 16),
+      RestingCard(child: table),
+    ];
+    if (widget.asDialog) {
+      return DialogPage(title: 'Version from $when', children: children);
+    }
+    return Scaffold(
+      appBar: AppBar(title: const Text('Earlier version')),
+      body: ListView(
+        padding: const EdgeInsets.fromLTRB(20, 4, 20, 28),
+        children: children,
       ),
     );
   }

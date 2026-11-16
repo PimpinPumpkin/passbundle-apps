@@ -29,14 +29,29 @@ const _main = [
   (ItemKind.identity, 'Personal info'),
 ];
 
-/// Asks what's being saved: null if cancelled. On a computer a dialog, on a
-/// phone a page of its own.
+/// The kinds the web vault makes and the apps don't yet, which the picker
+/// names so nobody looks for them in vain.
+const _webVaultKinds = [
+  ItemKind.sshKey,
+  ItemKind.bankAccount,
+  ItemKind.driversLicense,
+  ItemKind.passport,
+];
+
+/// Asks what's being saved: null if canceled. On a computer a dialog, as
+/// tall as what's in it; on a phone a page of its own. [onWebVault] opens
+/// the web vault, for the kinds only it makes.
 Future<NewItemChoice?> chooseNewItem(
   BuildContext context, {
   required List<Map<String, dynamic>> templates,
   required bool asDialog,
+  VoidCallback? onWebVault,
 }) {
-  final picker = NewItemPicker(templates: templates, dialog: asDialog);
+  final picker = NewItemPicker(
+    templates: templates,
+    dialog: asDialog,
+    onWebVault: onWebVault,
+  );
   if (asDialog) {
     return showDialog<NewItemChoice>(
       context: context,
@@ -59,11 +74,15 @@ class NewItemPicker extends StatefulWidget {
     super.key,
     required this.templates,
     this.dialog = false,
+    this.onWebVault,
   });
 
   /// The core's template groups (Core.templates).
   final List<Map<String, dynamic>> templates;
   final bool dialog;
+
+  /// Opens the web vault, which makes the kinds the apps don't yet.
+  final VoidCallback? onWebVault;
 
   @override
   State<NewItemPicker> createState() => _NewItemPickerState();
@@ -108,19 +127,11 @@ class _NewItemPickerState extends State<NewItemPicker> {
               .toList(),
         ),
     ].where((g) => g.$2.isNotEmpty).toList();
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('What are you saving?'),
-        automaticallyImplyLeading: false,
-        leading: IconButton(
-          tooltip: 'Cancel',
-          icon: const Icon(Icons.close_rounded),
-          onPressed: () => Navigator.of(context).pop(),
-        ),
-      ),
-      body: ListView(
-        padding: const EdgeInsets.fromLTRB(20, 4, 20, 28),
-        children: [
+    // The kinds only the web vault makes, under the rest.
+    final elsewhere = _webVaultKinds
+        .where((k) => matches(k.one) || matches(k.many))
+        .toList();
+    final children = [
           // Four in a row where there's room, else two by two.
           LayoutBuilder(
             builder: (context, constraints) {
@@ -185,7 +196,7 @@ class _NewItemPickerState extends State<NewItemPicker> {
               ),
             ),
             const SizedBox(height: 10),
-            if (builtIn.isEmpty && custom.isEmpty)
+            if (builtIn.isEmpty && custom.isEmpty && elsewhere.isEmpty)
               Padding(
                 padding: const EdgeInsets.symmetric(vertical: 12),
                 child: Text(
@@ -201,8 +212,53 @@ class _NewItemPickerState extends State<NewItemPicker> {
               ),
               _Templates(templates: templates, onPick: pickTemplate),
             ],
+            if (elsewhere.isNotEmpty) ...[
+              const SectionHeading(
+                'In the web vault',
+                padding: EdgeInsets.fromLTRB(4, 18, 4, 4),
+              ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(4, 0, 4, 8),
+                child: Text(
+                  'PassBundle makes these in the web vault, for now. They show here once they\'re saved.',
+                  style: TextStyle(color: c.muted, fontSize: 13, height: 1.35),
+                ),
+              ),
+              _Templates(
+                templates: [
+                  for (final k in elsewhere)
+                    {'name': k.one, 'kind': k.kind},
+                ],
+                onPick: widget.onWebVault == null
+                    ? null
+                    : (_) => widget.onWebVault!(),
+                trailing: widget.onWebVault == null
+                    ? null
+                    : Icon(Icons.open_in_new_rounded, size: 16, color: c.muted),
+              ),
+            ],
           ],
-        ],
+    ];
+    if (widget.dialog) {
+      return DialogPage(
+        title: 'What are you saving?',
+        closeTooltip: 'Cancel',
+        children: children,
+      );
+    }
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('What are you saving?'),
+        automaticallyImplyLeading: false,
+        leading: IconButton(
+          tooltip: 'Cancel',
+          icon: const Icon(Icons.close_rounded),
+          onPressed: () => Navigator.of(context).pop(),
+        ),
+      ),
+      body: ListView(
+        padding: const EdgeInsets.fromLTRB(20, 4, 20, 28),
+        children: children,
       ),
     );
   }
@@ -255,12 +311,14 @@ class _MainKind extends StatelessWidget {
   }
 }
 
-/// Templates, two or three to a row, each with its category's jewel.
+/// Templates, two or three to a row, each with its category's jewel (or,
+/// for a kind the web vault makes, its kind's, with where it opens).
 class _Templates extends StatelessWidget {
-  const _Templates({required this.templates, required this.onPick});
+  const _Templates({required this.templates, required this.onPick, this.trailing});
 
   final List<Map<String, dynamic>> templates;
-  final ValueChanged<Map<String, dynamic>> onPick;
+  final ValueChanged<Map<String, dynamic>>? onPick;
+  final Widget? trailing;
 
   @override
   Widget build(BuildContext context) => LayoutBuilder(
@@ -283,7 +341,10 @@ class _Templates extends StatelessWidget {
                     child: j < templates.length
                         ? _Template(
                             template: templates[j],
-                            onTap: () => onPick(templates[j]),
+                            trailing: trailing,
+                            onTap: onPick == null
+                                ? null
+                                : () => onPick!(templates[j]),
                           )
                         : const SizedBox.shrink(),
                   ),
@@ -298,10 +359,11 @@ class _Templates extends StatelessWidget {
 }
 
 class _Template extends StatelessWidget {
-  const _Template({required this.template, required this.onTap});
+  const _Template({required this.template, required this.onTap, this.trailing});
 
   final Map<String, dynamic> template;
-  final VoidCallback onTap;
+  final VoidCallback? onTap;
+  final Widget? trailing;
 
   @override
   Widget build(BuildContext context) => RestingCard(
@@ -315,7 +377,13 @@ class _Template extends StatelessWidget {
           child: Row(
             children: [
               JewelTile(
-                jewel: Categories.of(template['category'] as String?),
+                jewel: switch (template['kind']) {
+                  final String kind => ItemKind.of(kind),
+                  _ => Categories.forItem(
+                    template['category'] as String?,
+                    template['id'] as String?,
+                  ),
+                },
                 size: 28,
               ),
               const SizedBox(width: 10),
@@ -327,6 +395,7 @@ class _Template extends StatelessWidget {
                   style: const TextStyle(fontWeight: FontWeight.w600),
                 ),
               ),
+              ?trailing,
             ],
           ),
         ),

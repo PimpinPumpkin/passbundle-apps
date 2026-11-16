@@ -690,12 +690,12 @@ void main() {
       await tester.scrollUntilVisible(
         find.text('Folders'),
         200,
-        scrollable: find.byType(Scrollable).last,
+        scrollable: vaultScroll,
       );
-      await tester.drag(find.byType(Scrollable).last, const Offset(0, -260));
+      await tester.drag(vaultScroll, const Offset(0, -260));
       await tester.pumpAndSettle();
       await shoot('folders-phone-$b', tester);
-      await tester.drag(find.byType(Scrollable).last, const Offset(0, 4000));
+      await tester.drag(vaultScroll, const Offset(0, 4000));
       await tester.pumpAndSettle();
 
       await tester.enterText(find.byType(TextField), 'backup');

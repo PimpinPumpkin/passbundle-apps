@@ -44,6 +44,24 @@ Future<void> showBrowserImport(
 /// The web vault's guided import: the browser's own Export, step by step.
 const guidedImportPath = '/#/tools/import-from-browser';
 
+/// A browser by the name people call it: "Chrome", "Edge", "Firefox".
+String browserOf(Map<String, dynamic> p) =>
+    p['browserShort'] as String? ?? p['browserName'] as String? ?? 'Browser';
+
+/// A profile by the name its browser shows: Firefox's own name for its
+/// default profile ("default-release") reads as "Default".
+String profileOf(Map<String, dynamic> p) {
+  final name = p['name'] as String? ?? '';
+  if (p['browser'] == 'firefox' &&
+      RegExp(r'^default(-[a-z]+)?$').hasMatch(name)) {
+    return 'Default';
+  }
+  return name;
+}
+
+/// A profile with its browser, one way everywhere: "Chrome: Work".
+String profileName(Map<String, dynamic> p) => '${browserOf(p)}: ${profileOf(p)}';
+
 enum _Stage { finding, choosing, importing, primaryPassword, done }
 
 class BrowserImportDialog extends StatefulWidget {
@@ -206,7 +224,8 @@ class _BrowserImportDialogState extends State<BrowserImportDialog> {
             padding: const EdgeInsets.fromLTRB(24, 22, 24, 0),
             child: Text(switch (stage) {
               _Stage.primaryPassword => 'Firefox\'s Primary Password',
-              _Stage.done => 'Imported from your browsers',
+              // "Imported" only once something was; else the summary says why not.
+              _Stage.done when added > 0 => 'Imported from your browsers',
               _ => 'Import from your browsers',
             }, style: Theme.of(context).textTheme.headlineSmall),
           ),
@@ -302,7 +321,7 @@ class _BrowserImportDialogState extends State<BrowserImportDialog> {
     }
     final byBrowser = <String, List<Map<String, dynamic>>>{};
     for (final p in profiles) {
-      byBrowser.putIfAbsent(p['browserName'] as String, () => []).add(p);
+      byBrowser.putIfAbsent(browserOf(p), () => []).add(p);
     }
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -323,7 +342,7 @@ class _BrowserImportDialogState extends State<BrowserImportDialog> {
           ),
         for (final g in guidedBrowsers)
           SettingsGroup(
-            title: g['browserName'] as String,
+            title: browserOf(g),
             footer: g['words'] as String,
             children: [
               ListTile(
@@ -366,7 +385,7 @@ class _BrowserImportDialogState extends State<BrowserImportDialog> {
       value: chosen.contains(id),
       onChanged: (on) =>
           setState(() => on == true ? chosen.add(id) : chosen.remove(id)),
-      title: Text(p['name'] as String),
+      title: Text(profileOf(p)),
       subtitle: Text(notes.join('\n')),
       isThreeLine: notes.length > 1,
       controlAffinity: ListTileControlAffinity.leading,
@@ -380,7 +399,7 @@ class _BrowserImportDialogState extends State<BrowserImportDialog> {
       mainAxisSize: MainAxisSize.min,
       children: [
         Text(
-          'Firefox protects the passwords in its ${p['name']} profile with a Primary Password. Type it to import them. PassBundle uses it for this import only and doesn\'t keep it.',
+          'Firefox protects the passwords in its ${profileOf(p)} profile with a Primary Password. Type it to import them. PassBundle uses it for this import only and doesn\'t keep it.',
           style: TextStyle(color: context.colors.muted, height: 1.35),
         ),
         const SizedBox(height: 16),
@@ -409,15 +428,17 @@ class _BrowserImportDialogState extends State<BrowserImportDialog> {
   Widget summary(BuildContext context) {
     final muted = TextStyle(color: context.colors.muted, height: 1.35);
     String plural(int n, String one, String many) => n == 1 ? one : many;
+    final added = this.added - toCheck;
     final lines = <String>[
-      if (added - toCheck > 0)
-        '${added - toCheck} new ${plural(added - toCheck, 'password is', 'passwords are')} in your vault.'
+      if (added > 0)
+        '$added new ${plural(added, 'password is', 'passwords are')} in your vault.'
       else if (toCheck == 0 && alreadyThere > 0)
         'No new passwords: everything was already in your vault.'
       else if (toCheck == 0)
         'Nothing was imported.',
+      // Besides the new ones, never among them.
       if (toCheck > 0)
-        '$toCheck ${plural(toCheck, 'has', 'have')} a different password from one you already have, so ${plural(toCheck, 'it\'s', 'they\'re')} in ${checkFolders.map((f) => '"$f"').join(' and ')} for you to compare.',
+        '${added > 0 ? '$toCheck more' : '$toCheck'} ${plural(toCheck, 'has', 'have')} a different password from a login you already have, so ${plural(toCheck, 'it\'s', 'they\'re')} in ${checkFolders.map((f) => '"$f"').join(' and ')} for you to compare.',
       if (alreadyThere > 0)
         '$alreadyThere ${plural(alreadyThere, 'was', 'were')} already in your vault.',
       if (empty > 0)
@@ -441,7 +462,7 @@ class _BrowserImportDialogState extends State<BrowserImportDialog> {
           ),
         for (final g in guided)
           SettingsGroup(
-            title: '${g['browserName']} (${g['name']})',
+            title: profileName(g),
             footer: g['words'] as String?,
             children: [
               ListTile(
@@ -458,7 +479,7 @@ class _BrowserImportDialogState extends State<BrowserImportDialog> {
   /// A profile read, and its own password saving.
   Widget turnOffTile(BuildContext context, Map<String, dynamic> r) {
     final id = r['id'] as String;
-    final short = r['browserShort'] as String? ?? 'the browser';
+    final short = browserOf(r);
     final result = turnedOff[id];
     final count = (r['logins'] as num?)?.toInt() ?? 0;
     final saving = switch (result?['result']) {
@@ -469,7 +490,7 @@ class _BrowserImportDialogState extends State<BrowserImportDialog> {
       _ => (result?['byHand'] as String?) ?? '',
     };
     return ListTile(
-      title: Text('$short: ${r['name']}'),
+      title: Text(profileName(r)),
       subtitle: Text(
         '$count saved ${count == 1 ? 'password' : 'passwords'}. $saving',
       ),

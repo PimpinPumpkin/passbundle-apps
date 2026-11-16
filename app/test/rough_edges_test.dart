@@ -247,6 +247,12 @@ void main() {
     (tester) async {
       await unlockOnComputer(tester);
       final menu = find.byType(Sidebar);
+      // The tools, after the folders and the trash: the menu's list to its end.
+      await tester.drag(
+        find.descendant(of: menu, matching: find.byType(Scrollable)).first,
+        const Offset(0, -1000),
+      );
+      await tester.pumpAndSettle();
       // Import and Export, each the web vault's.
       for (final tool in ['Import', 'Export']) {
         expect(
@@ -255,7 +261,12 @@ void main() {
         );
       }
       expect(find.text('Import and export'), findsNothing);
-      expect(find.byTooltip('Opens the web vault'), findsNWidgets(2));
+      // And the trash, which is the web vault's too.
+      expect(
+        find.descendant(of: menu, matching: find.text('Trash')),
+        findsOneWidget,
+      );
+      expect(find.byTooltip('Opens the web vault'), findsNWidgets(3));
 
       // An SSH key: the web vault edits it, and the item says so.
       await tester.tap(find.text('Build server'));

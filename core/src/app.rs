@@ -90,6 +90,9 @@ pub enum Step {
     NewDevice(new_device::Check),
 }
 
+/// How many of what the generator made its history keeps.
+pub const GENERATOR_HISTORY: usize = 20;
+
 pub struct App {
     /// This account's own id on this device (accounts.rs): its folder's
     /// name, and what a phone's biometric unlock keeps its key under. Empty
@@ -140,6 +143,11 @@ pub struct App {
     /// (as `value("", "generated")`), so it clears like any secret. Forgotten
     /// when the vault locks.
     generated: Option<Zeroizing<String>>,
+    /// The generator's history: what it made that the person copied or used,
+    /// newest first, with when (seconds since 1970), at most
+    /// `GENERATOR_HISTORY` of them. In memory only, forgotten (and wiped)
+    /// when the vault locks.
+    generator_history: Vec<(Zeroizing<String>, u64)>,
     /// Websites' icons, in memory while the vault is open (icons.rs).
     icons: crate::icons::Cache,
     /// Counts each time the icons are emptied (locking, signing out,
@@ -251,6 +259,7 @@ impl App {
             autolock: AutoLock::new(Instant::now(), SystemTime::now()),
             history: None,
             generated: None,
+            generator_history: Vec::new(),
             icons: crate::icons::Cache::default(),
             icon_session: 0,
             sign_in_requests: None,
@@ -1117,12 +1126,41 @@ impl App {
     /// copy (`value("", "generated")`): what the person sees, even if
     /// something else made one since (Android's offer to save a sign-in
     /// opens an editor with a generator of its own). Only while unlocked.
+    /// It goes in the generator's history too (`generator_history`): the
+    /// apps take it this way when the person copies it or uses it in an item.
     pub fn keep_generated(&mut self, shown: &str) -> Result<()> {
         if self.vault.is_none() {
             return Err(Error::SignedOut);
         }
         self.generated = Some(Zeroizing::new(shown.to_owned()));
+        if !shown.is_empty() {
+            // Once each: the same one again moves to the top.
+            self.generator_history
+                .retain(|(kept, _)| kept.as_str() != shown);
+            let now = SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            self.generator_history
+                .insert(0, (Zeroizing::new(shown.to_owned()), now));
+            self.generator_history.truncate(GENERATOR_HISTORY);
+        }
         Ok(())
+    }
+
+    /// The generator's history, newest first: what it made that the person
+    /// copied or used since the vault was unlocked, with when. Only while
+    /// unlocked; nothing of it is written anywhere.
+    pub fn generator_history(&self) -> Result<&[(Zeroizing<String>, u64)]> {
+        if self.vault.is_none() {
+            return Err(Error::SignedOut);
+        }
+        Ok(&self.generator_history)
+    }
+
+    /// Forgets the generator's history now.
+    pub fn clear_generator_history(&mut self) {
+        self.generator_history.clear();
     }
 
     pub fn set_preferences(&mut self, preferences: Preferences) -> Result<()> {
@@ -1217,6 +1255,7 @@ impl App {
         self.grant += 1;
         self.history = None;
         self.generated = None;
+        self.generator_history.clear();
         self.forget_icons();
         self.vault = None;
         self.session = None;
@@ -1743,6 +1782,45 @@ impl App {
             let _ = self.keep_saved("folders", &made);
         }
         Ok(id)
+    }
+
+    /// Makes a shared folder in an organization where the person may
+    /// (`Vault::makes_folders`), its name encrypted with the organization's
+    /// key, then syncs. Answers its id. A nested one is named for its parent
+    /// ("Clients" inside "Work" is "Work/Clients"), as upstream's apps nest
+    /// them. Nobody is given it: the organization's owners and admins see
+    /// every shared folder, and give it to others in the web vault.
+    pub fn create_collection(&mut self, organization_id: &str, name: &str) -> Result<String> {
+        let name = Self::folder_name(name)?;
+        let vault = self.vault.as_ref().ok_or(Error::SignedOut)?;
+        if !vault.organizations.contains_key(organization_id) {
+            return Err(Error::Damaged("no such organization"));
+        }
+        if !vault.makes_folders.contains(organization_id) {
+            return Err(Error::Refused(
+                "only the organization's owners and admins make its shared folders",
+            ));
+        }
+        let encrypted = vault.encrypt_collection_name(organization_id, &name)?;
+        let (Some(server), Some(session)) = (&self.server, self.session.as_mut()) else {
+            return Err(Error::SignedOut);
+        };
+        let id = server.create_collection(session, organization_id, &encrypted)?;
+        // Shown once a sync brings it: a shared folder isn't kept on its own.
+        let _ = self.sync();
+        Ok(id)
+    }
+
+    /// A login's websites that "Change password" can open a page for
+    /// (change_password.rs, `websites`), in the item's order: none for an
+    /// item that isn't a login, or has no website.
+    pub fn change_password_websites(&self, id: &str) -> Result<Vec<(String, String)>> {
+        let vault = self.vault.as_ref().ok_or(Error::SignedOut)?;
+        let item = vault.item(id).ok_or(Error::Damaged("no such item"))?;
+        if item.kind != crate::vault::ItemKind::Login {
+            return Ok(Vec::new());
+        }
+        Ok(crate::change_password::websites(&item.uris))
     }
 
     /// Renames a folder, then syncs.

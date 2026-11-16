@@ -157,3 +157,42 @@ fn it_lasts_until_another_item_asks_and_an_edit_waits_for_it() {
         .confirm_master_password("no-such-item", &sample.password)
         .is_err());
 }
+
+#[test]
+fn the_editor_turns_asking_for_the_master_password_on_and_off() {
+    let sample = Sample::new();
+    let mut app = sample.unlocked();
+    app.confirm_master_password(&sample.asks, &sample.password)
+        .unwrap();
+    let vault = app.vault().unwrap();
+    let asks = vault.item(&sample.asks).unwrap();
+    let other = vault.item(&sample.other).unwrap();
+    // A draft that doesn't say keeps what each item does.
+    let kept = vault
+        .encrypt_item(&ItemDraft::of(asks), Some(asks))
+        .unwrap();
+    assert_eq!(kept["reprompt"], 1);
+    let kept = vault
+        .encrypt_item(&ItemDraft::of(other), Some(other))
+        .unwrap();
+    assert_eq!(kept["reprompt"], 0);
+    // The switch turns it off, and on.
+    let mut off = ItemDraft::of(asks);
+    off.reprompt = Some(false);
+    assert_eq!(vault.encrypt_item(&off, Some(asks)).unwrap()["reprompt"], 0);
+    let mut on = ItemDraft::of(other);
+    on.reprompt = Some(true);
+    assert_eq!(vault.encrypt_item(&on, Some(other)).unwrap()["reprompt"], 1);
+    // A new item asks only when the editor says so.
+    let new = ItemDraft {
+        name: "New".into(),
+        ..ItemDraft::default()
+    };
+    assert_eq!(vault.encrypt_item(&new, None).unwrap()["reprompt"], 0);
+    let new = ItemDraft {
+        name: "New".into(),
+        reprompt: Some(true),
+        ..ItemDraft::default()
+    };
+    assert_eq!(vault.encrypt_item(&new, None).unwrap()["reprompt"], 1);
+}

@@ -6,10 +6,12 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/services.dart';
+import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:passbundle/core.dart';
 import 'package:passbundle/icons.dart';
+import 'package:passbundle/vault.dart';
 
 /// The sample vault's master password (the core's test vectors).
 const samplePassword = 'correct horse battery staple 1';
@@ -223,6 +225,36 @@ void showIcons(bool on) {
   final answer = Core().setAppearance({'showIcons': on});
   if (!answer.ok) throw StateError('${answer.error}');
   siteIcons.turn(on);
+}
+
+/// What the generator shows: its digits and symbols are spans of their own
+/// colors (generator.dart, GeneratedText), read here as one string.
+String generatedText(WidgetTester tester) {
+  final text = tester.widget<Text>(find.byKey(const Key('generated')));
+  return text.data ?? text.textSpan!.toPlainText();
+}
+
+/// A phone's vault, which scrolls (the row of kinds inside it scrolls
+/// sideways, and is a Scrollable of its own).
+Finder get vaultScroll => find
+    .descendant(
+      of: find.byKey(const ValueKey('vault-scroll')),
+      matching: find.byType(Scrollable),
+    )
+    .first;
+
+/// An entry of a computer's menu, scrolled into view: the menu's list
+/// scrolls, and its tools come after its folders and the trash.
+Future<Finder> menuEntry(WidgetTester tester, String label) async {
+  final menu = find.byType(Sidebar);
+  final entry = find.descendant(of: menu, matching: find.text(label));
+  await tester.scrollUntilVisible(
+    entry,
+    100,
+    scrollable: find.descendant(of: menu, matching: find.byType(Scrollable)).first,
+  );
+  await tester.pump();
+  return entry;
 }
 
 /// Pumps until something shows up, giving slow core calls real time.
