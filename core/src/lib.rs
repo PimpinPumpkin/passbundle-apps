@@ -27,6 +27,7 @@ pub mod new_device;
 pub mod passkey;
 pub mod pin;
 pub mod places;
+pub mod plans;
 pub mod secrets;
 pub mod security_key;
 pub mod server;

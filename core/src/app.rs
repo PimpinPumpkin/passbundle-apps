@@ -1065,6 +1065,16 @@ impl App {
         self.generator_policy
     }
 
+    /// The person's plans, as the last sync kept on this device says them
+    /// (plans.rs): nothing where the server doesn't enforce plans.
+    pub fn plans(&self) -> crate::plans::Plans {
+        self.store
+            .sync()
+            .as_deref()
+            .map(crate::plans::Plans::from_sync)
+            .unwrap_or_default()
+    }
+
     /// A new password or passphrase, from the choices held to the policy,
     /// which become the next choices. Answers what it made, and the choices
     /// it made it with.

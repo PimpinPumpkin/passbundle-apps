@@ -12,7 +12,8 @@
 // Sign-ins from other devices waiting for an answer
 // (sign_in_requests.dart). On Android and the Mac, updates from PassBundle's
 // releases (updates.dart). On macOS and Windows, whether screenshots of
-// PassBundle are allowed (window_chrome.dart).
+// PassBundle are allowed (window_chrome.dart). The plans, where the server
+// enforces them (plan.dart).
 import 'package:flutter/material.dart';
 
 import 'accounts.dart';
@@ -20,6 +21,7 @@ import 'autofill_offer.dart';
 import 'core.dart';
 import 'icons.dart';
 import 'pin.dart';
+import 'plan.dart';
 import 'sign_in_requests.dart';
 import 'theme.dart';
 import 'unlock_offer.dart';
@@ -543,6 +545,9 @@ class _SettingsListState extends State<SettingsList> {
                 ),
             ],
           ),
+        // The plans, where the server enforces them (plan.dart): their
+        // state, never a way to pay.
+        const PlanSettings(),
         // With more than one account: what this one's called where they're
         // listed together, and its color.
         if (widget.named ?? _shownOf(widget.menu) case final entry?)

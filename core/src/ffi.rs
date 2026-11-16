@@ -3608,6 +3608,22 @@ pub unsafe extern "C" fn pb_generator_policy(account: *const c_char) -> *mut c_c
     with_app(&account, |app| json!(app.generator_policy()))
 }
 
+/// The person's plans, for Settings (core/src/plans.rs; DESIGN.md in the
+/// meta repo, "Plans and billing"): `enforced`, and where it's true, `own`
+/// (their own plan), `premiumFromOrganization`, and `organizations`, the
+/// ones they own or are an admin of (`id`, `name`, `role`, `plan`). Each plan
+/// is `keykeeperPlan` as the server sent it at the last sync: `plan`,
+/// `state`, `freeUntil`, `freeWhy`, `until`, `renews`, `endsAt`,
+/// `storageGb`, `people`, `coveredBy`, and `canManage`.
+///
+/// # Safety
+/// `account` is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_plans(account: *const c_char) -> *mut c_char {
+    let account = text(account);
+    with_app(&account, |app| json!(app.plans()))
+}
+
 /// Updates from PassBundle's releases on Windows and Linux (src/updates), for
 /// Settings' Updates (app/lib/updates.dart): each call on a thread of the
 /// core's own, since checking and downloading wait on the network (see
