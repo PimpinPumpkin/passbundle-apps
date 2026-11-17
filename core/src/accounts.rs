@@ -485,6 +485,23 @@ impl Accounts {
             .collect()
     }
 
+    /// Each unlocked account's cards or identities, which autofill offers
+    /// whatever the app or the site (matching.rs, `fills_anywhere`), with
+    /// the account and vault each is in, as `fillable` orders them.
+    pub fn fillable_anywhere(
+        &self,
+        kind: crate::vault::ItemKind,
+    ) -> Vec<(&str, &Vault, &crate::vault::Item)> {
+        self.unlocked_shown_first()
+            .flat_map(|(id, vault)| {
+                vault
+                    .fillable_anywhere(kind)
+                    .into_iter()
+                    .map(move |i| (id, vault, i))
+            })
+            .collect()
+    }
+
     /// Each unlocked account's logins with a passkey for a site (by its ID),
     /// with the account each is in, as `fillable` orders them.
     pub fn passkeys_for<'a>(&'a self, rp_id: &str) -> Vec<(&'a str, &'a crate::vault::Item)> {
@@ -1108,6 +1125,18 @@ mod tests {
         server: &'static str,
         login: &'static str,
     ) -> Made {
+        make_with(email, password, server, login, |_| Vec::new())
+    }
+
+    /// As `make`, with more items after the login, their values encrypted
+    /// with the account's key (`enc`).
+    fn make_with(
+        email: &'static str,
+        password: &'static str,
+        server: &'static str,
+        login: &'static str,
+        more: impl Fn(&dyn Fn(&str) -> String) -> Vec<serde_json::Value>,
+    ) -> Made {
         let master = MasterKey::derive(
             password,
             email,
@@ -1120,6 +1149,28 @@ mod tests {
         let private = PrivateKey::generate().unwrap();
         let user_id = uuid::Uuid::new_v4().to_string();
         let enc = |text: &str| user.encrypt_str(text).to_string();
+        let mut ciphers = vec![serde_json::json!({
+            "id": uuid::Uuid::new_v4().to_string(),
+            "organizationId": null,
+            "folderId": null,
+            "type": 1,
+            "key": null,
+            "favorite": false,
+            "reprompt": 0,
+            "revisionDate": "2026-11-06T12:00:00.000Z",
+            "creationDate": "2026-11-06T12:00:00.000Z",
+            "deletedDate": null,
+            "collectionIds": [],
+            "name": enc(login),
+            "notes": null,
+            "login": {
+                "username": enc(email),
+                "password": enc("not-a-real-password"),
+                // A site both accounts have a login for.
+                "uris": [{ "uri": enc("https://shared.example.test/sign-in"), "match": null }],
+            },
+        })];
+        ciphers.extend(more(&enc));
         let sync = serde_json::json!({
             "object": "sync",
             "profile": {
@@ -1131,27 +1182,7 @@ mod tests {
             },
             "folders": [],
             "collections": [],
-            "ciphers": [{
-                "id": uuid::Uuid::new_v4().to_string(),
-                "organizationId": null,
-                "folderId": null,
-                "type": 1,
-                "key": null,
-                "favorite": false,
-                "reprompt": 0,
-                "revisionDate": "2026-11-06T12:00:00.000Z",
-                "creationDate": "2026-11-06T12:00:00.000Z",
-                "deletedDate": null,
-                "collectionIds": [],
-                "name": enc(login),
-                "notes": null,
-                "login": {
-                    "username": enc(email),
-                    "password": enc("not-a-real-password"),
-                    // A site both accounts have a login for.
-                    "uris": [{ "uri": enc("https://shared.example.test/sign-in"), "match": null }],
-                },
-            }],
+            "ciphers": ciphers,
             "policies": [],
         })
         .to_string();
@@ -1188,6 +1219,72 @@ mod tests {
                 "https://vault.passbundle.example.test",
                 "Bank",
             )
+        })
+    }
+
+    /// A card or an identity (`kind` 3 or 4) for `make_with`, in the trash
+    /// or archived when it says so.
+    fn wallet_item(
+        enc: &dyn Fn(&str) -> String,
+        kind: u8,
+        name: &str,
+        deleted: bool,
+        archived: bool,
+    ) -> serde_json::Value {
+        let mut item = serde_json::json!({
+            "id": uuid::Uuid::new_v4().to_string(),
+            "organizationId": null,
+            "folderId": null,
+            "type": kind,
+            "key": null,
+            "favorite": false,
+            "reprompt": 0,
+            "revisionDate": "2026-11-06T12:00:00.000Z",
+            "creationDate": "2026-11-06T12:00:00.000Z",
+            "deletedDate": deleted.then_some("2026-11-07T12:00:00.000Z"),
+            "archivedDate": archived.then_some("2026-11-07T12:00:00.000Z"),
+            "collectionIds": [],
+            "name": enc(name),
+            "notes": null,
+        });
+        if kind == 3 {
+            item["card"] = serde_json::json!({
+                "cardholderName": enc("Ana López"),
+                "brand": enc("Visa"),
+                "number": enc("4111111111111111"),
+                "expMonth": enc("7"),
+                "expYear": enc("2029"),
+                "code": enc("123"),
+            });
+        } else {
+            item["identity"] = serde_json::json!({
+                "firstName": enc("Ana"),
+                "lastName": enc("López"),
+                "city": enc("Springfield"),
+            });
+        }
+        item
+    }
+
+    /// Two accounts with cards and identities, some in the trash or
+    /// archived: made once, as `work` and `personal` are.
+    fn shopper(which: usize) -> &'static Made {
+        static MADE: [OnceLock<Made>; 2] = [OnceLock::new(), OnceLock::new()];
+        MADE[which].get_or_init(|| {
+            let (email, server) = [
+                ("ana@shop.example.test", "https://vault.shop.example.test"),
+                ("ana@store.example.test", "https://vault.store.example.test"),
+            ][which];
+            make_with(email, "shopping password 1", server, "Shop", move |enc| {
+                let mine = |name: &str| format!("{name} {}", which + 1);
+                vec![
+                    wallet_item(enc, 3, &mine("Visa"), false, false),
+                    wallet_item(enc, 3, &mine("Amex"), true, false),
+                    wallet_item(enc, 3, &mine("Debit"), false, false),
+                    wallet_item(enc, 4, &mine("Home"), false, false),
+                    wallet_item(enc, 4, &mine("Old address"), false, true),
+                ]
+            })
         })
     }
 
@@ -1873,6 +1970,68 @@ mod tests {
         accounts.lock(&p);
         assert!(accounts.fillable(&site).is_empty());
         assert!(accounts.passkeys_for("shared.example.test").is_empty());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// Autofill offers cards and identities whatever the app or the site:
+    /// every unlocked account's in use, by name, the shown account's first,
+    /// each with its account; none of a locked account's.
+    #[test]
+    fn every_unlocked_accounts_cards_and_identities_fill_anywhere() {
+        use crate::vault::ItemKind;
+        let dir = new_dir();
+        let a = keep(&dir, shopper(0));
+        let b = keep(&dir, shopper(1));
+        let mut accounts = open(&dir);
+        accounts.switch(&b).unwrap();
+        for id in [&a, &b] {
+            accounts
+                .app(id)
+                .unwrap()
+                .unlock("shopping password 1")
+                .unwrap();
+        }
+        let names = |accounts: &Accounts, kind| -> Vec<(String, String)> {
+            accounts
+                .fillable_anywhere(kind)
+                .into_iter()
+                .map(|(id, _, i)| (id.to_owned(), i.name.clone()))
+                .collect()
+        };
+        assert_eq!(
+            names(&accounts, ItemKind::Card),
+            vec![
+                (b.clone(), "Debit 2".to_owned()),
+                (b.clone(), "Visa 2".to_owned()),
+                (a.clone(), "Debit 1".to_owned()),
+                (a.clone(), "Visa 1".to_owned()),
+            ]
+        );
+        assert_eq!(
+            names(&accounts, ItemKind::Identity),
+            vec![
+                (b.clone(), "Home 2".to_owned()),
+                (a.clone(), "Home 1".to_owned())
+            ]
+        );
+        // Never a login, which matches by its websites instead.
+        assert!(names(&accounts, ItemKind::Login).is_empty());
+        // Each with its own vault, for what the person may see of it.
+        let (_, vault, visa) = accounts.fillable_anywhere(ItemKind::Card)[1];
+        assert!(vault.grid(visa).see_passwords);
+        assert_eq!(crate::matching::fill_subtitle(visa, true), "Visa, *1111");
+        // A locked account offers none.
+        accounts.lock(&b);
+        assert_eq!(
+            names(&accounts, ItemKind::Card),
+            vec![
+                (a.clone(), "Debit 1".to_owned()),
+                (a.clone(), "Visa 1".to_owned())
+            ]
+        );
+        accounts.lock(&a);
+        assert!(names(&accounts, ItemKind::Card).is_empty());
+        assert!(names(&accounts, ItemKind::Identity).is_empty());
         let _ = fs::remove_dir_all(dir);
     }
 

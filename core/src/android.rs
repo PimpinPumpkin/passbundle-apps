@@ -47,8 +47,9 @@ pub fn init<'caller>(
         .resolve::<ThrowRuntimeExAndDefault>();
 }
 
-/// An item's value for autofill to fill ("username", "password", "totp",
-/// or "field:<index>"), from the account it's in (by its id on this
+/// An item's value for autofill to fill ("username", "password", "totp"
+/// (the current code), "field:<index>", or a card's or an identity's, as
+/// `Item::detail` names them), from the account it's in (by its id on this
 /// device), as UTF-8 bytes Kotlin zeroes after use; null while that account
 /// is locked or busy, or if there's nothing to fill. It goes from here into
 /// the other app's field without passing through Dart. A secret the
@@ -247,6 +248,25 @@ pub fn fillable<'caller>(
         .with_env(|env| -> JniResult<jstring> {
             let answer =
                 crate::ffi::fillable(&package.try_to_string(env)?, &domain.try_to_string(env)?);
+            Ok(env.new_string(answer.to_string())?.into_raw())
+        })
+        .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+/// The cards and identities for autofill, from every unlocked account, as
+/// JSON: names and plain subtitles only, never a number or a code, each with
+/// its account, offered whatever the app or the site (docs/phones.md,
+/// "Autofill"). Their values come one at a time from `value`, once one is
+/// picked.
+#[cfg(feature = "ffi")]
+#[jni_mangle("com.passbundle.app.Core")]
+pub fn cards_and_identities<'caller>(
+    mut unowned_env: EnvUnowned<'caller>,
+    _class: JClass<'caller>,
+) -> jstring {
+    unowned_env
+        .with_env(|env| -> JniResult<jstring> {
+            let answer = crate::ffi::cards_and_identities();
             Ok(env.new_string(answer.to_string())?.into_raw())
         })
         .resolve::<ThrowRuntimeExAndDefault>()
