@@ -149,32 +149,127 @@ object Responses {
         lastFilled = Filled(account, item, fields.packageName, fields.webDomain, System.currentTimeMillis())
     }
 
-    private fun justFilled(item: JSONObject, fields: Fields): Boolean {
+    private fun justFilled(item: Offered, fields: Fields): Boolean {
         val last = lastFilled ?: return false
-        return last.account == item.optString("account") && last.item == item.getString("id") &&
+        return last.account == item.account && last.item == item.id &&
             last.before(fields.packageName, fields.webDomain, System.currentTimeMillis())
     }
 
-    /** One item in Android's list for these fields, whose values FillActivity takes from the core once it's picked. */
-    private fun dataset(
-        context: Context,
-        fields: Fields,
-        ids: List<AutofillId>,
-        title: String,
-        subtitle: String?,
-        item: JSONObject,
-        kind: Kind,
-    ): Dataset {
+    /** An item the core offers to fill, as plain values: names and plain details only, never a secret. */
+    data class Offered(
+        val id: String,
+        val account: String,
+        val name: String,
+        /** A login's username. */
+        val username: String? = null,
+        /** The site a login in an app is from (AppSites.kt). */
+        val from: String? = null,
+        /** The account's name, with more than one account on the phone. */
+        val accountLabel: String? = null,
+        /** A card's or an identity's second line, from the core. */
+        val subtitle: String? = null,
+        /** It asks for the master password again before it fills. */
+        val reprompt: Boolean = false,
+        /** A login with a one-time code key. */
+        val totp: Boolean = false,
+    )
+
+    private fun offered(item: JSONObject) =
+        Offered(
+            id = item.getString("id"),
+            account = item.optString("account"),
+            name = item.optString("name"),
+            username = text(item, "username"),
+            from = text(item, "from"),
+            accountLabel = text(item, "accountLabel"),
+            subtitle = text(item, "subtitle"),
+            reprompt = item.optBoolean("reprompt"),
+            totp = item.optBoolean("totp"),
+        )
+
+    /** The offer to trust an app as a browser: the page's domain it claims, the app's name, and the account the screens show. */
+    data class Trust(val domain: String, val app: String, val account: String)
+
+    /**
+     * One entry in Android's list: what it says, the fields it covers, and
+     * what picking it opens (FillActivity's `mode`, with the item, its
+     * account, and the kind of fill). It holds no value: an entry's fields
+     * get only placeholders, and their values come from FillActivity once
+     * the person picks it (`filled`).
+     */
+    data class Entry<T>(
+        val title: String,
+        val subtitle: String?,
+        val ids: List<T>,
+        val mode: String,
+        val kind: Kind,
+        val account: String,
+        val item: String?,
+        val asks: Boolean,
+    )
+
+    /**
+     * What Android's list offers on a screen, from what the core offers
+     * (plain values, so it's tested on the computer: src/test,
+     * ResponsesTest): every login on a sign-in screen (with the code field
+     * too, for a login with a key), or each login's code on a screen that
+     * asks only for one, the login just filled first; the offer to trust the
+     * app as a browser; and every card and identity on their own fields.
+     * Each entry is a pick: the same whether the vault was open or was just
+     * unlocked from this list (FillActivity hands back this list, never a
+     * fill nobody picked).
+     */
+    fun <T> entries(
+        screen: Roles.Screen<T>,
+        logins: List<Offered>,
+        cards: List<Offered>,
+        identities: List<Offered>,
+        trust: Trust? = null,
+        justFilled: (Offered) -> Boolean = { false },
+    ): List<Entry<T>> {
+        val found = mutableListOf<Entry<T>>()
+        val loginIds = listOfNotNull(screen.username, screen.password)
+        val code = screen.code
+        if (loginIds.isNotEmpty()) {
+            for (login in logins) {
+                // A login with a one-time code fills the screen's code field too.
+                val ids = loginIds + listOfNotNull(code?.takeIf { login.totp })
+                // A site's login in an app says which site it's from, as a browser's address bar would.
+                val subtitle = subtitle(login.username, login.from, login.accountLabel)
+                found += Entry(login.name, subtitle, ids, FillActivity.FILL, Kind.LOGIN, login.account, login.id, login.reprompt)
+            }
+        } else if (code != null) {
+            // Only a code asked for, as on the screen after signing in: the logins with one, the one just filled first.
+            val (first, rest) = logins.filter { it.totp }.partition(justFilled)
+            for (login in first + rest) {
+                val subtitle = codeSubtitle(login.username, login.from, login.accountLabel)
+                found += Entry(login.name, subtitle, listOf(code), FillActivity.FILL, Kind.CODE, login.account, login.id, login.reprompt)
+            }
+        }
+        if (trust != null && (loginIds.isNotEmpty() || code != null)) {
+            val ids = loginIds + listOfNotNull(code)
+            found += Entry("Logins for ${trust.domain}", "Trust ${trust.app} as a browser first", ids, FillActivity.TRUST, Kind.LOGIN, trust.account, null, false)
+        }
+        // Cards and identities aren't for a website: every one, on its own kind of field.
+        for ((kind, items) in listOf(Kind.CARD to cards, Kind.IDENTITY to identities)) {
+            val ids = screen.of(kind).map { it.id }.distinct()
+            if (ids.isEmpty()) continue
+            for (item in items) {
+                found += Entry(item.name, subtitle(item.subtitle, null, item.accountLabel), ids, FillActivity.FILL, kind, item.account, item.id, item.reprompt)
+            }
+        }
+        return found
+    }
+
+    /** An entry as Android's dataset: placeholders only, and FillActivity to fill it once it's picked. */
+    private fun dataset(context: Context, fields: Fields, entry: Entry<AutofillId>): Dataset {
         @Suppress("DEPRECATION")
-        val dataset = Dataset.Builder(presentation(context, title, subtitle))
-        // Placeholders: the values come from FillActivity once this one is picked.
-        for (field in ids) {
+        val dataset = Dataset.Builder(presentation(context, entry.title, entry.subtitle))
+        for (field in entry.ids) {
             @Suppress("DEPRECATION")
             dataset.setValue(field, null)
         }
-        dataset.setAuthentication(
-            pending(context, fields, FillActivity.FILL, item.optString("account"), item.getString("id"), item.optBoolean("reprompt"), kind = kind),
-        )
+        dataset.setAuthentication(pending(context, fields, entry.mode, entry.account, entry.item, entry.asks, kind = entry.kind))
         return dataset.build()
     }
 
@@ -223,57 +318,22 @@ object Responses {
                 .apply { save?.let { setSaveInfo(it) } }
                 .build()
         }
+        var matching = emptyList<Offered>()
+        var trust: Trust? = null
+        if (forLogins) {
+            matching = logins(context, fields, domain, waitMs)?.map(::offered) ?: return null
+            if (claimed != null && !trusted && Browsers.couldBe(context, fields.packageName)) {
+                trust = Trust(claimed, Browsers.label(context, fields.packageName), answer.optString("account"))
+            }
+            if (debug) Log.d("PassBundle", "autofill ${fields.packageName}: web domain ${fields.webDomain}, trusted $trusted, offers trust ${trust != null}")
+        }
+        fun anywhereFor(kind: Kind) = if (fields.of(kind).isEmpty()) emptyList() else anywhere(kind).orEmpty().map(::offered)
+        val offers = entries(fields.screen, matching, anywhereFor(Kind.CARD), anywhereFor(Kind.IDENTITY), trust) { justFilled(it, fields) }
         val response = FillResponse.Builder()
         save?.let { response.setSaveInfo(it) }
-        var offered = 0
-        var offerTrust = false
-        if (forLogins) {
-            val items = logins(context, fields, domain, waitMs) ?: return null
-            offerTrust = claimed != null && !trusted && Browsers.couldBe(context, fields.packageName)
-            if (debug) Log.d("PassBundle", "autofill ${fields.packageName}: web domain ${fields.webDomain}, trusted $trusted, offers trust $offerTrust")
-            if (loginIds.isNotEmpty()) {
-                for (item in items) {
-                    // A login with a one-time code fills the screen's code field too.
-                    val its = loginIds + listOfNotNull(code?.takeIf { item.optBoolean("totp") })
-                    // A site's login in an app says which site it's from, as a browser's address bar would.
-                    val subtitle = subtitle(text(item, "username"), text(item, "from"), text(item, "accountLabel"))
-                    response.addDataset(dataset(context, fields, its, item.optString("name"), subtitle, item, Kind.LOGIN))
-                    offered++
-                }
-            } else if (code != null) {
-                // Only a code asked for, as on the screen after signing in: the logins with one, the one just filled first.
-                val withCodes = items.filter { it.optBoolean("totp") }
-                val (first, rest) = withCodes.partition { justFilled(it, fields) }
-                for (item in first + rest) {
-                    val subtitle = codeSubtitle(text(item, "username"), text(item, "from"), text(item, "accountLabel"))
-                    response.addDataset(dataset(context, fields, listOf(code), item.optString("name"), subtitle, item, Kind.CODE))
-                    offered++
-                }
-            }
-            if (offerTrust) {
-                val app = Browsers.label(context, fields.packageName)
-                @Suppress("DEPRECATION")
-                val dataset = Dataset.Builder(presentation(context, "Logins for $claimed", "Trust $app as a browser first"))
-                for (field in loginIds + listOfNotNull(code)) {
-                    @Suppress("DEPRECATION")
-                    dataset.setValue(field, null)
-                }
-                dataset.setAuthentication(pending(context, fields, FillActivity.TRUST, answer.optString("account")))
-                response.addDataset(dataset.build())
-            }
-        }
-        // Cards and identities aren't for a website: every one, on its own kind of field.
-        for (kind in listOf(Kind.CARD, Kind.IDENTITY)) {
-            val theirs = fields.of(kind).map { it.id }.distinct()
-            if (theirs.isEmpty()) continue
-            for (item in anywhere(kind).orEmpty()) {
-                val subtitle = subtitle(text(item, "subtitle"), null, text(item, "accountLabel"))
-                response.addDataset(dataset(context, fields, theirs, item.optString("name"), subtitle, item, kind))
-                offered++
-            }
-        }
         // Nothing to fill: only the offer to save what the person signs in with.
-        if (offered == 0 && !offerTrust) return save?.let { response.build() }
+        if (offers.isEmpty()) return save?.let { response.build() }
+        for (entry in offers) response.addDataset(dataset(context, fields, entry))
         return response.build()
     }
 

@@ -112,7 +112,14 @@ class FillActivity : Activity() {
         }.start()
     }
 
-    /** Hands back the item's values for the fields; a login's is remembered for the code screen after it. */
+    /**
+     * After unlocking, or trusting a browser: the list to pick from, built
+     * the same as when the vault was open (Responses.entries, where every
+     * entry is a pick holding no value), never a fill nobody picked.
+     */
+    private fun handBackList(fields: Fields) = finishWith(Responses.forFields(this, fields))
+
+    /** Hands back the picked item's values for the fields; a login's is remembered for the code screen after it. */
     private fun finishFilled(fields: Fields, account: String, item: String, kind: Kind) {
         val filled = Responses.filled(this, fields, account, item, kind)
         if (filled != null && kind == Kind.LOGIN) Responses.filledLogin(fields, account, item)
@@ -217,7 +224,7 @@ class FillActivity : Activity() {
             )
             .setPositiveButton("Trust") { _, _ ->
                 if (Browsers.trust(this, fields.packageName)) {
-                    finishWith(Responses.forFields(this, fields))
+                    handBackList(fields)
                 } else {
                     Toast.makeText(this, "Couldn't trust $app.", Toast.LENGTH_LONG).show()
                     finishWith(null)
@@ -250,7 +257,7 @@ class FillActivity : Activity() {
         }
         Biometric.unlock(this, account) { unlocked, error ->
             if (isFinishing || isDestroyed) return@unlock
-            if (unlocked) return@unlock finishWith(Responses.forFields(this, fields))
+            if (unlocked) return@unlock handBackList(fields)
             // "Use master password", or the biometric unlock is off now.
             unlockWithMasterPassword(fields, account, label, error)
         }
@@ -290,7 +297,7 @@ class FillActivity : Activity() {
                     if (isFinishing || isDestroyed) return@runOnUiThread
                     if (answer?.optBoolean("ok") == true) {
                         dialog.dismiss()
-                        return@runOnUiThread finishWith(Responses.forFields(this, fields))
+                        return@runOnUiThread handBackList(fields)
                     }
                     // What went wrong, said in the dialog itself, and asked again.
                     unlocking = false
