@@ -15,6 +15,10 @@
 //! An Android app matches only an item's own `androidapp://<package>` website,
 //! never a lookalike name.
 //!
+//! Cards and identities aren't for a website, so they don't match by one:
+//! Android's autofill offers every one in use on a card's or an address's
+//! fields, whatever the app or the site (`fills_anywhere`).
+//!
 //! iOS suggests logins above the keyboard from a list the app gives it of
 //! usernames and the domains they're for, never passwords (`suggestions`), by
 //! the same rules; and passkeys by their site's ID (`passkey_suggestions`).
@@ -112,6 +116,35 @@ pub fn matches(item: &Item, target: &Target) -> bool {
             .any(|(at, uri)| fits(uri, item.uri_matches.get(at).copied().flatten(), target))
 }
 
+/// Whether the item is a card or an identity in use, of that kind: autofill
+/// offers those anywhere (docs/phones.md, "Autofill").
+pub fn fills_anywhere(item: &Item, kind: ItemKind) -> bool {
+    matches!(kind, ItemKind::Card | ItemKind::Identity) && item.kind == kind && item.in_use()
+}
+
+/// What autofill's list says under a card's or an identity's name, from its
+/// plain parts: a card's brand, with its number's last 4 digits only for
+/// someone who may see the number (`sees_secrets`, the item's grid); an
+/// identity's name, else its email.
+pub fn fill_subtitle(item: &Item, sees_secrets: bool) -> String {
+    if let Some(card) = &item.card {
+        return if sees_secrets {
+            card.summary()
+        } else {
+            card.brand.clone().unwrap_or_default()
+        };
+    }
+    if let Some(identity) = &item.identity {
+        let name = identity.full_name();
+        return if name.is_empty() {
+            identity.email.clone().unwrap_or_default()
+        } else {
+            name
+        };
+    }
+    String::new()
+}
+
 /// A login iOS may suggest above the keyboard (docs/phones.md, "Autofill"):
 /// its username, and a domain its websites fill on. Never its password.
 #[derive(Debug, PartialEq, Eq)]
@@ -125,6 +158,18 @@ impl Vault {
     /// The logins for the target, by name.
     pub fn matching(&self, target: &Target) -> Vec<&Item> {
         let mut found: Vec<&Item> = self.items.iter().filter(|i| matches(i, target)).collect();
+        found.sort_by_key(|i| i.name.to_lowercase());
+        found
+    }
+
+    /// The cards or the identities autofill offers, whatever the app or the
+    /// site (`fills_anywhere`), by name.
+    pub fn fillable_anywhere(&self, kind: ItemKind) -> Vec<&Item> {
+        let mut found: Vec<&Item> = self
+            .items
+            .iter()
+            .filter(|i| fills_anywhere(i, kind))
+            .collect();
         found.sort_by_key(|i| i.name.to_lowercase());
         found
     }
@@ -258,6 +303,46 @@ mod tests {
         }
     }
 
+    fn card(number: &str, brand: &str) -> Item {
+        Item {
+            kind: ItemKind::Card,
+            name: "Visa".into(),
+            username: None,
+            card: Some(crate::vault::Card {
+                cardholder_name: Some("Ana López".into()),
+                brand: Some(brand.into()),
+                exp_month: Some("7".into()),
+                exp_year: Some("2029".into()),
+                number: Some(zeroize::Zeroizing::new(number.into())),
+                code: Some(zeroize::Zeroizing::new("123".into())),
+            }),
+            ..login(&[])
+        }
+    }
+
+    fn identity() -> Item {
+        Item {
+            kind: ItemKind::Identity,
+            name: "Home".into(),
+            username: None,
+            identity: Some(crate::vault::Identity {
+                title: Some("Ms".into()),
+                first_name: Some("Ana".into()),
+                middle_name: Some("María".into()),
+                last_name: Some("López".into()),
+                address1: Some("1 Example Street".into()),
+                address2: Some("Apt 2".into()),
+                city: Some("Springfield".into()),
+                state: Some("IL".into()),
+                postal_code: Some("62701".into()),
+                country: Some("US".into()),
+                email: Some("ana@example.test".into()),
+                ..Default::default()
+            }),
+            ..login(&[])
+        }
+    }
+
     fn site(uri: &str, m: Option<u8>, page: &str) -> bool {
         matches(&login(&[(uri, m)]), &Target::Website(page))
     }
@@ -375,6 +460,88 @@ mod tests {
         ]);
         assert!(matches(&item, &Target::Website("www.example.net")));
         assert!(!matches(&item, &Target::Website("example.com")));
+    }
+
+    #[test]
+    fn cards_and_identities_fill_anywhere_and_logins_never_do() {
+        let visa = card("4111 1111 1111 1234", "Visa");
+        assert!(fills_anywhere(&visa, ItemKind::Card));
+        assert!(!fills_anywhere(&visa, ItemKind::Identity));
+        assert!(fills_anywhere(&identity(), ItemKind::Identity));
+        assert!(!fills_anywhere(&identity(), ItemKind::Card));
+        // Never a login (those match by their websites) or another kind.
+        let login = login(&[("https://example.com", None)]);
+        assert!(!fills_anywhere(&login, ItemKind::Login));
+        assert!(!fills_anywhere(&login, ItemKind::Card));
+        // Only those in use: not in the trash, not archived.
+        let deleted = Item {
+            deleted: true,
+            ..card("4111 1111 1111 1234", "Visa")
+        };
+        let archived = Item {
+            archived: true,
+            ..identity()
+        };
+        assert!(!fills_anywhere(&deleted, ItemKind::Card));
+        assert!(!fills_anywhere(&archived, ItemKind::Identity));
+        // A card never matches a website or an app as a login would.
+        assert!(!matches(&visa, &Target::Website("example.com")));
+    }
+
+    #[test]
+    fn a_cards_subtitle_shows_its_last_digits_only_to_someone_who_may_see_them() {
+        let visa = card("4111 1111 1111 1234", "Visa");
+        assert_eq!(fill_subtitle(&visa, true), "Visa, *1234");
+        assert_eq!(fill_subtitle(&visa, false), "Visa");
+        let no_brand = card("4111 1111 1111 1234", "");
+        assert_eq!(fill_subtitle(&no_brand, false), "");
+        // An identity by its name, else its email.
+        assert_eq!(fill_subtitle(&identity(), false), "Ms Ana María López");
+        let mut emailed = identity();
+        if let Some(i) = emailed.identity.as_mut() {
+            (i.title, i.first_name, i.middle_name, i.last_name) = (None, None, None, None);
+        }
+        assert_eq!(fill_subtitle(&emailed, true), "ana@example.test");
+        assert_eq!(fill_subtitle(&login(&[]), true), "");
+    }
+
+    #[test]
+    fn a_cards_and_an_identitys_parts_are_there_one_at_a_time() {
+        let visa = card("4111 1111 1111 1234", "Visa");
+        let part = |item: &Item, what: &str| item.detail(what).map(|v| v.as_str().to_owned());
+        assert_eq!(part(&visa, "expMonth").as_deref(), Some("7"));
+        assert_eq!(part(&visa, "expYear").as_deref(), Some("2029"));
+        assert_eq!(
+            part(&visa, "cardNumber").as_deref(),
+            Some("4111 1111 1111 1234")
+        );
+        // A card has no identity's parts, and an identity no card's.
+        assert_eq!(part(&visa, "city"), None);
+        let home = identity();
+        assert_eq!(part(&home, "expMonth"), None);
+        for (what, want) in [
+            ("title", "Ms"),
+            ("firstName", "Ana"),
+            ("middleName", "María"),
+            ("lastName", "López"),
+            ("address1", "1 Example Street"),
+            ("address2", "Apt 2"),
+            ("city", "Springfield"),
+            ("state", "IL"),
+            ("postalCode", "62701"),
+            ("country", "US"),
+            ("email", "ana@example.test"),
+        ] {
+            assert_eq!(part(&home, what).as_deref(), Some(want), "{what}");
+            // Plain values, like the rest of an identity's name and address.
+            assert!(!home.is_secret(what), "{what}");
+        }
+        // Empty ones are none.
+        assert_eq!(part(&home, "address3"), None);
+        assert_eq!(part(&home, "company"), None);
+        // The month and year are plain; the number and code stay secrets.
+        assert!(!visa.is_secret("expMonth") && !visa.is_secret("expYear"));
+        assert!(visa.is_secret("cardNumber") && visa.is_secret("cardCode"));
     }
 
     #[test]

@@ -23,6 +23,23 @@ class UnlockingTest {
         }
     }
 
+    @Test fun `an item that asks for the master password, or doesn't fill, says what it is`() {
+        assertEquals("This login asks for your master password.", Unlocking.asks(Kind.LOGIN))
+        assertEquals("This login asks for your master password.", Unlocking.asks(Kind.CODE))
+        assertEquals("This card asks for your master password.", Unlocking.asks(Kind.CARD))
+        assertEquals("This identity asks for your master password.", Unlocking.asks(Kind.IDENTITY))
+        assertEquals("That login doesn't fill here.", Unlocking.doesntFill(Kind.CODE))
+        assertEquals("That card can't be filled now.", Unlocking.doesntFill(Kind.CARD))
+        assertEquals("That identity can't be filled now.", Unlocking.doesntFill(Kind.IDENTITY))
+    }
+
+    @Test fun `each kind of fill has the name FillActivity hears`() {
+        assertEquals(listOf("login", "code", "card", "identity"), Kind.entries.map { it.id })
+        for (kind in Kind.entries) assertEquals(kind, Kind.of(kind.id))
+        assertEquals(null, Kind.of("password"))
+        assertEquals(null, Kind.of(null))
+    }
+
     @Test fun `the dialog names the account when there's more than one, and says why it's asking`() {
         assertEquals("Enter your master password to fill this in.", Unlocking.message(null))
         assertEquals("Enter the master password for Work to fill this in.", Unlocking.message("Work"))

@@ -71,6 +71,23 @@ for node in re.finditer(r"<node [^>]*>", xml):
 ' "$1"
 }
 
+# What the field with this resource id ($1) holds, when it matches the
+# pattern ($2): what filling it put there. Never Android's autofill list,
+# whose second line for a login is its username too.
+filled() {
+  screen | python3 -c '
+import re, sys
+xml, field, want = sys.stdin.read(), sys.argv[1], sys.argv[2]
+for node in re.finditer(r"<node [^>]*>", xml):
+    n = node.group(0)
+    if ("resource-id=\"" + field + "\"") in n:
+        text = re.search(r"(?:^|\s)text=\"([^\"]*)\"", n)
+        if text and re.search(want, text.group(1)):
+            print(text.group(1))
+        break
+' "$1" "$2"
+}
+
 # Waits up to 30 seconds for something, then taps it.
 tap() {
   local at
@@ -108,9 +125,10 @@ web_field() {
 }
 
 # Picks an entry in Android's autofill list ($1) and waits for what it fills
-# ($2). The list can still be settling when it first shows, and Android 10
-# drops a tap that lands then, so it waits a moment before tapping. If
-# nothing was filled, it opens the list again from the field ($3) and retries.
+# ($2) in the field ($3, "id=<resource id>"). The list can still be settling
+# when it first shows, and Android 10 drops a tap that lands then, so it
+# waits a moment before tapping. If nothing was filled, it opens the list
+# again from the field and retries.
 pick() {
   local at
   for _ in 1 2 3; do
@@ -122,7 +140,7 @@ pick() {
       a shell input tap $at
     fi
     for _ in $(seq 8); do
-      [ -n "$(where "$2")" ] && return 0
+      [ -n "$(filled "${3#id=}" "$2")" ] && return 0
       sleep 1
     done
     echo "Picking $1 filled nothing; opening the list again." >&2
@@ -470,7 +488,7 @@ ask autofill-no-biometric autofill-no-biometric-done "PassBundle never turned bi
 sign_in_form
 tap "^Unlock PassBundle"
 shown "^Enter your master password to fill this in" || exit 1
-[ -z "$(where '^autofill@example.test$')" ] || { echo "Something filled before the master password was given." >&2; exit 1; }
+[ -z "$(filled com.passbundle.autofilltest:id/username '^autofill@example.test$')" ] || { echo "Something filled before the master password was given." >&2; exit 1; }
 # Typed, then Enter, as the keyboard's Go would (its Unlock button can sit
 # under the keyboard on a small screen).
 type_in "not%sthe%spassword"
@@ -479,8 +497,9 @@ shown "^That master password isn't right" || exit 1
 type_in "${password// /%s}"
 a shell input keyevent KEYCODE_ENTER
 shown "^Autofill test app" || exit 1
-# Unlocked, and only offered: nothing is filled until it's picked.
-[ -z "$(where '^autofill@example.test$')" ] || { echo "Unlocking filled a login nobody picked." >&2; exit 1; }
+# Unlocked, and only offered: nothing is filled until it's picked. The
+# username field itself, since the list shows the login's username too.
+[ -z "$(filled com.passbundle.autofilltest:id/username '^autofill@example.test$')" ] || { echo "Unlocking filled a login nobody picked." >&2; exit 1; }
 pick "^Autofill test app" "^autofill@example.test$" "id=com.passbundle.autofilltest:id/username"
 offers_unlock "The vault stayed unlocked after unlocking with the master password from autofill and filling, with Immediately chosen."
 echo "Filled: unlocked with the master password from autofill, then the login picked."

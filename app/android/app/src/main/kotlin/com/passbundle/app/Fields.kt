@@ -3,53 +3,76 @@ package com.passbundle.app
 import android.app.assist.AssistStructure
 import android.content.Intent
 import android.os.Build
-import android.text.InputType
+import android.os.Bundle
 import android.view.View
 import android.view.autofill.AutofillId
 
 /**
- * The sign-in fields on another app's screen, or a browser's page, as Android's
- * autofill describes them (docs/phones.md, "Autofill"), and what's asking: the
- * app's package, and the page's domain when a browser gives one.
+ * The fields PassBundle fills on another app's screen, or a browser's page,
+ * as Android's autofill describes them (docs/phones.md, "Autofill"), each
+ * with what it's for (Roles.kt): a login's username and password, a one-time
+ * code, a card's parts, an identity's. And what's asking: the app's package,
+ * and the page's domain when a browser gives one.
  */
 class Fields(
-    val username: AutofillId?,
-    val password: AutofillId?,
+    val screen: Roles.Screen<AutofillId>,
     val packageName: String,
     val webDomain: String?,
 ) {
-    val ids get() = listOfNotNull(username, password).toTypedArray()
+    val username: AutofillId? get() = screen.username
+    val password: AutofillId? get() = screen.password
 
+    /** The first field that asks for a one-time code. */
+    val code: AutofillId? get() = screen.code
+
+    /** Every field PassBundle might fill here, once each. */
+    val ids: Array<AutofillId> get() = screen.ids.toTypedArray()
+
+    /** The fields a kind of item fills here. */
+    fun of(kind: Kind): List<Roles.Found<AutofillId>> = screen.of(kind)
+
+    /** Every extra `from` reads is set here, so nothing added to the intent later stands in for one. */
     fun into(intent: Intent): Intent =
         intent
-            .putExtra(USERNAME, username)
-            .putExtra(PASSWORD, password)
+            .putParcelableArrayListExtra(FOUND, ArrayList(screen.found.map(::bundle)))
             .putExtra(PACKAGE, packageName)
             .putExtra(DOMAIN, webDomain)
 
     companion object {
-        private const val USERNAME = "com.passbundle.app.username"
-        private const val PASSWORD = "com.passbundle.app.password"
+        private const val FOUND = "com.passbundle.app.found"
         private const val PACKAGE = "com.passbundle.app.package"
         private const val DOMAIN = "com.passbundle.app.domain"
 
-        private val PASSWORD_VARIATIONS =
-            setOf(
-                InputType.TYPE_TEXT_VARIATION_PASSWORD,
-                InputType.TYPE_TEXT_VARIATION_WEB_PASSWORD,
-                InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD,
-            )
-        private val USERNAME_WORDS = listOf("user", "email", "e-mail", "login", "account")
+        private fun bundle(found: Roles.Found<AutofillId>): Bundle =
+            Bundle().apply {
+                putParcelable("id", found.id)
+                putString("role", found.role.name)
+                putString("format", found.format)
+                putStringArrayList("options", found.options?.let { ArrayList(it) })
+            }
+
+        @Suppress("DEPRECATION")
+        private fun found(bundle: Bundle): Roles.Found<AutofillId>? {
+            val id =
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    bundle.getParcelable("id", AutofillId::class.java)
+                } else {
+                    bundle.getParcelable("id")
+                } ?: return null
+            val role = runCatching { Role.valueOf(bundle.getString("role") ?: "") }.getOrNull() ?: return null
+            return Roles.Found(id, role, bundle.getString("format"), bundle.getStringArrayList("options"))
+        }
 
         fun from(intent: Intent): Fields {
             @Suppress("DEPRECATION")
-            fun id(key: String): AutofillId? =
+            val bundles =
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                    intent.getParcelableExtra(key, AutofillId::class.java)
+                    intent.getParcelableArrayListExtra(FOUND, Bundle::class.java)
                 } else {
-                    intent.getParcelableExtra(key)
+                    intent.getParcelableArrayListExtra(FOUND)
                 }
-            return Fields(id(USERNAME), id(PASSWORD), intent.getStringExtra(PACKAGE) ?: "", intent.getStringExtra(DOMAIN))
+            val found = bundles.orEmpty().mapNotNull { runCatching { found(it) }.getOrNull() }
+            return Fields(Roles.Screen(found), intent.getStringExtra(PACKAGE) ?: "", intent.getStringExtra(DOMAIN))
         }
 
         /** What's typed in the username and password fields, for saving. */
@@ -67,20 +90,16 @@ class Fields(
             return username to password
         }
 
-        /** The username and password fields: by the app's own hints first, then by what they look like. */
+        /** The screen's fields, each described as Roles.kt reads them, and what each is for. */
         fun find(structure: AssistStructure): Fields {
-            var username: AutofillId? = null
-            var password: AutofillId? = null
+            val described = mutableListOf<Roles.Field<AutofillId>>()
             var domain: String? = null
-            // The text field just before the password, for a form that says nothing about its username.
-            var textBeforePassword: AutofillId? = null
-            var lastText: AutofillId? = null
 
             fun visit(node: AssistStructure.ViewNode) {
                 node.webDomain?.takeIf { it.isNotBlank() && domain == null }?.let { domain = it }
                 val id = node.autofillId
-                if (id != null && node.autofillType == View.AUTOFILL_TYPE_TEXT) {
-                    val hints = node.autofillHints.orEmpty().map { it.lowercase() }
+                val list = node.autofillType == View.AUTOFILL_TYPE_LIST
+                if (id != null && (node.autofillType == View.AUTOFILL_TYPE_TEXT || list)) {
                     // A web page's attributes, as Chromium gives them: one with no
                     // value (`required`, say) comes as null.
                     val html =
@@ -88,31 +107,25 @@ class Fields(
                             .mapNotNull { attribute ->
                                 val name: String? = attribute.first
                                 val value: String? = attribute.second
-                                name?.let { it.lowercase() to value.orEmpty().lowercase() }
+                                name?.let { it.lowercase() to value.orEmpty() }
                             }
                             .toMap()
-                    val textClass = (node.inputType and InputType.TYPE_MASK_CLASS) == InputType.TYPE_CLASS_TEXT
-                    val variation = node.inputType and InputType.TYPE_MASK_VARIATION
-                    val words = listOfNotNull(node.idEntry, node.hint?.toString(), html["name"], html["id"]).joinToString(" ").lowercase()
-                    val isPassword =
-                        hints.any { "password" in it } || html["type"] == "password" ||
-                            (textClass && variation in PASSWORD_VARIATIONS)
-                    val isUsername =
-                        hints.any { it == "username" || "email" in it } || html["type"] == "email" ||
-                            html["autocomplete"] == "username" || USERNAME_WORDS.any { it in words }
-                    when {
-                        isPassword -> if (password == null) {
-                            password = id
-                            textBeforePassword = lastText
-                        }
-                        isUsername -> if (username == null) username = id
-                        else -> lastText = id
-                    }
+                    described +=
+                        Roles.Field(
+                            id = id,
+                            hints = node.autofillHints.orEmpty().toList(),
+                            html = html,
+                            inputType = node.inputType,
+                            idEntry = node.idEntry,
+                            hint = node.hint,
+                            maxLength = node.maxTextLength.takeIf { it > 0 },
+                            options = if (list) node.autofillOptions.orEmpty().map { it.toString() } else null,
+                        )
                 }
                 for (i in 0 until node.childCount) visit(node.getChildAt(i))
             }
             for (i in 0 until structure.windowNodeCount) visit(structure.getWindowNodeAt(i).rootViewNode)
-            return Fields(username ?: textBeforePassword, password, structure.activityComponent.packageName, domain)
+            return Fields(Roles.screen(described), structure.activityComponent.packageName, domain)
         }
     }
 }

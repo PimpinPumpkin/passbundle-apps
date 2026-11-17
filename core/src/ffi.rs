@@ -1628,17 +1628,14 @@ pub(crate) fn open_if_closed(dir: &str) {
     }
 }
 
-/// The logins for an Android app or the page a browser shows, for its
-/// autofill (android.rs), or for a website in iOS's AutoFill extension
-/// (`pb_fillable`), from every unlocked account: names and usernames only,
-/// each with its account's id on this device (`account`), which filling it
-/// names, and with more than one account here, the account's name or email
-/// (`accountLabel`). `locked` while no account is unlocked (with the account
-/// the screens show, to unlock), `signedOut` with no account, and `busy`
-/// while a slow call has the app. `account` is the one the screens show.
+/// What autofill offers while an account is unlocked (`fillable`,
+/// `cards_and_identities`), with `locked: false` and the `account` the
+/// screens show added; else `locked` while no account is unlocked (with the
+/// account the screens show, to unlock, and its name when there's more than
+/// one), `signedOut` with no account, and `busy` while a slow call has the
+/// app.
 #[cfg(phone)]
-pub(crate) fn fillable(package: &str, domain: &str) -> Value {
-    use crate::matching::Target;
+fn for_autofill(offer: impl FnOnce(&Accounts) -> Value) -> Value {
     let Some(mut guard) = accounts_now() else {
         return json!({ "busy": true });
     };
@@ -1658,26 +1655,79 @@ pub(crate) fn fillable(package: &str, domain: &str) -> Value {
             "accountLabel": account_label(accounts, &shown),
         });
     }
+    let mut answer = offer(accounts);
+    answer["locked"] = json!(false);
+    answer["account"] = json!(shown);
+    answer
+}
+
+/// The logins for an Android app or the page a browser shows, for its
+/// autofill (android.rs), or for a website in iOS's AutoFill extension
+/// (`pb_fillable`), from every unlocked account: names and usernames only,
+/// each with its account's id on this device (`account`), which filling it
+/// names, and with more than one account here, the account's name or email
+/// (`accountLabel`), and whether it has a one-time code (`totp`), never the
+/// code or its key. `locked`, `signedOut`, and `busy` as `for_autofill`
+/// says. `account` is the one the screens show.
+#[cfg(phone)]
+pub(crate) fn fillable(package: &str, domain: &str) -> Value {
+    use crate::matching::Target;
     let target = if domain.is_empty() {
         Target::App(package)
     } else {
         Target::Website(domain)
     };
-    let items: Vec<Value> = accounts
-        .fillable(&target)
-        .into_iter()
-        .map(|(account, i)| {
-            json!({
-                "id": i.id,
-                "account": account,
-                "accountLabel": account_label(accounts, account),
-                "name": i.name,
-                "username": i.username,
-                "reprompt": i.kept.reprompt != 0,
+    for_autofill(|accounts| {
+        let items: Vec<Value> = accounts
+            .fillable(&target)
+            .into_iter()
+            .map(|(account, i)| {
+                json!({
+                    "id": i.id,
+                    "account": account,
+                    "accountLabel": account_label(accounts, account),
+                    "name": i.name,
+                    "username": i.username,
+                    "reprompt": i.kept.reprompt != 0,
+                    "totp": i.totp.is_some(),
+                })
             })
+            .collect();
+        json!({ "items": items })
+    })
+}
+
+/// The cards and identities for Android's autofill (android.rs), from every
+/// unlocked account: every one in use, whatever the app or the site, since
+/// they aren't for a website (matching.rs, `fills_anywhere`). Names and
+/// plain subtitles only (`matching::fill_subtitle`), never a number or a
+/// code, each with its `account` and `accountLabel` as `fillable` gives
+/// them, as `{cards, identities}`; `locked`, `signedOut`, and `busy` as
+/// `for_autofill` says.
+#[cfg(target_os = "android")]
+pub(crate) fn cards_and_identities() -> Value {
+    for_autofill(|accounts| {
+        let offered = |kind| -> Vec<Value> {
+            accounts
+                .fillable_anywhere(kind)
+                .into_iter()
+                .map(|(account, vault, i)| {
+                    json!({
+                        "id": i.id,
+                        "account": account,
+                        "accountLabel": account_label(accounts, account),
+                        "name": i.name,
+                        "subtitle": crate::matching::fill_subtitle(i, vault.grid(i).see_passwords),
+                        "reprompt": i.kept.reprompt != 0,
+                    })
+                })
+                .collect()
+        };
+        json!({
+            "cards": offered(ItemKind::Card),
+            "identities": offered(ItemKind::Identity),
         })
-        .collect();
-    json!({ "locked": false, "account": shown, "items": items })
+    })
 }
 
 /// The master password, for a login that asks for it again before Android's

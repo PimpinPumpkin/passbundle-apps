@@ -700,10 +700,12 @@ pub struct SshKey {
     pub private_key: Option<Zeroizing<String>>,
 }
 
-/// A card's, an identity's, or an SSH key's values the app copies or
-/// reveals, by name: the secrets ("cardNumber", "cardCode", "ssn",
+/// A card's, an identity's, or an SSH key's values the app copies, reveals,
+/// or fills, by name: the secrets ("cardNumber", "cardCode", "ssn",
 /// "passportNumber", "licenseNumber", "sshPrivateKey"), and the plain ones
-/// (`PLAIN_DETAILS`).
+/// (`PLAIN_DETAILS`), among them the parts a form can ask for one at a time
+/// (Android's autofill: a card's expiry month and year, an identity's name
+/// and address parts).
 pub const SECRET_DETAILS: [&str; 6] = [
     "cardNumber",
     "cardCode",
@@ -712,7 +714,7 @@ pub const SECRET_DETAILS: [&str; 6] = [
     "licenseNumber",
     "sshPrivateKey",
 ];
-pub const PLAIN_DETAILS: [&str; 10] = [
+pub const PLAIN_DETAILS: [&str; 23] = [
     "sshPublicKey",
     "sshFingerprint",
     "cardholderName",
@@ -723,6 +725,19 @@ pub const PLAIN_DETAILS: [&str; 10] = [
     "phone",
     "identityUsername",
     "address",
+    "expMonth",
+    "expYear",
+    "title",
+    "firstName",
+    "middleName",
+    "lastName",
+    "address1",
+    "address2",
+    "address3",
+    "city",
+    "state",
+    "postalCode",
+    "country",
 ];
 
 impl Item {
@@ -781,6 +796,8 @@ impl Item {
                 "cardCode" => secret(&card.code),
                 "cardholderName" => text(&card.cardholder_name),
                 "expiration" => card.expiration().map(Zeroizing::new),
+                "expMonth" => text(&card.exp_month),
+                "expYear" => text(&card.exp_year),
                 _ => None,
             };
         }
@@ -797,6 +814,17 @@ impl Item {
             "phone" => text(&id.phone),
             "identityUsername" => text(&id.username),
             "address" => id.address().map(Zeroizing::new),
+            "title" => text(&id.title),
+            "firstName" => text(&id.first_name),
+            "middleName" => text(&id.middle_name),
+            "lastName" => text(&id.last_name),
+            "address1" => text(&id.address1),
+            "address2" => text(&id.address2),
+            "address3" => text(&id.address3),
+            "city" => text(&id.city),
+            "state" => text(&id.state),
+            "postalCode" => text(&id.postal_code),
+            "country" => text(&id.country),
             _ => None,
         }
     }

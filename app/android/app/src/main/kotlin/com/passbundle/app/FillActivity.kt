@@ -17,12 +17,13 @@ import org.json.JSONObject
 
 /**
  * What Android's autofill opens when someone picks one of PassBundle's
- * entries (Responses.kt): fills a login, taking its password from the core
- * only now, or unlocks first. It has no screen of its own; unlocking shows
+ * entries (Responses.kt): fills a login, a login's one-time code, a card,
+ * or an identity, taking its values from the core only now, or unlocks
+ * first. It has no screen of its own; unlocking shows
  * Android's biometric prompt, or asks for the account's master password in
  * PassBundle's own dialog, here, so the fill isn't lost; either way it hands
- * back the logins to pick from, never a fill nobody picked (docs/phones.md,
- * "Autofill"). A login that asks for the master password again asks for it
+ * back the items to pick from, never a fill nobody picked (docs/phones.md,
+ * "Autofill"). An item that asks for the master password again asks for it
  * in a dialog here first (docs/core.md, "Asking for the master password
  * again"). An app that isn't a browser PassBundle knows asks here, in
  * PassBundle's own dialog, before its web domain counts (Browsers.kt).
@@ -37,6 +38,8 @@ class FillActivity : Activity() {
         const val ASKS = "com.passbundle.app.asks"
         /** The account to unlock's name, when there's more than one on the phone. */
         const val LABEL = "com.passbundle.app.label"
+        /** What's filled (Kind.id): a login, a login's code alone, a card, or an identity. */
+        const val KIND = "com.passbundle.app.kind"
         const val FILL = "fill"
         const val UNLOCK = "unlock"
         const val TRUST = "trust"
@@ -54,7 +57,10 @@ class FillActivity : Activity() {
         val fields = Fields.from(intent)
         val account = intent.getStringExtra(ACCOUNT) ?: ""
         when (intent.getStringExtra(MODE)) {
-            FILL -> fill(fields, account, intent.getStringExtra(ITEM), intent.getBooleanExtra(ASKS, false))
+            FILL ->
+                Kind.of(intent.getStringExtra(KIND))?.let { kind ->
+                    fill(fields, account, intent.getStringExtra(ITEM), intent.getBooleanExtra(ASKS, false), kind)
+                } ?: finishWith(null)
             UNLOCK -> unlock(fields, account, intent.getStringExtra(LABEL))
             TRUST -> trust(fields)
             SIGN_IN -> signIn()
@@ -76,22 +82,48 @@ class FillActivity : Activity() {
         return logins.any { it.optString("id") == item && it.optString("account") == account }
     }
 
-    private fun fill(fields: Fields, account: String, item: String?, asks: Boolean) {
+    /**
+     * Whether the item still fills here, now: a login (or its code) as
+     * `stillMatches` says; a card or an identity while it's still one in
+     * use in that account, as autofill offers them anywhere.
+     */
+    private fun stillFills(fields: Fields, account: String, item: String, kind: Kind): Boolean =
+        when (kind) {
+            Kind.LOGIN, Kind.CODE -> stillMatches(fields, account, item)
+            Kind.CARD, Kind.IDENTITY ->
+                Responses.anywhere(kind).orEmpty().any { it.optString("id") == item && it.optString("account") == account }
+        }
+
+    private fun fill(fields: Fields, account: String, item: String?, asks: Boolean, kind: Kind) {
         if (item == null) return finishWith(null)
         Thread {
-            val matches = runCatching { stillMatches(fields, account, item) }.getOrDefault(false)
+            val fills = runCatching { stillFills(fields, account, item, kind) }.getOrDefault(false)
             runOnUiThread {
                 when {
                     isFinishing || isDestroyed -> Unit
-                    !matches -> {
-                        Toast.makeText(this, "That login doesn't fill here.", Toast.LENGTH_LONG).show()
+                    !fills -> {
+                        Toast.makeText(this, Unlocking.doesntFill(kind), Toast.LENGTH_LONG).show()
                         finishWith(null)
                     }
-                    !asks -> finishWith(Responses.filled(this, fields, account, item))
-                    else -> askMasterPassword(fields, account, item)
+                    !asks -> finishFilled(fields, account, item, kind)
+                    else -> askMasterPassword(fields, account, item, kind)
                 }
             }
         }.start()
+    }
+
+    /**
+     * After unlocking, or trusting a browser: the list to pick from, built
+     * the same as when the vault was open (Responses.entries, where every
+     * entry is a pick holding no value), never a fill nobody picked.
+     */
+    private fun handBackList(fields: Fields) = finishWith(Responses.forFields(this, fields))
+
+    /** Hands back the picked item's values for the fields; a login's is remembered for the code screen after it. */
+    private fun finishFilled(fields: Fields, account: String, item: String, kind: Kind) {
+        val filled = Responses.filled(this, fields, account, item, kind)
+        if (filled != null && kind == Kind.LOGIN) Responses.filledLogin(fields, account, item)
+        finishWith(filled)
     }
 
     /**
@@ -122,21 +154,21 @@ class FillActivity : Activity() {
         }
     }
 
-    /** A login that asks for the master password again: its dialog, then it fills. */
-    private fun askMasterPassword(fields: Fields, account: String, item: String) {
+    /** An item that asks for the master password again: its dialog, then it fills. */
+    private fun askMasterPassword(fields: Fields, account: String, item: String, kind: Kind) {
         val password = masterPasswordField()
         val dialog = AlertDialog.Builder(this)
             .setTitle("PassBundle")
-            .setMessage("This login asks for your master password.")
+            .setMessage(Unlocking.asks(kind))
             .setView(password)
-            .setPositiveButton("Continue") { _, _ -> confirm(fields, account, item, password) }
+            .setPositiveButton("Continue") { _, _ -> confirm(fields, account, item, kind, password) }
             .setNegativeButton("Cancel") { _, _ -> finishWith(null) }
             .setOnCancelListener { finishWith(null) }
             .create()
         password.setOnEditorActionListener { _, action, _ ->
             if (action != EditorInfo.IME_ACTION_GO) return@setOnEditorActionListener false
             dialog.dismiss()
-            confirm(fields, account, item, password)
+            confirm(fields, account, item, kind, password)
             true
         }
         keepPrivate(dialog)
@@ -146,7 +178,7 @@ class FillActivity : Activity() {
     }
 
     /** Checks the account's master password off the main thread (the KDF), then fills, unless the person left. */
-    private fun confirm(fields: Fields, account: String, item: String, password: EditText) {
+    private fun confirm(fields: Fields, account: String, item: String, kind: Kind, password: EditText) {
         val typed = password.text.toString()
         password.text.clear()
         Thread {
@@ -163,7 +195,7 @@ class FillActivity : Activity() {
             runOnUiThread {
                 when {
                     isFinishing || isDestroyed -> Unit
-                    ok -> finishWith(Responses.filled(this, fields, account, item))
+                    ok -> finishFilled(fields, account, item, kind)
                     else -> finishWith(null)
                 }
             }
@@ -192,7 +224,7 @@ class FillActivity : Activity() {
             )
             .setPositiveButton("Trust") { _, _ ->
                 if (Browsers.trust(this, fields.packageName)) {
-                    finishWith(Responses.forFields(this, fields))
+                    handBackList(fields)
                 } else {
                     Toast.makeText(this, "Couldn't trust $app.", Toast.LENGTH_LONG).show()
                     finishWith(null)
@@ -214,7 +246,7 @@ class FillActivity : Activity() {
 
     /**
      * Unlocks the account the screens show (the one autofill offered to
-     * unlock), then hands back its logins to pick from: with its biometric
+     * unlock), then hands back what fills here to pick from: with its biometric
      * unlock when it's on, else (or when that doesn't unlock, or the person
      * would rather) with its master password, here.
      */
@@ -225,7 +257,7 @@ class FillActivity : Activity() {
         }
         Biometric.unlock(this, account) { unlocked, error ->
             if (isFinishing || isDestroyed) return@unlock
-            if (unlocked) return@unlock finishWith(Responses.forFields(this, fields))
+            if (unlocked) return@unlock handBackList(fields)
             // "Use master password", or the biometric unlock is off now.
             unlockWithMasterPassword(fields, account, label, error)
         }
@@ -234,8 +266,8 @@ class FillActivity : Activity() {
     /**
      * The account's master password, in PassBundle's own dialog over the app
      * being filled (`keepPrivate`). The core unlocks that account with it,
-     * off the main thread (the KDF), as the lock screen does; then the
-     * logins to pick from. A wrong one says so and asks again; Cancel fills
+     * off the main thread (the KDF), as the lock screen does; then what
+     * fills here, to pick from. A wrong one says so and asks again; Cancel fills
      * nothing.
      */
     private fun unlockWithMasterPassword(fields: Fields, account: String, label: String?, why: String?) {
@@ -265,7 +297,7 @@ class FillActivity : Activity() {
                     if (isFinishing || isDestroyed) return@runOnUiThread
                     if (answer?.optBoolean("ok") == true) {
                         dialog.dismiss()
-                        return@runOnUiThread finishWith(Responses.forFields(this, fields))
+                        return@runOnUiThread handBackList(fields)
                     }
                     // What went wrong, said in the dialog itself, and asked again.
                     unlocking = false
@@ -306,7 +338,7 @@ class FillActivity : Activity() {
             setResult(RESULT_OK, Intent().putExtra(AutofillManager.EXTRA_AUTHENTICATION_RESULT, result))
         }
         finish()
-        // With "Immediately" (docs/phones.md, "Locking"): a login's values
+        // With "Immediately" (docs/phones.md, "Locking"): an item's values
         // handed back lock the vault now, and so does an unlock with nothing
         // to pick from; a list to pick from (after unlocking, or trusting a
         // browser) keeps it open for the pick, a minute at most. A fill that
