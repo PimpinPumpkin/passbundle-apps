@@ -77,7 +77,9 @@ object Core {
 
     /**
      * An item's value for autofill to fill, from its account, as UTF-8 to
-     * zero after use; null while that account is locked or busy, or if
+     * zero after use: "username", "password", "totp" (the current one-time
+     * code), or a card's or an identity's part, by the core's names for
+     * them (Values.kt); null while that account is locked or busy, or if
      * there's nothing to fill.
      */
     @JvmStatic external fun value(account: String, id: String, what: String): ByteArray?
@@ -104,12 +106,21 @@ object Core {
     @JvmStatic external fun writeAttachmentTo(account: String, id: String, attachmentId: String, fd: Int): String?
 
     /**
-     * The logins for an app or a page, as JSON, from the account the
-     * screens show: names and usernames only, each with its `account`; or
-     * `locked`, with the `account` to unlock and its `accountLabel` when
-     * there's more than one; or `signedOut` (Responses.kt).
+     * The logins for an app or a page, as JSON, from every unlocked
+     * account: names and usernames only, each with its `account` and
+     * whether it has a one-time code (`totp`); or `locked`, with the
+     * `account` to unlock and its `accountLabel` when there's more than
+     * one; or `signedOut` (Responses.kt).
      */
     @JvmStatic external fun fillable(packageName: String, webDomain: String): String?
+
+    /**
+     * The cards and identities autofill offers on any app or page, as JSON
+     * (`cards`, `identities`), from every unlocked account: names and plain
+     * subtitles only, never a number or a code, each with its `account`; or
+     * `locked` and `signedOut`, as [fillable] says (Responses.kt).
+     */
+    @JvmStatic external fun cardsAndIdentities(): String?
 
     /**
      * Unlocks an account with its master password, for autofill while it's
