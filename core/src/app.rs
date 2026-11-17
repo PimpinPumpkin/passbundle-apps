@@ -214,6 +214,13 @@ pub(crate) const BIOMETRICS_AFTER_PIN: Error =
 const REMOVED_KIND: Error =
     Error::Refused("an organization you're in doesn't allow that kind of item");
 
+/// A new item nobody picked a place for (`App::new_item_place`), where an
+/// organization keeps items out of Personal and the person has no shared
+/// folder to add to: the import's words for it (transfer.dart in the app).
+const NO_SHARED_FOLDER: Error = Error::Refused(
+    "your organization keeps items out of Personal, and you have no shared folder you can add to. Ask an admin for one, then try again",
+);
+
 /// How long confirming it's you lasts, to approve a sign-in.
 const CONFIRMATION_LASTS: std::time::Duration = std::time::Duration::from_secs(60);
 
@@ -2142,9 +2149,11 @@ impl App {
     /// names (replacing the site's passkey for this account if it has it,
     /// keeping its password, and filling in its username if it had none) or
     /// a new login for the site, before the site hears of it. The login must
-    /// be one the phones offer for it (`Vault::passkey_target`). Refused,
-    /// with nothing made, if the vault already has one of the site's
-    /// `exclude` credentials; offline, it's refused too.
+    /// be one the phones offer for it (`Vault::passkey_target`); a new one
+    /// goes in Personal, or in a shared folder where an organization keeps
+    /// items out of Personal (`new_item_place`). Refused, with nothing made,
+    /// if the vault already has one of the site's `exclude` credentials;
+    /// offline, it's refused too.
     pub fn passkey_create(&mut self, new: &NewPasskey<'_>) -> Result<PasskeyMade> {
         use crate::passkey::{
             attestation_object, authenticator_data, credential_id, flags, Attested, Key,
@@ -2178,6 +2187,12 @@ impl App {
             }
             None => None,
         };
+        // A new login's place, checked before anything is made: Personal,
+        // or a shared folder where an organization keeps items out of it.
+        let place = match editing {
+            Some(_) => None,
+            None => self.new_item_place()?,
+        };
         let mut draft = match editing {
             Some(item) => ItemDraft::of(item),
             // Named after the site's ID, which the passkey is bound to, not
@@ -2185,6 +2200,7 @@ impl App {
             None => ItemDraft {
                 name: new.rp_id.to_owned(),
                 uris: vec![format!("https://{}", new.rp_id)],
+                organization_id: place.as_ref().map(|(org, _)| org.clone()),
                 ..ItemDraft::default()
             },
         };
@@ -2212,9 +2228,11 @@ impl App {
             "creationDate": crate::vault::now_iso8601(),
         }]);
         let body = vault.encrypt_item_with(&draft, editing, Some(credential))?;
-        let collection_ids = editing
-            .map(|i| i.collection_ids.clone())
-            .unwrap_or_default();
+        let collection_ids = match (editing, place) {
+            (Some(item), _) => item.collection_ids.clone(),
+            (None, Some((_, folder))) => vec![folder],
+            (None, None) => Vec::new(),
+        };
         let (Some(server), Some(session)) = (&self.server, self.session.as_mut()) else {
             return Err(Error::SignedOut);
         };
@@ -2248,6 +2266,24 @@ impl App {
             credential_id: raw_id,
             item_id,
         })
+    }
+
+    /// Where a new item goes when nobody picks a place for it (a new
+    /// passkey's login): Personal (None), unless an organization keeps items
+    /// out of it (`keeps_items_out`; the server would refuse it there). Then
+    /// the first shared folder the person may add items to, in the order an
+    /// import offers them (`import_shared_folders`), as its organization and
+    /// its id; with none, it's refused, saying what to do.
+    fn new_item_place(&self) -> Result<Option<(String, String)>> {
+        if self.keeps_items_out().is_none() {
+            return Ok(None);
+        }
+        let (folder, _, organization, _) = self
+            .import_shared_folders()
+            .into_iter()
+            .next()
+            .ok_or(NO_SHARED_FOLDER)?;
+        Ok(Some((organization, folder)))
     }
 
     /// Favorites an item or not, then syncs: the person's own mark, as

@@ -1088,6 +1088,143 @@ fn passkeys_are_made_and_sign_in() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// Where an organization keeps items out of Personal (upstream's "Remove
+/// individual vault", policy 5), the server refuses a member's new login
+/// there, so a new passkey's login goes in a shared folder they may add
+/// to, under the organization's key, and signs in from there. A member who
+/// may only view the shared folder gets no login and no passkey, and the
+/// organization's owner, whom the policy doesn't bind, gets theirs in
+/// Personal.
+#[test]
+fn where_an_organization_keeps_items_out_of_personal_a_new_passkeys_login_goes_in_a_shared_folder()
+{
+    use p256::ecdsa::signature::Verifier;
+    use p256::ecdsa::{Signature, VerifyingKey};
+    use p256::pkcs8::DecodePublicKey;
+    use passbundle_core::app::NewPasskey;
+
+    let Some(server) = server() else { return };
+    let url = std::env::var("PB_TEST_SERVER").unwrap();
+    let (owner, member, viewer) = (
+        new_email("keeps-out-owner"),
+        new_email("keeps-out-member"),
+        new_email("keeps-out-viewer"),
+    );
+    for email in [&owner, &member, &viewer] {
+        sign_up(&server, email);
+    }
+    let mut session = sign_in(&server, &owner);
+    let (org_id, org_key) = new_organization(&server, &mut session, &owner);
+    let it = open(&server, &mut session)
+        .collections
+        .keys()
+        .next()
+        .unwrap()
+        .clone();
+    join(
+        &server,
+        &mut session,
+        &org_id,
+        &org_key,
+        &member,
+        json!([{ "id": it, "readOnly": false, "hidePasswords": false, "manage": false }]),
+    );
+    join(
+        &server,
+        &mut session,
+        &org_id,
+        &org_key,
+        &viewer,
+        json!([{ "id": it, "readOnly": true, "hidePasswords": false, "manage": false }]),
+    );
+    server
+        .raw(
+            &mut session,
+            "PUT",
+            &format!("/api/organizations/{org_id}/policies/5"),
+            Some(json!({ "policy": { "enabled": true, "data": null } })),
+        )
+        .unwrap();
+    let new = |rp_id: &'static str| NewPasskey {
+        rp_id,
+        rp_name: None,
+        user_handle: &[6; 16],
+        user_name: Some("ana@keeps-out.example.test"),
+        user_display_name: None,
+        user_verified: true,
+        discoverable: true,
+        login: None,
+        exclude: &[],
+        app: None,
+    };
+
+    // The server refuses the member a login of their own.
+    let mut members = signed_in_app(&url, &member);
+    assert!(members.keeps_items_out().is_some());
+    let mine = ItemDraft {
+        name: "Mine".into(),
+        ..ItemDraft::default()
+    };
+    assert!(members
+        .save(None, &mine, &[])
+        .unwrap_err()
+        .to_string()
+        .contains("personal vault"));
+    // So the passkey's login goes in IT, under the organization's key.
+    let made = members
+        .passkey_create(&new("keeps-out.example.test"))
+        .unwrap();
+    let item = members.vault().unwrap().item(&made.item_id).unwrap();
+    assert_eq!(item.organization_id.as_deref(), Some(org_id.as_str()));
+    assert_eq!(item.collection_ids, std::slice::from_ref(&it));
+    assert_eq!(item.name, "keeps-out.example.test");
+    let (sync, _) = server.sync(&mut session).unwrap();
+    let kept = sync.ciphers.iter().find(|c| c.id == made.item_id).unwrap();
+    let name = passbundle_core::crypto::EncString::parse(kept.name.as_deref().unwrap()).unwrap();
+    assert_eq!(
+        name.decrypt_string(&org_key).unwrap().as_str(),
+        "keeps-out.example.test"
+    );
+    // It signs in from there, the signature verified with the public key
+    // the site was given.
+    let hash = [9u8; 32];
+    let signed = members
+        .passkey_assert(&made.item_id, "keeps-out.example.test", &hash, true)
+        .unwrap();
+    assert_eq!(signed.credential_id, made.credential_id);
+    let mut message = signed.authenticator_data.clone();
+    message.extend_from_slice(&hash);
+    assert!(VerifyingKey::from_public_key_der(&made.public_key)
+        .unwrap()
+        .verify(&message, &Signature::from_der(&signed.signature).unwrap())
+        .is_ok());
+
+    // The viewer has no shared folder to add to: nothing is made.
+    let mut viewers = signed_in_app(&url, &viewer);
+    let count = viewers.vault().unwrap().items.len();
+    assert_eq!(
+        viewers.passkey_create(&new("viewer.keeps-out.example.test")).err(),
+        Some(Error::Refused(
+            "your organization keeps items out of Personal, and you have no shared folder you can add to. Ask an admin for one, then try again"
+        ))
+    );
+    viewers.sync().unwrap();
+    assert_eq!(viewers.vault().unwrap().items.len(), count);
+    assert!(viewers
+        .passkeys_for("viewer.keeps-out.example.test")
+        .is_empty());
+
+    // The owner isn't bound: theirs is in Personal.
+    let mut owners = signed_in_app(&url, &owner);
+    assert!(owners.keeps_items_out().is_none());
+    let made = owners
+        .passkey_create(&new("owner.keeps-out.example.test"))
+        .unwrap();
+    let item = owners.vault().unwrap().item(&made.item_id).unwrap();
+    assert_eq!(item.organization_id, None);
+    assert!(item.collection_ids.is_empty());
+}
+
 /// An SSH key on the server comes through the core's sync: the core says
 /// which client version's format it reads (server::CLIENT_VERSION), and a
 /// server holds SSH keys back from a client that doesn't.

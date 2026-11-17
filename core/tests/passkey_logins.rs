@@ -4,7 +4,9 @@
 //! for it (in use, that the person may change, for the site and without a
 //! passkey, or with this account's passkey for the site, which it
 //! replaces), and making one into a login, in place of its old passkey or
-//! beside its password, never into one the phones wouldn't offer. The
+//! beside its password, never into one the phones wouldn't offer; a new
+//! login goes in a shared folder where an organization keeps items out of
+//! Personal, and isn't made with no shared folder to add to. The
 //! sample's Backup service login has a passkey for backup.example.test; its
 //! Example Mail login is on mail.example.test, the same site by the default
 //! match (example.test).
@@ -13,6 +15,7 @@ use p256::ecdsa::signature::Verifier;
 use p256::ecdsa::{Signature, VerifyingKey};
 use p256::pkcs8::DecodePublicKey;
 use passbundle_core::app::{App, NewPasskey, PasskeyMade, ALREADY_HAS_PASSKEY};
+use passbundle_core::crypto::EncString;
 use passbundle_core::error::Error;
 use passbundle_core::matching::PasskeySite;
 use passbundle_core::passkey::{base64_either, credential_id};
@@ -21,7 +24,7 @@ use serde_json::{json, Value};
 
 #[path = "support/stand_in.rs"]
 mod stand_in;
-use stand_in::{sent, stand_in, Asked, Sample, BACKUP, GATE, MAIL, OFFICE_WIFI, ORG};
+use stand_in::{sent, stand_in, user_key, Asked, Sample, BACKUP, GATE, IT, MAIL, OFFICE_WIFI, ORG};
 
 const SITE: &str = "backup.example.test";
 /// The sample's passkey, as Backup service stores it.
@@ -446,6 +449,87 @@ fn where_a_policy_removes_logins_none_is_offered_and_no_new_one_is_made() {
         offered(&cards.unlocked(), &site(SITE, &ana)),
         ids(&[(BACKUP, true), (MAIL, false)])
     );
+}
+
+/// The sample with Contoso keeping items out of Personal (upstream's
+/// "Remove individual vault", policy 5), for a member it binds (`member`;
+/// its owners and admins aren't bound, and the sample's person owns it),
+/// whose shared folder IT takes new items or not (`create`).
+fn keeping_items_out(url: &str, member: bool, create: bool) -> Sample {
+    Sample::new(url, &[], move |sync| {
+        if member {
+            sync["profile"]["organizations"][0]["type"] = 2.into();
+        }
+        sync["policies"] = json!([{ "organizationId": ORG, "type": 5, "enabled": true }]);
+        sync["collections"][0]["keykeeper"]["create"] = create.into();
+    })
+}
+
+#[test]
+fn where_an_organization_keeps_items_out_of_personal_a_new_login_goes_in_a_shared_folder() {
+    let (url, asked) = stand_in(vec![]);
+    let handle = [4u8; 16];
+    let sample = keeping_items_out(&url, true, true);
+    let mut app = sample.unlocked();
+    let made = app
+        .passkey_create(&new_passkey("new.example.test", &handle, None, &[]))
+        .unwrap();
+    // One save: an organization's item, in Contoso's shared folder IT, as
+    // an import goes there, encrypted with Contoso's key, not the person's.
+    assert_eq!(saves(&asked), 1);
+    let created = sent(&asked, "POST /api/ciphers/create");
+    assert_eq!(created.len(), 1);
+    assert_eq!(created[0]["collectionIds"], json!([IT]));
+    let cipher = &created[0]["cipher"];
+    assert_eq!(cipher["organizationId"], ORG);
+    assert!(cipher["folderId"].is_null());
+    assert!(EncString::parse(cipher["name"].as_str().unwrap())
+        .unwrap()
+        .decrypt_string(&user_key())
+        .is_err());
+    // The login as the server keeps it: Contoso's, in IT, named after the
+    // site, with the account's name; and its passkey signs.
+    let vault = app.vault().unwrap();
+    let item = vault.item(&made.item_id).unwrap();
+    assert_eq!(item.organization_id.as_deref(), Some(ORG));
+    assert_eq!(item.collection_ids, [IT]);
+    assert_eq!(item.name, "new.example.test");
+    assert_eq!(item.username.as_deref(), Some("ana@backup.example.test"));
+    assert_eq!(item.passkey.as_ref().unwrap().rp_id, "new.example.test");
+    signs_with(&mut app, &made.item_id, "new.example.test", &made);
+}
+
+#[test]
+fn with_no_shared_folder_to_add_to_no_new_login_is_made() {
+    let (url, asked) = stand_in(vec![]);
+    let handle = [4u8; 16];
+    // IT doesn't take new items from this member: nowhere a new login
+    // could go.
+    let sample = keeping_items_out(&url, true, false);
+    let mut app = sample.unlocked();
+    assert_eq!(
+        app.passkey_create(&new_passkey("new.example.test", &handle, None, &[]))
+            .err(),
+        Some(Error::Refused(
+            "your organization keeps items out of Personal, and you have no shared folder you can add to. Ask an admin for one, then try again"
+        ))
+    );
+    assert_eq!(saves(&asked), 0);
+    assert_eq!(app.passkeys_for("new.example.test").len(), 0);
+
+    // An owner or admin isn't bound by it: theirs goes in Personal, as
+    // anyone's does where no organization keeps items out of it.
+    let sample = keeping_items_out(&url, false, false);
+    let mut app = sample.unlocked();
+    let made = app
+        .passkey_create(&new_passkey("new.example.test", &handle, None, &[]))
+        .unwrap();
+    let created = sent(&asked, "POST /api/ciphers");
+    assert_eq!(created.len(), 1);
+    assert!(created[0]["organizationId"].is_null());
+    let item = app.vault().unwrap().item(&made.item_id).unwrap();
+    assert_eq!(item.organization_id, None);
+    assert!(item.collection_ids.is_empty());
 }
 
 #[test]
