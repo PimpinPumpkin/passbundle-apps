@@ -4109,7 +4109,20 @@ class _ItemPaneState extends State<ItemPane> {
       rows.add(secretRow('Password', 'password'));
     }
     final code = totp?['code'] as String?;
-    if (item['hasTotp'] == true && !sees) {
+    if (item['codeNeedsPremium'] == true) {
+      // A key whose code needs Premium (core/src/codes.rs): no code, no
+      // Copy, and the editor still has the key.
+      rows.add(
+        row(
+          'One-time code',
+          Text(
+            'Two-step login codes are part of Premium.',
+            key: const ValueKey('code-needs-premium'),
+            style: TextStyle(fontSize: valueSize),
+          ),
+        ),
+      );
+    } else if (item['hasTotp'] == true && !sees) {
       rows.add(secretRow('One-time code', 'totp'));
     } else if (item['hasTotp'] == true && code != null) {
       final left = (totp!['secondsLeft'] as num).toInt();

@@ -41,6 +41,13 @@ pub struct Profile {
     pub private_key: Option<String>,
     #[serde(default)]
     pub organizations: Vec<OrganizationData>,
+    /// Premium of the person's own (`premium`) and through an organization
+    /// or an MSP (`premiumFromOrganization`), as the server works them out:
+    /// whether items' two-step codes show (codes.rs).
+    #[serde(default)]
+    pub premium: Option<bool>,
+    #[serde(default)]
+    pub premium_from_organization: Option<bool>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -243,6 +250,9 @@ pub struct CipherData {
     pub passport: Option<serde_json::Value>,
     #[serde(default)]
     pub attachments: Option<Vec<AttachmentData>>,
+    /// Whether the item's organization gives two-step codes (codes.rs).
+    #[serde(default)]
+    pub organization_use_totp: Option<bool>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -523,6 +533,9 @@ pub struct Item {
     pub details: Vec<Detail>,
     /// What an edit keeps that the app doesn't show or change.
     pub kept: Kept,
+    /// Its organization gives two-step codes (codes.rs): the server's
+    /// `organizationUseTotp`, for an organization's item.
+    pub organization_use_totp: bool,
 }
 
 /// A login's passkey (docs/core.md, "Passkeys"): upstream's first
@@ -1191,6 +1204,9 @@ pub struct DamagedItem {
 pub struct Vault {
     pub user_id: String,
     pub email: String,
+    /// The person has Premium's features, of their own or through an
+    /// organization or an MSP, as the last sync said (codes.rs).
+    pub premium: bool,
     pub folders: HashMap<String, String>,
     pub collections: HashMap<String, String>,
     /// Each collection's organization.
@@ -1369,6 +1385,7 @@ impl Vault {
         Ok(Vault {
             user_id: sync.profile.id.clone(),
             email: sync.profile.email.clone(),
+            premium: sync.profile.has_premium(),
             folders,
             collections,
             collection_orgs,
@@ -2202,6 +2219,8 @@ impl Keyring {
             passkey,
             details,
             kept,
+            organization_use_totp: c.organization_id.is_some()
+                && c.organization_use_totp == Some(true),
         })
     }
 }

@@ -18,9 +18,9 @@
 //! The tests of a server without room for files need one with 64 KB for an
 //! account's attachments and its Sends' files, PB_TEST_SERVER_LITTLE_ROOM
 //! (`USER_ATTACHMENT_LIMIT=64 USER_SEND_LIMIT=64 tools/test-server.sh ...`),
-//! and the test of what a Free account hears where plans are enforced one
-//! that enforces them, PB_TEST_SERVER_PLANS (`PLANS_ENFORCED=true
-//! tools/test-server.sh ...`).
+//! and the tests of what a Free account hears and sees where plans are
+//! enforced one that enforces them, PB_TEST_SERVER_PLANS
+//! (`PLANS_ENFORCED=true tools/test-server.sh ...`).
 
 use base64::{engine::general_purpose::STANDARD, Engine};
 use passbundle_core::app::{App, State, Step};
@@ -3787,6 +3787,64 @@ fn where_plans_are_enforced_a_free_account_hears_the_servers_sentence_for_a_file
         ..Default::default()
     };
     assert!(app.save_send(None, &text, None).unwrap().synced);
+}
+
+/// Two-step codes need Premium (src/codes.rs): where plans are enforced, a
+/// Free account's login keeps its key, and its code doesn't show, copy, or
+/// fill; on a server that doesn't enforce them, the same login's code works
+/// as it always has.
+#[test]
+fn where_plans_are_enforced_a_free_accounts_codes_dont_show_and_their_keys_stay() {
+    let Ok(url) = std::env::var("PB_TEST_SERVER_PLANS") else {
+        eprintln!(
+            "PB_TEST_SERVER_PLANS isn't set; skipping the test of a server that enforces plans."
+        );
+        return;
+    };
+    let draft = ItemDraft {
+        name: "Example Mail".into(),
+        username: Some("ana@example.test".into()),
+        password: secret("not-a-real-password-c1"),
+        totp: secret("JBSWY3DPEHPK3PXP"),
+        uris: vec!["https://mail.example.test".into()],
+        ..ItemDraft::default()
+    };
+    let saved = |url: &str, prefix: &str| {
+        let server = Server::new(url, Device::this_one(&Device::new_identifier())).unwrap();
+        let email = new_email(prefix);
+        sign_up(&server, &email);
+        let mut app = signed_in_app(url, &email);
+        app.save(None, &draft, &[]).unwrap();
+        let id = app.vault().unwrap().items[0].id.clone();
+        (app, id)
+    };
+
+    let (app, id) = saved(&url, "codes-free");
+    let vault = app.vault().unwrap();
+    let item = vault.item(&id).unwrap();
+    assert!(!vault.premium);
+    assert_eq!(
+        item.totp.as_deref().map(String::as_str),
+        Some("JBSWY3DPEHPK3PXP"),
+        "the key stays, for the editor"
+    );
+    assert!(vault.code_needs_premium(item));
+    assert!(!vault.has_code(item));
+    assert_eq!(
+        app.value(&id, "totp").unwrap_err().to_string(),
+        "Two-step login codes are part of Premium."
+    );
+    assert!(app.value(&id, "password").is_ok());
+
+    let Ok(plain) = std::env::var("PB_TEST_SERVER") else {
+        return;
+    };
+    let (app, id) = saved(&plain, "codes-as-always");
+    let vault = app.vault().unwrap();
+    assert!(vault.premium);
+    assert!(vault.has_code(vault.item(&id).unwrap()));
+    let code = app.value(&id, "totp").unwrap();
+    assert_eq!(code.len(), 6);
 }
 
 /// Archive (meta repo DESIGN.md, "Archive, export, and import in the apps"): an item

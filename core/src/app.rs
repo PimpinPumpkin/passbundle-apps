@@ -2442,9 +2442,9 @@ impl App {
     }
 
     /// Copies one of an item's values: "username", "password", "totp" (the
-    /// current code), "notes", "field:<index>", or a card's or an identity's
-    /// (`Item::detail`); or a Send's link (`SEND_LINK`, with the Send's
-    /// id). Secrets clear after 30 seconds.
+    /// current code, where codes show: codes.rs), "notes", "field:<index>",
+    /// or a card's or an identity's (`Item::detail`); or a Send's link
+    /// (`SEND_LINK`, with the Send's id). Secrets clear after 30 seconds.
     pub fn copy(&self, id: &str, what: &str) -> Result<()> {
         // The generator's password, and a Send's link (`id` is the Send's):
         // whoever has the link opens the Send, so it's a secret.
@@ -2480,7 +2480,8 @@ impl App {
     }
 
     /// The value `copy` copies. On phones the app's native piece puts it on
-    /// the clipboard itself (docs/phones.md, "Copying").
+    /// the clipboard itself (docs/phones.md, "Copying"), and autofill fills
+    /// from it. An item's current code only where codes show (codes.rs).
     pub fn value(&self, id: &str, what: &str) -> Result<zeroize::Zeroizing<String>> {
         if what == SEND_LINK {
             return self.send_link(id);
@@ -2517,6 +2518,11 @@ impl App {
             "password" => item.password.as_ref().map(|p| p.as_str().to_owned()),
             "notes" => item.notes.as_ref().map(|n| n.as_str().to_owned()),
             "totp" => {
+                // Only where Premium or the item's organization gives codes
+                // (codes.rs): the key stays, for the editor.
+                if !self.vault.as_ref().is_some_and(|v| v.shows_code(item)) {
+                    return Err(Error::Refused(crate::codes::NEEDS_PREMIUM));
+                }
                 let totp = crate::totp::Totp::parse(
                     item.totp
                         .as_deref()

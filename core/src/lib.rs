@@ -11,6 +11,7 @@ pub mod autolock;
 pub mod browser_import;
 pub mod change_password;
 pub mod clipboard;
+pub mod codes;
 pub mod crypto;
 pub mod csv;
 pub mod device_approval;

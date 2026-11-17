@@ -94,7 +94,8 @@ object Responses {
      * checked lately). A page the app shows itself (a WebView: an in-app
      * browser, say) gets a site's logins only if it's that site, so a page
      * opened inside the app can't be handed the logins of the sites that
-     * trust the app. Each says whether it has a one-time code (`totp`).
+     * trust the app. Each says whether it has a one-time code to fill
+     * (`totp`), which a key whose code needs Premium doesn't.
      */
     fun logins(context: Context, fields: Fields, domain: String?, waitMs: Long): List<JSONObject>? {
         val answer = JSONObject(Core.fillable(fields.packageName, domain ?: "") ?: return null)
@@ -170,7 +171,7 @@ object Responses {
         val subtitle: String? = null,
         /** It asks for the master password again before it fills. */
         val reprompt: Boolean = false,
-        /** A login with a one-time code key. */
+        /** A login with a one-time code to fill: a key, where the core says its code shows (core/src/codes.rs). */
         val totp: Boolean = false,
     )
 

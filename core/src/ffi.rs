@@ -1666,8 +1666,8 @@ fn for_autofill(offer: impl FnOnce(&Accounts) -> Value) -> Value {
 /// (`pb_fillable`), from every unlocked account: names and usernames only,
 /// each with its account's id on this device (`account`), which filling it
 /// names, and with more than one account here, the account's name or email
-/// (`accountLabel`), and whether it has a one-time code (`totp`), never the
-/// code or its key. `locked`, `signedOut`, and `busy` as `for_autofill`
+/// (`accountLabel`), and whether it has a one-time code to fill (`totp`:
+/// a key, where codes show, codes.rs), never the code or its key. `locked`, `signedOut`, and `busy` as `for_autofill`
 /// says. `account` is the one the screens show.
 #[cfg(phone)]
 pub(crate) fn fillable(package: &str, domain: &str) -> Value {
@@ -1678,6 +1678,12 @@ pub(crate) fn fillable(package: &str, domain: &str) -> Value {
         Target::Website(domain)
     };
     for_autofill(|accounts| {
+        // Each account's own rule for codes: its vault's Premium.
+        let has_code = |account: &str, i: &crate::vault::Item| {
+            accounts
+                .unlocked()
+                .any(|(id, vault)| id == account && vault.has_code(i))
+        };
         let items: Vec<Value> = accounts
             .fillable(&target)
             .into_iter()
@@ -1689,7 +1695,7 @@ pub(crate) fn fillable(package: &str, domain: &str) -> Value {
                     "name": i.name,
                     "username": i.username,
                     "reprompt": i.kept.reprompt != 0,
-                    "totp": i.totp.is_some(),
+                    "totp": has_code(account, i),
                 })
             })
             .collect();
@@ -2120,7 +2126,11 @@ pub unsafe extern "C" fn pb_item(account: *const c_char, id: *const c_char) -> *
         view["uris"] = json!(item.uris);
         view["collectionIds"] = json!(item.collection_ids);
         view["hasPassword"] = json!(item.password.is_some());
-        view["hasTotp"] = json!(item.totp.is_some());
+        // A code to show (`hasTotp`), or a key whose code needs Premium
+        // (codes.rs): the view says so in its place, and the editor still
+        // has the key.
+        view["hasTotp"] = json!(vault.has_code(item));
+        view["codeNeedsPremium"] = json!(vault.code_needs_premium(item));
         view["hasNotes"] = json!(item.notes.is_some());
         // Each field's upstream type: 0 text, 1 hidden, 2 yes or no, 3 linked.
         view["fields"] = item
@@ -3713,7 +3723,8 @@ pub unsafe extern "C" fn pb_copy(
     with_app(&account, |app| done(app.copy(&id, &what)))
 }
 
-/// The item's current one-time code and the seconds it has left.
+/// The item's current one-time code and the seconds it has left; null
+/// where codes don't show (codes.rs).
 ///
 /// # Safety
 /// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
@@ -3722,10 +3733,14 @@ pub unsafe extern "C" fn pb_totp(account: *const c_char, id: *const c_char) -> *
     let account = text(account);
     let id = text(id);
     with_app(&account, |app| {
-        // Not for someone whose shared folder hides the item's passwords.
+        // Not for someone whose shared folder hides the item's passwords,
+        // nor without Premium or an organization that gives codes.
         let Some(secret) = app
             .vault()
-            .and_then(|v| v.item(&id).filter(|i| v.grid(i).see_passwords))
+            .and_then(|v| {
+                v.item(&id)
+                    .filter(|i| v.grid(i).see_passwords && v.shows_code(i))
+            })
             .filter(|i| app.may_use(i))
             .and_then(|i| i.totp.as_ref())
         else {

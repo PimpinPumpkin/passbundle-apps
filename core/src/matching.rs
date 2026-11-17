@@ -300,6 +300,7 @@ mod tests {
             view_password: true,
             deletable: true,
             details: Vec::new(),
+            organization_use_totp: false,
         }
     }
 
