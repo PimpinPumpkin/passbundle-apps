@@ -168,6 +168,21 @@ pub fn stand_in_with(
                     .unwrap()
                     .clone();
                 json!({ "hidePasswords": false, "data": [{ "id": "version-1", "revisionDate": "2026-11-01T09:00:00.000000Z", "savedBy": null, "cipher": cipher }] })
+            } else if method == "POST" && (path == "/api/ciphers" || path == "/api/ciphers/create")
+            {
+                // A new item, given an id: the person's own, or an
+                // organization's in the shared folders named with it.
+                let (mut c, collections) = match path.as_str() {
+                    "/api/ciphers" => (body.clone(), json!([])),
+                    _ => (body["cipher"].clone(), body["collectionIds"].clone()),
+                };
+                made += 1;
+                c["id"] = format!("00000000-0000-4000-9000-{made:012}").into();
+                c["collectionIds"] = collections;
+                c["edit"] = true.into();
+                c["viewPassword"] = true.into();
+                ciphers.push(c.clone());
+                c
             } else if let Some(rest) = path.strip_prefix("/api/ciphers/") {
                 let (id, action) = rest.split_once('/').unwrap_or((rest, ""));
                 match (method.as_str(), action) {

@@ -1,3 +1,4 @@
+import AuthenticationServices
 import Foundation
 import LocalAuthentication
 import Security
@@ -140,6 +141,26 @@ enum Shared {
     plain = plain.trimmingCharacters(in: CharacterSet(charactersIn: "="))
     plain += String(repeating: "=", count: (4 - plain.count % 4) % 4)
     return Data(base64Encoded: plain)
+  }
+
+  /// The passkeys iOS may list in its passkey sheet, from every unlocked
+  /// account (`pb_passkey_suggestions`): each one's site, account name, and
+  /// IDs, never a key, naming its account and item (`<account>/<item>`). The
+  /// app gives iOS these after each sync (AppDelegate.swift, `Suggestions`),
+  /// and the extension takes a replaced passkey's out of iOS's list by the
+  /// same.
+  static func passkeyIdentities() -> [ASPasskeyCredentialIdentity] {
+    ((answer(pb_passkey_suggestions()) as? [[String: Any]]) ?? []).compactMap {
+      s -> ASPasskeyCredentialIdentity? in
+      guard let account = s["account"] as? String, let id = s["id"] as? String,
+        let rpId = s["rpId"] as? String, let user = s["userName"] as? String,
+        let credential = (s["credentialId"] as? String).flatMap(Shared.fromBase64url),
+        let handle = (s["userHandle"] as? String).flatMap(Shared.fromBase64url)
+      else { return nil }
+      return ASPasskeyCredentialIdentity(
+        relyingPartyIdentifier: rpId, userName: user, credentialID: credential, userHandle: handle,
+        recordIdentifier: "\(account)/\(id)")
+    }
   }
 
   /// One of the core's calls that answers JSON, read and freed.

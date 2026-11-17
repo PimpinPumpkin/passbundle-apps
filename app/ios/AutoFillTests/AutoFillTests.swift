@@ -304,10 +304,13 @@ final class AutoFillTests: XCTestCase {
   /// login has one for (the same site ID and user handle): Backup service
   /// is picked to replace it, Example Mail (on example.test too) is offered
   /// beside a new login, and saving asks first whether to replace it, in
-  /// the Android app's words. Another account on the site isn't offered
-  /// Backup service, whose passkey would be lost. (Saving goes to the
-  /// server, which this test has none of: the core's own tests save one,
-  /// core/tests/passkey_logins.rs.)
+  /// the Android app's words; replacing it takes the old passkey's
+  /// suggestion, as the app gave it to iOS, out of iOS's sheet. Another
+  /// account on the site isn't offered Backup service, whose passkey would
+  /// be lost. (Saving goes to the server, which this test has none of: the
+  /// core's own tests save one, core/tests/passkey_logins.rs. Nor does the
+  /// simulator have PassBundle on for AutoFill, so iOS's list itself isn't
+  /// changed here.)
   func testANewPasskeyForTheSameAccountAsksToReplaceTheOldOne() throws {
     let provider = Provider()
     try show(provider)
@@ -324,6 +327,19 @@ final class AutoFillTests: XCTestCase {
     XCTAssertEqual(provider.targets.map(\.account), [Self.work, Self.work])
     XCTAssertEqual(provider.saveTo?.item, Self.backup)
     snapshot("6-replace-passkey")
+
+    // Replacing it takes the old passkey's suggestion out of iOS's sheet:
+    // the one the app gave iOS for Backup service, by its IDs. Example Mail
+    // and a new login have none to take out.
+    let old = try XCTUnwrap(provider.replacedSuggestion(for: provider.saveTo))
+    let known = try XCTUnwrap(Data(base64Encoded: "DC9qjk0bTzqefFuNKh9uQA=="))
+    XCTAssertEqual(old.relyingPartyIdentifier, "backup.example.test")
+    XCTAssertEqual(old.userName, "backup@example.test")
+    XCTAssertEqual(old.credentialID, known)
+    XCTAssertEqual(old.userHandle, ana)
+    XCTAssertEqual(old.recordIdentifier, "\(Self.work)/\(Self.backup)")
+    XCTAssertNil(provider.replacedSuggestion(for: provider.targets[1]))
+    XCTAssertNil(provider.replacedSuggestion(for: nil))
 
     // Saving asks first: nothing goes to the core until the person says so.
     provider.save()
