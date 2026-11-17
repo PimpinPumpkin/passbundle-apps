@@ -1092,8 +1092,9 @@ pub extern "C" fn pb_send_email_code() -> *mut c_char {
 /// Duo's address for the sign-in waiting for its second step, for the
 /// browser: `{ok, url}`, or the answer of a sign-in that went through
 /// without it (as `pb_sign_in`'s). On Windows and Linux, this app becomes
-/// the one `passbundle://` links open first, for Duo's way back
-/// (two_step.rs, `take_links`).
+/// the one `passbundle://` links open first, for Duo's way back, unless
+/// they open it already, as where the installer put it (two_step.rs,
+/// `take_links`).
 #[no_mangle]
 pub extern "C" fn pb_duo_start() -> *mut c_char {
     with_accounts_waiting(|accounts| match accounts.duo_address() {
