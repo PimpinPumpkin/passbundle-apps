@@ -3897,6 +3897,182 @@ fn an_archived_item_stays_archived_through_the_apps_saves() {
     assert!(!open(&server, &mut session).item(&id).unwrap().archived);
 }
 
+/// Several items at once (docs/core.md, "Selecting several items"):
+/// Archive, the trash, restoring, and deleting for good, each one call for
+/// all of them, as the server keeps them. Archived items moved to a folder
+/// together stay archived; one restored from the trash goes back to
+/// Archive; deleting for good takes only what's in the trash. A member who
+/// may only view an organization's item is left out of restoring it and
+/// deleting it for good, by the app and by the server.
+#[test]
+fn several_items_are_archived_trashed_restored_and_deleted_for_good_together() {
+    use passbundle_core::app::{Bulk, Skip};
+
+    let Some(server) = server() else { return };
+    let url = std::env::var("PB_TEST_SERVER").unwrap();
+    let (owner, viewer) = (new_email("bulk"), new_email("bulk-viewer"));
+    for email in [&owner, &viewer] {
+        sign_up(&server, email);
+    }
+    let mut app = signed_in_app(&url, &owner);
+    let mut ids = Vec::new();
+    for name in ["Old forum", "Old shop", "Old bank"] {
+        let draft = ItemDraft {
+            name: name.into(),
+            username: Some("ana".into()),
+            password: secret("not-a-real-password-b1"),
+            ..ItemDraft::default()
+        };
+        ids.push(app.save(None, &draft, &[]).unwrap().id);
+    }
+    let (forum, shop, bank) = (ids[0].clone(), ids[1].clone(), ids[2].clone());
+    let mut session = sign_in(&server, &owner);
+    let is = |app: &App, id: &str, what: fn(&passbundle_core::vault::Item) -> bool| {
+        app.vault().unwrap().item(id).is_some_and(what)
+    };
+
+    // Archived together, as the server keeps them.
+    let went = app.bulk(&ids, &Bulk::Archive(true), None).unwrap();
+    assert_eq!(went.done, ids);
+    assert!(went.failed.is_empty() && went.synced);
+    let there = open(&server, &mut session);
+    assert!(ids.iter().all(|id| there.item(id).unwrap().archived));
+    assert!(app.vault().unwrap().search("old").is_empty());
+    assert_eq!(app.vault().unwrap().archived("old").len(), 3);
+
+    // Moved to a folder together: still archived.
+    let folder = app.create_folder("Old accounts").unwrap();
+    let moved = app
+        .bulk(&ids, &Bulk::Folder(Some(folder.clone())), None)
+        .unwrap();
+    assert_eq!(moved.done, ids);
+    let there = open(&server, &mut session);
+    for id in &ids {
+        let item = there.item(id).unwrap();
+        assert!(item.archived, "the move kept it archived");
+        assert_eq!(item.folder_id.as_deref(), Some(folder.as_str()));
+    }
+
+    // One out of Archive, then all three to the trash.
+    let out = app
+        .bulk(std::slice::from_ref(&bank), &Bulk::Archive(false), None)
+        .unwrap();
+    assert_eq!(out.done, std::slice::from_ref(&bank));
+    assert!(is(&app, &bank, |i| !i.archived));
+    let trashed = app.bulk(&ids, &Bulk::Trash, None).unwrap();
+    assert_eq!(trashed.done, ids);
+    let mut listed: Vec<String> = app
+        .vault()
+        .unwrap()
+        .trashed("")
+        .iter()
+        .map(|i| i.id.clone())
+        .collect();
+    listed.sort();
+    let mut all = ids.clone();
+    all.sort();
+    assert_eq!(listed, all);
+    assert!(app.vault().unwrap().archived("").is_empty());
+    assert!(app.vault().unwrap().search("old").is_empty());
+
+    // Two restored: the archived one goes back to Archive, the other to
+    // the lists, each in its folder.
+    let restored = app
+        .bulk(&[forum.clone(), bank.clone()], &Bulk::Restore, None)
+        .unwrap();
+    assert_eq!(restored.done, [forum.clone(), bank.clone()]);
+    assert!(restored.failed.is_empty());
+    assert!(is(&app, &forum, |i| !i.deleted && i.archived));
+    assert!(is(&app, &bank, |i| !i.deleted && !i.archived));
+    assert_eq!(app.vault().unwrap().search("old bank").len(), 1);
+    assert_eq!(app.vault().unwrap().archived("old forum").len(), 1);
+    let there = open(&server, &mut session);
+    assert!(!there.item(&forum).unwrap().deleted && there.item(&shop).unwrap().deleted);
+
+    // Deleting for good takes the one in the trash, never one out of it.
+    let deleted = app
+        .bulk(&[shop.clone(), bank.clone()], &Bulk::DeleteForever, None)
+        .unwrap();
+    assert_eq!(deleted.done, std::slice::from_ref(&shop));
+    assert_eq!(deleted.skipped, [(bank.clone(), Skip::NotInTrash)]);
+    assert!(app.vault().unwrap().item(&shop).is_none());
+    let there = open(&server, &mut session);
+    assert!(there.item(&shop).is_none());
+    assert!(there.item(&bank).is_some_and(|i| !i.deleted));
+
+    // An organization's item in the trash: a member who may only view it
+    // sees it there, and may neither restore it nor delete it for good.
+    let (org_id, org_key) = new_organization(&server, &mut session, &owner);
+    let vault = open(&server, &mut session);
+    let it = vault.collections.keys().next().unwrap().clone();
+    join(
+        &server,
+        &mut session,
+        &org_id,
+        &org_key,
+        &viewer,
+        json!([{ "id": it, "readOnly": true, "hidePasswords": false, "manage": false }]),
+    );
+    let draft = ItemDraft {
+        name: "Office Wi-Fi".into(),
+        username: Some("not-a-real-user".into()),
+        organization_id: Some(org_id.clone()),
+        ..ItemDraft::default()
+    };
+    let wifi = server
+        .save_item(
+            &mut session,
+            None,
+            vault.encrypt_item(&draft, None).unwrap(),
+            std::slice::from_ref(&it),
+        )
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    app.sync().unwrap();
+    let in_trash = app
+        .bulk(std::slice::from_ref(&wifi), &Bulk::Trash, None)
+        .unwrap();
+    assert_eq!(in_trash.done, std::slice::from_ref(&wifi));
+
+    let mut viewers = signed_in_app(&url, &viewer);
+    let listed: Vec<String> = viewers
+        .vault()
+        .unwrap()
+        .trashed("")
+        .iter()
+        .map(|i| i.id.clone())
+        .collect();
+    assert_eq!(listed, std::slice::from_ref(&wifi));
+    let left = viewers
+        .bulk(std::slice::from_ref(&wifi), &Bulk::Restore, None)
+        .unwrap();
+    assert_eq!(left.skipped, [(wifi.clone(), Skip::NoRestore)]);
+    let left = viewers
+        .bulk(std::slice::from_ref(&wifi), &Bulk::DeleteForever, None)
+        .unwrap();
+    assert_eq!(left.skipped, [(wifi.clone(), Skip::NoDelete)]);
+    // The server refuses both itself.
+    let mut viewer_session = sign_in(&server, &viewer);
+    assert!(server
+        .restore_items(&mut viewer_session, std::slice::from_ref(&wifi))
+        .is_err());
+    assert!(server
+        .delete_items(&mut viewer_session, std::slice::from_ref(&wifi))
+        .is_err());
+    assert!(open(&server, &mut session).item(&wifi).unwrap().deleted);
+
+    // The owner deletes it for good.
+    let gone = app
+        .bulk(std::slice::from_ref(&wifi), &Bulk::DeleteForever, None)
+        .unwrap();
+    assert_eq!(gone.done, std::slice::from_ref(&wifi));
+    assert!(open(&server, &mut session).item(&wifi).is_none());
+    viewers.sync().unwrap();
+    assert!(viewers.vault().unwrap().item(&wifi).is_none());
+}
+
 /// Exporting and importing (meta repo DESIGN.md, "Archive, export, and
 /// import in the apps"): one account's `.json` export, plain and password-protected,
 /// comes into another with its folder, fields, favorite, and archive as

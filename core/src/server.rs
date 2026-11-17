@@ -1068,11 +1068,18 @@ impl Server {
                 .put(&url)
                 .header("Authorization", &auth)
                 .send_empty(),
-            ("DELETE", _) => self
+            ("DELETE", None) => self
                 .agent
                 .delete(&url)
                 .header("Authorization", &auth)
                 .call(),
+            // Upstream's delete for several items says which in its body.
+            ("DELETE", Some(b)) => self
+                .agent
+                .delete(&url)
+                .header("Authorization", &auth)
+                .force_send_body()
+                .send_json(b),
             _ => unreachable!("only the methods above are used"),
         };
         self.answer(response)
@@ -1669,6 +1676,53 @@ impl Server {
             Some(json!({ "ids": ids })),
         )
         .map(|_| ())
+    }
+
+    /// Restores several items from the trash in one call (upstream's bulk
+    /// restore, `PUT /api/ciphers/restore`). The server stops at the first
+    /// it refuses, with the ones it took before that restored already.
+    pub fn restore_items(&self, session: &mut Session, ids: &[String]) -> Result<()> {
+        self.call(
+            session,
+            "PUT",
+            "/api/ciphers/restore",
+            Some(json!({ "ids": ids })),
+        )
+        .map(|_| ())
+    }
+
+    /// Deletes several items from the trash for good in one call
+    /// (upstream's bulk delete, `DELETE /api/ciphers`), their attachments
+    /// and history with them. The server stops at the first it refuses,
+    /// with the ones it took before that gone already.
+    pub fn delete_items(&self, session: &mut Session, ids: &[String]) -> Result<()> {
+        self.call(
+            session,
+            "DELETE",
+            "/api/ciphers",
+            Some(json!({ "ids": ids })),
+        )
+        .map(|_| ())
+    }
+
+    /// Archives several items, or takes them out of the archive, in one
+    /// call (upstream's `PUT /api/ciphers/archive` and `/unarchive`, which
+    /// its apps use for one item too): the person's own mark, as for one
+    /// item, so nothing is encrypted again. The server stops at the first
+    /// it refuses, with the ones before it done.
+    pub fn archive_items(
+        &self,
+        session: &mut Session,
+        ids: &[String],
+        archived: bool,
+    ) -> Result<()> {
+        let path = if archived {
+            "/api/ciphers/archive"
+        } else {
+            "/api/ciphers/unarchive"
+        };
+        self.call(session, "PUT", path, Some(json!({ "ids": ids })))
+            .map(|_| ())
     }
 
     /// Puts several items in one of the person's folders, or in none, in

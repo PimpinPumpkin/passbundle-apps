@@ -1,6 +1,7 @@
 //! One thing done to several items at once (docs/core.md, "Selecting
 //! several items"): what's done, what's left and why, and what's said when
-//! the server takes only part. On the vectors' sample vault, with an
+//! the server takes only part; and the trash, its list, restoring from it,
+//! and deleting for good. On the vectors' sample vault, with an
 //! organization's items the person may and may not change, signed in to a
 //! stand-in for the server on this computer that keeps the vault and
 //! changes it as the server's calls do.
@@ -26,6 +27,10 @@ const VIEWED: &str = "a0000000-0000-4000-8000-000000000001";
 const HIDDEN: &str = "a0000000-0000-4000-8000-000000000002";
 
 const FOLDER: &str = "1b2c3d4e-5f60-4718-89a0-b1c2d3e4f506";
+/// The organization the sample vault's person is in.
+const ORG: &str = "8f9a7c1e-3b2d-4e5f-9a8b-7c6d5e4f3a2b";
+/// When the stand-in's items went to the trash, or to Archive.
+const TRASHED_AT: &str = "2026-11-09T10:00:00.000Z";
 /// The organization's shared folders: one the person changes items in, a
 /// second like it, and one they only view.
 const OPEN: &str = "2c3d4e5f-6071-4829-9ab0-c1d2e3f40516";
@@ -90,6 +95,11 @@ fn ids_of(body: &Value) -> Vec<String> {
 /// The sample vault, with the organization's items and shared folders
 /// these tests are about.
 fn vault() -> Value {
+    vault_with(&[])
+}
+
+/// `vault()`, with these items in the trash.
+fn vault_with(trashed: &[&str]) -> Value {
     let v: Value = serde_json::from_str(include_str!("vectors/core-v1.json")).unwrap();
     let mut sync = v["sync"].clone();
     let grid = |can: bool| {
@@ -129,6 +139,9 @@ fn vault() -> Value {
         if c["id"] == ASKS {
             c["reprompt"] = 1.into();
         }
+        if trashed.iter().any(|id| c["id"] == *id) {
+            c["deletedDate"] = TRASHED_AT.into();
+        }
     }
     sync
 }
@@ -136,10 +149,15 @@ fn vault() -> Value {
 /// A stand-in for the server: a session for the refresh token, the vault
 /// as a sync, and the calls that change several items or one, done to the
 /// vault it keeps as the server does them. An item it's told to refuse
-/// gets the server's words; the call for the trash stops there, with the
-/// ones before it done, and the call for a folder moves the rest and says
-/// not all were moved.
+/// gets the server's words; the calls for the trash, restoring, deleting
+/// for good, and Archive stop there, with the ones before it done, and the
+/// call for a folder moves the rest and says not all were moved.
 fn stand_in() -> StandIn {
+    stand_in_with(vault())
+}
+
+/// `stand_in()`, keeping this vault.
+fn stand_in_with(vault: Value) -> StandIn {
     let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
     let url = format!("http://{}", server.server_addr().to_ip().unwrap());
     let here = StandIn {
@@ -148,7 +166,7 @@ fn stand_in() -> StandIn {
         refuses: Arc::default(),
     };
     let there = here.clone();
-    let mut kept = vault();
+    let mut kept = vault;
     std::thread::spawn(move || {
         for mut request in server.incoming_requests() {
             let path = request.url().to_owned();
@@ -162,6 +180,7 @@ fn stand_in() -> StandIn {
                 .push((format!("{} {path}", request.method()), body.clone()));
             let refuses = there.refuses.lock().unwrap().clone();
             let refused = |id: &str| refuses.iter().any(|r| r == id);
+            let method = request.method().to_string();
             let ciphers = kept["ciphers"].as_array_mut().unwrap();
             let mut change = |id: &str, name: &str, value: Value| {
                 for c in ciphers.iter_mut().filter(|c| c["id"] == id) {
@@ -178,19 +197,57 @@ fn stand_in() -> StandIn {
             let one = path
                 .strip_prefix("/api/ciphers/")
                 .and_then(|rest| rest.split_once('/'));
+            // Each of several, in the order sent, until one is refused:
+            // the server's way for the trash, restoring, deleting for good,
+            // and Archive.
+            let mut each = |name: &str, value: Value, words: &str| {
+                for id in &sent_ids {
+                    if refused(id) {
+                        return no(words);
+                    }
+                    change(id, name, value.clone());
+                }
+                (200, r#"{"data":[],"object":"list"}"#.to_owned())
+            };
             let (status, answer) = if path == "/identity/connect/token" {
                 let token = r#"{"access_token":"a.b.c","expires_in":3600,"refresh_token":"next","token_type":"Bearer"}"#;
                 (200, token.to_owned())
             } else if path.starts_with("/api/sync") {
                 (200, kept.to_string())
             } else if path == "/api/ciphers/delete" {
+                match each(
+                    "deletedDate",
+                    TRASHED_AT.into(),
+                    "Cipher can't be deleted by user",
+                ) {
+                    (200, _) => (200, String::new()),
+                    refused => refused,
+                }
+            } else if path == "/api/ciphers/restore" {
+                each(
+                    "deletedDate",
+                    Value::Null,
+                    "Cipher can't be restored by user",
+                )
+            } else if path == "/api/ciphers/archive" || path == "/api/ciphers/unarchive" {
+                let date = match path.ends_with("/archive") {
+                    true => TRASHED_AT.into(),
+                    false => Value::Null,
+                };
+                each(
+                    "archivedDate",
+                    date,
+                    "Cipher is not accessible for the current user",
+                )
+            } else if path == "/api/ciphers" && method == "DELETE" {
+                // Gone for good, each in turn, until one is refused.
                 let mut answer = (200, String::new());
                 for id in &sent_ids {
                     if refused(id) {
                         answer = no("Cipher can't be deleted by user");
                         break;
                     }
-                    change(id, "deletedDate", "2026-11-09T10:00:00.000Z".into());
+                    ciphers.retain(|c| c["id"] != id.as_str());
                 }
                 answer
             } else if path == "/api/ciphers/move" {
@@ -239,7 +296,12 @@ struct Sample {
 impl Sample {
     /// The vault kept here, signed in to `server` (a refresh token kept).
     fn new(server: &str) -> Sample {
-        let sample = Sample::signed_out(server);
+        Sample::keeping(server, vault())
+    }
+
+    /// `new`, keeping this vault.
+    fn keeping(server: &str, vault: Value) -> Sample {
+        let sample = Sample::signed_out_keeping(server, vault);
         let email = Store::new(&sample.dir).settings().unwrap().email;
         assert!(sample.secrets.keep(server, &email, "kept-refresh-token"));
         sample
@@ -247,6 +309,10 @@ impl Sample {
 
     /// The vault kept here, to read: no session.
     fn signed_out(server: &str) -> Sample {
+        Sample::signed_out_keeping(server, vault())
+    }
+
+    fn signed_out_keeping(server: &str, vault: Value) -> Sample {
         let v: Value = serde_json::from_str(include_str!("vectors/core-v1.json")).unwrap();
         let pre = &v["account"]["pbkdf2"]["prelogin"];
         let dir =
@@ -263,7 +329,7 @@ impl Sample {
                 device_identifier: "d".into(),
             })
             .unwrap();
-        store.save_sync(&vault().to_string()).unwrap();
+        store.save_sync(&vault.to_string()).unwrap();
         Sample {
             dir,
             password: v["account"]["password"].as_str().unwrap().into(),
@@ -696,6 +762,16 @@ fn what_to_do_is_read_as_the_app_sends_it() {
     );
     assert_eq!(read(r#"{"do":"trash"}"#), Ok(Bulk::Trash));
     assert_eq!(
+        read(r#"{"do":"archive","archived":true}"#),
+        Ok(Bulk::Archive(true))
+    );
+    assert_eq!(
+        read(r#"{"do":"archive","archived":false}"#),
+        Ok(Bulk::Archive(false))
+    );
+    assert_eq!(read(r#"{"do":"restore"}"#), Ok(Bulk::Restore));
+    assert_eq!(read(r#"{"do":"deleteForever"}"#), Ok(Bulk::DeleteForever));
+    assert_eq!(
         read(r#"{"do":"folder","folderId":null}"#),
         Ok(Bulk::Folder(None))
     );
@@ -716,8 +792,314 @@ fn what_to_do_is_read_as_the_app_sends_it() {
         "{}",
         r#"{"do":"delete"}"#,
         r#"{"do":"favorite"}"#,
+        r#"{"do":"archive"}"#,
+        r#"{"do":"archive","archived":"yes"}"#,
         r#"{"do":"sharedFolder"}"#,
     ] {
         assert!(read(unread).is_err(), "{unread}");
     }
+}
+
+fn archived(app: &App, id: &str) -> bool {
+    app.vault().unwrap().item(id).unwrap().archived
+}
+
+fn trashed(app: &App, query: &str) -> Vec<String> {
+    sorted(
+        app.vault()
+            .unwrap()
+            .trashed(query)
+            .iter()
+            .map(|i| i.id.clone())
+            .collect(),
+    )
+}
+
+#[test]
+fn archive_takes_every_item_the_person_sees_in_one_call_and_brings_them_back_the_same_way() {
+    let server = stand_in_with(vault_with(&[CARD]));
+    let sample = Sample::keeping(&server.url, vault_with(&[CARD]));
+    let mut app = sample.unlocked();
+    let selection = ids(&[MAIL, BACKUP, VIEWED, ASKS, CARD]);
+    // The person's own mark, as a favorite is: an item they only view takes
+    // it. One in the trash isn't archived from the lists.
+    let plan = app.bulk_plan(&selection, &Bulk::Archive(true)).unwrap();
+    assert_eq!(plan.go, ids(&[MAIL, BACKUP, VIEWED]));
+    assert_eq!(
+        plan.skipped,
+        [
+            (ASKS.to_owned(), Skip::MasterPassword),
+            (CARD.to_owned(), Skip::Gone),
+        ]
+    );
+    assert!(server.asked().is_empty(), "{:?}", server.asked());
+
+    let went = app.bulk(&selection, &Bulk::Archive(true), None).unwrap();
+    assert_eq!(went.done, ids(&[MAIL, BACKUP, VIEWED]));
+    assert_eq!(went.skipped, plan.skipped);
+    assert!(went.failed.is_empty() && went.synced);
+    // One call for all three, then one sync: never a save of an item, which
+    // would have to carry each one's archived date.
+    assert_eq!(
+        server.asked(),
+        [
+            "PUT /api/ciphers/archive",
+            "GET /api/sync?excludeDomains=true"
+        ]
+    );
+    assert_eq!(
+        ids_of(&server.sent("/api/ciphers/archive")),
+        sorted(ids(&[MAIL, BACKUP, VIEWED]))
+    );
+    for id in [MAIL, BACKUP, VIEWED] {
+        assert!(archived(&app, id), "{id}");
+    }
+    // Out of the lists and search, into Archive.
+    let vault = app.vault().unwrap();
+    assert!(vault.search("").iter().all(|i| !i.archived));
+    assert_eq!(vault.archived("").len(), 3);
+
+    // Archived already: nothing sent for it.
+    server.asked.lock().unwrap().clear();
+    let again = app
+        .bulk(&ids(&[MAIL, NOTE]), &Bulk::Archive(true), None)
+        .unwrap();
+    assert_eq!(again.done, ids(&[MAIL, NOTE]));
+    assert_eq!(ids_of(&server.sent("/api/ciphers/archive")), ids(&[NOTE]));
+
+    // And out again, in one call.
+    server.asked.lock().unwrap().clear();
+    let out = app
+        .bulk(
+            &ids(&[MAIL, BACKUP, VIEWED, NOTE]),
+            &Bulk::Archive(false),
+            None,
+        )
+        .unwrap();
+    assert_eq!(out.done, ids(&[MAIL, BACKUP, VIEWED, NOTE]));
+    assert_eq!(
+        server.asked(),
+        [
+            "PUT /api/ciphers/unarchive",
+            "GET /api/sync?excludeDomains=true"
+        ]
+    );
+    assert!(app.vault().unwrap().archived("").is_empty());
+    assert!(!archived(&app, MAIL) && !archived(&app, NOTE));
+}
+
+#[test]
+fn an_archive_the_server_stops_partway_says_which_went() {
+    let server = stand_in();
+    let sample = Sample::new(&server.url);
+    let mut app = sample.unlocked();
+    server.refuse(NOTE);
+    let went = app
+        .bulk(&ids(&[MAIL, NOTE, CARD]), &Bulk::Archive(true), None)
+        .unwrap();
+    assert_eq!(went.done, ids(&[MAIL]));
+    assert_eq!(went.failed, ids(&[NOTE, CARD]));
+    assert_eq!(
+        went.error,
+        Some(Error::Server(
+            "Cipher is not accessible for the current user".into()
+        ))
+    );
+    assert!(archived(&app, MAIL) && !archived(&app, NOTE) && !archived(&app, CARD));
+}
+
+#[test]
+fn the_trash_is_its_own_list_and_restoring_takes_what_the_person_may_restore_in_one_call() {
+    let trash = [MAIL, BACKUP, VIEWED, ASKS];
+    let server = stand_in_with(vault_with(&trash));
+    let sample = Sample::keeping(&server.url, vault_with(&trash));
+    let mut app = sample.unlocked();
+    // In the trash, with its own search, and in no other list or search.
+    assert_eq!(trashed(&app, ""), sorted(ids(&trash)));
+    assert_eq!(trashed(&app, "mail"), ids(&[MAIL]));
+    let vault = app.vault().unwrap();
+    for id in trash {
+        assert!(vault.search("").iter().all(|i| i.id != id), "{id}");
+    }
+    assert!(vault.archived("").is_empty());
+
+    // Restoring needs what moving to the trash needs (delete, which the
+    // server checks for both); one out of the trash already is done.
+    let selection = ids(&[MAIL, BACKUP, VIEWED, ASKS, NOTE, "not-in-the-vault"]);
+    let plan = app.bulk_plan(&selection, &Bulk::Restore).unwrap();
+    assert_eq!(plan.go, ids(&[MAIL, BACKUP, NOTE]));
+    assert_eq!(
+        plan.skipped,
+        [
+            (VIEWED.to_owned(), Skip::NoRestore),
+            (ASKS.to_owned(), Skip::MasterPassword),
+            ("not-in-the-vault".to_owned(), Skip::Gone),
+        ]
+    );
+    assert_eq!(
+        plan.json()["skipped"],
+        json!([
+            { "id": VIEWED, "why": "noRestore" },
+            { "id": ASKS, "why": "masterPassword" },
+            { "id": "not-in-the-vault", "why": "gone" },
+        ])
+    );
+    assert!(server.asked().is_empty(), "{:?}", server.asked());
+
+    let went = app.bulk(&selection, &Bulk::Restore, None).unwrap();
+    assert_eq!(went.done, ids(&[NOTE, MAIL, BACKUP]));
+    assert!(went.failed.is_empty() && went.synced);
+    assert_eq!(
+        server.asked(),
+        [
+            "PUT /api/ciphers/restore",
+            "GET /api/sync?excludeDomains=true"
+        ]
+    );
+    assert_eq!(
+        ids_of(&server.sent("/api/ciphers/restore")),
+        sorted(ids(&[MAIL, BACKUP]))
+    );
+    assert_eq!(trashed(&app, ""), sorted(ids(&[VIEWED, ASKS])));
+    // Back where they were: its folder, its favorite.
+    assert!(!in_trash(&app, MAIL));
+    assert_eq!(folder(&app, MAIL).as_deref(), Some(FOLDER));
+    assert!(favorite(&app, MAIL));
+
+    // The one that asks, once the master password is given.
+    let asks = app
+        .bulk(&ids(&[ASKS]), &Bulk::Restore, Some(&sample.password))
+        .unwrap();
+    assert_eq!(asks.done, ids(&[ASKS]));
+    assert_eq!(trashed(&app, ""), ids(&[VIEWED]));
+}
+
+#[test]
+fn deleting_for_good_takes_only_items_in_the_trash_in_one_call() {
+    let trash = [MAIL, VIEWED, ASKS, NOTE];
+    let server = stand_in_with(vault_with(&trash));
+    let sample = Sample::keeping(&server.url, vault_with(&trash));
+    let mut app = sample.unlocked();
+    let selection = ids(&[MAIL, VIEWED, ASKS, NOTE, CARD]);
+    let plan = app.bulk_plan(&selection, &Bulk::DeleteForever).unwrap();
+    assert_eq!(plan.go, ids(&[MAIL, NOTE]));
+    // Never one that isn't in the trash.
+    assert_eq!(
+        plan.skipped,
+        [
+            (VIEWED.to_owned(), Skip::NoDelete),
+            (ASKS.to_owned(), Skip::MasterPassword),
+            (CARD.to_owned(), Skip::NotInTrash),
+        ]
+    );
+    assert_eq!(plan.json()["skipped"][2]["why"], "notInTrash");
+    // Moving to the trash leaves the ones there already.
+    let trash_plan = app.bulk_plan(&selection, &Bulk::Trash).unwrap();
+    assert_eq!(trash_plan.go, ids(&[CARD]));
+
+    let went = app.bulk(&selection, &Bulk::DeleteForever, None).unwrap();
+    assert_eq!(went.done, ids(&[MAIL, NOTE]));
+    assert!(went.failed.is_empty() && went.synced);
+    assert_eq!(
+        server.asked(),
+        ["DELETE /api/ciphers", "GET /api/sync?excludeDomains=true"]
+    );
+    assert_eq!(
+        ids_of(&server.sent("/api/ciphers")),
+        sorted(ids(&[MAIL, NOTE]))
+    );
+    let vault = app.vault().unwrap();
+    assert!(vault.item(MAIL).is_none() && vault.item(NOTE).is_none());
+    assert!(vault.item(CARD).is_some_and(|i| !i.deleted));
+    assert_eq!(trashed(&app, ""), sorted(ids(&[VIEWED, ASKS])));
+
+    // Gone: asked again, nothing to do and nothing sent.
+    server.asked.lock().unwrap().clear();
+    let again = app.bulk(&ids(&[MAIL]), &Bulk::DeleteForever, None).unwrap();
+    assert_eq!(again.skipped, [(MAIL.to_owned(), Skip::Gone)]);
+    assert!(server.asked().is_empty());
+}
+
+#[test]
+fn a_restore_or_a_delete_for_good_the_server_stops_partway_says_which_went() {
+    let trash = [MAIL, NOTE, CARD];
+    let server = stand_in_with(vault_with(&trash));
+    let sample = Sample::keeping(&server.url, vault_with(&trash));
+    let mut app = sample.unlocked();
+    server.refuse(NOTE);
+    let restored = app
+        .bulk(&ids(&[MAIL, NOTE, CARD]), &Bulk::Restore, None)
+        .unwrap();
+    assert_eq!(restored.done, ids(&[MAIL]));
+    assert_eq!(restored.failed, ids(&[NOTE, CARD]));
+    assert_eq!(
+        restored.error,
+        Some(Error::Server("Cipher can't be restored by user".into()))
+    );
+    assert_eq!(trashed(&app, ""), sorted(ids(&[NOTE, CARD])));
+
+    let deleted = app
+        .bulk(&ids(&[CARD, NOTE]), &Bulk::DeleteForever, None)
+        .unwrap();
+    assert_eq!(deleted.done, ids(&[CARD]));
+    assert_eq!(deleted.failed, ids(&[NOTE]));
+    assert!(app.vault().unwrap().item(CARD).is_none());
+    assert_eq!(trashed(&app, ""), ids(&[NOTE]));
+}
+
+#[test]
+fn offline_nothing_is_restored_archived_or_deleted_for_good() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    drop(listener);
+    let sample = Sample::keeping(&url, vault_with(&[NOTE, CARD]));
+    let mut app = sample.unlocked();
+    for action in [Bulk::Restore, Bulk::DeleteForever] {
+        let went = app.bulk(&ids(&[NOTE, CARD]), &action, None).unwrap();
+        assert!(went.done.is_empty(), "{action:?}");
+        assert_eq!(went.failed, ids(&[NOTE, CARD]), "{action:?}");
+        assert!(went.error.as_ref().is_some_and(Error::offline));
+    }
+    let archive = app.bulk(&ids(&[MAIL]), &Bulk::Archive(true), None).unwrap();
+    assert_eq!(archive.failed, ids(&[MAIL]));
+    assert_eq!(trashed(&app, ""), sorted(ids(&[NOTE, CARD])));
+    assert!(!archived(&app, MAIL));
+}
+
+#[test]
+fn an_item_an_organizations_policy_hides_is_in_no_trash_and_nothing_is_done_to_it() {
+    // "Remove card item type", from the organization the person is in: it
+    // binds their own cards too, in the trash or not.
+    let mut sync = vault_with(&[CARD, NOTE]);
+    sync["policies"] = json!([{
+        "id": "p", "organizationId": ORG, "type": 15, "enabled": true,
+        "data": null, "object": "policy",
+    }]);
+    let server = stand_in_with(sync.clone());
+    let sample = Sample::keeping(&server.url, sync);
+    let mut app = sample.unlocked();
+    assert_eq!(trashed(&app, ""), ids(&[NOTE]));
+    for action in [Bulk::Restore, Bulk::DeleteForever] {
+        let went = app.bulk(&ids(&[CARD]), &action, None).unwrap();
+        assert_eq!(went.skipped, [(CARD.to_owned(), Skip::Gone)], "{action:?}");
+    }
+    assert!(server.asked().is_empty(), "{:?}", server.asked());
+}
+
+#[test]
+fn signed_out_nothing_in_the_trash_changes() {
+    let sample = Sample::signed_out_keeping("https://vault.example.test", vault_with(&[NOTE]));
+    let mut app = sample.unlocked();
+    for action in [Bulk::Restore, Bulk::DeleteForever, Bulk::Archive(true)] {
+        let id = match action {
+            Bulk::Archive(_) => CARD,
+            _ => NOTE,
+        };
+        assert_eq!(
+            app.bulk(&ids(&[id]), &action, None).unwrap_err(),
+            Error::SignedOut,
+            "{action:?}"
+        );
+    }
+    assert_eq!(trashed(&app, ""), ids(&[NOTE]));
 }
