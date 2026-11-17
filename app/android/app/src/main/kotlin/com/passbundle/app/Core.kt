@@ -124,6 +124,27 @@ object Core {
     @JvmStatic external fun cardsAndIdentities(): String?
 
     /**
+     * What autofill needs before Android offers to save a card or an
+     * address someone typed (Saving.kt), from every unlocked account, as
+     * JSON: `card` and `identity`, each with whether one may be made in any
+     * of them (`mayAdd`), and each card's `last4` and each identity's
+     * `addresses` (its street's words and its postal code, as the core
+     * compares them), never a whole number; or `locked`, `signedOut`, and
+     * `busy`, as [fillable] says.
+     */
+    @JvmStatic external fun saveHints(): String?
+
+    /**
+     * Whether a card (by its number) or an address (its first street line
+     * and postal code) someone asked to save is one an unlocked account has,
+     * as JSON: `saved`, with its `account`, `id`, and `name`, or null; and
+     * the unlocked accounts where one may be made (`mayAdd`, the shown one
+     * first); or `locked`, `signedOut`, and `busy`, as [fillable] says.
+     * `kind` is "card" or "identity"; what doesn't apply to it is "".
+     */
+    @JvmStatic external fun alreadySaved(kind: String, number: String, street: String, postalCode: String): String?
+
+    /**
      * Unlocks an account with its master password, for autofill while it's
      * locked and there's no biometric unlock (FillActivity.kt): {"ok": true},
      * or the words to show. Slow (the KDF): off the main thread.

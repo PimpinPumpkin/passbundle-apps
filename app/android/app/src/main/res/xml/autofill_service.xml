@@ -1,3 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- PassBundle as Android's autofill service (PassBundleAutofill.kt). -->
-<autofill-service xmlns:android="http://schemas.android.com/apk/res/android" />
+<!-- PassBundle as Android's autofill service (PassBundleAutofill.kt). On
+     Android 11 and later, a keyboard that asks gets its entries as
+     suggestions on the keyboard (Inline.kt). -->
+<autofill-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:supportsInlineSuggestions="true" />

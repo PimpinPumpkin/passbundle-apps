@@ -1736,6 +1736,61 @@ pub(crate) fn cards_and_identities() -> Value {
     })
 }
 
+/// What Android's autofill needs before it offers to save a card or an
+/// address someone typed (Saving.kt; docs/phones.md, "Autofill"), from
+/// every unlocked account: whether any of them may make one (`mayAdd`: no
+/// organization's policy there removes the kind, restricted_types.rs), and
+/// what tells a new one from one they have (matching.rs, `SaveHints`): each
+/// card's last 4 digits, and each identity's street and postal code, never
+/// a whole number. `locked`, `signedOut`, and `busy` as `for_autofill` says.
+#[cfg(target_os = "android")]
+pub(crate) fn save_hints() -> Value {
+    for_autofill(|accounts| {
+        let hints = accounts.save_hints();
+        let addresses: Vec<Value> = hints
+            .addresses
+            .iter()
+            .map(|(street, postal_code)| json!({ "street": street, "postalCode": postal_code }))
+            .collect();
+        json!({
+            "card": {
+                "mayAdd": !accounts.may_add(ItemKind::Card).is_empty(),
+                "last4": hints.last4,
+            },
+            "identity": {
+                "mayAdd": !accounts.may_add(ItemKind::Identity).is_empty(),
+                "addresses": addresses,
+            },
+        })
+    })
+}
+
+/// A card or an address someone asked Android's autofill to save, once
+/// PassBundle is unlocked to save it (PassBundleAutofill.takeSave): the
+/// item an unlocked account has of it already, if any (`saved`, with its
+/// `account`, `id`, and `name`), so it isn't saved again; and the unlocked
+/// accounts that may make one (`mayAdd`, the shown one first). `kind` is
+/// "card", by its `number`, or "identity", by its `street` (the first line)
+/// and `postal_code`. `locked`, `signedOut`, and `busy` as `for_autofill`
+/// says.
+#[cfg(target_os = "android")]
+pub(crate) fn already_saved(kind: &str, number: &str, street: &str, postal_code: &str) -> Value {
+    for_autofill(|accounts| {
+        let (kind, found) = match kind {
+            "card" => (ItemKind::Card, accounts.card_with_number(number)),
+            "identity" => (
+                ItemKind::Identity,
+                accounts.identity_at(street, postal_code),
+            ),
+            _ => return json!({ "saved": null, "mayAdd": [] }),
+        };
+        json!({
+            "saved": found.map(|(account, i)| json!({ "account": account, "id": i.id, "name": i.name })),
+            "mayAdd": accounts.may_add(kind),
+        })
+    })
+}
+
 /// The master password, for a login that asks for it again before Android's
 /// autofill fills it (android.rs): `{ok}`, or the words to show.
 #[cfg(target_os = "android")]

@@ -596,11 +596,21 @@ class AccountBadge extends StatelessWidget {
 }
 
 /// Which account a new item goes in, where more than one is unlocked: each
-/// unlocked one, the one shown first. Its id, or null if the person
-/// cancels; the one shown's, without asking, when it's the only one.
-Future<String?> chooseAccount(BuildContext context, AccountsMenu menu) async {
-  final unlocked = menu.unlocked;
-  if (unlocked.length < 2) return menu.shown;
+/// unlocked one, the one shown first, or only those [among] names (where a
+/// card or an address Android's autofill offers to save may go). Its id, or
+/// null if the person cancels; without asking, when there's only one.
+Future<String?> chooseAccount(
+  BuildContext context,
+  AccountsMenu menu, {
+  List<String>? among,
+}) async {
+  final unlocked = [
+    for (final a in menu.unlocked)
+      if (among == null || among.contains(a.id)) a,
+  ];
+  if (unlocked.length < 2) {
+    return unlocked.length == 1 ? unlocked.single.id : menu.shown;
+  }
   return showDialog<String>(
     context: context,
     builder: (context) => SimpleDialog(

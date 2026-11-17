@@ -272,6 +272,52 @@ pub fn cards_and_identities<'caller>(
         .resolve::<ThrowRuntimeExAndDefault>()
 }
 
+/// What autofill needs before it offers to save a card or an address
+/// someone typed, from every unlocked account, as JSON: whether one may be
+/// made there, and what tells a new one from one they have, never a whole
+/// number (ffi.rs, `save_hints`; docs/phones.md, "Autofill").
+#[cfg(feature = "ffi")]
+#[jni_mangle("com.passbundle.app.Core")]
+pub fn save_hints<'caller>(
+    mut unowned_env: EnvUnowned<'caller>,
+    _class: JClass<'caller>,
+) -> jstring {
+    unowned_env
+        .with_env(|env| -> JniResult<jstring> {
+            let answer = crate::ffi::save_hints();
+            Ok(env.new_string(answer.to_string())?.into_raw())
+        })
+        .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+/// Whether a card (by its number) or an address (its first street line and
+/// postal code) someone asked autofill to save is one an unlocked account
+/// has already, and where one may be made, as JSON (ffi.rs,
+/// `already_saved`). The number is wiped here once it's been compared.
+#[cfg(feature = "ffi")]
+#[jni_mangle("com.passbundle.app.Core")]
+pub fn already_saved<'caller>(
+    mut unowned_env: EnvUnowned<'caller>,
+    _class: JClass<'caller>,
+    kind: JString<'caller>,
+    number: JString<'caller>,
+    street: JString<'caller>,
+    postal_code: JString<'caller>,
+) -> jstring {
+    unowned_env
+        .with_env(|env| -> JniResult<jstring> {
+            let number = Zeroizing::new(number.try_to_string(env)?);
+            let answer = crate::ffi::already_saved(
+                &kind.try_to_string(env)?,
+                &number,
+                &street.try_to_string(env)?,
+                &postal_code.try_to_string(env)?,
+            );
+            Ok(env.new_string(answer.to_string())?.into_raw())
+        })
+        .resolve::<ThrowRuntimeExAndDefault>()
+}
+
 /// Writes one of an item's attachments into a file Android opened for it
 /// (Downloads, through MediaStore; docs/core.md, "Attachments"): `{ok}`, or
 /// the words to show, as JSON. Slow (the download): off the main thread.
