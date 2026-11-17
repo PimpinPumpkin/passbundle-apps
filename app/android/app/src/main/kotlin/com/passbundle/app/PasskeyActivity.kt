@@ -9,6 +9,8 @@ import android.text.InputType
 import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
 import android.widget.EditText
+import android.widget.LinearLayout
+import android.widget.TextView
 import android.widget.Toast
 import androidx.credentials.CreatePublicKeyCredentialRequest
 import androidx.credentials.CreatePublicKeyCredentialResponse
@@ -35,8 +37,10 @@ import org.json.JSONObject
  * - **Signing in:** checks who's asking (Passkeys.caller), asks the person to
  *   prove who they are when the site wants it or the login asks for the
  *   master password, then has the core sign over the client data hash.
- * - **Making one:** the same checks, then the core makes the passkey and
- *   saves it in a new login before the site hears of it.
+ * - **Making one:** the same checks, then where it goes (PasskeySaving.kt):
+ *   in place of this account's old passkey for the site, after asking; in a
+ *   login for the site the person picks; or in a new login. The core makes
+ *   the passkey and saves it there before the site hears of it.
  */
 class PasskeyActivity : Activity() {
     companion object {
@@ -158,6 +162,38 @@ class PasskeyActivity : Activity() {
 
     // --- Making one ---
 
+    /** A site's request to make a passkey, as read from it, and who's asking. */
+    private class Making(
+        val caller: Passkeys.Caller,
+        val asked: CreatePublicKeyCredentialRequest,
+        val json: JSONObject,
+        val rpId: String,
+        /** The name the site gives itself, or its ID. */
+        val site: String,
+        val userName: String,
+        val rp: JSONObject,
+        val user: JSONObject,
+    ) {
+        /** The account unlocked for this request, before anything was asked: that was the proof. */
+        var unlockedNow: String? = null
+
+        val userVerification: String get() = json.optJSONObject("authenticatorSelection")?.optString("userVerification", "preferred") ?: "preferred"
+
+        /**
+         * What the core's calls take (Core.passkeyLogins, Core.passkeyCreate):
+         * the site's ID, the account's user handle, the passkeys the site has
+         * already, and the app asking, which a browser isn't.
+         */
+        fun request(): JSONObject {
+            val exclude = json.optJSONArray("excludeCredentials") ?: JSONArray()
+            return JSONObject()
+                .put("rpId", rpId)
+                .put("userHandle", user.optString("id"))
+                .put("exclude", JSONArray((0 until exclude.length()).mapNotNull { exclude.optJSONObject(it)?.optString("id") }))
+                .put("app", if (caller.browser) null else caller.packageName)
+        }
+    }
+
     private fun create() {
         val request = PendingIntentHandler.retrieveProviderCreateCredentialRequest(intent) ?: return failCreate(null)
         val asked = request.callingRequest as? CreatePublicKeyCredentialRequest ?: return failCreate(null)
@@ -170,18 +206,76 @@ class PasskeyActivity : Activity() {
         if (algorithms.length() > 0 && (0 until algorithms.length()).none { algorithms.optJSONObject(it)?.optInt("alg") == -7 }) {
             return failCreate("That site doesn't take the kind of passkey PassBundle makes.")
         }
-        val selection = json.optJSONObject("authenticatorSelection")
         val userName = Responses.text(user, "name") ?: ""
         val site = Responses.text(rp, "name") ?: rpId
         background({ Passkeys.caller(this, request.callingAppInfo, rpId) }) { caller ->
             if (caller == null) return@background failCreate("That site doesn't let this app save its passkeys.")
-            // Which account it goes in: with more than one unlocked, the
-            // person picks (the one the screens show first); else the one
-            // unlocked, or the one shown, which proving who they are unlocks.
-            chooseAccount { account, label ->
-                if (account == null) return@chooseAccount failCreate(null)
-                confirmCreate(account, label, caller, asked, json, rpId, site, userName, selection, rp, user)
+            val making = Making(caller, asked, json, rpId, site, userName, rp, user)
+            // Which logins it can go in is in the vault: with none unlocked,
+            // the account the screens show unlocks first.
+            unlockFirst { unlocked ->
+                if (unlocked == null) return@unlockFirst failCreate(null)
+                making.unlockedNow = unlocked.ifEmpty { null }
+                where(making)
             }
+        }
+    }
+
+    /**
+     * With no account unlocked, the one the screens show unlocks first, with
+     * its fingerprint or face: that's the proof the site may ask for, so it
+     * isn't asked again. `done(account)` with the account unlocked now, ""
+     * when one was unlocked already, or null if it can't be or the person
+     * cancels (without biometric unlock, PassBundle opens to unlock there).
+     */
+    private fun unlockFirst(done: (String?) -> Unit) {
+        val (account, locked) = shown()
+        if (!locked) return done("")
+        if (Biometric.status(this, account) != "setUp") {
+            startActivity(Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            Toast.makeText(this, "Unlock PassBundle, then try again.", Toast.LENGTH_LONG).show()
+            return done(null)
+        }
+        Biometric.unlock(this, account) { unlocked, error ->
+            error?.let { Toast.makeText(this, it, Toast.LENGTH_LONG).show() }
+            done(if (unlocked) account else null)
+        }
+    }
+
+    /** Asks where the passkey goes, from the logins the core says it can go in (PasskeySaving.step). */
+    private fun where(m: Making) {
+        background({ JSONObject(Core.passkeyLogins(m.request().toString()) ?: "{}") }) { result ->
+            val answer = result ?: JSONObject()
+            if (answer.optBoolean("locked")) return@background failCreate("Unlock PassBundle, then try again.")
+            if (!answer.optBoolean("ok")) return@background failCreate(Responses.text(answer, "error") ?: "PassBundle couldn't save the passkey.")
+            when (val step = PasskeySaving.step(answer.optBoolean("excluded"), logins(answer))) {
+                PasskeySaving.Step.Excluded -> failCreateExcluded()
+                is PasskeySaving.Step.Replace -> confirmReplace(m, step.login, back = null)
+                is PasskeySaving.Step.Choose -> chooseLogin(m, step.logins)
+                PasskeySaving.Step.New ->
+                    chooseAccount { account, label ->
+                        if (account == null) return@chooseAccount failCreate(null)
+                        confirmCreate(m, account, label)
+                    }
+            }
+        }
+    }
+
+    /** The logins the core listed (Core.passkeyLogins), by their parts. */
+    private fun logins(answer: JSONObject): List<PasskeySaving.Login> {
+        val items = answer.optJSONArray("items") ?: return emptyList()
+        return (0 until items.length()).mapNotNull { at ->
+            val item = items.optJSONObject(at) ?: return@mapNotNull null
+            PasskeySaving.Login(
+                id = Responses.text(item, "id") ?: return@mapNotNull null,
+                account = Responses.text(item, "account") ?: return@mapNotNull null,
+                name = Responses.text(item, "name") ?: "",
+                username = Responses.text(item, "userName"),
+                accountLabel = Responses.text(item, "accountLabel"),
+                replaces = item.optBoolean("replaces"),
+                passkeyUserName = Responses.text(item, "passkeyUserName"),
+                reprompt = item.optBoolean("reprompt"),
+            )
         }
     }
 
@@ -211,77 +305,160 @@ class PasskeyActivity : Activity() {
         dialog.show()
     }
 
-    /** "Save a passkey in PassBundle?" for the site, in [account] ([label] names it, with more than one), then making it. */
-    private fun confirmCreate(
-        account: String,
-        label: String?,
-        caller: Passkeys.Caller,
-        asked: CreatePublicKeyCredentialRequest,
-        json: JSONObject,
-        rpId: String,
-        site: String,
-        userName: String,
-        selection: JSONObject?,
-        rp: JSONObject,
-        user: JSONObject,
-    ) {
-            val dialog = AlertDialog.Builder(this)
+    /** "Save a passkey in PassBundle?" for the site, in a new login in [account] ([label] names it, with more than one), then making it. */
+    private fun confirmCreate(m: Making, account: String, label: String?) {
+        val dialog =
+            AlertDialog.Builder(this)
                 .setTitle("Save a passkey in PassBundle?")
                 // The site's ID, which the passkey is bound to, first: the name is
                 // whatever the site says it is.
-                .setMessage(
-                    "For $rpId${if (site == rpId) "" else " (says it's $site)"}" +
-                        "${if (userName.isEmpty()) "" else ", as $userName"}, in a new login" +
-                        "${if (label == null) "" else " in $label"}.",
-                )
-                .setPositiveButton("Save") { _, _ ->
-                    prove(account, null, selection?.optString("userVerification", "preferred") ?: "preferred") { verified ->
-                        if (verified == null) return@prove failCreate(null)
-                        val clientData =
-                            if (caller.browser && asked.clientDataHash != null) null else Passkeys.clientData("webauthn.create", json.optString("challenge"), caller)
-                        val exclude = json.optJSONArray("excludeCredentials") ?: JSONArray()
-                        val made =
-                            JSONObject()
-                                .put("account", account)
-                                .put("rpId", rpId)
-                                .put("rpName", Responses.text(rp, "name"))
-                                .put("userHandle", user.optString("id"))
-                                .put("userName", userName.ifEmpty { null })
-                                .put("userDisplayName", Responses.text(user, "displayName"))
-                                .put("userVerified", verified)
-                                .put("discoverable", true)
-                                .put("exclude", JSONArray((0 until exclude.length()).mapNotNull { exclude.optJSONObject(it)?.optString("id") }))
-                        background({ JSONObject(Core.passkeyCreate(made.toString()) ?: "{}") }) { result ->
-                            val answer = result ?: JSONObject()
-                            if (answer.optBoolean("excluded")) return@background failCreateExcluded()
-                            if (!answer.optBoolean("ok")) return@background failCreate(answer.optString("error", "PassBundle couldn't save the passkey."))
-                            val credentialId = answer.getString("credentialId")
-                            val credential =
-                                JSONObject()
-                                    .put("id", credentialId)
-                                    .put("rawId", credentialId)
-                                    .put("type", "public-key")
-                                    .put("authenticatorAttachment", "platform")
-                                    .put(
-                                        "response",
-                                        JSONObject()
-                                            .put("clientDataJSON", Passkeys.base64url(clientData ?: PLACEHOLDER))
-                                            .put("attestationObject", answer.getString("attestationObject"))
-                                            .put("authenticatorData", answer.getString("authenticatorData"))
-                                            .put("publicKey", answer.getString("publicKey"))
-                                            .put("publicKeyAlgorithm", -7)
-                                            .put("transports", JSONArray(listOf("internal", "hybrid"))),
-                                    ).put("clientExtensionResults", JSONObject().put("credProps", JSONObject().put("rk", true)))
-                            val result = Intent()
-                            PendingIntentHandler.setCreateCredentialResponse(result, CreatePublicKeyCredentialResponse(credential.toString()))
-                            answer(result)
-                        }
+                .setMessage(PasskeySaving.newLogin(m.rpId, m.site, m.userName, label))
+                .setPositiveButton("Save") { _, _ -> save(m, account, null) }
+                .setNegativeButton("Cancel") { _, _ -> failCreate(null) }
+                .setOnCancelListener { failCreate(null) }
+                .create()
+        guard(dialog)
+        dialog.show()
+    }
+
+    /**
+     * "Save a passkey in PassBundle?" with the logins it can go in, each in
+     * its own account, then "New login": picking a login adds the passkey to
+     * it, keeping its password; one with this account's passkey for the site
+     * asks to replace it first.
+     */
+    private fun chooseLogin(m: Making, logins: List<PasskeySaving.Login>) {
+        val builder = AlertDialog.Builder(this)
+        val dialog =
+            builder
+                .setCustomTitle(heading(builder, "Save a passkey in PassBundle?", PasskeySaving.choose(m.rpId, m.site, m.userName)))
+                .setItems(PasskeySaving.rows(logins).toTypedArray<CharSequence>()) { _, which ->
+                    val login = logins.getOrNull(which)
+                    when {
+                        login == null -> newLogin(m)
+                        login.replaces -> confirmReplace(m, login) { chooseLogin(m, logins) }
+                        else -> save(m, login.account, login)
                     }
                 }.setNegativeButton("Cancel") { _, _ -> failCreate(null) }
                 .setOnCancelListener { failCreate(null) }
                 .create()
-            guard(dialog)
-            dialog.show()
+        guard(dialog)
+        dialog.show()
+    }
+
+    /** "New login" from the list: in the account the person picks, with more than one unlocked. */
+    private fun newLogin(m: Making) {
+        chooseAccount { account, _ ->
+            if (account == null) return@chooseAccount failCreate(null)
+            save(m, account, null)
+        }
+    }
+
+    /**
+     * "Replace the passkey for <user> on <site>?": the login has this
+     * account's passkey for the site, and the new one takes its place, so
+     * the old one stops working at the site's next sign-in. [back] goes back
+     * to the list it was picked from; without one, it's Cancel.
+     */
+    private fun confirmReplace(m: Making, login: PasskeySaving.Login, back: (() -> Unit)?) {
+        val builder = AlertDialog.Builder(this)
+        builder
+            .setCustomTitle(heading(builder, PasskeySaving.replaceTitle(m.userName, login, m.rpId), null))
+            .setMessage(PasskeySaving.replaceMessage(login, m.rpId))
+            .setPositiveButton("Replace") { _, _ -> save(m, login.account, login) }
+            .setOnCancelListener { failCreate(null) }
+        if (back != null) {
+            builder.setNegativeButton("Back") { _, _ -> back() }
+        } else {
+            builder.setNegativeButton("Cancel") { _, _ -> failCreate(null) }
+        }
+        val dialog = builder.create()
+        guard(dialog)
+        dialog.show()
+    }
+
+    /**
+     * A dialog's title over more than one line (a site's ID and an account's
+     * name can be long), with what it asks under it when there's a list
+     * below, in the dialog's own look.
+     */
+    private fun heading(builder: AlertDialog.Builder, title: String, message: String?): LinearLayout {
+        val context = builder.context
+        val dp = resources.displayMetrics.density
+        return LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding((24 * dp).toInt(), (20 * dp).toInt(), (24 * dp).toInt(), (8 * dp).toInt())
+            addView(
+                TextView(context).apply {
+                    setTextAppearance(android.R.style.TextAppearance_Material_DialogWindowTitle)
+                    text = title
+                },
+            )
+            if (message != null) {
+                addView(
+                    TextView(context).apply {
+                        setTextAppearance(android.R.style.TextAppearance_Material_Subhead)
+                        setPadding(0, (12 * dp).toInt(), 0, 0)
+                        text = message
+                    },
+                )
+            }
+        }
+    }
+
+    /**
+     * Has the person prove who they are as the site wants (or as the login
+     * asks, with its master password), then has the core make the passkey
+     * in [login] (its account's), or in a new login in [account]. Unlocked
+     * just now for this request, that was the proof.
+     */
+    private fun save(m: Making, account: String, login: PasskeySaving.Login?) {
+        val asks = login?.reprompt == true
+        if (m.unlockedNow == account && !asks) return make(m, account, login?.id, true)
+        prove(account, if (asks) login?.id else null, m.userVerification) { verified ->
+            if (verified == null) return@prove failCreate(null)
+            make(m, account, login?.id, verified)
+        }
+    }
+
+    /** The core makes the passkey, saved in [login] or a new login, then the site gets it. */
+    private fun make(m: Making, account: String, login: String?, verified: Boolean) {
+        val clientData =
+            if (m.caller.browser && m.asked.clientDataHash != null) null else Passkeys.clientData("webauthn.create", m.json.optString("challenge"), m.caller)
+        val made =
+            m.request()
+                .put("account", account)
+                .put("login", login)
+                .put("rpName", Responses.text(m.rp, "name"))
+                .put("userName", m.userName.ifEmpty { null })
+                .put("userDisplayName", Responses.text(m.user, "displayName"))
+                .put("userVerified", verified)
+                .put("discoverable", true)
+        background({ JSONObject(Core.passkeyCreate(made.toString()) ?: "{}") }) { result ->
+            val answer = result ?: JSONObject()
+            if (answer.optBoolean("excluded")) return@background failCreateExcluded()
+            if (!answer.optBoolean("ok")) return@background failCreate(answer.optString("error", "PassBundle couldn't save the passkey."))
+            val credentialId = answer.getString("credentialId")
+            val credential =
+                JSONObject()
+                    .put("id", credentialId)
+                    .put("rawId", credentialId)
+                    .put("type", "public-key")
+                    .put("authenticatorAttachment", "platform")
+                    .put(
+                        "response",
+                        JSONObject()
+                            .put("clientDataJSON", Passkeys.base64url(clientData ?: PLACEHOLDER))
+                            .put("attestationObject", answer.getString("attestationObject"))
+                            .put("authenticatorData", answer.getString("authenticatorData"))
+                            .put("publicKey", answer.getString("publicKey"))
+                            .put("publicKeyAlgorithm", -7)
+                            .put("transports", JSONArray(listOf("internal", "hybrid"))),
+                    ).put("clientExtensionResults", JSONObject().put("credProps", JSONObject().put("rk", true)))
+            val result = Intent()
+            PendingIntentHandler.setCreateCredentialResponse(result, CreatePublicKeyCredentialResponse(credential.toString()))
+            answer(result)
+        }
     }
 
     /**
@@ -300,6 +477,10 @@ class PasskeyActivity : Activity() {
             val yes = dialog.getButton(AlertDialog.BUTTON_POSITIVE)
             yes?.isEnabled = false
             yes?.postDelayed({ yes.isEnabled = true }, 1000)
+            // A list to pick from (the logins a passkey can go in) waits too.
+            val list = dialog.listView
+            list?.isEnabled = false
+            list?.postDelayed({ list.isEnabled = true }, 1000)
         }
     }
 

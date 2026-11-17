@@ -556,6 +556,36 @@ impl Accounts {
         found
     }
 
+    /// Each unlocked account's logins a new passkey for `site` may go in
+    /// (matching.rs, `Vault::passkey_target`), with the account each is in
+    /// and whether it replaces the login's passkey: those that replace one
+    /// first, then as `fillable` orders them.
+    pub fn passkey_logins<'a>(
+        &'a self,
+        site: &crate::matching::PasskeySite<'_>,
+    ) -> Vec<(&'a str, &'a crate::vault::Item, bool)> {
+        let mut found: Vec<(&str, &crate::vault::Item, bool)> = self
+            .unlocked_shown_first()
+            .flat_map(|(id, vault)| {
+                vault
+                    .passkey_logins(site)
+                    .into_iter()
+                    .map(move |(i, replaces)| (id, i, replaces))
+            })
+            .collect();
+        // Stable: within each, the account order stays.
+        found.sort_by_key(|(_, _, replaces)| !replaces);
+        found
+    }
+
+    /// Whether an unlocked account has one of a site's passkeys by their
+    /// credential IDs (raw): one the site lists among those it has already
+    /// (`excludeCredentials`), as `Vault::has_passkey_among` finds it.
+    pub fn has_passkey_among(&self, rp_id: &str, ids: &[Vec<u8>]) -> bool {
+        self.unlocked()
+            .any(|(_, vault)| vault.has_passkey_among(rp_id, ids))
+    }
+
     /// What a search finds in every unlocked account, with the account
     /// each item is in and its vault: by name, as one account's list is,
     /// and for the same name, the one shown first.
@@ -2000,6 +2030,27 @@ mod tests {
             .map(|(id, _, _)| id)
             .collect();
         assert_eq!(paid, vec![w.as_str()]);
+        // Where a new passkey for the site can go: each account's login for
+        // it, as autofill orders them, neither with one to replace.
+        let handle = [1u8; 16];
+        let new_passkey = crate::matching::PasskeySite {
+            rp_id: "shared.example.test",
+            user_handle: &handle,
+            app: None,
+        };
+        let offered: Vec<(String, String, bool)> = accounts
+            .passkey_logins(&new_passkey)
+            .into_iter()
+            .map(|(id, i, replaces)| (id.to_owned(), i.name.clone(), replaces))
+            .collect();
+        assert_eq!(
+            offered,
+            vec![
+                (p.clone(), personal().login.to_owned(), false),
+                (w.clone(), work().login.to_owned(), false)
+            ]
+        );
+        assert!(!accounts.has_passkey_among("shared.example.test", &[handle.to_vec()]));
         // A locked account offers nothing.
         accounts.lock(&w);
         let filled: Vec<&str> = accounts
@@ -2009,9 +2060,16 @@ mod tests {
             .collect();
         assert_eq!(filled, vec![p.as_str()]);
         assert!(accounts.search_all("pay").is_empty());
+        let offered: Vec<&str> = accounts
+            .passkey_logins(&new_passkey)
+            .into_iter()
+            .map(|(id, _, _)| id)
+            .collect();
+        assert_eq!(offered, vec![p.as_str()]);
         accounts.lock(&p);
         assert!(accounts.fillable(&site).is_empty());
         assert!(accounts.passkeys_for("shared.example.test").is_empty());
+        assert!(accounts.passkey_logins(&new_passkey).is_empty());
         let _ = fs::remove_dir_all(dir);
     }
 

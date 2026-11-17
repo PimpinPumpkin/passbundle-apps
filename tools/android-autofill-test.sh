@@ -377,7 +377,10 @@ fi
 
 # Passkeys (Android 14 and later): the test app makes one in PassBundle
 # through Android's Credential Manager, then signs in with it, checking what
-# comes back as a site would (PasskeySiteActivity). Android's own sheets come
+# comes back as a site would (PasskeySiteActivity). The test site is on
+# example.test, as the account's Bank website login is, so PassBundle offers
+# to add it there; making one again for the same account replaces it there;
+# and one the site says it has already is refused. Android's own sheets come
 # between, which differ by version: step through them by their buttons until
 # PassBundle's dialog or the result shows.
 through() {
@@ -406,16 +409,35 @@ if [ "$(a shell getprop ro.build.version.sdk | tr -d '\r')" -ge 34 ]; then
   a shell am force-stop com.passbundle.autofilltest
   a shell am start -W -n com.passbundle.autofilltest/.PasskeySiteActivity > /dev/null
   tap "id=com.passbundle.autofilltest:id/make_passkey"
+  # The account's logins for the site (its Bank website login is on
+  # example.test too), and a new login.
   through "^Save a passkey in PassBundle\?"
-  # Save can't be tapped for its first moment.
+  shown "^New login$"
+  # The list can't be tapped for its first moment.
   sleep 2
-  tap "^(Save|SAVE)$"
+  tap "^Bank website"
   shown "^Made a passkey for passkeys.example.test$"
-  echo "Made: Credential Manager has a passkey from PassBundle, attested for the test app."
+  echo "Made: Credential Manager has a passkey from PassBundle, attested for the test app, in the Bank website login."
   tap "id=com.passbundle.autofilltest:id/sign_in_passkey"
   through "^Signed in with a passkey" "^ana@passkeys\.example\.test$"
   shown "^Signed in with a passkey, signature checked$"
   echo "Signed in: the signature checks with the passkey's public key, for the test app's origin."
+  # Again for the same account (user handle): PassBundle asks to replace the
+  # one in Bank website, and the sign-in checks with the new one's key.
+  tap "id=com.passbundle.autofilltest:id/make_passkey"
+  through "^Replace the passkey for ana@passkeys\.example\.test on passkeys\.example\.test\?"
+  # Replace can't be tapped for its first moment.
+  sleep 2
+  tap "^(Replace|REPLACE)$"
+  shown "^Made a passkey for passkeys.example.test$"
+  tap "id=com.passbundle.autofilltest:id/sign_in_passkey"
+  through "^Signed in with a passkey" "^ana@passkeys\.example\.test$"
+  shown "^Signed in with a passkey, signature checked$"
+  echo "Replaced: the new passkey took the old one's place, and signs in."
+  # The site names the one it has: refused as WebAuthn says, nothing asked.
+  tap "id=com.passbundle.autofilltest:id/make_known_passkey"
+  through "^Refused: the site has this passkey already$"
+  echo "Refused: a passkey the site has already isn't made again or replaced."
 fi
 
 # "Immediately" (docs/phones.md, "Locking"): with it chosen, a vault that

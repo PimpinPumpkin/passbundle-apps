@@ -167,7 +167,17 @@ object Core {
     /** Signs in with a login's passkey, from its account, the client data hash in base64url: JSON (ffi.rs). Slow: off the main thread. */
     @JvmStatic external fun passkeyAssert(account: String, id: String, rpId: String, clientDataHash: String, userVerified: Boolean): String?
 
-    /** Makes a passkey from the request as JSON (with the `account` it goes in), answering JSON (ffi.rs). Slow, it's saved first: off the main thread. */
+    /**
+     * Where a new passkey can go, from the request as JSON (the site's ID, the
+     * user handle, the credentials the site has, and the app asking): every
+     * unlocked account's logins it can go in, the one whose passkey it would
+     * replace first, and whether the site has one of PassBundle's already
+     * (`excluded`); or `locked`, with the `account` to unlock (ffi.rs,
+     * `pb_passkey_logins`). Never a key or a password.
+     */
+    @JvmStatic external fun passkeyLogins(request: String): String?
+
+    /** Makes a passkey from the request as JSON (with the `account` it goes in, and the `login`, or none for a new one), answering JSON (ffi.rs). Slow, it's saved first: off the main thread. */
     @JvmStatic external fun passkeyCreate(request: String): String?
 
     /**
