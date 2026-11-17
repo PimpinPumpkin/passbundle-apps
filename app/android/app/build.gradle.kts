@@ -111,6 +111,9 @@ dependencies {
     implementation("org.rustls:rustls-platform-verifier:$rustlsVerifierVersion")
     // Android's Credential Manager, for passkeys (PasskeyProvider.kt). Apache 2.0.
     implementation("androidx.credentials:credentials:1.6.0")
+    // Autofill's suggestions on the keyboard, drawn as Android 11's keyboards
+    // expect them (Inline.kt). Apache 2.0.
+    implementation("androidx.autofill:autofill:1.3.0")
     // The updater's own logic, tested on the computer (src/test). Eclipse Public License 1.0.
     testImplementation("junit:junit:4.13.2")
 }

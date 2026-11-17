@@ -115,9 +115,11 @@ class FillActivity : Activity() {
     /**
      * After unlocking, or trusting a browser: the list to pick from, built
      * the same as when the vault was open (Responses.entries, where every
-     * entry is a pick holding no value), never a fill nobody picked.
+     * entry is a pick holding no value), never a fill nobody picked; on the
+     * keyboard too, when the keyboard asked (Android hands its request here
+     * with the screen, Inline.kt).
      */
-    private fun handBackList(fields: Fields) = finishWith(Responses.forFields(this, fields))
+    private fun handBackList(fields: Fields) = finishWith(Responses.forFields(this, fields, keyboard = Inline.keyboard(this, intent)))
 
     /** Hands back the picked item's values for the fields; a login's is remembered for the code screen after it. */
     private fun finishFilled(fields: Fields, account: String, item: String, kind: Kind) {

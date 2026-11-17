@@ -3,7 +3,9 @@ package com.passbundle.app
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.content.IntentSender
 import android.content.pm.ApplicationInfo
+import android.os.Build
 import android.util.Log
 import android.service.autofill.Dataset
 import android.service.autofill.FillResponse
@@ -29,7 +31,8 @@ import java.util.concurrent.atomic.AtomicInteger
  *   PassBundle" with no account on the phone (Unlocking.offer).
  * A page's domain counts only from a browser (Browsers.kt); another app that
  * can open web links and gives one is offered to be trusted as a browser, in
- * PassBundle's own dialog.
+ * PassBundle's own dialog. A keyboard that asks for suggestions (Android 11
+ * and later) gets the same entries on the keyboard (Inline.kt).
  */
 object Responses {
     private val requests = AtomicInteger()
@@ -263,7 +266,7 @@ object Responses {
     }
 
     /** An entry as Android's dataset: placeholders only, and FillActivity to fill it once it's picked. */
-    private fun dataset(context: Context, fields: Fields, entry: Entry<AutofillId>): Dataset {
+    private fun dataset(context: Context, fields: Fields, entry: Entry<AutofillId>): Dataset.Builder {
         @Suppress("DEPRECATION")
         val dataset = Dataset.Builder(presentation(context, entry.title, entry.subtitle))
         for (field in entry.ids) {
@@ -271,14 +274,36 @@ object Responses {
             dataset.setValue(field, null)
         }
         dataset.setAuthentication(pending(context, fields, entry.mode, entry.account, entry.item, entry.asks, kind = entry.kind))
-        return dataset.build()
+        return dataset
+    }
+
+    /**
+     * One entry for the whole response, which opens FillActivity to unlock
+     * or sign in first: in Android's list, and on the keyboard when it asks
+     * (Inline.kt).
+     */
+    private fun FillResponse.Builder.authenticate(
+        context: Context,
+        ids: Array<AutofillId>,
+        sender: IntentSender,
+        title: String,
+        subtitle: String,
+        keyboard: Inline.Keyboard?,
+    ): FillResponse.Builder {
+        val listed = presentation(context, title, subtitle)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && keyboard?.authenticate(this, ids, sender, listed, title, subtitle) == true) {
+            return this
+        }
+        @Suppress("DEPRECATION")
+        return setAuthentication(ids, sender, listed)
     }
 
     /**
      * The response for these fields, from what the core says; null offers
-     * nothing. `waitMs` as for `logins`.
+     * nothing. `waitMs` as for `logins`. `keyboard` is the keyboard's
+     * request for suggestions, when it asks (Inline.kt).
      */
-    fun forFields(context: Context, fields: Fields, waitMs: Long = 0): FillResponse? {
+    fun forFields(context: Context, fields: Fields, waitMs: Long = 0, keyboard: Inline.Keyboard? = null): FillResponse? {
         val ids = fields.ids
         if (ids.isEmpty()) return null
         // Debug builds only, for the emulator tests' logs: what autofill decided, never a value.
@@ -295,10 +320,13 @@ object Responses {
         if (offer == Unlocking.Offer.SIGN_IN) {
             // No account here: PassBundle opens to sign in; nothing to save to yet.
             return FillResponse.Builder()
-                .setAuthentication(
+                .authenticate(
+                    context,
                     ids,
                     pending(context, fields, FillActivity.SIGN_IN, ""),
-                    presentation(context, "Sign in to PassBundle", "to fill this in"),
+                    "Sign in to PassBundle",
+                    "to fill this in",
+                    keyboard,
                 )
                 .build()
         }
@@ -311,10 +339,13 @@ object Responses {
             // The app's sites checked meanwhile, for once the person unlocks.
             if (domain == null && forLogins) AppSites.warm(context, fields.packageName)
             return FillResponse.Builder()
-                .setAuthentication(
+                .authenticate(
+                    context,
                     ids,
                     pending(context, fields, FillActivity.UNLOCK, answer.optString("account"), label = text(answer, "accountLabel")),
-                    presentation(context, "Unlock PassBundle", "to fill this in"),
+                    "Unlock PassBundle",
+                    "to fill this in",
+                    keyboard,
                 )
                 .apply { save?.let { setSaveInfo(it) } }
                 .build()
@@ -334,7 +365,10 @@ object Responses {
         save?.let { response.setSaveInfo(it) }
         // Nothing to fill: only the offer to save what the person signs in with.
         if (offers.isEmpty()) return save?.let { response.build() }
-        for (entry in offers) response.addDataset(dataset(context, fields, entry))
+        val datasets = offers.map { dataset(context, fields, it) }
+        // On the keyboard too, as many as it takes, in the list's order.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) keyboard?.suggest(datasets, offers.map { it.title to it.subtitle })
+        for (dataset in datasets) response.addDataset(dataset.build())
         return response.build()
     }
 

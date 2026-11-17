@@ -32,7 +32,8 @@ class PassBundleAutofill : AutofillService() {
         cancellationSignal.setOnCancelListener { cancelled.set(true) }
         filling.execute {
             if (cancelled.get()) return@execute
-            val response = runCatching { Responses.forFields(this, fields, SITES_WAIT_MS) }.getOrNull()
+            val keyboard = Inline.keyboard(this, request)
+            val response = runCatching { Responses.forFields(this, fields, SITES_WAIT_MS, keyboard) }.getOrNull()
             if (!cancelled.get()) runCatching { callback.onSuccess(response) }
         }
     }
