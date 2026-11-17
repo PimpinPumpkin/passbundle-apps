@@ -1089,12 +1089,14 @@ fn passkeys_are_made_and_sign_in() {
 }
 
 /// Where an organization keeps items out of Personal (upstream's "Remove
-/// individual vault", policy 5), the server refuses a member's new login
-/// there, so a new passkey's login goes in a shared folder they may add
-/// to, under the organization's key, and signs in from there. A member who
+/// individual vault", policy 5), the server refuses a member's own logins,
+/// new ones and edits. So none of theirs is offered for a passkey, and a
+/// new passkey's login goes in a shared folder they may add to, under the
+/// organization's key: one that shows passwords (IT) before one that hides
+/// them (Accounting, first by name). It signs in from there. A member who
 /// may only view the shared folder gets no login and no passkey, and the
 /// organization's owner, whom the policy doesn't bind, gets theirs in
-/// Personal.
+/// Personal, where it's offered again.
 #[test]
 fn where_an_organization_keeps_items_out_of_personal_a_new_passkeys_login_goes_in_a_shared_folder()
 {
@@ -1102,6 +1104,7 @@ fn where_an_organization_keeps_items_out_of_personal_a_new_passkeys_login_goes_i
     use p256::ecdsa::{Signature, VerifyingKey};
     use p256::pkcs8::DecodePublicKey;
     use passbundle_core::app::NewPasskey;
+    use passbundle_core::matching::PasskeySite;
 
     let Some(server) = server() else { return };
     let url = std::env::var("PB_TEST_SERVER").unwrap();
@@ -1121,13 +1124,18 @@ fn where_an_organization_keeps_items_out_of_personal_a_new_passkeys_login_goes_i
         .next()
         .unwrap()
         .clone();
+    let mut owners = signed_in_app(&url, &owner);
+    let accounting = owners.create_collection(&org_id, "Accounting").unwrap();
     join(
         &server,
         &mut session,
         &org_id,
         &org_key,
         &member,
-        json!([{ "id": it, "readOnly": false, "hidePasswords": false, "manage": false }]),
+        json!([
+            { "id": it, "readOnly": false, "hidePasswords": false, "manage": false },
+            { "id": accounting, "readOnly": false, "hidePasswords": true, "manage": false },
+        ]),
     );
     join(
         &server,
@@ -1137,14 +1145,11 @@ fn where_an_organization_keeps_items_out_of_personal_a_new_passkeys_login_goes_i
         &viewer,
         json!([{ "id": it, "readOnly": true, "hidePasswords": false, "manage": false }]),
     );
-    server
-        .raw(
-            &mut session,
-            "PUT",
-            &format!("/api/organizations/{org_id}/policies/5"),
-            Some(json!({ "policy": { "enabled": true, "data": null } })),
-        )
-        .unwrap();
+    let site = PasskeySite {
+        rp_id: "keeps-out.example.test",
+        user_handle: &[6; 16],
+        app: None,
+    };
     let new = |rp_id: &'static str| NewPasskey {
         rp_id,
         rp_name: None,
@@ -1158,8 +1163,43 @@ fn where_an_organization_keeps_items_out_of_personal_a_new_passkeys_login_goes_i
         app: None,
     };
 
-    // The server refuses the member a login of their own.
+    // Before the policy, a login of the member's own for the site, which
+    // a passkey could go in.
     let mut members = signed_in_app(&url, &member);
+    let shop = members
+        .save(
+            None,
+            &ItemDraft {
+                name: "Shop".into(),
+                uris: vec!["https://keeps-out.example.test".into()],
+                password: secret("not-a-real-password-keeps-out"),
+                ..ItemDraft::default()
+            },
+            &[],
+        )
+        .unwrap()
+        .id;
+    let offered = |app: &App| -> Vec<(String, bool)> {
+        app.vault()
+            .unwrap()
+            .passkey_logins(&site)
+            .into_iter()
+            .map(|(i, replaces)| (i.id.clone(), replaces))
+            .collect()
+    };
+    assert_eq!(offered(&members), [(shop.clone(), false)]);
+    server
+        .raw(
+            &mut session,
+            "PUT",
+            &format!("/api/organizations/{org_id}/policies/5"),
+            Some(json!({ "policy": { "enabled": true, "data": null } })),
+        )
+        .unwrap();
+    members.sync().unwrap();
+
+    // Now the server refuses the member a login of their own, and an edit
+    // to the one they have; so it isn't offered, and is refused unsent.
     assert!(members.keeps_items_out().is_some());
     let mine = ItemDraft {
         name: "Mine".into(),
@@ -1170,7 +1210,41 @@ fn where_an_organization_keeps_items_out_of_personal_a_new_passkeys_login_goes_i
         .unwrap_err()
         .to_string()
         .contains("personal vault"));
-    // So the passkey's login goes in IT, under the organization's key.
+    let shop_draft = ItemDraft::of(members.vault().unwrap().item(&shop).unwrap());
+    assert!(members
+        .save(Some(&shop), &shop_draft, &[])
+        .unwrap_err()
+        .to_string()
+        .contains("personal vault"));
+    assert!(offered(&members).is_empty());
+    assert_eq!(
+        members
+            .passkey_create(&NewPasskey {
+                login: Some(&shop),
+                ..new("keeps-out.example.test")
+            })
+            .err(),
+        Some(Error::Refused(
+            "your organization keeps items out of Personal, so that login can't be changed"
+        ))
+    );
+    assert!(members
+        .vault()
+        .unwrap()
+        .item(&shop)
+        .unwrap()
+        .passkey
+        .is_none());
+
+    // So the passkey's login goes in IT, under the organization's key: not
+    // Accounting, which comes first and takes new items but hides passwords.
+    let folders: Vec<String> = members
+        .import_shared_folders()
+        .into_iter()
+        .map(|(_, name, ..)| name)
+        .collect();
+    assert_eq!(folders, ["Accounting", "IT"]);
+    assert!(!members.vault().unwrap().collection_grids[&accounting].see_passwords);
     let made = members
         .passkey_create(&new("keeps-out.example.test"))
         .unwrap();
@@ -1186,7 +1260,7 @@ fn where_an_organization_keeps_items_out_of_personal_a_new_passkeys_login_goes_i
         "keeps-out.example.test"
     );
     // It signs in from there, the signature verified with the public key
-    // the site was given.
+    // the site was given, and it's the login a later passkey replaces.
     let hash = [9u8; 32];
     let signed = members
         .passkey_assert(&made.item_id, "keeps-out.example.test", &hash, true)
@@ -1198,12 +1272,15 @@ fn where_an_organization_keeps_items_out_of_personal_a_new_passkeys_login_goes_i
         .unwrap()
         .verify(&message, &Signature::from_der(&signed.signature).unwrap())
         .is_ok());
+    assert_eq!(offered(&members), [(made.item_id.clone(), true)]);
 
     // The viewer has no shared folder to add to: nothing is made.
     let mut viewers = signed_in_app(&url, &viewer);
     let count = viewers.vault().unwrap().items.len();
     assert_eq!(
-        viewers.passkey_create(&new("viewer.keeps-out.example.test")).err(),
+        viewers
+            .passkey_create(&new("viewer.keeps-out.example.test"))
+            .err(),
         Some(Error::Refused(
             "your organization keeps items out of Personal, and you have no shared folder you can add to. Ask an admin for one, then try again"
         ))
@@ -1214,15 +1291,17 @@ fn where_an_organization_keeps_items_out_of_personal_a_new_passkeys_login_goes_i
         .passkeys_for("viewer.keeps-out.example.test")
         .is_empty());
 
-    // The owner isn't bound: theirs is in Personal.
-    let mut owners = signed_in_app(&url, &owner);
+    // The owner isn't bound: theirs is in Personal, and their own login is
+    // offered for the next one.
+    owners.sync().unwrap();
     assert!(owners.keeps_items_out().is_none());
     let made = owners
-        .passkey_create(&new("owner.keeps-out.example.test"))
+        .passkey_create(&new("keeps-out.example.test"))
         .unwrap();
     let item = owners.vault().unwrap().item(&made.item_id).unwrap();
     assert_eq!(item.organization_id, None);
     assert!(item.collection_ids.is_empty());
+    assert!(offered(&owners).contains(&(made.item_id.clone(), true)));
 }
 
 /// An SSH key on the server comes through the core's sync: the core says

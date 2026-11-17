@@ -1501,30 +1501,61 @@ pub fn encrypt(vault: &Vault, item: &Item, organization_id: Option<&str>) -> Res
 
 /// The organization that keeps this person's items out of Personal
 /// (upstream's "Remove individual vault" policy, type 5), by name, from the
-/// kept sync: its owners and admins aren't bound by it, as upstream has it.
+/// kept sync: its owners and admins aren't bound by it, as upstream has it
+/// (`keeping_items_out`).
 pub fn keeps_items_out(sync: Option<&str>) -> Option<String> {
     let sync: Value = serde_json::from_str(sync?).ok()?;
-    let organizations: Vec<&Value> = ["/profile/organizations", "/profile/organizationsNew"]
+    let memberships = ["/profile/organizations", "/profile/organizationsNew"]
         .iter()
         .filter_map(|p| sync.pointer(p).and_then(Value::as_array))
         .flatten()
-        .collect();
-    sync["policies"]
+        .filter_map(Membership::of);
+    keeping_items_out(&sync["policies"], memberships)
+}
+
+/// One of the person's memberships, as an organization's policies read it.
+pub struct Membership<'a> {
+    pub organization: &'a str,
+    pub name: &'a str,
+    /// The person's role there, as upstream numbers it: 0 owner, 1 admin.
+    pub role: Option<u64>,
+}
+
+impl<'a> Membership<'a> {
+    /// One of a sync's `profile.organizations` (or passbundle-server's
+    /// `organizationsNew`, those whose key hasn't reached the person yet),
+    /// as sent; none without an id.
+    pub fn of(organization: &'a Value) -> Option<Membership<'a>> {
+        Some(Membership {
+            organization: organization["id"].as_str()?,
+            name: organization["name"].as_str().unwrap_or("Your organization"),
+            role: organization["type"].as_u64(),
+        })
+    }
+}
+
+/// The rule `keeps_items_out` reads the kept sync with, and the vault
+/// reads its sync with as it opens (`Vault::keeps_items_out`): from a
+/// sync's `policies` and the person's memberships, the first organization
+/// with "Remove individual vault" on that binds them, by name. Its owners
+/// and admins aren't bound. The server refuses such a person's own items,
+/// new ones and edits.
+pub fn keeping_items_out<'a>(
+    policies: &Value,
+    memberships: impl IntoIterator<Item = Membership<'a>>,
+) -> Option<String> {
+    let memberships: Vec<Membership<'a>> = memberships.into_iter().collect();
+    policies
         .as_array()
         .into_iter()
         .flatten()
         .filter(|p| p["type"].as_u64() == Some(5) && p["enabled"] == true)
         .find_map(|p| {
-            let org = organizations
+            let member = memberships
                 .iter()
-                .find(|o| o["id"] == p["organizationId"])?;
-            let exempt = matches!(org["type"].as_u64(), Some(0 | 1));
-            (!exempt).then(|| {
-                org["name"]
-                    .as_str()
-                    .unwrap_or("Your organization")
-                    .to_owned()
-            })
+                .find(|m| p["organizationId"] == m.organization)?;
+            let exempt = matches!(member.role, Some(0 | 1));
+            (!exempt).then(|| member.name.to_owned())
         })
 }
 

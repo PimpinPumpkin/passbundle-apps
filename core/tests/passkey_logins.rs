@@ -15,7 +15,7 @@ use p256::ecdsa::signature::Verifier;
 use p256::ecdsa::{Signature, VerifyingKey};
 use p256::pkcs8::DecodePublicKey;
 use passbundle_core::app::{App, NewPasskey, PasskeyMade, ALREADY_HAS_PASSKEY};
-use passbundle_core::crypto::EncString;
+use passbundle_core::crypto::{EncString, SymmetricKey};
 use passbundle_core::error::Error;
 use passbundle_core::matching::PasskeySite;
 use passbundle_core::passkey::{base64_either, credential_id};
@@ -497,6 +497,128 @@ fn where_an_organization_keeps_items_out_of_personal_a_new_login_goes_in_a_share
     assert_eq!(item.username.as_deref(), Some("ana@backup.example.test"));
     assert_eq!(item.passkey.as_ref().unwrap().rp_id, "new.example.test");
     signs_with(&mut app, &made.item_id, "new.example.test", &made);
+}
+
+/// Contoso's second shared folder for the sample, Accounting (before IT
+/// by name), its name under Contoso's key, giving the person `grid`.
+const ACCOUNTING: &str = "7c8d9e0f-1a2b-4c3d-8e4f-5a6b7c8d9e0f";
+
+fn accounting(grid: Value) -> Value {
+    use base64::Engine;
+    let v = stand_in::core_vectors();
+    let key = SymmetricKey::from_bytes(
+        &base64::engine::general_purpose::STANDARD
+            .decode(v["keys"]["organizationKey"].as_str().unwrap())
+            .unwrap(),
+    )
+    .unwrap();
+    json!({
+        "id": ACCOUNTING, "organizationId": ORG, "readOnly": false,
+        "name": key.encrypt_str("Accounting").to_string(), "keykeeper": grid,
+    })
+}
+
+/// What a shared folder lets the person do: add and edit items, and see
+/// their passwords or not.
+fn folder_grid(create: bool, see_passwords: bool) -> Value {
+    json!({
+        "seePasswords": see_passwords, "create": create, "edit": create, "delete": create,
+        "export": true, "share": create, "print": see_passwords, "viewHistory": true, "manage": false,
+    })
+}
+
+#[test]
+fn a_new_login_goes_in_a_shared_folder_that_shows_passwords_before_one_that_hides_them() {
+    let (url, asked) = stand_in(vec![]);
+    let handle = [4u8; 16];
+    // A member Contoso keeps out of Personal, with Accounting (first by
+    // name, hiding passwords) and IT (`it`).
+    let with_folders = |it: Value| {
+        Sample::new(&url, &[], move |sync| {
+            sync["profile"]["organizations"][0]["type"] = 2.into();
+            sync["policies"] = json!([{ "organizationId": ORG, "type": 5, "enabled": true }]);
+            sync["collections"][0]["keykeeper"] = it;
+            sync["collections"]
+                .as_array_mut()
+                .unwrap()
+                .push(accounting(folder_grid(true, false)));
+        })
+    };
+    let sample = with_folders(folder_grid(true, true));
+    let mut app = sample.unlocked();
+    let order: Vec<String> = app
+        .import_shared_folders()
+        .into_iter()
+        .map(|(_, name, ..)| name)
+        .collect();
+    assert_eq!(order, ["Accounting", "IT"]);
+    // IT, where a later passkey for the account can take this one's place.
+    app.passkey_create(&new_passkey("new.example.test", &handle, None, &[]))
+        .unwrap();
+    let created = sent(&asked, "POST /api/ciphers/create");
+    assert_eq!(created[0]["collectionIds"], json!([IT]));
+
+    // Where IT doesn't take new items, Accounting, the only folder left,
+    // does: the passkey signs in from there, though it hides passwords.
+    let sample = with_folders(folder_grid(false, true));
+    let mut app = sample.unlocked();
+    let made = app
+        .passkey_create(&new_passkey("new.example.test", &handle, None, &[]))
+        .unwrap();
+    let created = sent(&asked, "POST /api/ciphers/create");
+    assert_eq!(created.len(), 2);
+    assert_eq!(created[1]["collectionIds"], json!([ACCOUNTING]));
+    let mut kept = created[1]["cipher"].clone();
+    kept["id"] = made.item_id.clone().into();
+    kept["collectionIds"] = json!([ACCOUNTING]);
+    kept["edit"] = true.into();
+    kept["viewPassword"] = false.into();
+    let hidden = Sample::new(&url, &[], move |sync| {
+        sync["profile"]["organizations"][0]["type"] = 2.into();
+        sync["collections"]
+            .as_array_mut()
+            .unwrap()
+            .push(accounting(folder_grid(true, false)));
+        sync["ciphers"].as_array_mut().unwrap().push(kept);
+    });
+    let mut app = hidden.unlocked();
+    let vault = app.vault().unwrap();
+    let item = vault.item(&made.item_id).unwrap();
+    assert!(!vault.grid(item).see_passwords);
+    // A later passkey for the account can't go in it.
+    assert!(vault
+        .passkey_target(item, &site("new.example.test", &handle))
+        .is_err());
+    signs_with(&mut app, &made.item_id, "new.example.test", &made);
+}
+
+#[test]
+fn where_an_organization_keeps_items_out_of_personal_its_members_own_logins_take_no_passkey() {
+    let (url, asked) = stand_in(vec![]);
+    let ana = ana();
+    let sample = keeping_items_out(&url, true, true);
+    let mut app = sample.unlocked();
+    // Backup service has this account's passkey and Example Mail is for
+    // the site, but both are the member's own: the server would refuse
+    // either edit, so neither is offered and both are refused unsent.
+    assert!(offered(&app, &site(SITE, &ana)).is_empty());
+    for login in [BACKUP, MAIL] {
+        assert_eq!(
+            app.passkey_create(&new_passkey(SITE, &ana, Some(login), &[]))
+                .err(),
+            Some(Error::Refused(
+                "your organization keeps items out of Personal, so that login can't be changed"
+            ))
+        );
+    }
+    assert_eq!(saves(&asked), 0);
+    assert_eq!(credential(&app, BACKUP), OLD_CREDENTIAL);
+    // Its owners aren't bound: Backup service is the one to replace, as ever.
+    let owners = keeping_items_out(&url, false, true);
+    assert_eq!(
+        offered(&owners.unlocked(), &site(SITE, &ana)),
+        ids(&[(BACKUP, true), (MAIL, false)])
+    );
 }
 
 #[test]

@@ -2271,17 +2271,35 @@ impl App {
     /// Where a new item goes when nobody picks a place for it (a new
     /// passkey's login): Personal (None), unless an organization keeps items
     /// out of it (`keeps_items_out`; the server would refuse it there). Then
-    /// the first shared folder the person may add items to, in the order an
-    /// import offers them (`import_shared_folders`), as its organization and
-    /// its id; with none, it's refused, saying what to do.
+    /// a shared folder the person may add items to, in the order an import
+    /// offers them (`import_shared_folders`), the first where they may also
+    /// edit items and see passwords before any other; as its organization
+    /// and its id. With none, it's refused, saying what to do.
+    ///
+    /// Why those first: a passkey in a folder that hides passwords still
+    /// signs in (it's used and never shown, as a hidden password still
+    /// fills: `passkey_assert` doesn't ask for see passwords), so such a
+    /// folder is used when it's the only one. But its login can't take the
+    /// account's next passkey for the site in place of this one
+    /// (`Vault::passkey_target` needs edit and see passwords, as the editor
+    /// does), so signing up there again would leave two.
     fn new_item_place(&self) -> Result<Option<(String, String)>> {
         if self.keeps_items_out().is_none() {
             return Ok(None);
         }
-        let (folder, _, organization, _) = self
-            .import_shared_folders()
-            .into_iter()
-            .next()
+        let vault = self.vault.as_ref().ok_or(Error::SignedOut)?;
+        let folders = self.import_shared_folders();
+        let replaceable = |id: &str| {
+            vault
+                .collection_grids
+                .get(id)
+                .is_some_and(|g| g.edit && g.see_passwords)
+        };
+        let (folder, _, organization, _) = folders
+            .iter()
+            .find(|(id, ..)| replaceable(id))
+            .or_else(|| folders.first())
+            .cloned()
             .ok_or(NO_SHARED_FOLDER)?;
         Ok(Some((organization, folder)))
     }
