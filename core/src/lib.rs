@@ -33,6 +33,7 @@ pub mod passkey;
 pub mod pin;
 pub mod places;
 pub mod plans;
+pub mod restricted_types;
 pub mod secrets;
 pub mod security_key;
 pub mod send;

@@ -605,7 +605,7 @@ class _SettingsListState extends State<SettingsList> {
                 leading: const Icon(Icons.file_download_outlined),
                 title: const Text('Import'),
                 subtitle: const Text(
-                  'From PassBundle, a browser, or 1Password',
+                  'From PassBundle, a browser, 1Password, or LastPass',
                 ),
                 onTap: () => showImport(context, server: webVault),
               ),

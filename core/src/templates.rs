@@ -455,6 +455,18 @@ pub fn groups(vault: &Vault, may_use: impl Fn(&Item) -> bool) -> Vec<Group> {
         name: "Built-in".to_owned(),
         templates: built_in(),
     });
+    // None that makes a kind of item an organization's "Remove card item
+    // type" policy removes (restricted_types.rs).
+    let allowed = |t: &Template| {
+        !vault.restricted.refuses_new(match t.base {
+            Base::Login => ItemKind::Login,
+            Base::Note => ItemKind::SecureNote,
+        })
+    };
+    for group in &mut groups {
+        group.templates.retain(allowed);
+    }
+    groups.retain(|g| !g.templates.is_empty());
     groups
 }
 

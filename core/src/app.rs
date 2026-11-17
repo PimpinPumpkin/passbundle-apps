@@ -209,6 +209,11 @@ pub const PICK_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
 pub(crate) const BIOMETRICS_AFTER_PIN: Error =
     Error::Refused("unlock with your master password to turn this on");
 
+/// Saving a kind of item an organization's "Remove card item type" policy
+/// removes (restricted_types.rs).
+const REMOVED_KIND: Error =
+    Error::Refused("an organization you're in doesn't allow that kind of item");
+
 /// How long confirming it's you lasts, to approve a sign-in.
 const CONFIRMATION_LASTS: std::time::Duration = std::time::Duration::from_secs(60);
 
@@ -1694,7 +1699,18 @@ impl App {
         collection_ids: &[String],
     ) -> Result<Saved> {
         let vault = self.vault.as_ref().ok_or(Error::SignedOut)?;
+        // An organization's "Remove card item type" policy: an item it
+        // leaves out isn't here, and no item becomes a kind it removes
+        // (restricted_types.rs).
+        if id.is_some_and(|id| vault.hides(id)) {
+            return Err(Error::Damaged("no such item"));
+        }
         let editing = id.and_then(|id| vault.item(id));
+        if vault.restricted.refuses_new(draft.kind())
+            && editing.is_none_or(|item| item.kind != draft.kind())
+        {
+            return Err(REMOVED_KIND);
+        }
         // The editor reveals an item's secrets into its fields; one that asks
         // for the master password can't be edited before it's given, or its
         // empty fields would be saved over its secrets.
@@ -1903,6 +1919,13 @@ impl App {
             .is_some()
         {
             return Err(Error::Refused(KEEPS_ITEMS_OUT));
+        }
+        if self
+            .vault
+            .as_ref()
+            .is_some_and(|v| v.restricted.refuses_new(crate::vault::ItemKind::Login))
+        {
+            return Err(REMOVED_KIND);
         }
         let gathered = import::gather(home, keys, chosen, primary_passwords);
         let vault = self.vault.as_ref().ok_or(Error::SignedOut)?;
@@ -2406,6 +2429,11 @@ impl App {
     }
 
     pub fn trash(&mut self, id: &str) -> Result<()> {
+        // One an organization's "Remove card item type" policy leaves out
+        // isn't here.
+        if self.vault.as_ref().is_some_and(|v| v.hides(id)) {
+            return Err(Error::Damaged("no such item"));
+        }
         let (Some(server), Some(session)) = (&self.server, self.session.as_mut()) else {
             return Err(Error::SignedOut);
         };

@@ -2031,6 +2031,26 @@ pub unsafe extern "C" fn pb_templates(account: *const c_char) -> *mut c_char {
     })
 }
 
+/// The kinds of item New may not offer, as `pb_list` names kinds
+/// (`["card"]`): those an organization's "Remove card item type" policy
+/// removes (restricted_types.rs), from the open vault; none while locked.
+///
+/// # Safety
+/// `account` is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_restricted_kinds(account: *const c_char) -> *mut c_char {
+    let account = text(account);
+    with_app(&account, |app| match app.vault() {
+        Some(vault) => vault
+            .restricted
+            .removed()
+            .map(|n| kind(ItemKind::from(n)))
+            .filter(|k| *k != "other")
+            .collect(),
+        None => json!([]),
+    })
+}
+
 /// # Safety
 /// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
 #[no_mangle]
@@ -2377,10 +2397,10 @@ fn import_summary(app: &App) -> Value {
 /// Reads a file to import (DESIGN.md in the meta repo, "Export and import
 /// in the apps"): `format` the one the person chose ("json", "csv",
 /// "chrome", "edge", "brave", "opera", "vivaldi", "firefox", "safari",
-/// "1password-csv"), the file at `path`, and a password-protected file's
-/// password once it's asked for (empty before). `{ok, read: "needsPassword"
-/// or "wrongPassword"}`, or what it holds (`import_summary`); nothing is
-/// sent.
+/// "1password-csv", "1password-1pux", "lastpass-csv"), the file at `path`,
+/// and a password-protected file's password once it's asked for (empty
+/// before). `{ok, read: "needsPassword" or "wrongPassword"}`, or what it
+/// holds (`import_summary`); nothing is sent.
 ///
 /// # Safety
 /// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.

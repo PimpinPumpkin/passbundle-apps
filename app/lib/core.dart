@@ -261,6 +261,7 @@ class Core {
   late final _left = _lib.lookupFunction<_Str0, _Str0>('pb_left');
   late final _places = _lib.lookupFunction<_Str1, _Str1>('pb_places');
   late final _templates = _lib.lookupFunction<_Str1, _Str1>('pb_templates');
+  late final _restrictedKinds = _lib.lookupFunction<_Str1, _Str1>('pb_restricted_kinds');
   late final _icon = _lib.lookupFunction<_Str2, _Str2>('pb_icon');
   late final _testIcons = _lib.lookupFunction<_Str1, _Str1>('pb_test_icons');
   late final _keepGenerated = _lib.lookupFunction<_Str2, _Str2>('pb_keep_generated');
@@ -1667,6 +1668,15 @@ class Core {
   List<Map<String, dynamic>> templates() =>
       (_with([account], (p) => _answer(_templates(p[0]))) as List)
           .cast<Map<String, dynamic>>();
+
+  /// The kinds of item New doesn't offer (`card`, as [list] names kinds):
+  /// those an organization's "Remove card item type" policy removes
+  /// (core/src/restricted_types.rs). None while locked.
+  Set<String> restrictedKinds() =>
+      ((_with([account], (p) => _answer(_restrictedKinds(p[0]))) as List?) ??
+              const [])
+          .cast<String>()
+          .toSet();
 
   List<Map<String, dynamic>> list(String query) =>
       (_with([account, query], (p) => _answer(_list(p[0], p[1]))) as List)
