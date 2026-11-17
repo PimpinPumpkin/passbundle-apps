@@ -1198,13 +1198,18 @@ pub unsafe extern "C" fn pb_unlock(account: *const c_char, password: *const c_ch
     })
 }
 
+/// Brings an account up to date from its server: `{ok, twoStepNudge}`, with
+/// which nudge about two-step login its vault shows ("setUp", "stronger",
+/// or null; two_step_nudge.rs), asked once the sync is in. Offline, how old
+/// the copy kept here is (`keptSecondsAgo`).
+///
 /// # Safety
 /// `account` is null or a NUL-terminated UTF-8 string, valid for the call.
 #[no_mangle]
 pub unsafe extern "C" fn pb_sync(account: *const c_char) -> *mut c_char {
     let account = text(account);
     with_app_waiting(&account, |app| match app.sync() {
-        Ok(()) => json!({ "ok": true }),
+        Ok(()) => json!({ "ok": true, "twoStepNudge": app.two_step_nudge() }),
         // Offline: how old the copy kept here is, for the screens to say.
         Err(e) if e.offline() => {
             let mut answer = failed(e);
@@ -1213,6 +1218,17 @@ pub unsafe extern "C" fn pb_sync(account: *const c_char) -> *mut c_char {
         }
         Err(e) => failed(e),
     })
+}
+
+/// "Not now", to either nudge about two-step login (two_step_nudge.rs): the
+/// server hides both for 90 days, on every device. `{ok}`.
+///
+/// # Safety
+/// `account` is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_dismiss_two_step_nudge(account: *const c_char) -> *mut c_char {
+    let account = text(account);
+    with_app_waiting(&account, |app| done(app.dismiss_two_step_nudge()))
 }
 
 /// Whether a PassBundle server answers at an address, before signing in or

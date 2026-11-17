@@ -1130,6 +1130,35 @@ impl Server {
         Ok(Some(body["kept"].as_bool() != Some(false)))
     }
 
+    /// Which nudge about two-step login the vault shows, if any
+    /// (two_step_nudge.rs): None from a server without it (an older or other
+    /// server), as from one that says none.
+    pub fn two_step_nudge(
+        &self,
+        session: &mut Session,
+    ) -> Result<Option<crate::two_step_nudge::TwoStepNudge>> {
+        let (status, body) =
+            self.call_answered(session, "GET", "/api/keykeeper/two-step-nudge", None)?;
+        if matches!(status, 404 | 405) {
+            return Ok(None);
+        }
+        Ok(crate::two_step_nudge::from_answer(&Self::checked(
+            status, body,
+        )?))
+    }
+
+    /// "Not now", to either nudge about two-step login: the server hides
+    /// both for 90 days, on every device.
+    pub fn dismiss_two_step_nudge(&self, session: &mut Session) -> Result<()> {
+        self.call(
+            session,
+            "POST",
+            "/api/keykeeper/two-step-nudge/dismiss",
+            Some(json!({})),
+        )
+        .map(|_| ())
+    }
+
     /// The whole vault, as the server sends it, and its text to keep (still encrypted).
     pub fn sync(&self, session: &mut Session) -> Result<(Sync, String)> {
         let body = self.call(session, "GET", "/api/sync?excludeDomains=true", None)?;
@@ -2956,6 +2985,49 @@ mod tests {
 
     const ITEM: &str = "0b6f4a4e-7d1c-4e7e-9d57-3d8a5a1c2f10";
     const FILE: &str = "8Qv2kLm4TzYp1WcXn0Rs";
+
+    #[test]
+    fn the_server_says_which_nudge_about_two_step_login_and_not_now_goes_to_it() {
+        use crate::two_step_nudge::TwoStepNudge;
+        let json = "Content-Type: application/json\r\n";
+        let (url, served) = answering_with_bodies(vec![
+            answer("200 OK", json, br#"{"show":true,"nudge":"setUp"}"#),
+            answer("200 OK", json, br#"{"show":false,"nudge":"stronger"}"#),
+            // A server from before the second nudge.
+            answer("200 OK", json, br#"{"show":true}"#),
+            answer("200 OK", json, br#"{"show":false,"nudge":null}"#),
+            // A server without it: an older one, or someone else's.
+            answer("404 Not Found", "", b""),
+            answer("200 OK", json, br#"{"show":false,"nudge":null}"#),
+        ]);
+        let server = Server::new(&url, Device::this_one("nudge")).unwrap();
+        let mut session = a_session();
+        let mut ask = || server.two_step_nudge(&mut session);
+        assert_eq!(ask(), Ok(Some(TwoStepNudge::SetUp)));
+        assert_eq!(ask(), Ok(Some(TwoStepNudge::Stronger)));
+        assert_eq!(ask(), Ok(Some(TwoStepNudge::SetUp)));
+        assert_eq!(ask(), Ok(None));
+        assert_eq!(ask(), Ok(None));
+        server.dismiss_two_step_nudge(&mut session).unwrap();
+        let asked = served.join().unwrap();
+        assert_eq!(
+            asked.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>(),
+            [
+                "/api/keykeeper/two-step-nudge",
+                "/api/keykeeper/two-step-nudge",
+                "/api/keykeeper/two-step-nudge",
+                "/api/keykeeper/two-step-nudge",
+                "/api/keykeeper/two-step-nudge",
+                "/api/keykeeper/two-step-nudge/dismiss",
+            ]
+        );
+        assert_eq!(asked[5].1, "{}");
+
+        // A server that can't be reached is an error, which the app takes
+        // as no nudge.
+        let gone = Server::new("http://127.0.0.1:9", Device::this_one("nudge")).unwrap();
+        assert!(gone.two_step_nudge(&mut a_session()).is_err());
+    }
 
     #[test]
     fn a_shared_folder_is_made_with_its_encrypted_name_given_to_nobody() {
