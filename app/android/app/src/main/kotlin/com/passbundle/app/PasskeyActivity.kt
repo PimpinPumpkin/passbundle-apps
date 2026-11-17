@@ -136,7 +136,7 @@ class PasskeyActivity : Activity() {
                                     .put("clientDataJSON", Passkeys.base64url(clientData ?: PLACEHOLDER))
                                     .put("authenticatorData", answer.getString("authenticatorData"))
                                     .put("signature", answer.getString("signature"))
-                                    .apply { answer.optString("userHandle").takeIf { it.isNotEmpty() }?.let { put("userHandle", it) } },
+                                    .apply { Responses.text(answer, "userHandle")?.let { put("userHandle", it) } },
                             ).put("clientExtensionResults", JSONObject())
                     val result = Intent()
                     PendingIntentHandler.setGetCredentialResponse(result, GetCredentialResponse(PublicKeyCredential(credential.toString())))
@@ -171,8 +171,8 @@ class PasskeyActivity : Activity() {
             return failCreate("That site doesn't take the kind of passkey PassBundle makes.")
         }
         val selection = json.optJSONObject("authenticatorSelection")
-        val userName = user.optString("name")
-        val site = rp.optString("name").ifEmpty { rpId }
+        val userName = Responses.text(user, "name") ?: ""
+        val site = Responses.text(rp, "name") ?: rpId
         background({ Passkeys.caller(this, request.callingAppInfo, rpId) }) { caller ->
             if (caller == null) return@background failCreate("That site doesn't let this app save its passkeys.")
             // Which account it goes in: with more than one unlocked, the
@@ -244,10 +244,10 @@ class PasskeyActivity : Activity() {
                             JSONObject()
                                 .put("account", account)
                                 .put("rpId", rpId)
-                                .put("rpName", rp.optString("name").ifEmpty { null })
+                                .put("rpName", Responses.text(rp, "name"))
                                 .put("userHandle", user.optString("id"))
                                 .put("userName", userName.ifEmpty { null })
-                                .put("userDisplayName", user.optString("displayName").ifEmpty { null })
+                                .put("userDisplayName", Responses.text(user, "displayName"))
                                 .put("userVerified", verified)
                                 .put("discoverable", true)
                                 .put("exclude", JSONArray((0 until exclude.length()).mapNotNull { exclude.optJSONObject(it)?.optString("id") }))
