@@ -90,6 +90,33 @@ class Fields(
             return username to password
         }
 
+        /**
+         * What each field PassBundle found holds, for saving a card or an
+         * address (Saving.kt): a text field's text, and a list's chosen
+         * option as the list shows it. A field with nothing isn't there.
+         */
+        fun read(structure: AssistStructure, fields: Fields): Map<AutofillId, String> {
+            val wanted = fields.ids.toSet()
+            val found = HashMap<AutofillId, String>()
+
+            fun visit(node: AssistStructure.ViewNode) {
+                val id = node.autofillId
+                val value = node.autofillValue
+                if (id != null && value != null && id in wanted) {
+                    val text =
+                        when {
+                            value.isText -> value.textValue.toString()
+                            value.isList -> node.autofillOptions?.getOrNull(value.listValue)?.toString()
+                            else -> null
+                        }
+                    text?.let { found[id] = it }
+                }
+                for (i in 0 until node.childCount) visit(node.getChildAt(i))
+            }
+            for (i in 0 until structure.windowNodeCount) visit(structure.getWindowNodeAt(i).rootViewNode)
+            return found
+        }
+
         /** The screen's fields, each described as Roles.kt reads them, and what each is for. */
         fun find(structure: AssistStructure): Fields {
             val described = mutableListOf<Roles.Field<AutofillId>>()

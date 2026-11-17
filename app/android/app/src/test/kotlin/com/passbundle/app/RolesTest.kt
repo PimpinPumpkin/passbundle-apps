@@ -232,7 +232,7 @@ class RolesTest {
                 page("number", "cc-number"),
                 page("month", "cc-exp-month", options = months),
                 page("year", label = "Expiration year", options = years),
-                // Any other list is left alone.
+                // A country's list alone isn't an address's (one identity field isn't enough).
                 page("country", "country", options = listOf("Canada", "United States")),
             ).found
         assertEquals(
@@ -330,6 +330,29 @@ class RolesTest {
         assertEquals(
             mapOf("first" to listOf(Role.GIVEN_NAME), "addressLine2" to listOf(Role.ADDRESS_LINE2)),
             roles(app("first", idEntry = "first_name"), app("addressLine2", idEntry = "addressLine2")),
+        )
+    }
+
+    @Test fun `an address's state and country lists are chosen by their options, never a phone's country code`() {
+        val states = listOf("State", "Idaho", "Illinois")
+        val countries = listOf("Canada", "United States")
+        val found =
+            screen(
+                page("line1", "address-line1"),
+                page("zip", "postal-code"),
+                page("state", "address-level1", options = states),
+                page("nation", label = "Country/Region", options = countries),
+                page("calling", label = "Country code", options = listOf("+1", "+44")),
+                page("title", label = "Title", options = listOf("Ms", "Mr")),
+            ).found
+        assertEquals(
+            listOf(
+                Roles.Found("line1", Role.ADDRESS_LINE1),
+                Roles.Found("zip", Role.POSTAL_CODE),
+                Roles.Found("state", Role.STATE, options = states),
+                Roles.Found("nation", Role.COUNTRY, options = countries),
+            ),
+            found,
         )
     }
 

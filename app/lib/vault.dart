@@ -373,18 +373,40 @@ class VaultScreenState extends State<VaultScreen> {
     if (mounted) showUpdateNotice(context);
   }
 
-  /// A sign-in Android's autofill offered to save: the editor, filled in.
-  /// True if there was one. A new password for a login it has comes with
-  /// that login's id and account, and opens in that account; a new login,
-  /// with more than one account unlocked, asks which account it goes in.
+  /// A sign-in, a card, or an address Android's autofill offered to save:
+  /// the editor, filled in. True if there was one. A new password for a
+  /// login it has comes with that login's id and account, and opens in that
+  /// account; anything new, with more than one account unlocked, asks which
+  /// account it goes in. A card or an address the person has already isn't
+  /// saved again, and goes only where an organization's policy doesn't
+  /// remove its kind (core/src/restricted_types.rs).
   Future<bool> saveOffered() async {
     if (!mounted) return false;
     final save = await Core.pendingSave();
     if (save == null || !mounted) return false;
+    final card = save['kind'] == 'card';
+    if (save['already'] case final String name) {
+      showMessage(
+        context,
+        card
+            ? 'This card is in PassBundle already ($name).'
+            : 'This address is in PassBundle already ($name).',
+      );
+      return true;
+    }
+    final mayAdd = (save['mayAdd'] as List?)?.cast<String>();
+    if (mayAdd != null && mayAdd.isEmpty) {
+      showMessage(
+        context,
+        'An organization you\'re in doesn\'t allow '
+        '${card ? 'cards' : 'identities'}, so PassBundle didn\'t save it.',
+      );
+      return true;
+    }
     final id = save['id'] as String?;
     var account = save['account'] as String? ?? Core.account;
     if (id == null && widget.menu != null) {
-      final chosen = await chooseAccount(context, widget.menu!);
+      final chosen = await chooseAccount(context, widget.menu!, among: mayAdd);
       if (chosen == null || !mounted) return true;
       account = chosen;
     }

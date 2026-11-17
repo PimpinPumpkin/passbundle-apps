@@ -116,7 +116,9 @@ class ItemEditor extends StatefulWidget {
 
   /// A new login's name, username, password, and website, already filled in
   /// (a sign-in Android's autofill offered to save); for an existing login,
-  /// its new password.
+  /// its new password. Or a new card's or identity's name and parts (`kind`
+  /// "card" or "identity"), from a payment or address form Android's
+  /// autofill offered to save.
   final Map<String, dynamic>? prefill;
 
   @override
@@ -289,10 +291,26 @@ class _ItemEditorState extends State<ItemEditor> {
     }
     if (id == null && prefill != null) {
       name.text = (prefill['name'] ?? '') as String;
-      username.text = (prefill['username'] ?? '') as String;
-      password.text = (prefill['password'] ?? '') as String;
-      final uri = (prefill['uri'] ?? '') as String;
-      if (uri.isNotEmpty) uris.add(TextEditingController(text: uri));
+      String part(String key) => (prefill[key] ?? '') as String;
+      switch (prefill['kind']) {
+        case 'card':
+          kind = 'card';
+          for (final key in card.keys) {
+            card[key]!.text = part(key);
+          }
+          brand = prefill['brand'] as String?;
+          expMonth = prefill['expMonth'] as String?;
+        case 'identity':
+          kind = 'identity';
+          for (final key in identity.keys) {
+            identity[key]!.text = part(key);
+          }
+        default:
+          username.text = part('username');
+          password.text = part('password');
+          final uri = part('uri');
+          if (uri.isNotEmpty) uris.add(TextEditingController(text: uri));
+      }
     }
     if (uris.isEmpty && kind == 'login') uris.add(TextEditingController());
     _opened = _fingerprint();

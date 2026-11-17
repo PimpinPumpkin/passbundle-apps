@@ -22,6 +22,14 @@
 //! iOS suggests logins above the keyboard from a list the app gives it of
 //! usernames and the domains they're for, never passwords (`suggestions`), by
 //! the same rules; and passkeys by their site's ID (`passkey_suggestions`).
+//!
+//! Android also offers to save a card or an address someone typed into a
+//! form, unless it's one they have already: a card by its number, an
+//! identity by its first street line and its postal code (`card_with_number`,
+//! `identity_at`). Before Android asks, what tells them apart goes to
+//! Android's own check of what was typed: each card's last 4 digits, as
+//! autofill's list shows them, and each identity's street and postal code
+//! (`save_hints`).
 
 use std::collections::HashSet;
 use std::net::IpAddr;
@@ -183,6 +191,130 @@ impl Vault {
     pub fn passkey_suggestions(&self) -> Vec<PasskeySuggestion<'_>> {
         self.items.iter().filter_map(passkey_suggested).collect()
     }
+
+    /// The card in use with this number (by its digits), if there's one,
+    /// among those whose number the person may see: someone who can't see
+    /// a shared card's number isn't told it's that one (`same_card`).
+    pub fn card_with_number(&self, number: &str) -> Option<&Item> {
+        let typed = card_digits(number);
+        self.items
+            .iter()
+            .find(|i| same_card(i, &typed) && self.grid(i).see_passwords)
+    }
+
+    /// The identity in use at this address, if there's one (`same_address`).
+    pub fn identity_at(&self, street: &str, postal_code: &str) -> Option<&Item> {
+        let (street, postal_code) = (street_words(street), postal_key(postal_code));
+        self.items
+            .iter()
+            .find(|i| same_address(i, &street, &postal_code))
+    }
+
+    /// What tells a new card or address from one the person has, for
+    /// Android's own check before it offers to save (`save_hints`).
+    pub fn save_hints(&self) -> SaveHints {
+        save_hints(self.items.iter().map(|i| (i, self.grid(i).see_passwords)))
+    }
+}
+
+/// Whether an item is a card in use with this number, as its digits
+/// (`card_digits`); never for no number.
+pub fn same_card(item: &Item, digits: &str) -> bool {
+    !digits.is_empty()
+        && fills_anywhere(item, ItemKind::Card)
+        && item
+            .card
+            .as_ref()
+            .and_then(|c| c.number.as_deref())
+            .is_some_and(|n| card_digits(n) == digits)
+}
+
+/// Whether an item is an identity in use at this address: its first street
+/// line's words (`street_words`) and its postal code (`postal_key`) are
+/// these, neither of them empty.
+pub fn same_address(item: &Item, street: &[String], postal_code: &str) -> bool {
+    if street.is_empty() || postal_code.is_empty() || !fills_anywhere(item, ItemKind::Identity) {
+        return false;
+    }
+    item.identity.as_ref().is_some_and(|d| {
+        street_words(d.address1.as_deref().unwrap_or_default()) == street
+            && postal_key(d.postal_code.as_deref().unwrap_or_default()) == postal_code
+    })
+}
+
+/// What Android checks what was typed against before it offers to save a
+/// card or an address (Kotlin's `Saving.kt` writes the check, and Android
+/// runs it): never a whole number. Each card's last 4 digits, only for one
+/// whose number the person may see, as autofill's list already shows them
+/// (`fill_subtitle`); and each identity's first street line, as its words,
+/// with its postal code, for one that has both. A number with the same
+/// last 4 digits isn't offered then, even if it's another card; one that is
+/// offered is checked in full once the person accepts (`card_with_number`).
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct SaveHints {
+    pub last4: Vec<String>,
+    pub addresses: Vec<(Vec<String>, String)>,
+}
+
+/// The hints from items in use, each with whether the person may see its
+/// secrets, sorted and each once.
+pub fn save_hints<'a>(items: impl IntoIterator<Item = (&'a Item, bool)>) -> SaveHints {
+    let mut hints = SaveHints::default();
+    for (item, sees_secrets) in items {
+        if sees_secrets && fills_anywhere(item, ItemKind::Card) {
+            if let Some(last4) = item.card.as_ref().and_then(card_last4) {
+                hints.last4.push(last4);
+            }
+        }
+        if fills_anywhere(item, ItemKind::Identity) {
+            let Some(identity) = &item.identity else {
+                continue;
+            };
+            let street = street_words(identity.address1.as_deref().unwrap_or_default());
+            let postal_code = postal_key(identity.postal_code.as_deref().unwrap_or_default());
+            if !street.is_empty() && !postal_code.is_empty() {
+                hints.addresses.push((street, postal_code));
+            }
+        }
+    }
+    hints.last4.sort();
+    hints.last4.dedup();
+    hints.addresses.sort();
+    hints.addresses.dedup();
+    hints
+}
+
+/// A card's number as it's compared: its digits only ("4111 1111-1111
+/// 1111" is "4111111111111111").
+pub fn card_digits(number: &str) -> String {
+    number.chars().filter(char::is_ascii_digit).collect()
+}
+
+/// A card's number's last 4 digits, when it has more than 4 (as
+/// `Card::summary` shows them).
+fn card_last4(card: &crate::vault::Card) -> Option<String> {
+    let digits = card_digits(card.number.as_deref()?);
+    (digits.len() > 4).then(|| digits[digits.len() - 4..].to_owned())
+}
+
+/// A street as it's compared: its words, lowercase, whatever is between
+/// them ("12 Main St." and "12  main st" are the same).
+pub fn street_words(street: &str) -> Vec<String> {
+    street
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(str::to_lowercase)
+        .collect()
+}
+
+/// A postal code as it's compared: its letters and digits, lowercase
+/// ("SW1A 1AA" and "sw1a1aa" are the same).
+pub fn postal_key(postal_code: &str) -> String {
+    postal_code
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
 }
 
 /// A passkey iOS may suggest in its passkey sheet (docs/phones.md,
@@ -543,6 +675,115 @@ mod tests {
         // The month and year are plain; the number and code stay secrets.
         assert!(!visa.is_secret("expMonth") && !visa.is_secret("expYear"));
         assert!(visa.is_secret("cardNumber") && visa.is_secret("cardCode"));
+    }
+
+    #[test]
+    fn a_card_already_saved_has_the_same_number_however_it_was_typed() {
+        let visa = card("4111 1111 1111 1234", "Visa");
+        for typed in [
+            "4111111111111234",
+            "4111 1111 1111 1234",
+            "4111-1111-1111-1234",
+        ] {
+            assert!(same_card(&visa, &card_digits(typed)), "{typed}");
+        }
+        assert!(!same_card(&visa, &card_digits("4111 1111 1111 1235")));
+        // A number is needed: an empty one is nobody's.
+        assert!(!same_card(&visa, &card_digits("")));
+        assert!(!same_card(&card("", "Visa"), &card_digits("")));
+        // Only a card in use: not in the trash, not archived, not an identity.
+        let deleted = Item {
+            deleted: true,
+            ..card("4111 1111 1111 1234", "Visa")
+        };
+        let archived = Item {
+            archived: true,
+            ..card("4111 1111 1111 1234", "Visa")
+        };
+        for other in [deleted, archived, identity()] {
+            assert!(!same_card(&other, "4111111111111234"));
+        }
+    }
+
+    #[test]
+    fn an_address_already_saved_has_the_same_street_and_postal_code() {
+        let home = identity();
+        let at = |street: &str, postal_code: &str| {
+            same_address(&home, &street_words(street), &postal_key(postal_code))
+        };
+        assert!(at("1 Example Street", "62701"));
+        // Written another way: case, spaces, and what's between the words.
+        assert!(at("1  example street.", " 62701 "));
+        assert!(!at("2 Example Street", "62701"));
+        assert!(!at("1 Example Street", "62702"));
+        assert!(!at("1 Example", "62701"));
+        // Both are needed.
+        assert!(!at("1 Example Street", ""));
+        assert!(!at("", "62701"));
+        let mut no_postal_code = identity();
+        if let Some(i) = no_postal_code.identity.as_mut() {
+            i.postal_code = None;
+        }
+        assert!(!same_address(
+            &no_postal_code,
+            &street_words("1 Example Street"),
+            ""
+        ));
+        // Only an identity in use.
+        let deleted = Item {
+            deleted: true,
+            ..identity()
+        };
+        let street = street_words("1 Example Street");
+        assert!(!same_address(&deleted, &street, "62701"));
+        assert!(!same_address(
+            &card("4111 1111 1111 1234", "Visa"),
+            &street,
+            "62701"
+        ));
+        // Postal codes with letters.
+        assert_eq!(postal_key("SW1A 1AA"), postal_key("sw1a1aa"));
+        assert_eq!(
+            street_words("12, Rue de l'Église"),
+            ["12", "rue", "de", "l", "église"]
+        );
+    }
+
+    #[test]
+    fn save_hints_are_cards_last_digits_the_person_may_see_and_streets_with_postal_codes() {
+        let visa = card("4111 1111 1111 1234", "Visa");
+        let shared = card("5555 5555 5555 4444", "Mastercard");
+        let short = card("123", "Visa");
+        let deleted = Item {
+            deleted: true,
+            ..card("4111 1111 1111 9999", "Visa")
+        };
+        let mut no_postal_code = identity();
+        if let Some(i) = no_postal_code.identity.as_mut() {
+            i.postal_code = None;
+        }
+        let hints = save_hints([
+            (&visa, true),
+            // A shared card whose number the person may not see: none of it.
+            (&shared, false),
+            (&short, true),
+            (&deleted, true),
+            (&visa, true),
+            (&identity(), false),
+            (&identity(), true),
+            (&no_postal_code, true),
+            (&login(&[("https://example.com", None)]), true),
+        ]);
+        assert_eq!(
+            hints,
+            SaveHints {
+                last4: vec!["1234".into()],
+                addresses: vec![(
+                    vec!["1".into(), "example".into(), "street".into()],
+                    "62701".into()
+                )],
+            }
+        );
     }
 
     #[test]

@@ -3,8 +3,8 @@ package com.passbundle.app
 /**
  * How a card's or an identity's values go into the fields Roles.kt found
  * (docs/phones.md, "Autofill"): a card's expiry as the field writes it, a
- * month or a year chosen from a list, a name in parts or whole, an address
- * in one field. Plain functions, tested on the computer (src/test,
+ * month or a year chosen from a list, a state or a country chosen from a
+ * list (Regions.kt), a name in parts or whole, an address in one field. Plain functions, tested on the computer (src/test,
  * ValuesTest). The item's parts come from the core one at a time (`part`,
  * by the names `Item::detail` gives them in core/src/vault.rs), only once
  * the person picks the item.
@@ -46,11 +46,16 @@ object Values {
             Role.USERNAME, Role.PASSWORD, Role.CODE -> null
         }?.trim()?.ifEmpty { null }
 
-    /** Which of a list's options a card's expiry month or year chooses; null leaves the list as it is. */
+    /**
+     * Which of a list's options a card's expiry month or year chooses, or an
+     * identity's state or country (Regions.kt); null leaves the list as it is.
+     */
     fun option(role: Role, options: List<String>, part: (String) -> String?): Int? =
         when (role) {
             Role.CARD_EXPIRY_MONTH -> monthOption(options, part("expMonth"))
             Role.CARD_EXPIRY_YEAR -> yearOption(options, part("expYear"))
+            Role.STATE -> Regions.option(options, part("state"), Regions::state)
+            Role.COUNTRY -> Regions.option(options, part("country"), Regions::country)
             else -> null
         }
 
@@ -116,7 +121,8 @@ object Values {
             else -> "YYYY"
         }
 
-    private val MONTHS =
+    /** The months' English names, as lists show them and Saving.kt reads them. */
+    internal val MONTHS =
         listOf("january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december")
 
     /**

@@ -72,7 +72,7 @@ class MainActivity : FlutterActivity() {
                 when (call.method) {
                     // Where the core keeps the vault: this app's private files.
                     "filesDir" -> result.success(filesDir.absolutePath)
-                    // A sign-in to save, once: the editor opens with it (vault.dart).
+                    // A sign-in, a card, or an address to save, once: the editor opens with it (vault.dart).
                     "pendingSave" -> result.success(PassBundleAutofill.takeSave())
                     // The server an organization's MDM set (app_restrictions.xml), if any.
                     "managedServer" ->
