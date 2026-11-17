@@ -78,6 +78,18 @@ class ResponsesTest {
         assertEquals("One-time code · ana@bank.example.test", list[0].subtitle)
     }
 
+    @Test fun `a login whose code needs Premium is offered without its code, and not on a code screen`() {
+        // The core says `totp` false for a key whose code needs Premium (core/src/codes.rs).
+        val needsPremium = Responses.Offered("p", "acc", "Bank", username = "ana@bank.example.test", totp = false)
+        val signIn = Responses.entries(everything, listOf(needsPremium, withCode), emptyList(), emptyList())
+        assertEquals(listOf("p", "a"), signIn.map { it.item })
+        assertEquals(listOf("user", "pass"), signIn[0].ids)
+        assertEquals(listOf("user", "pass", "otp"), signIn[1].ids)
+        val codeOnly = Roles.screen(listOf(page("otp", "one-time-code")))
+        assertTrue(Responses.entries(codeOnly, listOf(needsPremium), emptyList(), emptyList()).isEmpty())
+        assertEquals(listOf("a"), Responses.entries(codeOnly, listOf(needsPremium, withCode), emptyList(), emptyList()).map { it.item })
+    }
+
     @Test fun `the offer to trust a browser opens its dialog, never a fill`() {
         val signIn = Roles.screen(listOf(page("user", "username"), page("pass", "current-password", type = "password")))
         val list = Responses.entries(signIn, emptyList(), listOf(card), emptyList(), Responses.Trust("bank.example.test", "Example Browser", "acc"))

@@ -39,22 +39,28 @@ String openEmpty({bool lockOnSleep = false}) {
 /// `readOnly`, `hidePasswords`, `manage`): the person may do anything.
 /// With `policies`, its kept sync has them, as the server sends them; the
 /// items in `asking` ask for the master password again, as the web vault
-/// sets it; and `changed` items (by id) and shared folders have those of
-/// the server's plain fields (`edit`, `viewPassword`, `permissions`, a
-/// shared folder's `keykeeper` grid) set as given.
+/// sets it; `changed` items (by id) and shared folders have those of the
+/// server's plain fields (`edit`, `viewPassword`, `permissions`, a shared
+/// folder's `keykeeper` grid) set as given; and the profile has the fields
+/// in `profile` set as given (`premium`, say).
 String openSample({
   bool lockOnSleep = false,
   List<Map<String, dynamic>>? policies,
   Set<String> asking = const {},
   Map<String, Map<String, dynamic>> changed = const {},
+  Map<String, dynamic> profile = const {},
 }) {
   final dir = Directory.systemTemp.createTempSync('pb-app-test-').path;
   for (final name in ['settings.json', 'sync.json']) {
     File('test/sample/$name').copySync('$dir/$name');
   }
-  if (policies != null || asking.isNotEmpty || changed.isNotEmpty) {
+  if (policies != null ||
+      asking.isNotEmpty ||
+      changed.isNotEmpty ||
+      profile.isNotEmpty) {
     final sync = File('$dir/sync.json');
     final json = jsonDecode(sync.readAsStringSync()) as Map<String, dynamic>;
+    (json['profile'] as Map<String, dynamic>).addAll(profile);
     for (final cipher
         in (json['ciphers'] as List).cast<Map<String, dynamic>>()) {
       if (asking.contains(cipher['id'])) cipher['reprompt'] = 1;

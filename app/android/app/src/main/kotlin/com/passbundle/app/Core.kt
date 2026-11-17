@@ -108,7 +108,8 @@ object Core {
     /**
      * The logins for an app or a page, as JSON, from every unlocked
      * account: names and usernames only, each with its `account` and
-     * whether it has a one-time code (`totp`); or `locked`, with the
+     * whether it has a one-time code to fill (`totp`: false for a key whose
+     * code needs Premium, core/src/codes.rs); or `locked`, with the
      * `account` to unlock and its `accountLabel` when there's more than
      * one; or `signedOut` (Responses.kt).
      */
