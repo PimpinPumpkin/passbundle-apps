@@ -28,11 +28,14 @@ class MainActivity : FlutterActivity() {
         window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
         // A copy of a file to attach left by a run that stopped partway.
         Picker.forgetLeftOver(this)
+        // An export a run that stopped partway left (ExportFile.kt).
+        ExportFile.forget(this)
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode == Picker.REQUEST) Picker.picked(this, resultCode, data)
+        if (requestCode == ExportFile.REQUEST) ExportFile.chosen(this, resultCode, data)
     }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -128,6 +131,18 @@ class MainActivity : FlutterActivity() {
                     // A file to attach (Picker.kt): copied into the app's cache,
                     // up to the size the app attaches, and deleted after.
                     "pickFile" -> Picker.pick(this, call.argument<Number>("limit")?.toLong() ?: 0L, result)
+                    // An export (ExportFile.kt): the folder the core writes it
+                    // in, then Android's picker for where it's kept.
+                    "exportFolder" -> result.success(ExportFile.prepare(this))
+                    "exportFile" -> {
+                        val path = call.argument<String>("path")
+                        val name = call.argument<String>("name")
+                        if (path == null || name == null) {
+                            result.success(mapOf("ok" to false, "saved" to false))
+                        } else {
+                            ExportFile.export(this, path, name, result)
+                        }
+                    }
                     "forgetPicked" -> {
                         Picker.forget(this)
                         result.success(null)

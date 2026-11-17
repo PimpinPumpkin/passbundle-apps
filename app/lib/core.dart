@@ -304,6 +304,14 @@ class Core {
   late final _restoreVersion = _lib.lookupFunction<_Str3, _Str3>('pb_restore_version');
   late final _deleteHistory = _lib.lookupFunction<_Str3, _Str3>('pb_delete_history');
   late final _setFavorite = _lib.lookupFunction<_Str3, _Str3>('pb_set_favorite');
+  late final _archived = _lib.lookupFunction<_Str2, _Str2>('pb_archived');
+  late final _setArchived = _lib.lookupFunction<_Str3, _Str3>('pb_set_archived');
+  late final _exportInfo = _lib.lookupFunction<_Str1, _Str1>('pb_export_info');
+  late final _confirmExport = _lib.lookupFunction<_Str2, _Str2>('pb_confirm_export');
+  late final _export = _lib.lookupFunction<_Str4, _Str4>('pb_export');
+  late final _importRead = _lib.lookupFunction<_Str4, _Str4>('pb_import_read');
+  late final _importSave = _lib.lookupFunction<_Str2, _Str2>('pb_import_save');
+  late final _importCancel = _lib.lookupFunction<_Str1, _Str1>('pb_import_cancel');
   late final _list = _lib.lookupFunction<_Str2, _Str2>('pb_list');
   late final _item = _lib.lookupFunction<_Str2, _Str2>('pb_item');
   late final _reveal = _lib.lookupFunction<_Str3, _Str3>('pb_reveal');
@@ -741,10 +749,12 @@ class Core {
   static Future<Map<String, dynamic>?> pickFile(
     int limit, {
     bool send = false,
+    bool import = false,
   }) async {
     final picked = await platform.invokeMethod<Map>('pickFile', {
       'limit': limit,
       if (send) 'send': true,
+      if (import) 'import': true,
     });
     return picked == null ? null : Map<String, dynamic>.from(picked);
   }
@@ -1531,6 +1541,102 @@ class Core {
       '$favorite',
     ], (p) => c._answer(c._setFavorite(p[0], p[1], p[2]))),
   );
+
+  /// The account's archived items that a search finds (not those in the
+  /// trash), as [list] lists the ones in use: the Archive view.
+  List<Map<String, dynamic>> archived(String query) =>
+      ((_with([account, query], (p) => _answer(_archived(p[0], p[1]))) as List?) ??
+              const [])
+          .cast<Map<String, dynamic>>();
+
+  /// Archives an item, or takes it out of the archive, then syncs: `{ok,
+  /// synced}`. The person's own mark, so an item they can't edit takes it.
+  static Future<Answer> setArchived(String id, bool archived) => _background(
+    (c, a) => c._with([
+      a,
+      id,
+      '$archived',
+    ], (p) => c._answer(c._setArchived(p[0], p[1], p[2]))),
+  );
+
+  /// What exporting offers (DESIGN.md in the meta repo, "Archive, export,
+  /// and import in the apps"): `{ok, forbiddenBy, items, csvItems,
+  /// inOrganization}`.
+  Answer exportInfo() => Answer(
+    Map<String, dynamic>.from(
+      _with([account], (p) => _answer(_exportInfo(p[0]))) as Map,
+    ),
+  );
+
+  /// The master password, to export: good for one export within ten
+  /// minutes. Never a PIN or biometrics.
+  static Future<Answer> confirmExport(String password) => _background(
+    (c, a) => c._with([
+      a,
+      password,
+    ], (p) => c._answer(c._confirmExport(p[0], p[1]))),
+  );
+
+  /// Writes the export, [format] "json", "csv", or "encrypted_json" (with
+  /// [filePassword]), at [path], once [confirmExport] took the master
+  /// password: `{ok, items, leftOut}`. The core writes the file itself.
+  static Future<Answer> export(
+    String format,
+    String path,
+    String filePassword,
+  ) => _background(
+    (c, a) => c._with([
+      a,
+      format,
+      path,
+      filePassword,
+    ], (p) => c._answer(c._export(p[0], p[1], p[2], p[3]))),
+  );
+
+  /// Reads a file to import, in [format] (transfer.dart's formats), with a
+  /// password-protected file's [password] once it's asked for: `{ok, read:
+  /// "needsPassword" | "wrongPassword"}`, or what the file holds and where
+  /// it may go (core/src/ffi.rs, `import_summary`). Nothing is sent.
+  static Future<Answer> importRead(
+    String format,
+    String path, [
+    String password = '',
+  ]) => _background(
+    (c, a) => c._with([
+      a,
+      format,
+      path,
+      password,
+    ], (p) => c._answer(c._importRead(p[0], p[1], p[2], p[3]))),
+  );
+
+  /// Saves the file read last, [to] "personal" or "folder:" and a shared
+  /// folder's id, then syncs: `{ok, added, synced}`, or the words to show
+  /// with how many the server took before it refused (`saved`).
+  static Future<Answer> importSave(String to) => _background(
+    (c, a) => c._with([a, to], (p) => c._answer(c._importSave(p[0], p[1]))),
+  );
+
+  /// Forgets the file read last, wiping what it held.
+  void importCancel() => _with([account], (p) => _answer(_importCancel(p[0])));
+
+  /// Where to save a file on a computer, with its own save dialog (the
+  /// Mac's NSSavePanel, Windows' common file dialog, GTK's on Linux),
+  /// suggesting [name]: its path, or null when the person gave up.
+  static Future<String?> chooseSaveLocation(String name) =>
+      platform.invokeMethod<String>('saveFile', {'name': name});
+
+  /// On a phone, the app's own folder for a file it's about to hand on
+  /// ([handOnFile]); anything left there from before is deleted first.
+  static Future<String?> exportFolder() =>
+      platform.invokeMethod<String>('exportFolder');
+
+  /// On a phone, hands the file at [path] to the system's own picker for
+  /// where to keep it (Android's "create document", iOS's document picker),
+  /// as [name], then deletes it, whatever the person chose: `{saved}`.
+  static Future<bool> handOnFile(String path, String name) async =>
+      (await _onPhone('exportFile', {'path': path, 'name': name}))['saved'] ==
+      true;
 
   /// Opens a website in the browser: only http and https. Phones and the
   /// Mac through their own code, Windows and Linux through the OS's opener.

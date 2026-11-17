@@ -8,7 +8,7 @@
 // ("Locking by itself"), within what an organization's policy allows
 // ("Locking by policy"). On Android, turning on autofill and passkeys (autofill_offer.dart).
 // The account shown, and signing out of it, which says which; on a phone,
-// importing and exporting in the web vault.
+// importing and exporting a file (transfer.dart), and the web vault.
 // Sign-ins from other devices waiting for an answer
 // (sign_in_requests.dart). On Android and the Mac, updates from PassBundle's
 // releases (updates.dart). On macOS and Windows, whether screenshots of
@@ -24,6 +24,7 @@ import 'pin.dart';
 import 'plan.dart';
 import 'sign_in_requests.dart';
 import 'theme.dart';
+import 'transfer.dart';
 import 'unlock_offer.dart';
 import 'updates.dart';
 import 'widgets.dart';
@@ -594,24 +595,48 @@ class _SettingsListState extends State<SettingsList> {
           ),
         if (updates case final updates?) UpdatesSection(updates: updates),
         // On a phone, which has no menu for them: importing and exporting
-        // are the web vault's, which opens in the browser, with the
-        // account's own settings there.
+        // a file (transfer.dart).
+        if (isPhone)
+          SettingsGroup(
+            title: 'Import and export',
+            children: [
+              ListTile(
+                key: const ValueKey('import'),
+                leading: const Icon(Icons.file_download_outlined),
+                title: const Text('Import'),
+                subtitle: const Text(
+                  'From PassBundle, a browser, or 1Password',
+                ),
+                onTap: () => showImport(context, server: webVault),
+              ),
+              ListTile(
+                key: const ValueKey('export'),
+                leading: const Icon(Icons.file_upload_outlined),
+                title: const Text('Export'),
+                subtitle: const Text('Your own items, to a file'),
+                onTap: () async {
+                  final messenger = ScaffoldMessenger.maybeOf(context);
+                  final said = await showExport(context);
+                  if (said != null) {
+                    messenger?.showSnackBar(SnackBar(content: Text(said)));
+                  }
+                },
+              ),
+            ],
+          ),
+        // And the web vault, which opens in the browser, with the account's
+        // own settings there.
         if (isPhone && webVault != null)
           SettingsGroup(
             title: 'Web vault',
             footer: 'These open in your browser.',
             children: [
-              for (final (key, label, path) in [
-                ('web-import', 'Import', '/#/tools/import'),
-                ('web-export', 'Export', '/#/tools/export'),
-                ('web-vault', 'Open the web vault', '/#/vault'),
-              ])
-                ListTile(
-                  key: ValueKey(key),
-                  title: Text(label),
-                  trailing: const Icon(Icons.open_in_new_rounded, size: 20),
-                  onTap: () => openWebVault(path),
-                ),
+              ListTile(
+                key: const ValueKey('web-vault'),
+                title: const Text('Open the web vault'),
+                trailing: const Icon(Icons.open_in_new_rounded, size: 20),
+                onTap: () => openWebVault('/#/vault'),
+              ),
               ?accountSettings,
             ],
           ),

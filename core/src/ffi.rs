@@ -491,6 +491,8 @@ fn summary(vault: &Vault, item: &Item) -> Value {
         // The host its tile's icon is for (icons.rs), for a login.
         "iconHost": (item.kind == ItemKind::Login).then(|| item.uris.first().and_then(|u| crate::icons::host_of(u))).flatten(),
         "favorite": item.favorite,
+        // In the Archive: out of the lists, search, and filling.
+        "archived": item.archived,
         // Asks for the master password before its secrets are used.
         "reprompt": item.kept.reprompt != 0,
         "folderId": item.folder_id,
@@ -2212,6 +2214,235 @@ pub unsafe extern "C" fn pb_set_favorite(
     let account = text(account);
     let (id, favorite) = (text(id), text(favorite) == "true");
     with_app_waiting(&account, |app| done(app.set_favorite(&id, favorite)))
+}
+
+/// The account's archived items (not those in the trash) that a search
+/// finds, as `pb_list` lists items in use: the Archive view.
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_archived(account: *const c_char, query: *const c_char) -> *mut c_char {
+    let account = text(account);
+    let query = text(query);
+    with_app(&account, |app| match app.vault() {
+        Some(vault) => Value::Array(
+            vault
+                .archived(&query)
+                .into_iter()
+                .map(|i| summary(vault, i))
+                .collect(),
+        ),
+        None => json!([]),
+    })
+}
+
+/// Archives an item (`archived` "true") or takes it out of the archive,
+/// then syncs: `{ok, synced}`, or the words to show.
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_set_archived(
+    account: *const c_char,
+    id: *const c_char,
+    archived: *const c_char,
+) -> *mut c_char {
+    let account = text(account);
+    let (id, archived) = (text(id), text(archived) == "true");
+    with_app_waiting(&account, |app| match app.set_archived(&id, archived) {
+        Ok(synced) => json!({ "ok": true, "synced": synced }),
+        Err(e) => failed(e),
+    })
+}
+
+/// What exporting offers (DESIGN.md in the meta repo, "Archive, export,
+/// and import in the apps"): `{ok, forbiddenBy, items, csvItems}`: the organization whose
+/// policy doesn't let the person export their own items (null when it
+/// may), how many of their own items a `.json` holds, and how many logins
+/// and notes a `.csv` does.
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_export_info(account: *const c_char) -> *mut c_char {
+    let account = text(account);
+    with_app(&account, |app| {
+        let Some(vault) = app.vault() else {
+            return failed(Error::SignedOut);
+        };
+        let own: Vec<&Item> = vault
+            .items
+            .iter()
+            .filter(|i| i.organization_id.is_none() && !i.deleted)
+            .collect();
+        json!({
+            "ok": true,
+            "forbiddenBy": app.export_forbidden_by(),
+            "items": own.iter().filter(|i| !matches!(i.kind, ItemKind::Other(_))).count(),
+            "csvItems": own.iter().filter(|i| matches!(i.kind, ItemKind::Login | ItemKind::SecureNote)).count(),
+            "inOrganization": vault.in_an_organization(),
+        })
+    })
+}
+
+/// The master password, to export: `{ok}`, good for one export within ten
+/// minutes, or the words to show (a wrong one is said as that).
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_confirm_export(
+    account: *const c_char,
+    password: *const c_char,
+) -> *mut c_char {
+    let account = text(account);
+    let password = Zeroizing::new(text(password));
+    with_app_waiting(&account, |app| done(app.confirm_export(&password)))
+}
+
+/// Writes an export at `path`: `format` "json", "csv", or "encrypted_json"
+/// (with `file_password`), once the master password was given
+/// (`pb_confirm_export`). `{ok, items, leftOut}`, or the words to show.
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_export(
+    account: *const c_char,
+    format: *const c_char,
+    path: *const c_char,
+    file_password: *const c_char,
+) -> *mut c_char {
+    let account = text(account);
+    let format = text(format);
+    let path = text(path);
+    let file_password = Zeroizing::new(text(file_password));
+    with_app_waiting(&account, |app| {
+        let Some(format) = crate::export::Format::named(&format) else {
+            return failed(Error::Refused("PassBundle doesn't export that format"));
+        };
+        let password = Some(file_password.as_str()).filter(|p| !p.is_empty());
+        match app.export_to(format, std::path::Path::new(&path), password) {
+            Ok(made) => json!({ "ok": true, "items": made.items, "leftOut": made.left_out }),
+            Err(e) => failed(e),
+        }
+    })
+}
+
+/// What a file read to import holds, for the person to see before
+/// anything is saved, and where it may go.
+fn import_summary(app: &App) -> Value {
+    let Some(parsed) = app.pending_import() else {
+        return failed(Error::Refused("choose a file to import first"));
+    };
+    let kinds = parsed.kinds();
+    let count = |k: u8| kinds.get(&k).copied().unwrap_or(0);
+    json!({
+        "ok": true,
+        "read": "read",
+        "protected": parsed.protected,
+        "items": parsed.items.len() - parsed.saved,
+        "saved": parsed.saved,
+        "kinds": {
+            "login": count(1), "note": count(2), "card": count(3), "identity": count(4),
+            "sshKey": count(5), "other": count(6) + count(7) + count(8),
+        },
+        "folders": parsed.folders.len(),
+        "archived": parsed.items.iter().filter(|i| i.archived_date.is_some()).count(),
+        "toCheck": parsed.to_check.len(),
+        "checkFolder": parsed.check_folder,
+        "leftOut": parsed.left_out.iter().map(|(why, n)| json!({ "why": why.name(), "count": n })).collect::<Vec<_>>(),
+        "renamed": parsed.renamed,
+        // Where it may go: Personal, unless an organization keeps items out
+        // of it, and the shared folders the person may add items to.
+        "personal": app.keeps_items_out().is_none(),
+        "keepsItemsOut": app.keeps_items_out(),
+        "sharedFolders": app.import_shared_folders().into_iter().map(|(id, name, org, org_name)| json!({
+            "id": id, "name": name, "organizationId": org, "organization": org_name,
+        })).collect::<Vec<_>>(),
+    })
+}
+
+/// Reads a file to import (DESIGN.md in the meta repo, "Export and import
+/// in the apps"): `format` the one the person chose ("json", "csv",
+/// "chrome", "edge", "brave", "opera", "vivaldi", "firefox", "safari",
+/// "1password-csv"), the file at `path`, and a password-protected file's
+/// password once it's asked for (empty before). `{ok, read: "needsPassword"
+/// or "wrongPassword"}`, or what it holds (`import_summary`); nothing is
+/// sent.
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_import_read(
+    account: *const c_char,
+    format: *const c_char,
+    path: *const c_char,
+    file_password: *const c_char,
+) -> *mut c_char {
+    let account = text(account);
+    let format = text(format);
+    let path = text(path);
+    let file_password = Zeroizing::new(text(file_password));
+    with_app_waiting(&account, |app| {
+        let Some(format) = crate::import::Format::named(&format) else {
+            return failed(Error::Refused(
+                "PassBundle doesn't import that format yet; import it in the web vault",
+            ));
+        };
+        let password = Some(file_password.as_str()).filter(|p| !p.is_empty());
+        match app.read_import(format, std::path::Path::new(&path), password) {
+            Ok(crate::app::ImportRead::Read) => import_summary(app),
+            Ok(crate::app::ImportRead::NeedsPassword) => {
+                json!({ "ok": true, "read": "needsPassword" })
+            }
+            Ok(crate::app::ImportRead::WrongPassword) => {
+                json!({ "ok": true, "read": "wrongPassword" })
+            }
+            Err(e) => failed(e),
+        }
+    })
+}
+
+/// Saves the file read last (`pb_import_read`) where the person chose:
+/// `to` "personal", or "folder:" and a shared folder's id. Then syncs.
+/// `{ok, added, synced}`; or the words to show, with how many the server
+/// took before it refused (`saved`): saving again sends only the rest.
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_import_save(account: *const c_char, to: *const c_char) -> *mut c_char {
+    let account = text(account);
+    let to = text(to);
+    with_app_waiting(&account, |app| {
+        let destination = match to.strip_prefix("folder:") {
+            Some(id) => crate::app::Destination::SharedFolder(id.to_owned()),
+            None => crate::app::Destination::Personal,
+        };
+        match app.save_import(&destination) {
+            Ok(saved) => json!({ "ok": true, "added": saved.added, "synced": saved.synced }),
+            Err(e) => {
+                let mut answer = failed(e);
+                answer["saved"] = json!(app.pending_import().map_or(0, |p| p.saved));
+                answer
+            }
+        }
+    })
+}
+
+/// Gives up the file read last, wiping what it held: `{ok}`.
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_import_cancel(account: *const c_char) -> *mut c_char {
+    let account = text(account);
+    with_app(&account, |app| {
+        app.cancel_import();
+        json!({ "ok": true })
+    })
 }
 
 /// How the app looks on this device: `{showIcons}`.
