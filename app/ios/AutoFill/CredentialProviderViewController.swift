@@ -97,8 +97,10 @@ class CredentialProviderViewController: ASCredentialProviderViewController {
       picked: identity.recordIdentifier)
   }
 
-  /// A site making a passkey: saved in a new login for the site, in the
-  /// account the person picks among those unlocked here, once they say so.
+  /// A site making a passkey: saved, once the person says so, in place of
+  /// this account's old passkey for the site, in a login for the site they
+  /// pick, or in a new login in the account they pick among those unlocked
+  /// here.
   override func prepareInterface(forPasskeyRegistration registrationRequest: ASCredentialRequest) {
     guard let request = registrationRequest as? ASPasskeyCredentialRequest,
       let identity = request.credentialIdentity as? ASPasskeyCredentialIdentity
@@ -246,6 +248,12 @@ final class Provider: ObservableObject {
     var asks = false
     /// A passkey, rather than a password to fill.
     var passkey = false
+    /// Where a new passkey can go: it has the site's passkey for this
+    /// account (the same site ID and user handle), which the new one
+    /// replaces.
+    var replaces = false
+    /// The account's name on the site, as the passkey it replaces has it.
+    var passkeyUserName: String?
   }
 
   /// A login picked for a site that isn't one of its own, which only search
@@ -297,6 +305,14 @@ final class Provider: ObservableObject {
   @Published var passkeys: [Login] = []
   /// The account a new passkey goes in: one unlocked here.
   @Published var saveIn: String?
+  /// The logins a new passkey can go in, from each account unlocked here
+  /// (`pb_passkey_logins`): the one whose passkey it replaces first.
+  @Published var targets: [Login] = []
+  /// The login it goes in, in its own account; nil for a new login (in
+  /// `saveIn`).
+  @Published var saveTo: Login?
+  /// Asking whether to replace this login's passkey, before it's saved.
+  @Published var replacing: Login?
   var signIn: PasskeySignIn?
   var making: PasskeyMaking?
   /// What ends the extension (the view controller's).
@@ -319,6 +335,10 @@ final class Provider: ObservableObject {
   /// unlocks here only with its Face ID or master password, a passkey's
   /// proof that it's them.
   private var verified: Set<String> = []
+  /// The person picked where the new passkey goes (`choose`).
+  private var chose = false
+  /// The login whose passkey the person said to replace.
+  private var replaceAgreed: String?
 
   /// Whether the core is saving or signing: Cancel waits for it.
   var working: Bool {
@@ -352,6 +372,11 @@ final class Provider: ObservableObject {
     finished = false
     confirmed = []
     verified = []
+    targets = []
+    saveTo = nil
+    replacing = nil
+    chose = false
+    replaceAgreed = nil
     self.domains = domains
     self.picked = picked.flatMap { record in
       let parts = record.split(separator: "/", maxSplits: 1).map(String.init)
@@ -452,12 +477,28 @@ final class Provider: ObservableObject {
 
   /// The website's logins from each unlocked account, the one the app shows
   /// first, by name, and its passkeys when it asks for one; a suggestion
-  /// picked fills or signs at once. Making a passkey asks to save it.
+  /// picked fills or signs at once. Making a passkey asks to save it, with
+  /// the logins it can go in.
   private func show() {
     note = nil
-    if making != nil {
+    if let making {
       let unlocked = accounts.filter(\.unlocked).map(\.id)
       if saveIn == nil || !unlocked.contains(saveIn!) { saveIn = unlocked.first }
+      let answer = passkeyLogins(making)
+      // The site has one of PassBundle's passkeys already (iOS 18 and later
+      // give its list): it's told so, as WebAuthn has it, and nothing is
+      // offered in its place.
+      if answer?["excluded"] as? Bool == true {
+        if #available(iOS 18.0, *) { return finish(.refused(.matchedExcludedCredential)) }
+      }
+      targets = ((answer?["items"] as? [[String: Any]]) ?? []).compactMap(Self.target)
+      if let picked = saveTo, !targets.contains(picked) { saveTo = nil }
+      // Until the person picks: the login with this account's passkey for
+      // the site, which WebAuthn has the new one replace, when there's one.
+      if !chose {
+        let holders = targets.filter(\.replaces)
+        saveTo = holders.count == 1 ? holders[0] : nil
+      }
       screen = .saving
       return
     }
@@ -504,6 +545,52 @@ final class Provider: ObservableObject {
     }
   }
 
+  /// The logins a new passkey can go in, from each account unlocked here
+  /// (`pb_passkey_logins`), and whether the site has one of PassBundle's
+  /// already (`excluded`).
+  private func passkeyLogins(_ making: PasskeyMaking) -> [String: Any]? {
+    let request: [String: Any] = [
+      "rpId": making.rpId,
+      "userHandle": Shared.base64url(making.userHandle),
+      "exclude": making.excluded.map(Shared.base64url),
+    ]
+    guard let body = try? JSONSerialization.data(withJSONObject: request),
+      let json = String(data: body, encoding: .utf8)
+    else { return nil }
+    return Shared.answer(pb_passkey_logins(json)) as? [String: Any]
+  }
+
+  private static func target(_ item: [String: Any]) -> Login? {
+    guard let account = item["account"] as? String, let id = item["id"] as? String else { return nil }
+    return Login(
+      account: account, item: id, name: item["name"] as? String ?? "",
+      username: item["userName"] as? String ?? "", asks: item["reprompt"] as? Bool ?? false,
+      replaces: item["replaces"] as? Bool ?? false, passkeyUserName: item["passkeyUserName"] as? String)
+  }
+
+  /// The person picks where the new passkey goes: a login, or nil for a new
+  /// login.
+  func choose(_ login: Login?) {
+    chose = true
+    saveTo = login
+    note = nil
+  }
+
+  /// "Replace the passkey for <user> on <site>?", in the Android app's words.
+  func replaceTitle(_ login: Login) -> String {
+    let named = making?.userName ?? ""
+    let user = named.isEmpty ? login.passkeyUserName ?? "" : named
+    return "Replace the passkey for \(user.isEmpty ? "this account" : user) on \(making?.rpId ?? "")?"
+  }
+
+  /// What replacing does: the old passkey goes, so it stops working at the
+  /// site.
+  func replaceMessage(_ login: Login) -> String {
+    let account = label(login.account).map { " (in \($0))" } ?? ""
+    return "\(login.name)\(account) has a passkey for this account already. "
+      + "The new one takes its place, and the old one stops working the next time you sign in to \(making?.rpId ?? "")."
+  }
+
   private static func login(_ item: [String: Any], username: String) -> Login? {
     guard let account = item["account"] as? String, let id = item["id"] as? String else { return nil }
     return Login(
@@ -537,6 +624,8 @@ final class Provider: ObservableObject {
         return
       }
       self.confirmed.insert(login.id)
+      // The login a new passkey goes in: now it's saved.
+      if self.making != nil { return self.save() }
       login.passkey ? self.pickPasskey(login) : self.pick(login)
     }
   }
@@ -622,12 +711,28 @@ final class Provider: ObservableObject {
           clientDataHash: signIn.clientDataHash, authenticatorData: data, credentialID: credential)))
   }
 
-  /// Saves the new passkey in a new login for the site, in the account
-  /// chosen: the core makes it and saves it to the server before iOS hears
-  /// of it.
-  func save() {
-    guard let making, let account = saveIn, !finished else { return }
-    let request: [String: Any] = [
+  /// Saves the new passkey in the login picked (`saveTo`, in its own
+  /// account), or in a new login for the site in the account chosen
+  /// (`saveIn`). A login with this account's passkey for the site asks
+  /// first whether to replace it (`replace` once the person says so), and
+  /// one that asks for the master password asks for it. The core makes it
+  /// and saves it to the server before iOS hears of it.
+  func save(replace: Bool = false) {
+    guard let making, !finished else { return }
+    let target = saveTo
+    if replace { replaceAgreed = target?.id }
+    if let target, target.replaces, replaceAgreed != target.id {
+      replacing = target
+      return
+    }
+    replacing = nil
+    if let target, target.asks, !confirmed.contains(target.id) {
+      note = nil
+      screen = .reprompt(target)
+      return
+    }
+    guard let account = target?.account ?? saveIn else { return }
+    var request: [String: Any] = [
       "account": account,
       "rpId": making.rpId,
       "userHandle": Shared.base64url(making.userHandle),
@@ -636,6 +741,7 @@ final class Provider: ObservableObject {
       "discoverable": true,
       "exclude": making.excluded.map(Shared.base64url),
     ]
+    if let target { request["login"] = target.item }
     guard let body = try? JSONSerialization.data(withJSONObject: request),
       let json = String(data: body, encoding: .utf8)
     else { return }
@@ -849,8 +955,10 @@ struct ProviderView: View {
     }
   }
 
-  /// Saving a new passkey: the site's ID first, as iOS checked it, the
-  /// account's name on the site, and which PassBundle account it goes in.
+  /// Saving a new passkey: the site's ID first, as iOS checked it, and the
+  /// account's name on the site; then the logins it can go in (the one
+  /// whose passkey it replaces picked at first), or a new login in the
+  /// PassBundle account chosen. Replacing a passkey asks first.
   private var saving: some View {
     Form {
       Section {
@@ -860,18 +968,34 @@ struct ProviderView: View {
             LabeledContent("Account", value: making.userName)
           }
         }
+      } header: {
+        Text("Save a passkey in PassBundle")
+      }
+      if !provider.targets.isEmpty {
+        Section {
+          ForEach(provider.targets) { login in
+            target(login)
+          }
+          target(nil)
+        } header: {
+          Text("Where it goes")
+        } footer: {
+          Text("Add it to one of your logins for this website, or to a new login.")
+        }
+      }
+      Section {
+        // A login picked above is in its own account; a new one goes in
+        // the account chosen here.
         let unlocked = provider.accounts.filter(\.unlocked)
-        if provider.accounts.count > 1, !unlocked.isEmpty {
+        if provider.saveTo == nil, provider.accounts.count > 1, !unlocked.isEmpty {
           Picker("Save in", selection: $provider.saveIn) {
             ForEach(unlocked) { account in
               Text(account.label).tag(Optional(account.id))
             }
           }
         }
-        Button("Save passkey") { provider.save() }
-          .disabled(provider.saveIn == nil)
-      } header: {
-        Text("Save a passkey in PassBundle")
+        Button(provider.saveTo?.replaces == true ? "Replace passkey" : "Save passkey") { provider.save() }
+          .disabled(provider.saveTo == nil && provider.saveIn == nil)
       } footer: {
         if let note = provider.note {
           Text(note).foregroundStyle(.red)
@@ -885,6 +1009,50 @@ struct ProviderView: View {
               provider.askToUnlock(account, automatically: true)
             }
           }
+        }
+      }
+    }
+    .alert(
+      provider.replacing.map(provider.replaceTitle) ?? "",
+      isPresented: Binding(
+        get: { provider.replacing != nil },
+        set: { if !$0 { provider.replacing = nil } }),
+      presenting: provider.replacing
+    ) { _ in
+      Button("Replace", role: .destructive) { provider.save(replace: true) }
+      Button("Cancel", role: .cancel) {}
+    } message: { login in
+      Text(provider.replaceMessage(login))
+    }
+  }
+
+  /// A login a new passkey can go in, or a new login (nil): its name, its
+  /// username, whether the passkey replaces its own, and its account, with
+  /// a check where it's picked.
+  private func target(_ login: Provider.Login?) -> some View {
+    Button {
+      provider.choose(login)
+    } label: {
+      HStack {
+        VStack(alignment: .leading, spacing: 2) {
+          Text(login?.name ?? "New login").foregroundStyle(.primary)
+          if let login {
+            HStack(spacing: 6) {
+              if !login.username.isEmpty {
+                Text(login.username).font(.subheadline).foregroundStyle(.secondary)
+              }
+              if login.replaces {
+                Text("Replaces its passkey").font(.subheadline).foregroundStyle(.secondary)
+              }
+              if provider.label(login.account) != nil {
+                pill(login.account)
+              }
+            }
+          }
+        }
+        Spacer()
+        if provider.saveTo == login {
+          Image(systemName: "checkmark").foregroundStyle(Look.accent)
         }
       }
     }
@@ -907,7 +1075,7 @@ struct ProviderView: View {
         }
       }
       Section {
-        Button("Back to the logins") {
+        Button(provider.making == nil ? "Back to the logins" : "Back to saving the passkey") {
           password = ""
           provider.backToLogins()
         }

@@ -435,6 +435,25 @@ pub fn passkey_assert<'caller>(
         .resolve::<ThrowRuntimeExAndDefault>()
 }
 
+/// Where a new passkey can go (docs/core.md, "Passkeys", "Where it goes"),
+/// from the request as JSON, answering JSON: the logins it can go in, from
+/// every unlocked account, never a key or a password (ffi.rs,
+/// `pb_passkey_logins`).
+#[cfg(feature = "ffi")]
+#[jni_mangle("com.passbundle.app.Core")]
+pub fn passkey_logins<'caller>(
+    mut unowned_env: EnvUnowned<'caller>,
+    _class: JClass<'caller>,
+    request: JString<'caller>,
+) -> jstring {
+    unowned_env
+        .with_env(|env| -> JniResult<jstring> {
+            let answer = crate::ffi::passkey_logins(&request.try_to_string(env)?);
+            Ok(env.new_string(answer.to_string())?.into_raw())
+        })
+        .resolve::<ThrowRuntimeExAndDefault>()
+}
+
 /// Makes a passkey for a site (docs/core.md, "Passkeys", "Making one"), from
 /// the request as JSON (which names the account it goes in), answering JSON. Slow (it's saved first): off the main
 /// thread.

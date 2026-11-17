@@ -51,8 +51,14 @@ char *pb_passkeys(const char *rp_id);
 // {ok, authenticatorData, signature, credentialId, userHandle} or the words to show.
 char *pb_passkey_assert(const char *account, const char *id, const char *rp_id, const char *client_data_hash,
                         const char *user_verified);
-// Makes a passkey in a new login, from {account, rpId, userHandle, userName,
-// userVerified, discoverable, exclude}, saved to the server first:
+// Where a new passkey can go, from every account unlocked here, from {rpId,
+// userHandle, exclude}: {locked, excluded, items: [{id, account, accountLabel,
+// name, userName, replaces, passkeyUserName, reprompt}]}, the login whose
+// passkey for the site and account it replaces first; never a key or a password.
+char *pb_passkey_logins(const char *request);
+// Makes a passkey, from {account, rpId, userHandle, userName, userVerified,
+// discoverable, exclude, login}: in the login named (one pb_passkey_logins
+// offered), or a new login without one, saved to the server first:
 // {ok, itemId, credentialId, attestationObject} or the words to show.
 char *pb_passkey_create(const char *request);
 void pb_free(char *ptr);
