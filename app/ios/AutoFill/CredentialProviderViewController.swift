@@ -716,7 +716,8 @@ final class Provider: ObservableObject {
   /// (`saveIn`). A login with this account's passkey for the site asks
   /// first whether to replace it (`replace` once the person says so), and
   /// one that asks for the master password asks for it. The core makes it
-  /// and saves it to the server before iOS hears of it.
+  /// and saves it to the server before iOS hears of it; then iOS's sheet
+  /// lists the new one in place of any it replaced.
   func save(replace: Bool = false) {
     guard let making, !finished else { return }
     let target = saveTo
@@ -745,14 +746,27 @@ final class Provider: ObservableObject {
     guard let body = try? JSONSerialization.data(withJSONObject: request),
       let json = String(data: body, encoding: .utf8)
     else { return }
+    // Found now, while the vault here still has the old passkey.
+    let replaced = replacedSuggestion(for: target)
     // Saved over the network: off the main thread, with Cancel hidden
     // until it's back, so the site never misses a passkey the vault kept.
     work({ Shared.answer(pb_passkey_create(json)) as? [String: Any] }) { answer in
-      self.made(answer, making, account)
+      self.made(answer, making, account, replacing: replaced)
     }
   }
 
-  private func made(_ answer: [String: Any]?, _ making: PasskeyMaking, _ account: String) {
+  /// iOS's suggestion for the passkey a new one replaces in `target`, as
+  /// the app gave it to iOS (`Shared.passkeyIdentities`): nil for a new
+  /// login, or a login with no passkey.
+  func replacedSuggestion(for target: Login?) -> ASPasskeyCredentialIdentity? {
+    guard let target, target.replaces else { return nil }
+    return Shared.passkeyIdentities().first { $0.recordIdentifier == target.id }
+  }
+
+  private func made(
+    _ answer: [String: Any]?, _ making: PasskeyMaking, _ account: String,
+    replacing old: ASPasskeyCredentialIdentity?
+  ) {
     guard let request else { return }
     guard answer?["ok"] as? Bool == true,
       let item = answer?["itemId"] as? String,
@@ -771,8 +785,9 @@ final class Provider: ObservableObject {
       ASPasskeyRegistrationCredential(
         relyingParty: making.rpId, clientDataHash: making.clientDataHash, credentialID: credential,
         attestationObject: attestation))
-    // iOS lists it from now on, as it would after the app's next sync:
-    // answered once iOS has it, before the extension goes away.
+    // iOS lists it from now on, as it would after the app's next sync, and
+    // no longer lists the passkey it replaced: answered once iOS has it,
+    // before the extension goes away.
     let identity = ASPasskeyCredentialIdentity(
       relyingPartyIdentifier: making.rpId, userName: making.userName, credentialID: credential,
       userHandle: making.userHandle, recordIdentifier: "\(account)/\(item)")
@@ -786,7 +801,12 @@ final class Provider: ObservableObject {
     store.getState { state in
       guard state.isEnabled, state.supportsIncrementalUpdates else { return answer() }
       let identities: [any ASCredentialIdentity] = [identity]
-      store.saveCredentialIdentities(identities) { _, _ in answer() }
+      let add = { store.saveCredentialIdentities(identities) { _, _ in answer() } }
+      // The old one goes first, so iOS's sheet never offers a passkey the
+      // vault no longer has.
+      guard let old else { return add() }
+      let gone: [any ASCredentialIdentity] = [old]
+      store.removeCredentialIdentities(gone) { _, _ in add() }
     }
   }
 

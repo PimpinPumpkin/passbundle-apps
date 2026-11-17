@@ -61,4 +61,9 @@ char *pb_passkey_logins(const char *request);
 // offered), or a new login without one, saved to the server first:
 // {ok, itemId, credentialId, attestationObject} or the words to show.
 char *pb_passkey_create(const char *request);
+// The passkeys iOS may list in its passkey sheet, from every account unlocked
+// here, as the app gives them to iOS after each sync (Shared.passkeyIdentities):
+// [{account, id, rpId, userName, credentialId, userHandle}], never a key. A
+// passkey being replaced has its suggestion taken out of iOS's list by it.
+char *pb_passkey_suggestions(void);
 void pb_free(char *ptr);
