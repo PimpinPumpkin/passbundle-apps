@@ -117,7 +117,7 @@ fn a_changed_or_overreaching_file_is_refused_before_anything_is_opened() {
 }
 
 fn read_back(text: &str, format: Format, app: &App) -> import::Parsed {
-    match import::read(format, text, None, app.vault().unwrap()).unwrap() {
+    match import::read(format, text.as_bytes(), None, app.vault().unwrap()).unwrap() {
         Read::Parsed(parsed) => parsed,
         _ => panic!("not read"),
     }
@@ -414,11 +414,15 @@ fn a_browsers_export_is_sorted_as_the_guided_import_sorts_it() {
     );
 
     // A file that isn't Chrome's, and an export with nothing in it.
-    let refusal =
-        |text: &str, format: Format| match import::read(format, text, None, app.vault().unwrap()) {
-            Err(Error::Refused(why)) => why,
-            _ => panic!("read"),
-        };
+    let refusal = |text: &str, format: Format| match import::read(
+        format,
+        text.as_bytes(),
+        None,
+        app.vault().unwrap(),
+    ) {
+        Err(Error::Refused(why)) => why,
+        _ => panic!("read"),
+    };
     assert!(refusal(
         "Title,URL,Username,Password\nA,https://a.test,a,b",
         Format::Chromium("Google Chrome")

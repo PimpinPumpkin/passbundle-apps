@@ -168,11 +168,9 @@ impl App {
         if size > MAX_IMPORT_BYTES {
             return Err(TOO_LARGE);
         }
+        // Read here, in memory: a .1pux is unpacked from these bytes too.
         let bytes = zeroize::Zeroizing::new(std::fs::read(path).map_err(|_| UNREADABLE)?);
-        // As the web vault reads a file: UTF-8, with anything that isn't
-        // read as the replacement character.
-        let text = zeroize::Zeroizing::new(String::from_utf8_lossy(&bytes).into_owned());
-        Ok(match import::read(format, &text, file_password, vault)? {
+        Ok(match import::read(format, &bytes, file_password, vault)? {
             Read::Parsed(parsed) => {
                 self.pending_import = Some(parsed);
                 ImportRead::Read
