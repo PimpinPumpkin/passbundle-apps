@@ -323,14 +323,20 @@ class _ExportDialogState extends State<ExportDialog> {
   }
 }
 
-/// A format the app imports: its id for the core, its name, and the group
-/// it's listed in.
+/// A format the app imports: its id for the core, its name, the group it's
+/// listed in, and the app it's exported from, as its steps name it.
 class ImportFormat {
-  const ImportFormat(this.id, this.name, {this.group = 'PassBundle'});
+  const ImportFormat(
+    this.id,
+    this.name, {
+    this.group = 'PassBundle',
+    String? from,
+  }) : from = from ?? name;
 
   final String id;
   final String name;
   final String group;
+  final String from;
 }
 
 /// The formats, in the order offered.
@@ -345,14 +351,28 @@ const importFormats = [
   ImportFormat('firefox', 'Firefox', group: 'Browsers'),
   ImportFormat('safari', 'Safari or the Passwords app', group: 'Browsers'),
   ImportFormat(
+    '1password-1pux',
+    '1Password (.1pux)',
+    group: 'Password managers',
+    from: '1Password',
+  ),
+  ImportFormat(
     '1password-csv',
     '1Password 8 (.csv)',
     group: 'Password managers',
+    from: '1Password',
+  ),
+  ImportFormat(
+    'lastpass-csv',
+    'LastPass (.csv)',
+    group: 'Password managers',
+    from: 'LastPass',
   ),
 ];
 
-/// A browser's export, step by step, as the web vault's guided import has
-/// them, for this computer.
+/// An export, step by step, for this computer: a browser's as the web
+/// vault's guided import has them, and a password manager's as its sign-up
+/// import does.
 List<String> exportSteps(String format) {
   final mac = !isPhone && Platform.isMacOS;
   final windows = !isPhone && Platform.isWindows;
@@ -401,6 +421,20 @@ List<String> exportSteps(String format) {
       'Choose File, then Export All Passwords to File (in Safari: the … button, then Export All Passwords).',
       'Choose Continue. Confirm with Touch ID or your Mac\'s password.',
       'Save the file, Passwords.csv, somewhere you\'ll find it, such as Downloads.',
+    ],
+    '1password-1pux' => const [
+      'In the 1Password app on your computer, choose File, then Export, then your account.',
+      'Enter your 1Password password if it asks.',
+      'Choose 1PUX as the format, then Export Data, and save the file.',
+    ],
+    '1password-csv' => const [
+      'In the 1Password app on your computer, choose File, then Export, then your account.',
+      'Enter your 1Password password if it asks.',
+      'Choose CSV as the format, then Export Data, and save the file. A CSV has only logins and passwords; a 1PUX export brings cards, identities, secure notes, and custom fields too.',
+    ],
+    'lastpass-csv' => const [
+      'Sign in to LastPass in your browser, and open Advanced options, then Export.',
+      'Enter your LastPass master password, and save the file it downloads.',
     ],
     _ => const [],
   };
@@ -668,7 +702,7 @@ class _ImportDialogState extends State<ImportDialog> {
                         key: const ValueKey('import-in-web-vault'),
                         title: const Text('Another format, in the web vault'),
                         subtitle: const Text(
-                          'LastPass, 1Password\'s .1pux, KeePass, Dashlane, and more',
+                          'KeePass, Dashlane, Proton Pass, and more',
                         ),
                         trailing: const Icon(
                           Icons.open_in_new_rounded,
@@ -683,7 +717,7 @@ class _ImportDialogState extends State<ImportDialog> {
         ),
         if (steps.isNotEmpty)
           SettingsGroup(
-            title: 'Export from ${chosen.name}',
+            title: 'Export from ${chosen.from}',
             footer: 'Then choose the file here. It has every password in plain text, so delete it once they\'re in.',
             children: [
               for (final (i, step) in steps.indexed)
@@ -775,6 +809,12 @@ class _ImportDialogState extends State<ImportDialog> {
           ('unknownKind', final c) =>
             '$c ${plural(c, 'is a kind', 'are kinds')} of item PassBundle doesn\'t know, so ${plural(c, 'it\'s', 'they\'re')} left out.',
           ('firefoxAccount', _) => 'Firefox\'s own account entry is left out.',
+          ('attachment', final c) =>
+            '$c attached ${plural(c, 'file is', 'files are')} left out: PassBundle doesn\'t import attachments yet.',
+          ('sshKeyUnreadable', final c) =>
+            '$c SSH ${plural(c, 'key', 'keys')} couldn\'t be read, so ${plural(c, 'it\'s', 'they\'re')} left out. PassBundle reads Ed25519 and RSA keys.',
+          ('unreadable', final c) =>
+            '$c ${plural(c, 'item', 'items')} couldn\'t be read, so ${plural(c, 'it\'s', 'they\'re')} left out.',
           ('restricted', final c) =>
             '$c ${plural(c, 'item is', 'items are')} of a kind an organization you\'re in doesn\'t allow, so ${plural(c, 'it\'s', 'they\'re')} left out.',
           (_, final c) => '$c ${plural(c, 'item is', 'items are')} left out.',
