@@ -1,12 +1,15 @@
 // Several items selected in a list, and one thing done to all of them
-// (docs/core.md, "Selecting several items"): favorites, a folder or shared
-// folder, the trash. The lists keep which items are selected (vault.dart);
-// here is what's done with them: the bar with the actions, where to move
-// them, the question asked first, and the words for what happened.
+// (docs/core.md, "Selecting several items"): favorites, Archive, a folder or
+// shared folder, the trash; and in the trash, restoring and deleting for
+// good. The lists keep which items are selected (vault.dart); here is what's
+// done with them: the bar with the actions, where to move them, the
+// question asked first, and the words for what happened.
 //
 // What a person may do with each item is the core's to say (`Core.bulkPlan`
 // before anything is sent, `Core.bulk` after): nothing here decides it. The
-// items left as they are get said with why, before and after.
+// items left as they are get said with why, before and after. In "All
+// accounts" each item is acted on in its own account, with that account's
+// own call.
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -31,23 +34,66 @@ bool commandHeld() {
   };
 }
 
-enum BulkKind { favorite, unfavorite, trash, folder, sharedFolder }
+/// An item in a selection, by its account on this device and its id: "All
+/// accounts" lists several accounts' items together, and two accounts in
+/// one organization list its items under the same id.
+String keyOf(String account, String id) => '$account $id';
+
+/// A listed item's key ([keyOf]): its own account in "All accounts", else
+/// the account the screens show.
+String selectionKey(Map<String, dynamic> item) =>
+    keyOf(item['account'] as String? ?? Core.account, item['id'] as String);
+
+/// A key's account and item id.
+(String, String) splitKey(String key) {
+  final at = key.indexOf(' ');
+  return (key.substring(0, at), key.substring(at + 1));
+}
+
+/// The items of a selection by account, each account's in the order given.
+Map<String, List<String>> byAccount(Iterable<String> keys) {
+  final by = <String, List<String>>{};
+  for (final key in keys) {
+    final (account, id) = splitKey(key);
+    by.putIfAbsent(account, () => []).add(id);
+  }
+  return by;
+}
+
+enum BulkKind {
+  favorite,
+  unfavorite,
+  archive,
+  unarchive,
+  trash,
+  restore,
+  deleteForever,
+  folder,
+  sharedFolder,
+}
 
 /// One thing to do to every selected item.
 class BulkAction {
-  const BulkAction.favorite(bool on)
-    : kind = on ? BulkKind.favorite : BulkKind.unfavorite,
-      to = null,
+  const BulkAction._(this.kind)
+    : to = null,
       toName = null,
       from = null,
       owner = null;
 
-  const BulkAction.trash()
-    : kind = BulkKind.trash,
-      to = null,
-      toName = null,
-      from = null,
-      owner = null;
+  const BulkAction.favorite(bool on)
+    : this._(on ? BulkKind.favorite : BulkKind.unfavorite);
+
+  /// Into Archive, or out of it ([on] false): the person's own mark.
+  const BulkAction.archive(bool on)
+    : this._(on ? BulkKind.archive : BulkKind.unarchive);
+
+  const BulkAction.trash() : this._(BulkKind.trash);
+
+  /// Out of the trash, back where they were.
+  const BulkAction.restore() : this._(BulkKind.restore);
+
+  /// Out of the trash for good.
+  const BulkAction.deleteForever() : this._(BulkKind.deleteForever);
 
   /// Into one of the person's folders, or none ([to] null).
   const BulkAction.folder(this.to, this.toName)
@@ -79,55 +125,91 @@ class BulkAction {
   Map<String, dynamic> get json => switch (kind) {
     BulkKind.favorite => {'do': 'favorite', 'favorite': true},
     BulkKind.unfavorite => {'do': 'favorite', 'favorite': false},
+    BulkKind.archive => {'do': 'archive', 'archived': true},
+    BulkKind.unarchive => {'do': 'archive', 'archived': false},
     BulkKind.trash => {'do': 'trash'},
+    BulkKind.restore => {'do': 'restore'},
+    BulkKind.deleteForever => {'do': 'deleteForever'},
     BulkKind.folder => {'do': 'folder', 'folderId': to},
     BulkKind.sharedFolder => {'do': 'sharedFolder', 'to': to, 'from': from},
   };
+
+  /// It asks first, every time, with how many: the trash, and deleting for
+  /// good, which can't be undone.
+  bool get alwaysAsks =>
+      kind == BulkKind.trash || kind == BulkKind.deleteForever;
+
+  /// Its last step is the red one.
+  bool get danger => alwaysAsks;
+
+  /// What it's done to leaves the list it's in: Archive, the trash, and
+  /// the trash's own actions.
+  bool get leavesTheList => const {
+    BulkKind.archive,
+    BulkKind.unarchive,
+    BulkKind.trash,
+    BulkKind.restore,
+    BulkKind.deleteForever,
+  }.contains(kind);
 
   /// On its button.
   String get button => switch (kind) {
     BulkKind.favorite => 'Add to favorites',
     BulkKind.unfavorite => 'Remove from favorites',
+    BulkKind.archive => 'Archive',
+    BulkKind.unarchive => 'Move out of Archive',
     BulkKind.trash => 'Move to trash',
+    BulkKind.restore => 'Restore',
+    BulkKind.deleteForever => 'Delete forever',
     BulkKind.folder || BulkKind.sharedFolder => 'Move',
   };
 
   String get _verb => switch (kind) {
     BulkKind.favorite => 'Add',
     BulkKind.unfavorite => 'Remove',
+    BulkKind.restore => 'Restore',
+    BulkKind.deleteForever => 'Delete',
     _ => 'Move',
   };
 
   String get _past => switch (kind) {
     BulkKind.favorite => 'added',
     BulkKind.unfavorite => 'removed',
+    BulkKind.restore => 'restored',
+    BulkKind.deleteForever => 'deleted',
     _ => 'moved',
   };
 
+  /// Where they go, after the verb and how many: " to the trash", or
+  /// nothing for restoring.
   String get _where => switch (kind) {
-    BulkKind.favorite => 'to Favorites',
-    BulkKind.unfavorite => 'from Favorites',
-    BulkKind.trash => 'to the trash',
-    BulkKind.folder when to == null => 'to Personal, in no folder',
-    BulkKind.folder || BulkKind.sharedFolder => 'to $toName',
+    BulkKind.favorite => ' to Favorites',
+    BulkKind.unfavorite => ' from Favorites',
+    BulkKind.archive => ' to Archive',
+    BulkKind.unarchive => ' out of Archive',
+    BulkKind.trash => ' to the trash',
+    BulkKind.restore => '',
+    BulkKind.deleteForever => ' forever',
+    BulkKind.folder when to == null => ' to Personal, in no folder',
+    BulkKind.folder || BulkKind.sharedFolder => ' to $toName',
   };
 
-  /// "Move 3 items to the trash?"
-  String ask(int n) => '$_verb ${items(n)} $_where?';
+  /// "Move 3 items to the trash?", "Restore 3 items?"
+  String ask(int n) => '$_verb ${items(n)}$_where?';
 
-  /// "Moved 3 items to the trash."
+  /// "Moved 3 items to the trash.", "Restored 3 items."
   String did(int n) =>
-      '${_past[0].toUpperCase()}${_past.substring(1)} ${items(n)} $_where.';
+      '${_past[0].toUpperCase()}${_past.substring(1)} ${items(n)}$_where.';
 
   /// "None of these 3 items can be moved to the trash."
   String cant(int n) => n == 1
-      ? 'This item can\'t be $_past $_where'
-      : 'None of these $n items can be $_past $_where';
+      ? 'This item can\'t be $_past$_where'
+      : 'None of these $n items can be $_past$_where';
 
   /// "2 items weren't moved to the trash."
   String didnt(int n) => n == 1
-      ? '1 item wasn\'t $_past $_where'
-      : '$n items weren\'t $_past $_where';
+      ? '1 item wasn\'t $_past$_where'
+      : '$n items weren\'t $_past$_where';
 
   /// Why items are left as they are, by the core's name for it
   /// (core/src/app/bulk.rs, `Skip`), after "left as it is:".
@@ -139,7 +221,18 @@ class BulkAction {
         one
             ? 'it asks for your master password'
             : 'they ask for your master password',
+      // Items that ask for it, in more than one account: one master
+      // password doesn't include them all (`planAcross`).
+      'manyMasterPasswords' =>
+        '${one ? 'it asks' : 'they ask'} for the master password of '
+            '${one ? 'its account' : 'their accounts'}; select one '
+            'account\'s items at a time to include $it',
       'noDelete' => 'your organization doesn\'t let you delete $it',
+      'noRestore' => 'your organization doesn\'t let you restore $it',
+      'notInTrash' =>
+        one
+            ? 'it isn\'t in the trash anymore'
+            : 'they aren\'t in the trash anymore',
       'shared' =>
         one
             ? 'it belongs to an organization, and stays in its shared folders'
@@ -182,8 +275,141 @@ Map<String, int> leftBy(Answer answer) {
 List<String> _ids(Answer answer, String name) =>
     ((answer.body[name] as List?) ?? const []).cast<String>();
 
-/// What a bulk action did (`Core.bulk`'s answer), in words: what went, what
-/// was left and why, and what didn't go.
+/// Each item an answer leaves as it is, with its key ([keyOf]) for its id
+/// and its account; those that ask for the master password said apart when
+/// they're in more than one account, since one password can't include
+/// them all.
+List<Map<String, dynamic>> _leftIn(
+  Map<String, Answer> answers,
+) {
+  final left = [
+    for (final MapEntry(key: account, value: answer) in answers.entries)
+      for (final s in ((answer.body['skipped'] as List?) ?? const []))
+        {
+          'id': keyOf(account, (s as Map)['id'] as String),
+          'why': s['why'],
+          'account': account,
+        },
+  ];
+  final asking = {
+    for (final s in left)
+      if (s['why'] == 'masterPassword') s['account'],
+  };
+  if (asking.length < 2) return left;
+  return [
+    for (final s in left)
+      s['why'] == 'masterPassword' ? {...s, 'why': 'manyMasterPasswords'} : s,
+  ];
+}
+
+/// What [action] would do to the selected items ([ids], by account), each
+/// in its own account, from the vaults kept here with nothing sent
+/// (`Core.bulkPlan`): one answer as one account's is, with keys ([keyOf])
+/// for ids, and each item it leaves with its `account`. An account whose
+/// plan isn't ok answers for all.
+Answer planAcross(
+  Core core,
+  Map<String, List<String>> ids,
+  Map<String, dynamic> action,
+) {
+  final plans = <String, Answer>{};
+  for (final MapEntry(key: account, value: list) in ids.entries) {
+    final plan = core.bulkPlan(list, action, account);
+    if (!plan.ok) return plan;
+    plans[account] = plan;
+  }
+  return Answer({
+    'ok': true,
+    'go': [
+      for (final MapEntry(key: account, value: plan) in plans.entries)
+        for (final id in _ids(plan, 'go')) keyOf(account, id),
+    ],
+    'skipped': _leftIn(plans),
+  });
+}
+
+/// The account whose master password includes the items a plan
+/// ([planAcross]) leaves for wanting it: null when there are none, or
+/// they're in more than one account.
+String? askingIn(Answer plan) {
+  final accounts = {
+    for (final s in ((plan.body['skipped'] as List?) ?? const []))
+      if ((s as Map)['why'] == 'masterPassword') s['account'] as String?,
+  };
+  return accounts.length == 1 ? accounts.single : null;
+}
+
+/// Does [action] to the selected items ([ids], by account), each in its
+/// own account (`Core.bulk`), each account's then syncing. [password] is
+/// for the items of [passwordFor] that ask for it: that account goes first,
+/// so a wrong one stops everything before anything is done, as with one
+/// account. One answer as one account's is, with keys ([keyOf]) for ids.
+/// An account the call fails for (signed out there, say) has its items
+/// among `failed`, with its words; when it fails for every account, the
+/// answer is the first one's.
+Future<Answer> bulkAcross(
+  Map<String, List<String>> ids,
+  Map<String, dynamic> action, {
+  String password = '',
+  String? passwordFor,
+}) async {
+  final accounts = [
+    if (passwordFor != null && ids.containsKey(passwordFor)) passwordFor,
+    for (final account in ids.keys)
+      if (account != passwordFor) account,
+  ];
+  final answered = <String, Answer>{};
+  final done = <String>[];
+  final failed = <String>[];
+  String? error;
+  var offline = false;
+  var signedOut = false;
+  var synced = true;
+  Answer? refused;
+  for (final account in accounts) {
+    final given = account == passwordFor ? password : '';
+    final answer = await Core.bulk(
+      ids[account]!,
+      action,
+      password: given,
+      forAccount: account,
+    );
+    offline |= answer.offline;
+    signedOut |= answer.signedOut;
+    if (!answer.ok) {
+      // A wrong master password does nothing at all.
+      if (given.isNotEmpty && !answer.offline && !answer.signedOut) {
+        return answer;
+      }
+      refused ??= answer;
+      failed.addAll([for (final id in ids[account]!) keyOf(account, id)]);
+      error ??= answer.error;
+      continue;
+    }
+    answered[account] = answer;
+    done.addAll([for (final id in _ids(answer, 'done')) keyOf(account, id)]);
+    failed.addAll([
+      for (final id in _ids(answer, 'failed')) keyOf(account, id),
+    ]);
+    error ??= answer.error;
+    synced &= answer.body['synced'] != false;
+  }
+  if (answered.isEmpty && refused != null) return refused;
+  return Answer({
+    'ok': true,
+    'done': done,
+    'skipped': _leftIn(answered),
+    'failed': failed,
+    'error': error,
+    'offline': offline,
+    'signedOut': signedOut,
+    'synced': synced,
+  });
+}
+
+/// What a bulk action did ([bulkAcross]' answer), in words: what went, what
+/// was left and why, and what didn't go. [done] and [failed] are keys
+/// ([keyOf]).
 class BulkOutcome {
   BulkOutcome(this.action, Answer answer)
     : done = _ids(answer, 'done'),
@@ -258,96 +484,89 @@ class SelectBox extends StatelessWidget {
   }
 }
 
-/// A list's header on a computer while items are selected: how many, and
-/// what can be done with them. An action the person may not do with any of
-/// them isn't offered ([onMove] or [onTrash] null).
+/// One of the selection bar's actions: its words (a computer's tooltip, a
+/// phone's label), its icon, and what it does.
+class BarAction {
+  const BarAction(this.label, this.icon, this.onPressed);
+
+  final String label;
+  final Widget icon;
+  final VoidCallback onPressed;
+}
+
+/// A list's header on a computer while items are selected, or while Select
+/// is on: how many, and what can be done with them ([actions]: only those
+/// the person may do with any of them, and none while nothing is selected).
 class SelectionBar extends StatelessWidget {
   const SelectionBar({
     super.key,
     required this.count,
-    required this.allFavorites,
     required this.onClear,
     required this.onSelectAll,
-    required this.onFavorite,
-    required this.onMove,
-    required this.onTrash,
+    this.actions = const [],
   });
 
   final int count;
-
-  /// Every selected item is a favorite: the star takes them out.
-  final bool allFavorites;
   final VoidCallback onClear;
   final VoidCallback onSelectAll;
-  final ValueChanged<bool> onFavorite;
-  final VoidCallback? onMove;
-  final VoidCallback? onTrash;
+  final List<BarAction> actions;
 
   @override
   Widget build(BuildContext context) {
-    final c = context.colors;
-    Widget button(String tooltip, Widget icon, VoidCallback onPressed) =>
-        IconButton(
-          tooltip: tooltip,
-          onPressed: onPressed,
-          style: IconButton.styleFrom(
-            minimumSize: const Size.square(40),
-            fixedSize: const Size.square(40),
-            padding: EdgeInsets.zero,
-            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-          ),
-          icon: icon,
-        );
+    final shown = count == 0 ? const <BarAction>[] : actions;
     return Padding(
       padding: const EdgeInsets.fromLTRB(10, 4, 10, 0),
       child: LayoutBuilder(
-        builder: (context, box) => Row(
-          children: [
-            button(
-              'Clear the selection',
-              const Icon(Icons.close_rounded, size: 22),
-              onClear,
-            ),
-            const SizedBox(width: 2),
-            Expanded(
-              child: Text(
-                // The narrowest window has room for the number alone.
-                box.maxWidth < 300 ? '$count' : '$count selected',
-                semanticsLabel: '$count selected',
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(
-                  fontSize: 15,
-                  fontWeight: FontWeight.w700,
+        builder: (context, box) {
+          // Every button fits the narrowest window: smaller there, with room
+          // left for the number.
+          final size = ((box.maxWidth - 30) / (shown.length + 2)).clamp(
+            28.0,
+            40.0,
+          );
+          Widget button(String tooltip, Widget icon, VoidCallback onPressed) =>
+              IconButton(
+                tooltip: tooltip,
+                onPressed: onPressed,
+                style: IconButton.styleFrom(
+                  minimumSize: Size.square(size),
+                  fixedSize: Size.square(size),
+                  padding: EdgeInsets.zero,
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
+                icon: icon,
+              );
+          final said = count == 0 ? 'Choose items' : '$count selected';
+          return Row(
+            children: [
+              button(
+                'Clear the selection',
+                const Icon(Icons.close_rounded, size: 22),
+                onClear,
+              ),
+              const SizedBox(width: 2),
+              Expanded(
+                child: Text(
+                  // The narrowest window has room for the number alone.
+                  box.maxWidth < 300 && count > 0 ? '$count' : said,
+                  semanticsLabel: said,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 15,
+                    fontWeight: FontWeight.w700,
+                  ),
                 ),
               ),
-            ),
-            button(
-              'Select all',
-              const Icon(Icons.select_all_rounded, size: 22),
-              onSelectAll,
-            ),
-            button(
-              allFavorites ? 'Remove from favorites' : 'Add to favorites',
-              Glyph(
-                Glyphs.star,
-                size: 20,
-                color: allFavorites ? favoriteEdge : c.muted,
-                fill: allFavorites ? favoriteColor : null,
-                strokeWidth: 1.6,
-              ),
-              () => onFavorite(!allFavorites),
-            ),
-            if (onMove != null)
-              button('Move', Glyph(Glyphs.folder, size: 20), onMove!),
-            if (onTrash != null)
               button(
-                'Move to trash',
-                const Icon(Icons.delete_outline_rounded, size: 22),
-                onTrash!,
+                'Select all',
+                const Icon(Icons.select_all_rounded, size: 22),
+                onSelectAll,
               ),
-          ],
-        ),
+              for (final a in shown) button(a.label, a.icon, a.onPressed),
+            ],
+          );
+        },
       ),
     );
   }
@@ -356,48 +575,38 @@ class SelectionBar extends StatelessWidget {
 /// A phone's bar at the bottom while items are selected, where the tabs
 /// are otherwise: what can be done with them.
 class PhoneSelectionBar extends StatelessWidget {
-  const PhoneSelectionBar({
-    super.key,
-    required this.allFavorites,
-    required this.onFavorite,
-    required this.onMove,
-    required this.onTrash,
-  });
+  const PhoneSelectionBar({super.key, required this.actions});
 
-  final bool allFavorites;
-  final ValueChanged<bool> onFavorite;
-  final VoidCallback? onMove;
-  final VoidCallback? onTrash;
+  final List<BarAction> actions;
 
   @override
   Widget build(BuildContext context) {
     final c = context.colors;
-    Widget action(String label, Widget icon, VoidCallback onPressed) =>
-        Expanded(
-          child: InkWell(
-            onTap: onPressed,
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 10),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  icon,
-                  const SizedBox(height: 6),
-                  Text(
-                    label,
-                    maxLines: 2,
-                    textAlign: TextAlign.center,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      fontSize: 12,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ],
+    Widget action(BarAction a) => Expanded(
+      child: InkWell(
+        onTap: a.onPressed,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 10),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              a.icon,
+              const SizedBox(height: 6),
+              Text(
+                a.label,
+                maxLines: 2,
+                textAlign: TextAlign.center,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                ),
               ),
-            ),
+            ],
           ),
-        );
+        ),
+      ),
+    );
     return Material(
       color: c.pane,
       child: SafeArea(
@@ -406,29 +615,7 @@ class PhoneSelectionBar extends StatelessWidget {
           constraints: const BoxConstraints(minHeight: 68),
           child: IconTheme.merge(
             data: const IconThemeData(size: 22),
-            child: Row(
-              children: [
-                action(
-                  allFavorites ? 'Remove from favorites' : 'Add to favorites',
-                  Glyph(
-                    Glyphs.star,
-                    size: 22,
-                    color: allFavorites ? favoriteEdge : null,
-                    fill: allFavorites ? favoriteColor : null,
-                    strokeWidth: 1.6,
-                  ),
-                  () => onFavorite(!allFavorites),
-                ),
-                if (onMove != null)
-                  action('Move', const Glyph(Glyphs.folder, size: 22), onMove!),
-                if (onTrash != null)
-                  action(
-                    'Move to trash',
-                    const Icon(Icons.delete_outline_rounded),
-                    onTrash!,
-                  ),
-              ],
-            ),
+            child: Row(children: [for (final a in actions) action(a)]),
           ),
         ),
       ),
@@ -589,19 +776,27 @@ Future<BulkAction?> chooseWhereToMove(
   },
 );
 
-/// Asks before doing [action] to the selected items ([ids]), saying how
-/// many it's for and how many are left as they are and why ([plan], from
-/// `Core.bulkPlan`), then does it. Items that ask for the master password
-/// are included once it's given here, one time for all of them. The core's
+/// Asks before doing [action] to the selected items ([ids], by account),
+/// saying how many it's for and how many are left as they are and why
+/// ([plan], from [planAcross]), then does it ([bulkAcross]). Items that ask
+/// for the master password are included once it's given here, one time
+/// for all of them, when they're all in one account; [passwordOf] names
+/// that account for the field when it isn't the one the screens show. The
 /// answer once it's done, or null if the person didn't go on.
 Future<Answer?> confirmBulk(
   BuildContext context, {
   required BulkAction action,
-  required List<String> ids,
+  required Map<String, List<String>> ids,
   required Answer plan,
+  String? passwordOf,
 }) => showDialog<Answer>(
   context: context,
-  builder: (_) => _BulkDialog(action: action, ids: ids, plan: plan),
+  builder: (_) => _BulkDialog(
+    action: action,
+    ids: ids,
+    plan: plan,
+    passwordOf: passwordOf,
+  ),
 );
 
 class _BulkDialog extends StatefulWidget {
@@ -609,11 +804,13 @@ class _BulkDialog extends StatefulWidget {
     required this.action,
     required this.ids,
     required this.plan,
+    this.passwordOf,
   });
 
   final BulkAction action;
-  final List<String> ids;
+  final Map<String, List<String>> ids;
   final Answer plan;
+  final String? passwordOf;
 
   @override
   State<_BulkDialog> createState() => _BulkDialogState();
@@ -626,6 +823,9 @@ class _BulkDialogState extends State<_BulkDialog> {
 
   /// The items it's done for whatever is typed here.
   late final sure = ((widget.plan.body['go'] as List?) ?? const []).length;
+
+  /// The account whose master password includes the items that ask for it.
+  late final passwordFor = askingIn(widget.plan);
 
   /// The items left, by why; those that ask for the master password apart.
   late final left = leftBy(widget.plan)..remove('masterPassword');
@@ -646,7 +846,12 @@ class _BulkDialogState extends State<_BulkDialog> {
       error = null;
     });
     final answer = await whileBusy(
-      () => Core.bulk(widget.ids, widget.action.json, password: given),
+      () => bulkAcross(
+        widget.ids,
+        widget.action.json,
+        password: given,
+        passwordFor: passwordFor,
+      ),
     );
     if (!mounted) return;
     password.clear();
@@ -669,12 +874,19 @@ class _BulkDialogState extends State<_BulkDialog> {
     final action = widget.action;
     final nothing = sure == 0 && asking == 0;
     final count = sure > 0 ? sure : asking;
+    final all = [for (final list in widget.ids.values) ...list].length;
+    final yours = switch (widget.passwordOf) {
+      null => 'your master password',
+      final name => 'the master password for $name',
+    };
     final field = TextField(
       controller: password,
       obscureText: true,
       autofocus: sure == 0,
       decoration: InputDecoration(
-        labelText: 'Master password',
+        labelText: widget.passwordOf == null
+            ? 'Master password'
+            : 'Master password for ${widget.passwordOf}',
         errorText: error,
       ),
       onSubmitted: (_) => go(),
@@ -691,31 +903,37 @@ class _BulkDialogState extends State<_BulkDialog> {
       if (asking > 0 && sure > 0) ...[
         Text(
           asking == 1
-              ? '1 more item asks for your master password. Enter it to '
-                    'include that item, or leave it empty to leave the item '
-                    'as it is.'
-              : '$asking more items ask for your master password. Enter it '
-                    'to include them, or leave it empty to leave them as '
-                    'they are.',
+              ? '1 more item asks for $yours. Enter it to include that '
+                    'item, or leave it empty to leave the item as it is.'
+              : '$asking more items ask for $yours. Enter it to include '
+                    'them, or leave it empty to leave them as they are.',
         ),
         field,
       ] else if (asking > 0) ...[
         Text(
           asking == 1
-              ? 'This item asks for your master password.'
-              : 'These items ask for your master password.',
+              ? 'This item asks for $yours.'
+              : 'These items ask for $yours.',
         ),
         field,
       ],
       if (action.kind == BulkKind.trash && !nothing)
         Text(
           count == 1 && asking == 0
-              ? 'You can restore it from the trash in the web vault.'
-              : 'You can restore them from the trash in the web vault.',
+              ? 'You can restore it from the trash.'
+              : 'You can restore them from the trash.',
+        ),
+      if (action.kind == BulkKind.deleteForever && !nothing)
+        Text(
+          count == 1 && asking == 0
+              ? 'It\'s deleted for good, with its attachments and history. '
+                    'This can\'t be undone.'
+              : 'They\'re deleted for good, with their attachments and '
+                    'history. This can\'t be undone.',
         ),
     ];
     return AlertDialog(
-      title: Text(nothing ? action.cant(widget.ids.length) : action.ask(count)),
+      title: Text(nothing ? action.cant(all) : action.ask(count)),
       content: lines.isEmpty
           ? null
           : SizedBox(
@@ -749,10 +967,8 @@ class _BulkDialogState extends State<_BulkDialog> {
                 label: action.button,
                 working: working,
                 onPressed: go,
-                // Moving to the trash: the red last step.
-                style: action.kind == BulkKind.trash
-                    ? dangerButton(context)
-                    : null,
+                // The trash, and deleting for good: the red last step.
+                style: action.danger ? dangerButton(context) : null,
               ),
             ],
     );

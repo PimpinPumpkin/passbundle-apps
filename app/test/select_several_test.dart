@@ -451,7 +451,7 @@ void main() {
         findsOneWidget,
       );
       expect(
-        find.text('You can restore them from the trash in the web vault.'),
+        find.text('You can restore them from the trash.'),
         findsOneWidget,
       );
       // No master password is asked where no item asks for it.

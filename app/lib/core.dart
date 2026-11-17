@@ -306,6 +306,7 @@ class Core {
   late final _deleteHistory = _lib.lookupFunction<_Str3, _Str3>('pb_delete_history');
   late final _setFavorite = _lib.lookupFunction<_Str3, _Str3>('pb_set_favorite');
   late final _archived = _lib.lookupFunction<_Str2, _Str2>('pb_archived');
+  late final _trashed = _lib.lookupFunction<_Str2, _Str2>('pb_trashed');
   late final _setArchived = _lib.lookupFunction<_Str3, _Str3>('pb_set_archived');
   late final _exportInfo = _lib.lookupFunction<_Str1, _Str1>('pb_export_info');
   late final _confirmExport = _lib.lookupFunction<_Str2, _Str2>('pb_confirm_export');
@@ -1190,11 +1191,17 @@ class Core {
   /// What [bulk] would do with several items, from the vault kept here with
   /// nothing sent: `go`, the ids it would be done for, and `skipped`, each
   /// item it would leave as it is, with `why`. [action] is what to do:
-  /// `{do: 'favorite', favorite}`, `{do: 'trash'}`, `{do: 'folder',
-  /// folderId}`, or `{do: 'sharedFolder', to, from}`.
-  Answer bulkPlan(List<String> ids, Map<String, dynamic> action) => Answer(
+  /// `{do: 'favorite', favorite}`, `{do: 'archive', archived}`, `{do:
+  /// 'trash'}`, `{do: 'restore'}`, `{do: 'deleteForever'}`, `{do: 'folder',
+  /// folderId}`, or `{do: 'sharedFolder', to, from}`. For the account the
+  /// screens show, or [id] ("All accounts" acts on each item in its own).
+  Answer bulkPlan(
+    List<String> ids,
+    Map<String, dynamic> action, [
+    String? id,
+  ]) => Answer(
     _with([
-          account,
+          id ?? account,
           jsonEncode(ids),
           jsonEncode(action),
         ], (p) => _answer(_bulkPlan(p[0], p[1], p[2])))
@@ -1204,19 +1211,24 @@ class Core {
   /// Does one thing to several items, then syncs once. [password] is the
   /// master password, for the items that ask for it; without it they're
   /// left as they are, and a wrong one does nothing. Answers `done`,
-  /// `skipped` (as [bulkPlan]), and `failed`, with the words to show.
+  /// `skipped` (as [bulkPlan]), and `failed`, with the words to show. For
+  /// the account the screens show, or [forAccount].
   static Future<Answer> bulk(
     List<String> ids,
     Map<String, dynamic> action, {
     String password = '',
-  }) => _background(
-    (c, a) => c._with([
-      a,
-      jsonEncode(ids),
-      jsonEncode(action),
-      password,
-    ], (p) => c._answer(c._bulk(p[0], p[1], p[2], p[3]))),
-  );
+    String? forAccount,
+  }) {
+    final asked = forAccount;
+    return _background(
+      (c, a) => c._with([
+        asked ?? a,
+        jsonEncode(ids),
+        jsonEncode(action),
+        password,
+      ], (p) => c._answer(c._bulk(p[0], p[1], p[2], p[3]))),
+    );
+  }
 
   /// Makes a folder, renames one, or deletes one (its items stay, in no
   /// folder); each syncs after.
@@ -1320,9 +1332,10 @@ class Core {
   /// Where items live (core/src/places.rs): `folders`, the person's own,
   /// and `organizations`, each with its shared folders (`collections`), each
   /// `{id, name, label, depth, parentId}`, nested by name, and a shared
-  /// folder with what the person can do in it (`grid`, `canCreate`).
-  Map<String, dynamic> places() =>
-      _with([account], (p) => _answer(_places(p[0])))
+  /// folder with what the person can do in it (`grid`, `canCreate`). For
+  /// the account the screens show, or [id].
+  Map<String, dynamic> places([String? id]) =>
+      _with([id ?? account], (p) => _answer(_places(p[0])))
           as Map<String, dynamic>;
 
   /// A website's icon for a login's tile (core/src/icons.rs): the image,
@@ -1547,6 +1560,13 @@ class Core {
   /// trash), as [list] lists the ones in use: the Archive view.
   List<Map<String, dynamic>> archived(String query) =>
       ((_with([account, query], (p) => _answer(_archived(p[0], p[1]))) as List?) ??
+              const [])
+          .cast<Map<String, dynamic>>();
+
+  /// The account's items in the trash that a search finds (archived ones
+  /// too), as [list] lists the ones in use: the Trash view.
+  List<Map<String, dynamic>> trashed(String query) =>
+      ((_with([account, query], (p) => _answer(_trashed(p[0], p[1]))) as List?) ??
               const [])
           .cast<Map<String, dynamic>>();
 

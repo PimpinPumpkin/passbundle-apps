@@ -30,6 +30,10 @@ enum Filter {
   /// Archived items, out of the lists, search, and filling (the core's
   /// `Vault::archived`).
   archive,
+
+  /// Items in the trash, in no other list, search, count, or filling (the
+  /// core's `Vault::trashed`): restored, or deleted for good, from here.
+  trash,
 }
 
 /// The core's places (Core.places), read.
@@ -174,15 +178,20 @@ bool hasExpired(Map<String, dynamic> item) =>
     (item['expiry'] as Map?)?['state'] == 'expired';
 
 /// Whether an item shows under a filter. A template an MSP keeps up to date
-/// in a client's Templates shared folder shows only there. Health shows the
-/// items in [health] (core/src/health.rs and expiration.rs).
+/// in a client's Templates shared folder shows only there, and in the
+/// trash, which lists everything in it. Health shows the items in [health]
+/// (core/src/health.rs and expiration.rs).
 bool shows(
   Map<String, dynamic> item,
   Filter filter,
   String? id, {
   Map<String, Map<String, dynamic>> health = const {},
 }) {
-  if (item['mspCopy'] == true && filter != Filter.collection) return false;
+  if (item['mspCopy'] == true &&
+      filter != Filter.collection &&
+      filter != Filter.trash) {
+    return false;
+  }
   return switch (filter) {
     Filter.all || Filter.everyAccount => true,
     Filter.favorites => item['favorite'] == true,
@@ -197,6 +206,7 @@ bool shows(
     Filter.collection =>
       ((item['collectionIds'] as List?) ?? const []).contains(id),
     Filter.archive => item['archived'] == true,
+    Filter.trash => item['deleted'] == true,
   };
 }
 

@@ -6,8 +6,9 @@
 // every item, and an item opens on a page of its own. Copying goes through
 // the core, so a password never passes through Dart; secrets reach the
 // screen only while revealed, and never when the person's shared folder
-// hides them. Several items can be selected in a list and moved, favorited
-// or put in the trash together (selection.dart).
+// hides them. Several items can be selected in a list and moved, favorited,
+// archived, or put in the trash together, and the trash restores them or
+// deletes them for good (selection.dart).
 import 'dart:async';
 import 'dart:math' as math;
 
@@ -65,9 +66,6 @@ class VaultStart {
 /// The menu, the list, and an item side by side, from this wide; a phone's
 /// screens below it.
 const wideWidth = 900.0;
-
-/// The web vault's trash: restoring and deleting for good are its, for now.
-const trashPath = '/#/vault?type=trash';
 
 /// The menu's width on a computer, and the room around it.
 const sidebarWidth = 248.0;
@@ -148,16 +146,24 @@ class VaultScreenState extends State<VaultScreen> {
   /// The item open beside the list, on a computer.
   String? selected;
 
-  /// The items selected in the list, by id, to do one thing to all of them
-  /// (selection.dart): always among those shown, and this account's.
+  /// The items selected in the list, by key (`selectionKey`: an item's
+  /// account and id, since "All accounts" lists several accounts' items), to
+  /// do one thing to all of them (selection.dart): always among those shown.
   final checked = <String>{};
 
-  /// Where a range starts (Shift and a click): the item last selected.
+  /// Select is on (a computer's Select button): every row has its
+  /// checkbox, and a click selects, even with nothing selected yet.
+  bool selectMode = false;
+
+  /// Where a range starts (Shift and a click): the item last selected, by
+  /// key.
   String? anchor;
 
-  /// Whether the selected items' bar offers the trash: not when the person
-  /// may delete none of them.
+  /// Whether the selected items' bar offers the trash (in the trash,
+  /// deleting for good), and restoring: not when the person may do it to
+  /// none of them.
   bool trashOffered = true;
+  bool restoreOffered = true;
 
   /// Counts the bulk actions that changed the open item, so its pane reads
   /// it again.
@@ -173,6 +179,11 @@ class VaultScreenState extends State<VaultScreen> {
   /// are in all, for its count.
   List<Map<String, dynamic>> archived = [];
   int archivedCount = 0;
+
+  /// The items in the trash the search finds, for Trash, and how many there
+  /// are in all, for its count.
+  List<Map<String, dynamic>> trashed = [];
+  int trashedCount = 0;
 
   /// Every unlocked account's items, with several accounts signed in ("All
   /// accounts"): what the search finds there while it's shown, else all.
@@ -398,6 +409,9 @@ class VaultScreenState extends State<VaultScreen> {
       final allArchived = widget.core.archived('');
       archived = searching.isEmpty ? allArchived : widget.core.archived(searching);
       archivedCount = allArchived.length;
+      final allTrashed = widget.core.trashed('');
+      trashed = searching.isEmpty ? allTrashed : widget.core.trashed(searching);
+      trashedCount = allTrashed.length;
       places = Places(widget.core.places());
       if (selected != null && widget.core.item(selected!) == null) {
         selected = null;
@@ -468,6 +482,7 @@ class VaultScreenState extends State<VaultScreen> {
     for (final i in switch (filter) {
       Filter.everyAccount => everyAccount,
       Filter.archive => archived,
+      Filter.trash => trashed,
       _ => all,
     })
       if (shows(i, filter, filterId, health: health) &&
@@ -520,6 +535,7 @@ class VaultScreenState extends State<VaultScreen> {
     Filter.organization => places.organization(filterId)?['name'] as String?,
     Filter.collection => places.collection(filterId)?['label'] as String?,
     Filter.archive => 'Archive',
+    Filter.trash => 'Trash',
   };
 
   /// Where a new item goes by default: the folder or shared folder shown,
@@ -552,6 +568,8 @@ class VaultScreenState extends State<VaultScreen> {
       Filter.folder || Filter.collection => 'Nothing in this folder yet.',
       Filter.archive =>
         'Nothing in Archive. An archived item stays in your vault, out of the lists, search, and filling.',
+      Filter.trash =>
+        'Nothing in the trash. An item moved to the trash waits here until you restore it or delete it forever.',
       _ => 'Nothing here yet.',
     };
   }
@@ -566,6 +584,7 @@ class VaultScreenState extends State<VaultScreen> {
       report = null;
       // What's selected is of the list shown.
       checked.clear();
+      selectMode = false;
       anchor = null;
     });
     // The search is every account's there, and this one's elsewhere.
@@ -585,49 +604,58 @@ class VaultScreenState extends State<VaultScreen> {
   );
 
   /// The selected items, in the list's order.
-  List<String> get checkedIds => [
+  List<Map<String, dynamic>> get checkedItems => [
     for (final i in shown)
-      if (ofThisAccount(i) && checked.contains(i['id'])) i['id'] as String,
+      if (checked.contains(selectionKey(i))) i,
   ];
+
+  /// The selected items by account, each account's in the list's order:
+  /// "All accounts" acts on each item in its own account.
+  Map<String, List<String>> get checkedByAccount =>
+      byAccount([for (final i in checkedItems) selectionKey(i)]);
 
   /// The selection stays among the items shown: one a search or a sync
   /// took out of the list isn't selected any more, so nothing is done to an
   /// item the person can't see. Inside a setState.
   void keepChecked() {
     if (checked.isEmpty) return;
-    final here = {
-      for (final i in shown)
-        if (ofThisAccount(i)) i['id'] as String,
-    };
+    final here = {for (final i in shown) selectionKey(i)};
     checked.retainAll(here);
     if (!here.contains(anchor)) anchor = null;
     offer();
   }
 
   /// What the selected items' bar offers, once the selection changes. The
-  /// trash isn't offered when the person may delete none of them, which the
-  /// core says (`Core.bulkPlan`, nothing sent); while a slow call runs it
-  /// isn't asked, and the question before the trash says so instead.
+  /// trash isn't offered when the person may delete none of them, nor
+  /// restoring and deleting for good in the trash when they may do neither,
+  /// which the core says (`Core.bulkPlan`, nothing sent); while a slow call
+  /// runs it isn't asked, and the question before it says so instead.
   void offer() {
     trashOffered = true;
+    restoreOffered = true;
     if (checked.isEmpty || busy.value) return;
-    final plan = widget.core.bulkPlan(
-      checkedIds,
-      const BulkAction.trash().json,
-    );
-    trashOffered =
-        !plan.ok ||
-        (plan.body['go'] as List).isNotEmpty ||
-        leftBy(plan).containsKey('masterPassword');
+    final ids = checkedByAccount;
+    bool offered(BulkAction action) {
+      final plan = planAcross(widget.core, ids, action.json);
+      return !plan.ok ||
+          (plan.body['go'] as List).isNotEmpty ||
+          leftBy(plan).containsKey('masterPassword');
+    }
+
+    if (filter == Filter.trash) {
+      restoreOffered = offered(const BulkAction.restore());
+      trashOffered = offered(const BulkAction.deleteForever());
+    } else {
+      trashOffered = offered(const BulkAction.trash());
+    }
   }
 
   /// Selects an item, or takes it out of the selection.
   void check(Map<String, dynamic> item) {
-    if (!ofThisAccount(item)) return;
-    final id = item['id'] as String;
+    final key = selectionKey(item);
     setState(() {
-      if (!checked.remove(id)) checked.add(id);
-      anchor = checked.contains(id) ? id : null;
+      if (!checked.remove(key)) checked.add(key);
+      anchor = checked.contains(key) ? key : null;
       offer();
     });
   }
@@ -635,19 +663,16 @@ class VaultScreenState extends State<VaultScreen> {
   /// Selects every item from the last one selected to this one (Shift and
   /// a click); with none to start from, this one.
   void checkTo(Map<String, dynamic> item) {
-    if (!ofThisAccount(item)) return;
     final list = shown;
-    final from = list.indexWhere((i) => ofThisAccount(i) && i['id'] == anchor);
-    final to = list.indexWhere(
-      (i) => ofThisAccount(i) && i['id'] == item['id'],
-    );
+    final from = list.indexWhere((i) => selectionKey(i) == anchor);
+    final to = list.indexWhere((i) => selectionKey(i) == selectionKey(item));
     if (anchor == null || from < 0 || to < 0) {
-      if (!checked.contains(item['id'])) check(item);
+      if (!checked.contains(selectionKey(item))) check(item);
       return;
     }
     setState(() {
       for (var i = math.min(from, to); i <= math.max(from, to); i++) {
-        if (ofThisAccount(list[i])) checked.add(list[i]['id'] as String);
+        checked.add(selectionKey(list[i]));
       }
       offer();
     });
@@ -655,45 +680,61 @@ class VaultScreenState extends State<VaultScreen> {
 
   /// Selects everything shown.
   void checkAll() => setState(() {
-    checked.addAll([
-      for (final i in shown)
-        if (ofThisAccount(i)) i['id'] as String,
-    ]);
+    checked.addAll([for (final i in shown) selectionKey(i)]);
     offer();
   });
 
+  /// Lets go of everything selected, and Select.
   void uncheckAll() {
-    if (checked.isEmpty) return;
+    if (checked.isEmpty && !selectMode) return;
     setState(() {
       checked.clear();
+      selectMode = false;
       anchor = null;
     });
   }
 
-  /// Every selected item is a favorite: the star takes them out.
-  bool get checkedAreFavorites => shown
-      .where((i) => ofThisAccount(i) && checked.contains(i['id']))
-      .every((i) => i['favorite'] == true);
+  /// Select, on a computer: every row's checkbox, and a click selects.
+  void startSelecting() => setState(() => selectMode = true);
 
-  /// Whether Move has anywhere to offer: a folder for the person's own
-  /// items, or a shared folder the person may add items to, in an
-  /// organization that has one of them.
-  bool get moveOffered => shown
-      .where((i) => ofThisAccount(i) && checked.contains(i['id']))
-      .any((i) {
-        final owner = i['organizationId'] as String?;
-        return owner == null || places.canCreateIn(owner);
-      });
+  /// Every selected item is a favorite: the star takes them out.
+  bool get checkedAreFavorites =>
+      checkedItems.every((i) => i['favorite'] == true);
+
+  /// The account every selected item is in, or null when they're in more
+  /// than one ("All accounts").
+  String? get checkedAccount {
+    final accounts = checkedByAccount.keys;
+    return accounts.length == 1 ? accounts.single : null;
+  }
+
+  /// Where an account's items can go: this account's places, or another's
+  /// ("All accounts").
+  Places placesOf(String account) =>
+      account == Core.account ? places : Places(widget.core.places(account));
+
+  /// Whether Move has anywhere to offer: only when every selected item is
+  /// in one account, a folder for the person's own items, or a shared
+  /// folder the person may add items to, in an organization that has one
+  /// of them.
+  bool get moveOffered {
+    final account = checkedAccount;
+    if (account == null) return false;
+    final where = placesOf(account);
+    return checkedItems.any((i) {
+      final owner = i['organizationId'] as String?;
+      return owner == null || where.canCreateIn(owner);
+    });
+  }
 
   /// Move, for the selected items: asks where, then does it.
   Future<void> moveChecked() async {
-    final items = shown
-        .where((i) => ofThisAccount(i) && checked.contains(i['id']))
-        .toList();
-    if (items.isEmpty) return;
+    final items = checkedItems;
+    final account = checkedAccount;
+    if (items.isEmpty || account == null) return;
     final action = await chooseWhereToMove(
       context,
-      places: places,
+      places: placesOf(account),
       count: items.length,
       personal: items.any((i) => i['organizationId'] == null),
       organizations: {
@@ -709,25 +750,88 @@ class VaultScreenState extends State<VaultScreen> {
     await doToChecked(action);
   }
 
-  /// Does one thing to every selected item (selection.dart). The core says
-  /// first which it may be done to (`Core.bulkPlan`): the trash always asks,
-  /// with how many; anything else asks only when some items would be left
-  /// as they are, saying how many and why, or ask for the master password.
+  /// What the selected items' bar offers, in the place shown: in the trash,
+  /// restoring and deleting for good; elsewhere favorites, Move, Archive (or
+  /// Move out of Archive in Archive), and the trash. Each only where the
+  /// person may do it to any of them.
+  List<BarAction> barActions({required bool phone}) {
+    final size = phone ? 22.0 : 20.0;
+    if (filter == Filter.trash) {
+      return [
+        if (restoreOffered)
+          BarAction(
+            'Restore',
+            const Icon(Icons.restore_from_trash_rounded, size: 22),
+            () => doToChecked(const BulkAction.restore()),
+          ),
+        if (trashOffered)
+          BarAction(
+            'Delete forever',
+            const Icon(Icons.delete_forever_rounded, size: 22),
+            () => doToChecked(const BulkAction.deleteForever()),
+          ),
+      ];
+    }
+    final favorites = checkedAreFavorites;
+    final inArchive = filter == Filter.archive;
+    return [
+      BarAction(
+        favorites ? 'Remove from favorites' : 'Add to favorites',
+        Glyph(
+          Glyphs.star,
+          size: size,
+          color: favorites
+              ? favoriteEdge
+              : (phone ? null : context.colors.muted),
+          fill: favorites ? favoriteColor : null,
+          strokeWidth: 1.6,
+        ),
+        () => doToChecked(BulkAction.favorite(!favorites)),
+      ),
+      if (moveOffered)
+        BarAction('Move', Glyph(Glyphs.folder, size: size), moveChecked),
+      BarAction(
+        inArchive ? 'Move out of Archive' : 'Archive',
+        Glyph(Glyphs.archive, size: size),
+        () => doToChecked(BulkAction.archive(!inArchive)),
+      ),
+      if (trashOffered)
+        BarAction(
+          'Move to trash',
+          const Icon(Icons.delete_outline_rounded, size: 22),
+          () => doToChecked(const BulkAction.trash()),
+        ),
+    ];
+  }
+
+  /// Does one thing to every selected item (selection.dart), each in its
+  /// own account. The core says first which it may be done to
+  /// (`Core.bulkPlan`): the trash and deleting for good always ask, with
+  /// how many; anything else asks only when some items would be left as
+  /// they are, saying how many and why, or ask for the master password.
   /// What happened is said after, and an item it failed for stays selected.
   Future<void> doToChecked(BulkAction action) async {
-    final ids = checkedIds;
+    final ids = checkedByAccount;
     if (ids.isEmpty) return;
-    final plan = widget.core.bulkPlan(ids, action.json);
+    final plan = planAcross(widget.core, ids, action.json);
     if (!plan.ok) {
       showMessage(context, plan.error ?? 'Couldn\'t do that.');
       return;
     }
     final asks =
-        action.kind == BulkKind.trash ||
-        (plan.body['skipped'] as List).isNotEmpty;
+        action.alwaysAsks || (plan.body['skipped'] as List).isNotEmpty;
+    final passwordFor = askingIn(plan);
     final answer = asks
-        ? await confirmBulk(context, action: action, ids: ids, plan: plan)
-        : await whileBusy(() => Core.bulk(ids, action.json));
+        ? await confirmBulk(
+            context,
+            action: action,
+            ids: ids,
+            plan: plan,
+            passwordOf: passwordFor == null || passwordFor == Core.account
+                ? null
+                : widget.menu?.entry(passwordFor)?.label,
+          )
+        : await whileBusy(() => bulkAcross(ids, action.json));
     if (answer == null || !mounted) return;
     if (!answer.ok) {
       showMessage(context, answer.error ?? 'Couldn\'t do that.', inPlace: true);
@@ -735,13 +839,15 @@ class VaultScreenState extends State<VaultScreen> {
       return;
     }
     final outcome = BulkOutcome(action, answer);
+    final open = selected == null ? null : keyOf(Core.account, selected!);
     setState(() {
       checked
         ..clear()
         ..addAll(outcome.failed);
+      selectMode = false;
       anchor = null;
-      if (outcome.done.contains(selected)) {
-        if (action.kind == BulkKind.trash) selected = null;
+      if (outcome.done.contains(open)) {
+        if (action.leavesTheList) selected = null;
         refreshed++;
       }
     });
@@ -750,6 +856,8 @@ class VaultScreenState extends State<VaultScreen> {
       await showBulkFailure(context, outcome);
       return;
     }
+    // Only this account's items are in its trash.
+    final allHere = outcome.done.every((k) => splitKey(k).$1 == Core.account);
     showMessage(
       context,
       outcome.said,
@@ -757,11 +865,37 @@ class VaultScreenState extends State<VaultScreen> {
       seconds: outcome.left.isEmpty && outcome.synced ? null : 8,
       // What the last one did isn't waited out first.
       inPlace: true,
-      // Restoring them is the web vault's: its trash, a tap away.
-      action: action.kind == BulkKind.trash && outcome.done.isNotEmpty
-          ? ('Open trash', () => openWebVault(trashPath))
-          : null,
+      action: outcome.done.isEmpty
+          ? null
+          : switch (action.kind) {
+              BulkKind.trash when allHere && filter != Filter.trash => (
+                'Open trash',
+                () => choose(Filter.trash),
+              ),
+              BulkKind.archive || BulkKind.unarchive => (
+                'Undo',
+                () => undoArchive(outcome),
+              ),
+              _ => null,
+            },
     );
+  }
+
+  /// Takes what a bulk Archive or Move out of Archive did back: the same
+  /// items, each in its own account, the other way.
+  Future<void> undoArchive(BulkOutcome outcome) async {
+    final back = BulkAction.archive(outcome.action.kind != BulkKind.archive);
+    final answer = await whileBusy(
+      () => bulkAcross(byAccount(outcome.done), back.json),
+    );
+    if (!mounted) return;
+    reload();
+    if (!answer.ok) {
+      showMessage(context, answer.error ?? 'Couldn\'t do that.', inPlace: true);
+      return;
+    }
+    final undone = BulkOutcome(back, answer);
+    showMessage(context, undone.said, inPlace: true);
   }
 
   /// An item picked from a list: opened, in its own account. One of another
@@ -946,8 +1080,8 @@ class VaultScreenState extends State<VaultScreen> {
     return true;
   }
 
-  /// The web vault's pages (the trash, an import of another format): each
-  /// opens there, at [path] ("/#/vault?type=trash").
+  /// The web vault's pages (New item's kinds the app doesn't make yet): each
+  /// opens there, at [path] ("/#/vault").
   Future<void> openWebVault(String path) async {
     final server = widget.server;
     final opened = server != null && await Core.openWebsite('$server$path');
@@ -986,9 +1120,7 @@ class VaultScreenState extends State<VaultScreen> {
       context: context,
       builder: (context) => AlertDialog(
         title: Text('Move $name to the trash?'),
-        content: const Text(
-          'You can restore it from the trash in the web vault.',
-        ),
+        content: const Text('You can restore it from the trash.'),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context, false),
@@ -1011,12 +1143,77 @@ class VaultScreenState extends State<VaultScreen> {
     }
     setState(() => selected = null);
     reload();
-    // Restoring it is the web vault's: its trash, a tap away.
+    // The trash, a tap away, where it's restored.
     showMessage(
       context,
       'Moved $name to the trash.',
-      action: ('Open trash', () => openWebVault(trashPath)),
+      action: ('Open trash', () => choose(Filter.trash)),
     );
+    return true;
+  }
+
+  /// Restores an item from the trash, back where it was (an archived one to
+  /// Archive): true if it went. The trash's own call, for one item.
+  Future<bool> restore(String id, String name) =>
+      doToOne(id, const BulkAction.restore(), 'Restored $name.');
+
+  /// Deletes an item in the trash for good, once the person says so, which
+  /// can't be undone: true if it went.
+  Future<bool> deleteForever(String id, String name) async {
+    final sure = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('Delete $name forever?'),
+        content: const Text(
+          'It\'s deleted for good, with its attachments and history. This '
+          'can\'t be undone.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            style: dangerButton(context),
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Delete forever'),
+          ),
+        ],
+      ),
+    );
+    if (sure != true || !mounted) return false;
+    return doToOne(
+      id,
+      const BulkAction.deleteForever(),
+      'Deleted $name forever.',
+    );
+  }
+
+  /// Does [action] to one item, as for several (the core's checks and the
+  /// server's call), and says [said] once it's done, or why it wasn't.
+  Future<bool> doToOne(String id, BulkAction action, String said) async {
+    final answer = await whileBusy(() => Core.bulk([id], action.json));
+    if (!mounted) return false;
+    final went =
+        answer.ok && ((answer.body['done'] as List?) ?? const []).contains(id);
+    if (!went) {
+      final left = leftBy(answer);
+      showMessage(
+        context,
+        answer.error ??
+            (left.isEmpty
+                ? '${action.cant(1)}.'
+                : '${action.cant(1)}: ${action.why(left.keys.first, 1)}.'),
+      );
+      reload();
+      return false;
+    }
+    setState(() {
+      selected = null;
+      refreshed++;
+    });
+    reload();
+    showMessage(context, said, inPlace: true);
     return true;
   }
 
@@ -1110,6 +1307,14 @@ class VaultScreenState extends State<VaultScreen> {
             Navigator.of(context).pop();
           }
         },
+        onRestore: (name) async {
+          if (await restore(id, name) && mounted) Navigator.of(context).pop();
+        },
+        onDeleteForever: (name) async {
+          if (await deleteForever(id, name) && mounted) {
+            Navigator.of(context).pop();
+          }
+        },
       ),
     ),
   );
@@ -1182,6 +1387,8 @@ class VaultScreenState extends State<VaultScreen> {
             onChanged: reload,
             onTrash: (name) => trash(selected!, name),
             onArchive: (name, on) => archive(selected!, name, on),
+            onRestore: (name) => restore(selected!, name),
+            onDeleteForever: (name) => deleteForever(selected!, name),
           );
     // The top band is the window's (window_chrome.dart): the menu's top, the
     // list's search, and the item's actions sit where a title bar would, so
@@ -1216,7 +1423,7 @@ class VaultScreenState extends State<VaultScreen> {
                   onImport: importFile,
                   onExport: exportFile,
                   archived: archivedCount,
-                  onTrash: () => openWebVault(trashPath),
+                  trashed: trashedCount,
                   onChoose: choose,
                   onNewFolder: newFolder,
                   onRenameFolder: renameFolder,
@@ -1253,23 +1460,19 @@ class VaultScreenState extends State<VaultScreen> {
                     onSync: sync,
                     onSelect: pick,
                     checked: checked,
+                    selectMode: selectMode,
+                    onSelectMode: startSelecting,
                     onCheck: check,
                     onCheckTo: checkTo,
                     onCheckAll: checkAll,
                     onUncheckAll: uncheckAll,
-                    selection: checked.isEmpty
+                    selection: checked.isEmpty && !selectMode
                         ? null
                         : SelectionBar(
                             count: checked.length,
-                            allFavorites: checkedAreFavorites,
                             onClear: uncheckAll,
                             onSelectAll: checkAll,
-                            onFavorite: (on) =>
-                                doToChecked(BulkAction.favorite(on)),
-                            onMove: moveOffered ? moveChecked : null,
-                            onTrash: trashOffered
-                                ? () => doToChecked(const BulkAction.trash())
-                                : null,
+                            actions: barActions(phone: false),
                           ),
                   ),
                 ),
@@ -1370,14 +1573,7 @@ class VaultScreenState extends State<VaultScreen> {
               )
             : null,
         bottomNavigationBar: selecting
-            ? PhoneSelectionBar(
-                allFavorites: checkedAreFavorites,
-                onFavorite: (on) => doToChecked(BulkAction.favorite(on)),
-                onMove: moveOffered ? moveChecked : null,
-                onTrash: trashOffered
-                    ? () => doToChecked(const BulkAction.trash())
-                    : null,
-              )
+            ? PhoneSelectionBar(actions: barActions(phone: true))
             : NavigationBar(
                 selectedIndex: tab,
                 onDestinationSelected: (i) => setState(() => tab = i),
@@ -1676,14 +1872,11 @@ class VaultScreenState extends State<VaultScreen> {
             (e, count(e.filter, e.id), () => choose(e.filter, e.id)),
         ]),
       ],
-      // Archive, then the trash (the web vault's), after the folders as
-      // there.
+      // Archive, then the trash, after the folders as there.
       const SliverToBoxAdapter(child: SizedBox(height: 10)),
       archiveCard(),
-      if (widget.server != null) ...[
-        const SliverToBoxAdapter(child: SizedBox(height: 10)),
-        trashCard(),
-      ],
+      const SliverToBoxAdapter(child: SizedBox(height: 10)),
+      trashCard(),
       heading('All items'),
       if (listed.isEmpty)
         SliverToBoxAdapter(
@@ -1752,13 +1945,13 @@ class VaultScreenState extends State<VaultScreen> {
     );
   });
 
-  /// The trash, on a phone: a row that opens the web vault's.
+  /// The trash, on a phone: a row beside Archive, with how many it holds.
   Widget trashCard() => card(1, (context, i, radius) {
     final c = context.colors;
     return InkWell(
       key: const ValueKey('trash'),
       borderRadius: radius,
-      onTap: () => openWebVault(trashPath),
+      onTap: () => choose(Filter.trash),
       child: ConstrainedBox(
         constraints: const BoxConstraints(minHeight: 56),
         child: Padding(
@@ -1788,10 +1981,9 @@ class VaultScreenState extends State<VaultScreen> {
                   style: TextStyle(fontSize: 16, fontWeight: FontWeight.w500),
                 ),
               ),
-              Tooltip(
-                message: 'Opens the web vault',
-                child: Icon(Icons.open_in_new_rounded, size: 18, color: c.muted),
-              ),
+              Text('$trashedCount', style: TextStyle(color: c.muted, fontSize: 14)),
+              const SizedBox(width: 6),
+              Glyph(Glyphs.chevron, size: 18, color: c.muted, strokeWidth: 2),
             ],
           ),
         ),
@@ -1830,22 +2022,16 @@ class VaultScreenState extends State<VaultScreen> {
             ? widget.menu?.entry(item['account'] as String?)
             : null;
         // A long press starts selecting; from then a tap selects, or
-        // takes the item out. Another account's items aren't selected from
-        // here ("All accounts").
+        // takes the item out. In "All accounts", each item in its own
+        // account.
         final selecting = checked.isNotEmpty;
-        final mine = ofThisAccount(item);
         return PhoneItemRow(
           item: item,
           radius: radius,
           badge: account == null ? null : AccountBadge(entry: account),
-          checked: selecting && mine ? checked.contains(item['id']) : null,
-          dimmed: selecting && !mine,
-          onTap: !selecting
-              ? () => pick(item)
-              : mine
-              ? () => check(item)
-              : null,
-          onLongPress: mine ? () => check(item) : null,
+          checked: selecting ? checked.contains(selectionKey(item)) : null,
+          onTap: selecting ? () => check(item) : () => pick(item),
+          onLongPress: () => check(item),
         );
       });
 
@@ -2334,7 +2520,7 @@ class Sidebar extends StatelessWidget {
     this.onImport,
     this.onExport,
     this.archived = 0,
-    this.onTrash,
+    this.trashed = 0,
     required this.onChoose,
     required this.onNewFolder,
     required this.onRenameFolder,
@@ -2376,11 +2562,9 @@ class Sidebar extends StatelessWidget {
   final VoidCallback? onImport;
   final VoidCallback? onExport;
 
-  /// How many items are in Archive, beside the trash.
+  /// How many items are in Archive, and in the trash beside it.
   final int archived;
-
-  /// The trash, which is the web vault's: restoring and deleting for good.
-  final VoidCallback? onTrash;
+  final int trashed;
   final void Function(Filter, [String?]) onChoose;
   final VoidCallback onNewFolder;
   final void Function(String id, String name) onRenameFolder;
@@ -2393,11 +2577,6 @@ class Sidebar extends StatelessWidget {
     final c = context.colors;
     int count(Filter f, [String? id]) =>
         items.where((i) => shows(i, f, id)).length;
-    // What opens in the web vault, in the browser, says so.
-    final webVaultMark = Tooltip(
-      message: 'Opens the web vault',
-      child: Icon(Icons.open_in_new_rounded, size: 15, color: c.muted),
-    );
     Widget entry({
       required Widget tile,
       required String label,
@@ -2692,8 +2871,7 @@ class Sidebar extends StatelessWidget {
                           )
                         : null,
                   ),
-                // Archive, then the trash (the web vault's), after the
-                // folders as there.
+                // Archive, then the trash, after the folders as there.
                 entry(
                   tile: outline(Glyphs.archive, strong: filter == Filter.archive),
                   label: 'Archive',
@@ -2701,14 +2879,13 @@ class Sidebar extends StatelessWidget {
                   tap: () => onChoose(Filter.archive),
                   count: archived,
                 ),
-                if (onTrash case final open?)
-                  entry(
-                    tile: outline(Glyphs.trash),
-                    label: 'Trash',
-                    on: false,
-                    tap: open,
-                    trailing: webVaultMark,
-                  ),
+                entry(
+                  tile: outline(Glyphs.trash, strong: filter == Filter.trash),
+                  label: 'Trash',
+                  on: filter == Filter.trash,
+                  tap: () => onChoose(Filter.trash),
+                  count: trashed,
+                ),
                 if (tools.isNotEmpty) ...[
                   const Padding(
                     padding: EdgeInsets.symmetric(horizontal: 6, vertical: 10),
@@ -2773,7 +2950,9 @@ class Sidebar extends StatelessWidget {
 /// under the pointer and whenever any is selected; Shift and a click takes
 /// a range, Command (Ctrl off a Mac) and a click one without opening it,
 /// and with the list in focus Command or Ctrl with A takes them all and
-/// Escape none. While any is selected, [selection] is where the title was.
+/// Escape none. Select, beside the count, shows every row's checkbox and
+/// makes a click select. While any is selected, or Select is on,
+/// [selection] is where the title was.
 class ItemList extends StatefulWidget {
   const ItemList({
     super.key,
@@ -2792,6 +2971,8 @@ class ItemList extends StatefulWidget {
     this.emptyState,
     this.header,
     this.checked = const {},
+    this.selectMode = false,
+    this.onSelectMode,
     this.onCheck,
     this.onCheckTo,
     this.onCheckAll,
@@ -2829,8 +3010,15 @@ class ItemList extends StatefulWidget {
   final VoidCallback onSync;
   final ValueChanged<Map<String, dynamic>> onSelect;
 
-  /// The items selected to do one thing to all of them, by id.
+  /// The items selected to do one thing to all of them, by key
+  /// (`selectionKey`).
   final Set<String> checked;
+
+  /// Select is on: every row's checkbox shows, and a click selects.
+  final bool selectMode;
+
+  /// Turns Select on (its button beside the count).
+  final VoidCallback? onSelectMode;
 
   /// Selects an item or takes it out; without it nothing is selected here.
   final ValueChanged<Map<String, dynamic>>? onCheck;
@@ -2867,28 +3055,35 @@ class _ItemListState extends State<ItemList> {
       return KeyEventResult.handled;
     }
     if (event.logicalKey == LogicalKeyboardKey.escape &&
-        widget.checked.isNotEmpty) {
+        (widget.checked.isNotEmpty || widget.selectMode)) {
       widget.onUncheckAll?.call();
       return KeyEventResult.handled;
     }
     return KeyEventResult.ignored;
   }
 
-  /// A click on a row: with Shift, a range; with Command or Ctrl, this one
-  /// without opening it; else it opens.
+  /// A click on a row: with Shift, a range; with Command or Ctrl, or while
+  /// Select is on, this one without opening it; else it opens.
   void tap(Map<String, dynamic> item) {
     focus.requestFocus();
-    if (widget.onCheck != null && ofThisAccount(item)) {
+    if (widget.onCheck case final toggle?) {
       if (HardwareKeyboard.instance.isShiftPressed) {
         widget.onCheckTo?.call(item);
         return;
       }
-      if (commandHeld()) {
-        widget.onCheck!(item);
+      if (commandHeld() || widget.selectMode) {
+        toggle(item);
         return;
       }
     }
     widget.onSelect(item);
+  }
+
+  /// Select, beside the count: the list takes the focus, so Escape and
+  /// Command or Ctrl with A are its at once.
+  void startSelecting() {
+    focus.requestFocus();
+    widget.onSelectMode?.call();
   }
 
   /// A click on a row's checkbox.
@@ -3015,6 +3210,24 @@ class _ItemListState extends State<ItemList> {
                                   : '${items.length} items',
                               style: TextStyle(color: c.muted, fontSize: 13),
                             ),
+                            if (widget.onSelectMode != null &&
+                                widget.onCheck != null &&
+                                items.isNotEmpty) ...[
+                              const SizedBox(width: 6),
+                              TextButton(
+                                onPressed: startSelecting,
+                                style: TextButton.styleFrom(
+                                  minimumSize: const Size(0, 30),
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 10,
+                                  ),
+                                  tapTargetSize:
+                                      MaterialTapTargetSize.shrinkWrap,
+                                  visualDensity: VisualDensity.compact,
+                                ),
+                                child: const Text('Select'),
+                              ),
+                            ],
                           ],
                         ),
                       ),
@@ -3048,20 +3261,24 @@ class _ItemListState extends State<ItemList> {
                           itemBuilder: (context, i) {
                             final item = items[i];
                             final account = item['account'] as String?;
-                            final mine = ofThisAccount(item);
                             return ItemRow(
                               key: ValueKey((account, item['id'])),
                               item: item,
-                              on: item['id'] == widget.selected && mine,
+                              on:
+                                  item['id'] == widget.selected &&
+                                  ofThisAccount(item),
                               where: widget.badges
                                   ? item['where'] as String?
                                   : null,
                               account: widget.accounts?.entry(account),
-                              checked:
-                                  mine && widget.checked.contains(item['id']),
-                              selecting: widget.checked.isNotEmpty,
+                              checked: widget.checked.contains(
+                                selectionKey(item),
+                              ),
+                              selecting:
+                                  widget.checked.isNotEmpty ||
+                                  widget.selectMode,
                               onTap: () => tap(item),
-                              onCheck: widget.onCheck != null && mine
+                              onCheck: widget.onCheck != null
                                   ? () => check(item)
                                   : null,
                             );
@@ -3285,8 +3502,7 @@ class ItemRow extends StatefulWidget {
   final bool selecting;
   final VoidCallback onTap;
 
-  /// Selects it or takes it out; null for one that can't be selected
-  /// (another account's, in "All accounts").
+  /// Selects it or takes it out; null where nothing is selected.
   final VoidCallback? onCheck;
 
   /// Where it is, beside it.
@@ -3494,6 +3710,8 @@ class ItemPane extends StatefulWidget {
     required this.onEdit,
     required this.onTrash,
     this.onArchive,
+    this.onRestore,
+    this.onDeleteForever,
     this.onChanged,
     this.server,
     this.phone = false,
@@ -3522,6 +3740,10 @@ class ItemPane extends StatefulWidget {
 
   /// Archives it (true) or takes it out of the archive, by its name.
   final void Function(String name, bool archive)? onArchive;
+
+  /// In the trash: restores it, or deletes it for good, by its name.
+  final ValueChanged<String>? onRestore;
+  final ValueChanged<String>? onDeleteForever;
 
   /// A page of its own, with Edit and Move to trash at the top.
   final bool phone;
@@ -3948,8 +4170,33 @@ class _ItemPaneState extends State<ItemPane> {
     );
   }
 
-  /// What can be done with it: favorite it, edit it, and move it to the trash.
-  List<Widget> actions(Map<String, dynamic> item) => [
+  /// What can be done with it: favorite it, edit it, archive it, and move
+  /// it to the trash; or, in the trash, restore it and delete it for good.
+  List<Widget> actions(Map<String, dynamic> item) {
+    if (item['deleted'] == true) return trashActions(item);
+    return ownActions(item);
+  }
+
+  /// In the trash: Restore and Delete forever, where the person may delete
+  /// it (the server's check for both). Nothing else changes an item there.
+  List<Widget> trashActions(Map<String, dynamic> item) => [
+    if (widget.onRestore case final restore? when may(item, 'delete'))
+      IconButton(
+        tooltip: 'Restore',
+        icon: const Icon(Icons.restore_from_trash_rounded),
+        onPressed: () => restore(item['name'] as String),
+      ),
+    if (widget.onDeleteForever case final delete? when may(item, 'delete'))
+      IconButton(
+        tooltip: 'Delete forever',
+        icon: const Icon(Icons.delete_forever_rounded),
+        onPressed: () => delete(item['name'] as String),
+      ),
+  ];
+
+  /// Out of the trash: favorite it, edit it, archive it, and move it to the
+  /// trash.
+  List<Widget> ownActions(Map<String, dynamic> item) => [
     FavoriteButton(
       on: item['favorite'] == true,
       size: widget.phone ? 22 : 20,

@@ -261,12 +261,13 @@ void main() {
         );
       }
       expect(find.text('Import and export'), findsNothing);
-      // And the trash, which is the web vault's, the one there.
+      // And the trash, which is the app's own: nothing in the menu opens
+      // the web vault.
       expect(
         find.descendant(of: menu, matching: find.text('Trash')),
         findsOneWidget,
       );
-      expect(find.byTooltip('Opens the web vault'), findsOneWidget);
+      expect(find.byTooltip('Opens the web vault'), findsNothing);
 
       // An SSH key: the web vault edits it, and the item says so.
       await tester.tap(find.text('Build server'));
