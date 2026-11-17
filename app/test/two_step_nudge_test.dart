@@ -33,7 +33,9 @@ const nudgePath = '/api/keykeeper/two-step-nudge';
 /// A stand-in for PassBundle's server: the sample vault's account, and the
 /// nudge it says ([nudge], as the server's answer; null for a server without
 /// it). Not now makes it say none from then on, as the server keeps it.
-/// [asked] has each call.
+/// [asked] has each call. Given a [userId], its account is another person's
+/// than the sample's (the same email and password), as a second account on
+/// another server is: the app refuses one it has already.
 class StandIn {
   StandIn._(this._server, this.nudge);
 
@@ -49,12 +51,17 @@ class StandIn {
 
   int get nudgeAsked => asked.where((a) => a == 'GET $nudgePath').length;
 
-  static Future<StandIn> start(WidgetTester tester, Object? nudge) async {
+  static Future<StandIn> start(
+    WidgetTester tester,
+    Object? nudge, {
+    String? userId,
+  }) async {
     final standIn = (await tester.runAsync(() async {
       final made = StandIn._(
         await HttpServer.bind(InternetAddress.loopbackIPv4, 0),
         nudge,
       );
+      if (userId != null) (made.sync['profile'] as Map)['id'] = userId;
       made._server.listen(made._answer);
       return made;
     }))!;
@@ -368,7 +375,11 @@ void main() {
       final first = Core.account;
 
       // A second account, on a server that says none.
-      final home = await StandIn.start(tester, {'show': false, 'nudge': null});
+      final home = await StandIn.start(
+        tester,
+        {'show': false, 'nudge': null},
+        userId: '0d4c7b1e-3f2a-4e6b-8c9d-5a1b2c3d4e5f',
+      );
       await tester.tap(find.byTooltip('Accounts'));
       await tester.pumpAndSettle();
       await tester.tap(find.byKey(const ValueKey('add-account')));
