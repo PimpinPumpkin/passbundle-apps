@@ -141,6 +141,9 @@ pub enum LeftOut {
     UnknownKind,
     /// Firefox's own account, which older versions export.
     FirefoxAccount,
+    /// A kind of item an organization's "Remove card item type" policy
+    /// removes (restricted_types.rs), as the web vault's import leaves out.
+    Restricted,
 }
 
 impl LeftOut {
@@ -150,6 +153,7 @@ impl LeftOut {
             LeftOut::AlreadyThere => "alreadyThere",
             LeftOut::UnknownKind => "unknownKind",
             LeftOut::FirefoxAccount => "firefoxAccount",
+            LeftOut::Restricted => "restricted",
         }
     }
 }
@@ -371,6 +375,15 @@ pub fn read(format: Format, text: &str, password: Option<&str>, vault: &Vault) -
         Format::Safari => safari(&table(text)?, text)?,
         Format::OnePasswordCsv => one_password_csv(&table(text)?)?,
     };
+    // No item of a kind an organization's "Remove card item type" policy
+    // removes, wherever it would go (upstream's import.service.ts).
+    let before = parsed.items.len();
+    parsed
+        .items
+        .retain(|i| !vault.restricted.refuses_new(ItemKind::from(i.kind)));
+    for _ in parsed.items.len()..before {
+        parsed.leave_out(LeftOut::Restricted);
+    }
     // Our own fields come back only from our own .json.
     parsed.renamed = guard_reserved_fields(&mut parsed.items, format == Format::Json);
     if let Some(browser) = format.browser() {

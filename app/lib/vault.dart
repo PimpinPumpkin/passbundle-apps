@@ -809,6 +809,7 @@ class VaultScreenState extends State<VaultScreen> {
       templates: widget.core.templates(),
       asDialog: wide,
       onWebVault: widget.server == null ? null : () => openWebVault('/#/vault'),
+      restricted: widget.core.restrictedKinds(),
     );
     if (choice == null || !mounted) return;
     await edit(null, null, choice);

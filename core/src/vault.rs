@@ -1,7 +1,7 @@
 //! The vault: the sync as the server sends it, and opening it with the master
 //! password (docs/core.md, "The keys, in order" and "Items").
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde::Deserialize;
 use zeroize::Zeroizing;
@@ -9,6 +9,7 @@ use zeroize::Zeroizing;
 use crate::crypto::{EncString, PrivateKey, SymmetricKey};
 use crate::error::{Error, Result};
 use crate::kdf::{Kdf, MasterKey, Prelogin};
+use crate::restricted_types::RestrictedTypes;
 
 // What `/api/sync` sends, as far as the core reads it. Everything else is ignored.
 
@@ -25,6 +26,10 @@ pub struct Sync {
     /// The account's Sends (send.rs).
     #[serde(default)]
     pub sends: Vec<crate::send::SendData>,
+    /// Its organizations' policies, as sent, of which opening the vault
+    /// reads "Remove card item type" (restricted_types.rs).
+    #[serde(default)]
+    pub policies: serde_json::Value,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -1202,6 +1207,11 @@ pub struct Vault {
     pub damaged: Vec<DamagedItem>,
     /// The account's Sends, each opened with the user key (send.rs).
     pub sends: Vec<crate::send::Send>,
+    /// The item types its organizations' "Remove card item type" policy
+    /// removes (restricted_types.rs): no new item may be one.
+    pub restricted: RestrictedTypes,
+    /// The items that policy leaves out, by id: in none of the above.
+    hidden: HashSet<String>,
     keys: Keyring,
 }
 
@@ -1331,9 +1341,19 @@ impl Vault {
                 Some((c.id.clone(), crate::places::parse_look(&text)?))
             })
             .collect();
+        let restricted = RestrictedTypes::read(
+            &sync.policies,
+            sync.profile.organizations.iter().map(|o| o.id.as_str()),
+        );
         let mut items = Vec::new();
         let mut damaged = Vec::new();
+        let mut hidden = HashSet::new();
         for cipher in &sync.ciphers {
+            // Left out of everything, as if it weren't there, never opened.
+            if restricted.hides(cipher.kind, cipher.organization_id.as_deref()) {
+                hidden.insert(cipher.id.clone());
+                continue;
+            }
             match keys.open_item(cipher) {
                 Ok(item) => items.push(item),
                 Err(error) => damaged.push(DamagedItem {
@@ -1359,8 +1379,16 @@ impl Vault {
             items,
             damaged,
             sends: crate::send::open_all(&sync.sends, &keys.user),
+            restricted,
+            hidden,
             keys,
         })
+    }
+
+    /// Whether the item with this id is one an organization's "Remove card
+    /// item type" policy leaves out: nothing may be done with it here.
+    pub fn hides(&self, id: &str) -> bool {
+        self.hidden.contains(id)
     }
 
     /// A shared folder's name, encrypted with its organization's key, as the
