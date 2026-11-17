@@ -119,7 +119,7 @@ class PasskeyProvider : CredentialProviderService() {
                     // can find by itself (discoverable), as WebAuthn has it.
                     if (allowed == null && !item.optBoolean("discoverable", true)) continue
                     if (allowed != null && item.getString("credentialId") !in allowed) continue
-                    val name = item.optString("userName").ifEmpty { item.optString("name") }
+                    val name = Responses.text(item, "userName") ?: item.optString("name")
                     found +=
                         PublicKeyCredentialEntry.Builder(
                             context,
@@ -130,9 +130,9 @@ class PasskeyProvider : CredentialProviderService() {
                             .setDisplayName(
                                 // With more than one account on the phone, which one's it is.
                                 Responses.subtitle(
-                                    item.optString("userDisplayName").ifEmpty { item.optString("name") },
+                                    Responses.text(item, "userDisplayName") ?: item.optString("name"),
                                     null,
-                                    item.optString("accountLabel").ifEmpty { null },
+                                    Responses.text(item, "accountLabel"),
                                 ),
                             )
                             .build()
