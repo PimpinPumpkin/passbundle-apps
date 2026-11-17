@@ -836,8 +836,10 @@ fn folders_are_made_renamed_and_deleted() {
 /// Passkeys (docs/core.md, "Passkeys"): one made for a site is saved in a new
 /// login before it's answered, and signing in with it gives a signature its
 /// own public key verifies; one that counts its uses has its counter raised
-/// and saved first; one goes into an existing login too; and a site's
-/// credential the vault already has stops a new one.
+/// and saved first; one goes into an existing login too, keeping its
+/// password; a site's credential the vault already has stops a new one; and
+/// a new one for the same site and account replaces the old one in its
+/// login, which then signs with the new key only.
 #[test]
 fn passkeys_are_made_and_sign_in() {
     use p256::ecdsa::signature::Verifier;
@@ -869,6 +871,7 @@ fn passkeys_are_made_and_sign_in() {
             discoverable: true,
             login: None,
             exclude: &[],
+            app: None,
         })
         .unwrap();
     // The attested credential data names it, and the attestation object carries it.
@@ -949,6 +952,7 @@ fn passkeys_are_made_and_sign_in() {
         &ItemDraft {
             name: "Shop".into(),
             uris: vec!["https://shop.example.test".into()],
+            password: secret("not-a-real-password-shop"),
             ..ItemDraft::default()
         },
         &[],
@@ -974,11 +978,16 @@ fn passkeys_are_made_and_sign_in() {
             discoverable: true,
             login: Some(&shop),
             exclude: &[],
+            app: None,
         })
         .unwrap();
     assert_eq!(into.item_id, shop);
     let item = app.vault().unwrap().item(&shop).unwrap();
     assert_eq!(item.username.as_deref(), Some("ana@shop.example.test"));
+    assert_eq!(
+        item.password.as_deref().map(String::as_str),
+        Some("not-a-real-password-shop")
+    );
     assert_eq!(item.passkey.as_ref().unwrap().rp_id, "shop.example.test");
 
     // The site already has this one: nothing new is made.
@@ -994,9 +1003,88 @@ fn passkeys_are_made_and_sign_in() {
             discoverable: true,
             login: None,
             exclude: std::slice::from_ref(&into.credential_id),
+            app: None,
         })
         .is_err());
     assert_eq!(app.vault().unwrap().items.len(), count);
+
+    // Signing up again as the same account (the same user handle): Shop is
+    // the login to replace, and the new passkey takes the old one's place
+    // there, with Shop's name and password as they were.
+    let same_account = passbundle_core::matching::PasskeySite {
+        rp_id: "shop.example.test",
+        user_handle: &[9; 8],
+        app: None,
+    };
+    let offered: Vec<(String, bool)> = app
+        .vault()
+        .unwrap()
+        .passkey_logins(&same_account)
+        .into_iter()
+        .map(|(i, replaces)| (i.id.clone(), replaces))
+        .collect();
+    assert_eq!(offered, vec![(shop.clone(), true)]);
+    let again = app
+        .passkey_create(&NewPasskey {
+            rp_id: "shop.example.test",
+            rp_name: Some("Shop"),
+            user_handle: &[9; 8],
+            user_name: Some("ana@shop.example.test"),
+            user_display_name: None,
+            user_verified: true,
+            discoverable: true,
+            login: Some(&shop),
+            exclude: &[],
+            app: None,
+        })
+        .unwrap();
+    assert_eq!(again.item_id, shop);
+    assert_ne!(again.credential_id, into.credential_id);
+    assert_eq!(app.vault().unwrap().items.len(), count);
+    let item = app.vault().unwrap().item(&shop).unwrap();
+    assert_eq!(item.name, "Shop");
+    assert_eq!(
+        item.password.as_deref().map(String::as_str),
+        Some("not-a-real-password-shop")
+    );
+    assert_eq!(app.passkeys_for("shop.example.test").len(), 1);
+    // The old one is gone: signing in answers with the new one, which its
+    // own public key verifies, as the server sent it back.
+    let signed_in = app
+        .passkey_assert(&shop, "shop.example.test", &hash, true)
+        .unwrap();
+    assert_eq!(signed_in.credential_id, again.credential_id);
+    let mut message = signed_in.authenticator_data.clone();
+    message.extend_from_slice(&hash);
+    assert!(VerifyingKey::from_public_key_der(&again.public_key)
+        .unwrap()
+        .verify(
+            &message,
+            &Signature::from_der(&signed_in.signature).unwrap()
+        )
+        .is_ok());
+    // Another account on the site: Shop has this one's passkey, so it
+    // doesn't take that account's, and nothing is saved.
+    assert!(app
+        .passkey_create(&NewPasskey {
+            rp_id: "shop.example.test",
+            rp_name: Some("Shop"),
+            user_handle: &[8; 8],
+            user_name: Some("bea@shop.example.test"),
+            user_display_name: None,
+            user_verified: true,
+            discoverable: true,
+            login: Some(&shop),
+            exclude: &[],
+            app: None,
+        })
+        .is_err());
+    let item = app.vault().unwrap().item(&shop).unwrap();
+    assert_eq!(
+        passbundle_core::passkey::credential_id(&item.passkey.as_ref().unwrap().credential_id)
+            .unwrap(),
+        again.credential_id
+    );
     let _ = std::fs::remove_dir_all(dir);
 }
 
