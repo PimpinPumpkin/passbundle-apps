@@ -97,6 +97,8 @@ class PassBundleAutofill : AutofillService() {
         val fields = runCatching { Fields.find(structure) }.getOrNull() ?: return callback.onSuccess()
         val (username, password) = runCatching { Fields.values(structure, fields) }.getOrNull() ?: return callback.onSuccess()
         if (password.isNullOrEmpty()) return callback.onSuccess()
+        // Never a one-time code as a password (DESIGN.md in the meta repo, "One-time codes never become passwords").
+        if (Roles.looksLikeACode(username, password)) return callback.onSuccess()
         // A page's domain only from a browser (Browsers.kt); another app's sign-in is saved for the app.
         val domain = Browsers.domain(fields.webDomain)?.takeIf { Browsers.trusts(this, fields.packageName) }
         val name = domain ?: Browsers.label(this, fields.packageName)
