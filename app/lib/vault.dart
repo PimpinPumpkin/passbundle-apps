@@ -31,6 +31,7 @@ import 'send.dart';
 import 'settings.dart';
 import 'sign_in_requests.dart';
 import 'theme.dart';
+import 'transfer.dart';
 import 'unlock_offer.dart';
 import 'updates.dart';
 import 'widgets.dart';
@@ -262,6 +263,7 @@ class VaultScreenState extends State<VaultScreen> {
     lifecycle;
     updates?.addListener(updateFound);
     settingsAsked.addListener(openSettings);
+    vaultChanged.addListener(reload);
     // Read now, before the first sync has the core.
     final offer = widget.offerBiometric && mayOfferBiometric(widget.core);
     WidgetsBinding.instance.addPostFrameCallback((_) async {
@@ -346,6 +348,7 @@ class VaultScreenState extends State<VaultScreen> {
     signInRequests.stop();
     updates?.removeListener(updateFound);
     settingsAsked.removeListener(openSettings);
+    vaultChanged.removeListener(reload);
     lifecycle.dispose();
     search.dispose();
     // The vault closed (it locked, or the person signed out): its websites'
@@ -500,9 +503,7 @@ class VaultScreenState extends State<VaultScreen> {
   Widget emptyVaultNote() => EmptyVault(
     onNew: newItem,
     onBrowsers: isPhone ? null : importFromBrowsers,
-    onImport: widget.server == null
-        ? null
-        : () => openWebVault('/#/tools/import'),
+    onImport: importFile,
   );
 
   /// What the list shows, by name, for its header.
@@ -902,6 +903,17 @@ class VaultScreenState extends State<VaultScreen> {
     if (mounted) reload();
   }
 
+  /// Importing a file (transfer.dart), [format] chosen to begin with; the
+  /// vault shows what came in.
+  Future<void> importFile([String? format]) =>
+      showImport(context, format: format, server: widget.server);
+
+  /// Exporting the person's own items to a file (transfer.dart).
+  Future<void> exportFile() async {
+    final said = await showExport(context);
+    if (said != null && mounted) showMessage(context, said);
+  }
+
   /// Archives an item, or takes it out of the archive (DESIGN.md in the
   /// meta repo, "Archive, export, and import in the apps"): it leaves the
   /// lists and search, or comes back, with Undo.
@@ -930,8 +942,8 @@ class VaultScreenState extends State<VaultScreen> {
     return true;
   }
 
-  /// Import, export, and the trash are the web vault's: each opens there,
-  /// at [path] ("/#/tools/import").
+  /// The web vault's pages (the trash, an import of another format): each
+  /// opens there, at [path] ("/#/vault?type=trash").
   Future<void> openWebVault(String path) async {
     final server = widget.server;
     final opened = server != null && await Core.openWebsite('$server$path');
@@ -1197,8 +1209,8 @@ class VaultScreenState extends State<VaultScreen> {
                   onGenerator: openGeneratorTool,
                   onSend: openSendTool,
                   onBrowsers: isPhone ? null : importFromBrowsers,
-                  onImport: () => openWebVault('/#/tools/import'),
-                  onExport: () => openWebVault('/#/tools/export'),
+                  onImport: importFile,
+                  onExport: exportFile,
                   archived: archivedCount,
                   onTrash: () => openWebVault(trashPath),
                   onChoose: choose,
@@ -2348,8 +2360,8 @@ class Sidebar extends StatelessWidget {
   /// How many items Health has something to fix for.
   final int toFix;
 
-  /// The Tools: the generator, and import and export (the web vault's,
-  /// which open there).
+  /// The Tools: the generator, and importing and exporting a file
+  /// (transfer.dart).
   final VoidCallback? onGenerator;
 
   /// Send (send.dart), in a window of its own.
@@ -2502,7 +2514,7 @@ class Sidebar extends StatelessWidget {
           );
     // The tools, after a line under the folders and the trash, as the web
     // vault's menu has them: the generator and Send, then importing (a
-    // file in the web vault, and this computer's browsers), then exporting.
+    // file, and this computer's browsers), then exporting.
     // The list fades at its foot, so whatever is past it reads as more.
     final tools = [
       if (onGenerator case final open?)
@@ -2525,7 +2537,6 @@ class Sidebar extends StatelessWidget {
           label: 'Import',
           on: false,
           tap: open,
-          trailing: webVaultMark,
         ),
       if (onBrowsers case final open?)
         entry(
@@ -2540,7 +2551,6 @@ class Sidebar extends StatelessWidget {
           label: 'Export',
           on: false,
           tap: open,
-          trailing: webVaultMark,
         ),
     ];
     // The window's buttons at the top left (a Mac's traffic lights, or
@@ -3180,7 +3190,8 @@ class EmptyVault extends StatelessWidget {
   /// This computer's browsers (browser_import.dart).
   final VoidCallback? onBrowsers;
 
-  /// The web vault's import, for a file from another password manager.
+  /// Importing a file (transfer.dart): an export from another password
+  /// manager or a browser.
   final VoidCallback? onImport;
 
   @override
@@ -3232,8 +3243,8 @@ class EmptyVault extends StatelessWidget {
                 const SizedBox(height: 8),
                 OutlinedButton.icon(
                   onPressed: fromFile,
-                  icon: Icon(Icons.open_in_new_rounded, size: 16, color: c.muted),
-                  label: const Text('Import a file in the web vault'),
+                  icon: Glyph(Glyphs.download, size: 18, color: c.muted),
+                  label: const Text('Import a file'),
                 ),
               ],
             ],

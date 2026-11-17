@@ -954,7 +954,7 @@ pub struct Kept {
 }
 
 /// A website's checksum, as upstream writes it: base64 of the address's SHA-256.
-fn uri_checksum(uri: &str) -> String {
+pub(crate) fn uri_checksum(uri: &str) -> String {
     use base64::Engine;
     use sha2::{Digest, Sha256};
     base64::engine::general_purpose::STANDARD.encode(Sha256::digest(uri.as_bytes()))
@@ -1567,8 +1567,21 @@ impl Vault {
         })
     }
 
+    /// The key a new item's values go under, as `value_key` has it for a
+    /// new item: its organization's, or the user key.
+    pub(crate) fn owner_key(&self, organization_id: Option<&str>) -> Result<&SymmetricKey> {
+        match organization_id {
+            Some(org) => self
+                .keys
+                .organizations
+                .get(org)
+                .ok_or(Error::Damaged("that organization's key doesn't open")),
+            None => Ok(&self.keys.user),
+        }
+    }
+
     /// The key an item's values are under: its own, or its owner's.
-    fn item_value_key<'a>(&'a self, item: &'a Item) -> Result<&'a SymmetricKey> {
+    pub(crate) fn item_value_key<'a>(&'a self, item: &'a Item) -> Result<&'a SymmetricKey> {
         if let Some(key) = item.kept.item_key.as_ref() {
             return Ok(key);
         }

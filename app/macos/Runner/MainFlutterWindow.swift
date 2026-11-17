@@ -354,20 +354,37 @@ class MainFlutterWindow: NSWindow {
         return
       }
       result(NSWorkspace.shared.open(url))
-    // A file to attach to an item, or to send in a file Send ("send": true;
-    // app/lib/attaching.dart): its path and name, or nil if the person gave
+    // A file to attach to an item, to send in a file Send ("send": true;
+    // app/lib/attaching.dart), or to import ("import": true;
+    // app/lib/transfer.dart): its path and name, or nil if the person gave
     // up. The core reads it where it is, so nothing is copied.
     case "pickFile":
       let sending = arguments?["send"] as? Bool ?? false
+      let importing = arguments?["import"] as? Bool ?? false
       let panel = NSOpenPanel()
       panel.canChooseFiles = true
       panel.canChooseDirectories = false
       panel.allowsMultipleSelection = false
-      panel.message = sending ? "Choose a file to send" : "Choose a file to attach"
-      panel.prompt = sending ? "Choose" : "Attach"
+      panel.message =
+        importing ? "Choose a file to import" : sending ? "Choose a file to send" : "Choose a file to attach"
+      panel.prompt = importing || sending ? "Choose" : "Attach"
       panel.beginSheetModal(for: self) { response in
         guard response == .OK, let url = panel.url else { return result(nil) }
         result(["path": url.path, "name": url.lastPathComponent])
+      }
+    // Where to save an export (app/lib/transfer.dart), with the name it
+    // suggests: its path, or nil if the person gave up. The panel asks
+    // before replacing a file that's there. The core writes the file itself.
+    case "saveFile":
+      let panel = NSSavePanel()
+      panel.nameFieldStringValue = arguments?["name"] as? String ?? "passbundle_export.json"
+      panel.message = "Choose where to save your export"
+      panel.prompt = "Save"
+      panel.canCreateDirectories = true
+      panel.isExtensionHidden = false
+      panel.beginSheetModal(for: self) { response in
+        guard response == .OK, let url = panel.url else { return result(nil) }
+        result(url.path)
       }
     // Duo's Universal Prompt at sign-in (app/lib/two_step.dart): the link
     // it comes back with, or nil if the person gave up.

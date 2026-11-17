@@ -1255,6 +1255,36 @@ impl Server {
         self.call(session, "PUT", &path, None)
     }
 
+    /// Saves new items into one of an organization's shared folders, as
+    /// upstream's importers do for an organization
+    /// (`POST /api/ciphers/import-organization`): each already encrypted
+    /// with the organization's key, every one in `collection_id`, which the
+    /// person may add items to (the server checks). The shared folder goes
+    /// as it is, by its id and encrypted name.
+    pub fn import_organization_items(
+        &self,
+        session: &mut Session,
+        organization_id: &str,
+        ciphers: &[Value],
+        collection_id: &str,
+        collection_name: &str,
+    ) -> Result<()> {
+        let relationships: Vec<Value> = (0..ciphers.len())
+            .map(|item| json!({ "key": item, "value": 0 }))
+            .collect();
+        self.call(
+            session,
+            "POST",
+            &format!("/api/ciphers/import-organization?organizationId={organization_id}"),
+            Some(json!({
+                "ciphers": ciphers,
+                "collections": [{ "id": collection_id, "name": collection_name }],
+                "collectionRelationships": relationships,
+            })),
+        )
+        .map(|_| ())
+    }
+
     /// An item's past versions (passbundle-server, keykeeper_cipher_history.rs):
     /// `{hidePasswords, savedBy, data: [{id, revisionDate, savedBy, cipher}]}`,
     /// newest first, each version's `cipher` encrypted as the item is.

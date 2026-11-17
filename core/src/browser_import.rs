@@ -42,9 +42,6 @@ pub struct Organizations {
     pub keeps_items_out: Option<String>,
 }
 
-/// Upstream's "Remove individual vault" (organization data ownership) policy.
-const PERSONAL_OWNERSHIP: u64 = 5;
-
 impl Organizations {
     pub fn from_sync(text: Option<&str>) -> Organizations {
         let Some(sync) = text.and_then(|t| serde_json::from_str::<Value>(t).ok()) else {
@@ -70,23 +67,7 @@ impl Organizations {
         domains.sort();
         domains.dedup();
         // Owners and admins aren't bound by it, as upstream has it.
-        let keeps_items_out = sync["policies"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter(|p| p["type"].as_u64() == Some(PERSONAL_OWNERSHIP) && p["enabled"] == true)
-            .find_map(|p| {
-                let org = organizations
-                    .iter()
-                    .find(|o| o["id"] == p["organizationId"])?;
-                let exempt = matches!(org["type"].as_u64(), Some(0 | 1));
-                (!exempt).then(|| {
-                    org["name"]
-                        .as_str()
-                        .unwrap_or("Your organization")
-                        .to_owned()
-                })
-            });
+        let keeps_items_out = crate::import::keeps_items_out(text);
         Organizations {
             domains,
             keeps_items_out,

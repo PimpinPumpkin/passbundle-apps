@@ -105,15 +105,17 @@ pub struct MasterKey(Zeroizing<[u8; 32]>);
 impl MasterKey {
     pub fn derive(password: &str, email: &str, kdf: &Kdf) -> Result<MasterKey> {
         let salt = normalize_email(email);
+        MasterKey::derive_salted(password, salt.as_bytes(), kdf)
+    }
+
+    /// The KDF's 32 bytes for a password and a salt as given: PBKDF2-SHA256
+    /// over the salt, or Argon2id over the salt's SHA-256, as for the
+    /// master key (whose salt is the email, trimmed and lowercased).
+    pub(crate) fn derive_salted(password: &str, salt: &[u8], kdf: &Kdf) -> Result<MasterKey> {
         let mut out = Zeroizing::new([0u8; 32]);
         match *kdf {
             Kdf::Pbkdf2 { iterations } => {
-                pbkdf2::pbkdf2_hmac::<Sha256>(
-                    password.as_bytes(),
-                    salt.as_bytes(),
-                    iterations,
-                    &mut *out,
-                );
+                pbkdf2::pbkdf2_hmac::<Sha256>(password.as_bytes(), salt, iterations, &mut *out);
             }
             Kdf::Argon2id {
                 iterations,
@@ -123,11 +125,7 @@ impl MasterKey {
                 let params = Params::new(memory_mib * 1024, iterations, parallelism, Some(32))
                     .map_err(|_| Error::WeakKdf("Argon2id settings it can't use"))?;
                 Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
-                    .hash_password_into(
-                        password.as_bytes(),
-                        &Sha256::digest(salt.as_bytes()),
-                        &mut *out,
-                    )
+                    .hash_password_into(password.as_bytes(), &Sha256::digest(salt), &mut *out)
                     .map_err(|_| Error::WeakKdf("Argon2id settings it can't use"))?;
             }
         }

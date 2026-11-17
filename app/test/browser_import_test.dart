@@ -318,6 +318,13 @@ void main() {
       );
       expect(find.text('Import with its own Export'), findsOneWidget);
       expect(find.text('Nothing was imported.'), findsOneWidget);
+
+      // Its own Export, then that file imported here, with Edge chosen and
+      // the steps to export from it.
+      await tester.tap(find.text('Import with its own Export'));
+      await tester.pumpAndSettle();
+      expect(find.text('Export from Microsoft Edge'), findsOneWidget);
+      expect(find.byKey(const ValueKey('import-choose-file')), findsOneWidget);
     },
   );
 }
