@@ -3788,3 +3788,53 @@ fn where_plans_are_enforced_a_free_account_hears_the_servers_sentence_for_a_file
     };
     assert!(app.save_send(None, &text, None).unwrap().synced);
 }
+
+/// Archive (meta repo DESIGN.md, "Archive, export, and import in the apps"): an item
+/// archived in the app leaves the lists and search, stays archived through
+/// every save the app makes of it (an edit, a favorite, a version restored),
+/// as the server keeps it, and comes back out.
+#[test]
+fn an_archived_item_stays_archived_through_the_apps_saves() {
+    let Some(server) = server() else { return };
+    let url = std::env::var("PB_TEST_SERVER").unwrap();
+    let email = new_email("archive");
+    sign_up(&server, &email);
+    let mut app = signed_in_app(&url, &email);
+    let draft = ItemDraft {
+        name: "Old forum".into(),
+        username: Some("ana".into()),
+        password: secret("not-a-real-password-a1"),
+        uris: vec!["https://forum.example.test".into()],
+        ..ItemDraft::default()
+    };
+    app.save(None, &draft, &[]).unwrap();
+    let id = app.vault().unwrap().items[0].id.clone();
+    assert!(app.set_archived(&id, true).unwrap());
+    let archived = |app: &App| app.vault().unwrap().item(&id).unwrap().archived;
+    assert!(archived(&app));
+    assert!(app.vault().unwrap().search("forum").is_empty());
+    assert_eq!(app.vault().unwrap().archived("forum").len(), 1);
+
+    let mut draft = ItemDraft::of(app.vault().unwrap().item(&id).unwrap());
+    draft.password = secret("not-a-real-password-a2");
+    app.save(Some(&id), &draft, &[]).unwrap();
+    assert!(archived(&app), "an edit kept it archived");
+    app.set_favorite(&id, true).unwrap();
+    assert!(archived(&app), "a favorite kept it archived");
+    let version = app.history(&id).unwrap().versions[0].id.clone();
+    app.restore_version(&id, &version).unwrap();
+    assert!(archived(&app), "a version restored kept it archived");
+    let item = app.vault().unwrap().item(&id).unwrap();
+    assert_eq!(
+        item.password.as_deref().map(String::as_str),
+        Some("not-a-real-password-a1")
+    );
+    // As the server keeps it, on another device too.
+    let mut session = sign_in(&server, &email);
+    assert!(open(&server, &mut session).item(&id).unwrap().archived);
+
+    assert!(app.set_archived(&id, false).unwrap());
+    assert!(!archived(&app));
+    assert_eq!(app.vault().unwrap().search("forum").len(), 1);
+    assert!(!open(&server, &mut session).item(&id).unwrap().archived);
+}

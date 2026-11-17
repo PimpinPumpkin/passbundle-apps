@@ -304,6 +304,8 @@ class Core {
   late final _restoreVersion = _lib.lookupFunction<_Str3, _Str3>('pb_restore_version');
   late final _deleteHistory = _lib.lookupFunction<_Str3, _Str3>('pb_delete_history');
   late final _setFavorite = _lib.lookupFunction<_Str3, _Str3>('pb_set_favorite');
+  late final _archived = _lib.lookupFunction<_Str2, _Str2>('pb_archived');
+  late final _setArchived = _lib.lookupFunction<_Str3, _Str3>('pb_set_archived');
   late final _list = _lib.lookupFunction<_Str2, _Str2>('pb_list');
   late final _item = _lib.lookupFunction<_Str2, _Str2>('pb_item');
   late final _reveal = _lib.lookupFunction<_Str3, _Str3>('pb_reveal');
@@ -1530,6 +1532,23 @@ class Core {
       id,
       '$favorite',
     ], (p) => c._answer(c._setFavorite(p[0], p[1], p[2]))),
+  );
+
+  /// The account's archived items that a search finds (not those in the
+  /// trash), as [list] lists the ones in use: the Archive view.
+  List<Map<String, dynamic>> archived(String query) =>
+      ((_with([account, query], (p) => _answer(_archived(p[0], p[1]))) as List?) ??
+              const [])
+          .cast<Map<String, dynamic>>();
+
+  /// Archives an item, or takes it out of the archive, then syncs: `{ok,
+  /// synced}`. The person's own mark, so an item they can't edit takes it.
+  static Future<Answer> setArchived(String id, bool archived) => _background(
+    (c, a) => c._with([
+      a,
+      id,
+      '$archived',
+    ], (p) => c._answer(c._setArchived(p[0], p[1], p[2]))),
   );
 
   /// Opens a website in the browser: only http and https. Phones and the

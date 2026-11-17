@@ -1242,6 +1242,19 @@ impl Server {
         .map(|_| ())
     }
 
+    /// Archives an item, or takes it out of the archive (passbundle-server,
+    /// `PUT /api/ciphers/<id>/archive` and `/unarchive`): the person's own
+    /// mark, as a favorite is, so nothing is encrypted again. Answers the
+    /// item as the server keeps it now, as a sync has it.
+    pub fn set_archived(&self, session: &mut Session, id: &str, archived: bool) -> Result<Value> {
+        let path = if archived {
+            format!("/api/ciphers/{id}/archive")
+        } else {
+            format!("/api/ciphers/{id}/unarchive")
+        };
+        self.call(session, "PUT", &path, None)
+    }
+
     /// An item's past versions (passbundle-server, keykeeper_cipher_history.rs):
     /// `{hidePasswords, savedBy, data: [{id, revisionDate, savedBy, cipher}]}`,
     /// newest first, each version's `cipher` encrypted as the item is.

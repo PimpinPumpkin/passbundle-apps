@@ -2222,6 +2222,31 @@ impl App {
         self.sync()
     }
 
+    /// Archives an item, or takes it out of the archive (`archived` false),
+    /// then syncs: the person's own mark, as the server keeps it, so an item
+    /// they can't edit takes it too. Archived items stay out of the lists,
+    /// search, and filling (`Item::in_use`). Answers whether the sync after
+    /// it came through; the item shows as it now is either way.
+    pub fn set_archived(&mut self, id: &str, archived: bool) -> Result<bool> {
+        let vault = self.vault.as_ref().ok_or(Error::SignedOut)?;
+        let item = vault.item(id).ok_or(Error::Damaged("no such item"))?;
+        if item.deleted {
+            return Err(Error::Refused(
+                "that item is in the trash; restore it in the web vault first",
+            ));
+        }
+        let (Some(server), Some(session)) = (&self.server, self.session.as_mut()) else {
+            return Err(Error::SignedOut);
+        };
+        let saved = server.set_archived(session, id, archived)?;
+        let synced = self.sync().is_ok();
+        if !synced {
+            // Shown as it is now; a vault the answer doesn't open stays as it was.
+            let _ = self.keep_saved("ciphers", &saved);
+        }
+        Ok(synced)
+    }
+
     /// How the app looks on this device: whether logins show their
     /// websites' icons.
     pub fn appearance(&self) -> crate::store::Appearance {

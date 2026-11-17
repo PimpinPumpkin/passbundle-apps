@@ -26,6 +26,10 @@ enum Filter {
   folder,
   organization,
   collection,
+
+  /// Archived items, out of the lists, search, and filling (the core's
+  /// `Vault::archived`).
+  archive,
 }
 
 /// The core's places (Core.places), read.
@@ -192,6 +196,7 @@ bool shows(
     Filter.organization => item['organizationId'] == id,
     Filter.collection =>
       ((item['collectionIds'] as List?) ?? const []).contains(id),
+    Filter.archive => item['archived'] == true,
   };
 }
 

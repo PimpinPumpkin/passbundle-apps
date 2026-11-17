@@ -491,6 +491,8 @@ fn summary(vault: &Vault, item: &Item) -> Value {
         // The host its tile's icon is for (icons.rs), for a login.
         "iconHost": (item.kind == ItemKind::Login).then(|| item.uris.first().and_then(|u| crate::icons::host_of(u))).flatten(),
         "favorite": item.favorite,
+        // In the Archive: out of the lists, search, and filling.
+        "archived": item.archived,
         // Asks for the master password before its secrets are used.
         "reprompt": item.kept.reprompt != 0,
         "folderId": item.folder_id,
@@ -2162,6 +2164,46 @@ pub unsafe extern "C" fn pb_set_favorite(
     let account = text(account);
     let (id, favorite) = (text(id), text(favorite) == "true");
     with_app_waiting(&account, |app| done(app.set_favorite(&id, favorite)))
+}
+
+/// The account's archived items (not those in the trash) that a search
+/// finds, as `pb_list` lists items in use: the Archive view.
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_archived(account: *const c_char, query: *const c_char) -> *mut c_char {
+    let account = text(account);
+    let query = text(query);
+    with_app(&account, |app| match app.vault() {
+        Some(vault) => Value::Array(
+            vault
+                .archived(&query)
+                .into_iter()
+                .map(|i| summary(vault, i))
+                .collect(),
+        ),
+        None => json!([]),
+    })
+}
+
+/// Archives an item (`archived` "true") or takes it out of the archive,
+/// then syncs: `{ok, synced}`, or the words to show.
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_set_archived(
+    account: *const c_char,
+    id: *const c_char,
+    archived: *const c_char,
+) -> *mut c_char {
+    let account = text(account);
+    let (id, archived) = (text(id), text(archived) == "true");
+    with_app_waiting(&account, |app| match app.set_archived(&id, archived) {
+        Ok(synced) => json!({ "ok": true, "synced": synced }),
+        Err(e) => failed(e),
+    })
 }
 
 /// How the app looks on this device: `{showIcons}`.
