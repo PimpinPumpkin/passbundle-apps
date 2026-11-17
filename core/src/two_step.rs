@@ -225,8 +225,11 @@ impl Duo {
     pub fn token(&self, link: &str) -> Result<String> {
         let other =
             || Error::TwoStep("That Duo answer was for another sign-in. Continue with Duo again.");
-        let rest = link.trim().strip_prefix(LINK).ok_or_else(other)?;
-        let query = rest.strip_prefix('?').ok_or_else(other)?;
+        let link = as_written(link).ok_or_else(other)?;
+        let query = link
+            .strip_prefix(LINK)
+            .and_then(|rest| rest.strip_prefix('?'));
+        let query = query.ok_or_else(other)?;
         let code = query_value(query, "code").ok_or_else(other)?;
         let state = query_value(query, "state").ok_or_else(other)?;
         if state != self.state {
@@ -246,6 +249,21 @@ impl Duo {
 /// The link Duo's way back opens (the web vault's `duo-redirect-connector.html`).
 pub const LINK: &str = "passbundle://duo-callback";
 
+/// Duo's link as the server's page wrote it (`passbundle://duo-callback?...`),
+/// or None for any other. Windows hands the link on with a slash before the
+/// `?` (`passbundle://duo-callback/?...`), as it reads a link with nothing
+/// after its host; that slash is taken out, so the link reads the same
+/// however it arrived. Nothing else about it changes.
+fn as_written(link: &str) -> Option<String> {
+    let link = link.trim();
+    let rest = link.strip_prefix(LINK)?;
+    let rest = rest
+        .strip_prefix('/')
+        .filter(|r| r.starts_with('?'))
+        .unwrap_or(rest);
+    rest.starts_with('?').then(|| format!("{LINK}{rest}"))
+}
+
 /// Where a second copy of the app leaves Duo's link for the one signing in.
 fn handed_file(dir: &Path) -> PathBuf {
     dir.join("duo-callback.txt")
@@ -258,10 +276,9 @@ const HANDED_FOR: Duration = Duration::from_secs(5 * 60);
 /// Linux): leaves it in the app's folder, readable only by this person, for
 /// the copy that's signing in, and ends. Anything else is ignored.
 pub fn hand_over(dir: &Path, link: &str) -> bool {
-    let link = link.trim();
-    if !link.starts_with(LINK) || link.len() > 4096 {
+    let Some(link) = as_written(link).filter(|l| l.len() <= 4096) else {
         return false;
-    }
+    };
     if std::fs::create_dir_all(dir).is_err() {
         return false;
     }
@@ -820,7 +837,18 @@ mod tests {
             .unwrap(),
             format!("c0de+x|{STATE}")
         );
+        // As Windows hands it on, with a slash before the query.
+        assert_eq!(
+            duo.token(&format!(
+                "passbundle://duo-callback/?code=c0de%2Bx&state={STATE}"
+            ))
+            .unwrap(),
+            format!("c0de+x|{STATE}")
+        );
         for link in [
+            format!("passbundle://duo-callback//?code=c0de&state={STATE}"),
+            format!("passbundle://duo-callback/x?code=c0de&state={STATE}"),
+            format!("passbundle://duo-callbackx?code=c0de&state={STATE}"),
             format!("passbundle://duo-callback?code=c0de&state=Other{STATE}"),
             format!("passbundle://duo-callback?state={STATE}"),
             format!("passbundle://duo-callback?code=&state={STATE}"),
@@ -876,6 +904,12 @@ mod tests {
         }
         assert_eq!(handed_over(&dir).as_deref(), Some(link.as_str()));
         assert!(handed_over(&dir).is_none(), "once");
+        // As Windows hands it on: left as the server's page wrote it.
+        let windows = format!("passbundle://duo-callback/?code=c0de&state={STATE}");
+        assert!(hand_over(&dir, &windows));
+        assert_eq!(handed_over(&dir).as_deref(), Some(link.as_str()));
+        assert!(!hand_over(&dir, "passbundle://duo-callback/other"));
+        assert!(!hand_over(&dir, &format!("{link}{}", "x".repeat(4096))));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
