@@ -6,15 +6,22 @@ import android.content.Intent
 import android.content.IntentSender
 import android.content.pm.ApplicationInfo
 import android.os.Build
+import android.os.Bundle
 import android.util.Log
 import android.service.autofill.Dataset
 import android.service.autofill.FillResponse
+import android.service.autofill.LuhnChecksumValidator
+import android.service.autofill.RegexValidator
 import android.service.autofill.SaveInfo
+import android.service.autofill.Validator
+import android.service.autofill.Validators
 import android.view.autofill.AutofillId
 import android.view.autofill.AutofillValue
 import android.widget.RemoteViews
+import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.regex.Pattern
 
 /**
  * What PassBundle offers Android's autofill (docs/phones.md, "Autofill"):
@@ -32,7 +39,8 @@ import java.util.concurrent.atomic.AtomicInteger
  * A page's domain counts only from a browser (Browsers.kt); another app that
  * can open web links and gives one is offered to be trusted as a browser, in
  * PassBundle's own dialog. A keyboard that asks for suggestions (Android 11
- * and later) gets the same entries on the keyboard (Inline.kt).
+ * and later) gets the same entries on the keyboard (Inline.kt). And Android
+ * offers to save a new sign-in, card, or address there (Saving.kt).
  */
 object Responses {
     private val requests = AtomicInteger()
@@ -74,15 +82,71 @@ object Responses {
             PendingIntent.FLAG_CANCEL_CURRENT or PendingIntent.FLAG_MUTABLE,
         ).intentSender
 
-    /** Android offers "Save to PassBundle" for a sign-in with a password (PassBundleAutofill.onSaveRequest). */
-    private fun saveInfo(fields: Fields): SaveInfo? {
-        val password = fields.password ?: return null
-        val types =
-            SaveInfo.SAVE_DATA_TYPE_PASSWORD or
-                (if (fields.username != null) SaveInfo.SAVE_DATA_TYPE_USERNAME else 0)
-        return SaveInfo.Builder(types, arrayOf(password))
-            .apply { fields.username?.let { setOptionalIds(arrayOf(it)) } }
-            .build()
+    /**
+     * Android offers "Save to PassBundle" (PassBundleAutofill.onSaveRequest):
+     * for a sign-in with a password, as before, or a card or an address
+     * (Saving.offer), with Android's own check of what was typed.
+     */
+    private fun saveInfo(offer: Saving.Offer<AutofillId>): SaveInfo {
+        val type =
+            when (offer.what) {
+                Saving.What.LOGIN ->
+                    SaveInfo.SAVE_DATA_TYPE_PASSWORD or
+                        (if (offer.optional.isNotEmpty()) SaveInfo.SAVE_DATA_TYPE_USERNAME else 0)
+                Saving.What.CARD -> SaveInfo.SAVE_DATA_TYPE_CREDIT_CARD
+                Saving.What.ADDRESS -> SaveInfo.SAVE_DATA_TYPE_ADDRESS
+            }
+        // An address needs no one field: two of its parts, whichever (the check).
+        val builder =
+            if (offer.required.isEmpty()) SaveInfo.Builder(type) else SaveInfo.Builder(type, offer.required.toTypedArray())
+        if (offer.optional.isNotEmpty()) builder.setOptionalIds(offer.optional.toTypedArray())
+        offer.check?.let { builder.setValidator(validator(it)) }
+        return builder.build()
+    }
+
+    /** What the response offers to save (Saving.What's name), in its client state, which Android hands back with the save. */
+    const val SAVES = "com.passbundle.app.saves"
+
+    /** The offer to save on a response, and what it is, for PassBundleAutofill.onSaveRequest. */
+    private fun FillResponse.Builder.offerToSave(offer: Saving.Offer<AutofillId>): FillResponse.Builder =
+        setSaveInfo(saveInfo(offer)).setClientState(Bundle().apply { putString(SAVES, offer.what.name) })
+
+    /** Android's validator for a check (Saving.Check): Android runs it on what was typed, before it asks. */
+    private fun validator(check: Saving.Check<AutofillId>): Validator =
+        when (check) {
+            is Saving.Check.Matches -> RegexValidator(check.id, Pattern.compile(check.regex))
+            is Saving.Check.Luhn -> LuhnChecksumValidator(check.id)
+            is Saving.Check.All -> Validators.and(*check.checks.map(::validator).toTypedArray())
+            is Saving.Check.AnyOf -> Validators.or(*check.checks.map(::validator).toTypedArray())
+            is Saving.Check.Not -> Validators.not(validator(check.check))
+        }
+
+    private fun strings(array: JSONArray?): List<String> = array?.let { a -> (0 until a.length()).map { a.getString(it) } }.orEmpty()
+
+    /**
+     * What PassBundle knows for Android's offer to save a card or an
+     * address on these fields (Core.saveHints): where one may be made, and
+     * what tells a new one from one the person has. Null while it's locked
+     * or busy, or where there's no card's or identity's field to save from:
+     * then every one is offered, and checked once the person accepts.
+     */
+    private fun known(fields: Fields): Saving.Known? {
+        if (fields.password != null || (fields.of(Kind.CARD).isEmpty() && fields.of(Kind.IDENTITY).isEmpty())) return null
+        val answer = JSONObject(Core.saveHints() ?: return null)
+        if (answer.optBoolean("locked", true)) return null
+        val card = answer.optJSONObject("card") ?: return null
+        val identity = answer.optJSONObject("identity") ?: return null
+        val addresses = identity.optJSONArray("addresses")
+        return Saving.Known(
+            mayAddCard = card.optBoolean("mayAdd", true),
+            mayAddAddress = identity.optBoolean("mayAdd", true),
+            last4 = strings(card.optJSONArray("last4")),
+            addresses =
+                (0 until (addresses?.length() ?: 0)).map { i ->
+                    val address = addresses!!.getJSONObject(i)
+                    strings(address.optJSONArray("street")) to address.optString("postalCode")
+                },
+        )
     }
 
     /** A value the core gave, or null when it gave none (Android's JSON reads a null as the word "null"). */
@@ -330,7 +394,6 @@ object Responses {
                 )
                 .build()
         }
-        val save = saveInfo(fields)
         val loginIds = listOfNotNull(fields.username, fields.password)
         val code = fields.code
         // A login's fields, or a one-time code's, which comes from a login too.
@@ -338,6 +401,9 @@ object Responses {
         if (offer == Unlocking.Offer.UNLOCK) {
             // The app's sites checked meanwhile, for once the person unlocks.
             if (domain == null && forLogins) AppSites.warm(context, fields.packageName)
+            // Locked, a card or an address is offered to save whatever it
+            // is, and checked once PassBundle is unlocked to save it.
+            val save = Saving.offer(fields.screen, null)
             return FillResponse.Builder()
                 .authenticate(
                     context,
@@ -347,9 +413,10 @@ object Responses {
                     "to fill this in",
                     keyboard,
                 )
-                .apply { save?.let { setSaveInfo(it) } }
+                .apply { save?.let { offerToSave(it) } }
                 .build()
         }
+        val save = Saving.offer(fields.screen, known(fields))
         var matching = emptyList<Offered>()
         var trust: Trust? = null
         if (forLogins) {
@@ -362,8 +429,8 @@ object Responses {
         fun anywhereFor(kind: Kind) = if (fields.of(kind).isEmpty()) emptyList() else anywhere(kind).orEmpty().map(::offered)
         val offers = entries(fields.screen, matching, anywhereFor(Kind.CARD), anywhereFor(Kind.IDENTITY), trust) { justFilled(it, fields) }
         val response = FillResponse.Builder()
-        save?.let { response.setSaveInfo(it) }
-        // Nothing to fill: only the offer to save what the person signs in with.
+        save?.let { response.offerToSave(it) }
+        // Nothing to fill: only the offer to save what the person types.
         if (offers.isEmpty()) return save?.let { response.build() }
         val datasets = offers.map { dataset(context, fields, it) }
         // On the keyboard too, as many as it takes, in the list's order.

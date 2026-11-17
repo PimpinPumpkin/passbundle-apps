@@ -502,6 +502,48 @@ impl Accounts {
             .collect()
     }
 
+    /// The card with this number that an unlocked account has already, the
+    /// shown account's first, with its account: Android's autofill doesn't
+    /// save it again (matching.rs, `card_with_number`).
+    pub fn card_with_number(&self, number: &str) -> Option<(&str, &crate::vault::Item)> {
+        self.unlocked_shown_first()
+            .find_map(|(id, vault)| vault.card_with_number(number).map(|i| (id, i)))
+    }
+
+    /// The identity at this address (its first street line and postal
+    /// code) that an unlocked account has already, as `card_with_number`
+    /// finds a card (matching.rs, `identity_at`).
+    pub fn identity_at(
+        &self,
+        street: &str,
+        postal_code: &str,
+    ) -> Option<(&str, &crate::vault::Item)> {
+        self.unlocked_shown_first()
+            .find_map(|(id, vault)| vault.identity_at(street, postal_code).map(|i| (id, i)))
+    }
+
+    /// The unlocked accounts where a new item of this kind may be made (no
+    /// organization's policy there removes it, restricted_types.rs), the
+    /// shown one first.
+    pub fn may_add(&self, kind: crate::vault::ItemKind) -> Vec<&str> {
+        self.unlocked_shown_first()
+            .filter(|(_, vault)| !vault.restricted.refuses_new(kind))
+            .map(|(id, _)| id)
+            .collect()
+    }
+
+    /// What tells a new card or address from one in any unlocked account,
+    /// for Android's own check before it offers to save (matching.rs,
+    /// `SaveHints`): never a whole number.
+    pub fn save_hints(&self) -> crate::matching::SaveHints {
+        crate::matching::save_hints(self.unlocked().flat_map(|(_, vault)| {
+            vault
+                .items
+                .iter()
+                .map(move |i| (i, vault.grid(i).see_passwords))
+        }))
+    }
+
     /// Each unlocked account's logins with a passkey for a site (by its ID),
     /// with the account each is in, as `fillable` orders them.
     pub fn passkeys_for<'a>(&'a self, rp_id: &str) -> Vec<(&'a str, &'a crate::vault::Item)> {
@@ -2035,6 +2077,60 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
+    /// Android's autofill doesn't save again a card that an unlocked account
+    /// has, by its number however it's typed, the shown account's first;
+    /// a locked account's doesn't count. What tells them apart before
+    /// Android asks is their last 4 digits, never a whole number.
+    #[test]
+    fn a_card_already_saved_is_found_in_any_unlocked_account() {
+        use crate::vault::ItemKind;
+        let dir = new_dir();
+        let a = keep(&dir, shopper(0));
+        let b = keep(&dir, shopper(1));
+        let mut accounts = open(&dir);
+        accounts.switch(&b).unwrap();
+        // Locked, there's nothing to compare with, and nowhere to save.
+        assert!(accounts.card_with_number("4111111111111111").is_none());
+        assert!(accounts.may_add(ItemKind::Card).is_empty());
+        assert_eq!(accounts.save_hints(), crate::matching::SaveHints::default());
+        for id in [&a, &b] {
+            accounts
+                .app(id)
+                .unwrap()
+                .unlock("shopping password 1")
+                .unwrap();
+        }
+        let found = |accounts: &Accounts, number: &str| {
+            accounts
+                .card_with_number(number)
+                .map(|(id, i)| (id.to_owned(), i.name.clone()))
+        };
+        // The first in use by name (the Amex is in the trash), the shown account's first.
+        assert_eq!(
+            found(&accounts, "4111 1111 1111 1111"),
+            Some((b.clone(), "Debit 2".to_owned()))
+        );
+        assert_eq!(found(&accounts, "4111 1111 1111 1112"), None);
+        assert_eq!(
+            accounts.may_add(ItemKind::Card),
+            vec![b.as_str(), a.as_str()]
+        );
+        let hints = accounts.save_hints();
+        assert_eq!(hints.last4, vec!["1111".to_owned()]);
+        // These identities have no street or postal code to tell them by.
+        assert!(hints.addresses.is_empty());
+        assert!(accounts.identity_at("1 Example Street", "62701").is_none());
+        accounts.lock(&b);
+        assert_eq!(
+            found(&accounts, "4111111111111111"),
+            Some((a.clone(), "Debit 1".to_owned()))
+        );
+        assert_eq!(accounts.may_add(ItemKind::Card), vec![a.as_str()]);
+        accounts.lock(&a);
+        assert_eq!(found(&accounts, "4111111111111111"), None);
+        let _ = fs::remove_dir_all(dir);
+    }
+
     /// An organization's "Remove card item type" policy is its own
     /// account's: that account's cards are offered and listed nowhere, while
     /// another unlocked account without it still offers its own.
@@ -2116,6 +2212,19 @@ mod tests {
         assert!(!vault.restricted.refuses_new(ItemKind::Identity));
         let vault = accounts.app(&b).unwrap().vault().unwrap();
         assert!(!vault.restricted.refuses_new(ItemKind::Card));
+        // Autofill's offer to save a card: only into the other account, and
+        // a card the policy leaves out isn't one the person has.
+        assert_eq!(accounts.may_add(ItemKind::Card), vec![b.as_str()]);
+        assert_eq!(
+            accounts.may_add(ItemKind::Identity),
+            vec![a.as_str(), b.as_str()]
+        );
+        assert_eq!(
+            accounts
+                .card_with_number("4111111111111111")
+                .map(|(id, _)| id.to_owned()),
+            Some(b.clone())
+        );
         // Locked, the other account's cards go too; unlocked again, the
         // policy still holds.
         accounts.lock(&b);

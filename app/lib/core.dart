@@ -1153,7 +1153,9 @@ class Core {
         );
 
   /// A sign-in Android's autofill offered to save (name, username, password,
-  /// uri), once; null if there's none. The editor opens with it.
+  /// uri), or a card or an address (`kind`, its name and parts, and the
+  /// accounts it may go in, `mayAdd`; or `already`, the name of the one the
+  /// person has), once; null if there's none. The editor opens with it.
   static Future<Map<String, dynamic>?> pendingSave() async {
     if (!Platform.isAndroid) return null;
     final save = await platform.invokeMethod<Map>('pendingSave');

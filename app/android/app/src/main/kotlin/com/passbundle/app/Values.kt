@@ -116,7 +116,8 @@ object Values {
             else -> "YYYY"
         }
 
-    private val MONTHS =
+    /** The months' English names, as lists show them and Saving.kt reads them. */
+    internal val MONTHS =
         listOf("january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december")
 
     /**
