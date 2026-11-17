@@ -493,6 +493,9 @@ fn summary(vault: &Vault, item: &Item) -> Value {
         "favorite": item.favorite,
         // In the Archive: out of the lists, search, and filling.
         "archived": item.archived,
+        // In the trash: only in the Trash view, which restores it or
+        // deletes it for good.
+        "deleted": item.deleted,
         // Asks for the master password before its secrets are used.
         "reprompt": item.kept.reprompt != 0,
         "folderId": item.folder_id,
@@ -2314,6 +2317,27 @@ pub unsafe extern "C" fn pb_archived(account: *const c_char, query: *const c_cha
         Some(vault) => Value::Array(
             vault
                 .archived(&query)
+                .into_iter()
+                .map(|i| summary(vault, i))
+                .collect(),
+        ),
+        None => json!([]),
+    })
+}
+
+/// The account's items in the trash that a search finds (archived ones
+/// too), as `pb_list` lists items in use: the Trash view.
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_trashed(account: *const c_char, query: *const c_char) -> *mut c_char {
+    let account = text(account);
+    let query = text(query);
+    with_app(&account, |app| match app.vault() {
+        Some(vault) => Value::Array(
+            vault
+                .trashed(&query)
                 .into_iter()
                 .map(|i| summary(vault, i))
                 .collect(),

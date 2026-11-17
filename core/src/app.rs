@@ -2268,7 +2268,7 @@ impl App {
         let item = vault.item(id).ok_or(Error::Damaged("no such item"))?;
         if item.deleted {
             return Err(Error::Refused(
-                "that item is in the trash; restore it in the web vault first",
+                "that item is in the trash; restore it first",
             ));
         }
         let (Some(server), Some(session)) = (&self.server, self.session.as_mut()) else {

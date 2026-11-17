@@ -1958,6 +1958,15 @@ impl Vault {
         self.found(query, |i| i.archived && !i.deleted)
     }
 
+    /// Items in the trash (archived ones too) whose name, username, or
+    /// websites contain every word of the query, as `search` finds items in
+    /// use: the Trash view, apart from every other list, search, count, and
+    /// filling. An item an organization's policy hides isn't here either,
+    /// as it's in none of `items`.
+    pub fn trashed<'a>(&'a self, query: &str) -> Vec<&'a Item> {
+        self.found(query, |i| i.deleted)
+    }
+
     fn found<'a>(&'a self, query: &str, keep: impl Fn(&Item) -> bool) -> Vec<&'a Item> {
         let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
         self.items

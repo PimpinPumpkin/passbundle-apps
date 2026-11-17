@@ -1,5 +1,6 @@
 //! One thing done to several items at once (docs/core.md, "Selecting
-//! several items"): favorites, the trash, a folder, a shared folder.
+//! several items"): favorites, Archive, the trash, a folder, a shared
+//! folder; and in the trash, restoring and deleting for good.
 //!
 //! Nothing here decides on its own what a person may do. Each item is
 //! checked with what a single item's action is checked with (`Vault::grid`,
@@ -7,7 +8,8 @@
 //! between shared folders). An item that doesn't pass is left as it is and
 //! said with why (`Skip`), and the server checks every one again. Nothing is
 //! encrypted: each call is one a single item's action makes, or the
-//! server's call for several (the trash, a folder).
+//! server's call for several (Archive, the trash, restoring, deleting for
+//! good, a folder).
 
 use std::collections::HashSet;
 
@@ -22,8 +24,17 @@ use crate::vault::{Item, Vault};
 pub enum Bulk {
     /// Favorite them, or not.
     Favorite(bool),
+    /// Archive them (true), or take them out of the archive: the person's
+    /// own mark, as a favorite is.
+    Archive(bool),
     /// Move them to the trash.
     Trash,
+    /// Take them out of the trash, back where they were (archived ones back
+    /// to Archive, as the server keeps that mark apart).
+    Restore,
+    /// Delete them for good, from the trash: never an item that isn't in
+    /// it.
+    DeleteForever,
     /// Put the person's own items in one of their folders, or in none.
     Folder(Option<String>),
     /// Move an organization's items to one of its shared folders (`to`),
@@ -36,8 +47,10 @@ pub enum Bulk {
 
 impl Bulk {
     /// As the app sends it: `{"do": "favorite", "favorite": true}`,
-    /// `{"do": "trash"}`, `{"do": "folder", "folderId": null}`,
-    /// `{"do": "sharedFolder", "to": "...", "from": null}`.
+    /// `{"do": "archive", "archived": true}`, `{"do": "trash"}`,
+    /// `{"do": "restore"}`, `{"do": "deleteForever"}`, `{"do": "folder",
+    /// "folderId": null}`, `{"do": "sharedFolder", "to": "...", "from":
+    /// null}`.
     pub fn from_json(text: &str) -> Result<Bulk> {
         let unread = Error::Damaged("what to do with the selected items");
         let v: Value = serde_json::from_str(text).map_err(|_| unread.clone())?;
@@ -49,7 +62,10 @@ impl Bulk {
         };
         match v["do"].as_str() {
             Some("favorite") => v["favorite"].as_bool().map(Bulk::Favorite).ok_or(unread),
+            Some("archive") => v["archived"].as_bool().map(Bulk::Archive).ok_or(unread),
             Some("trash") => Ok(Bulk::Trash),
+            Some("restore") => Ok(Bulk::Restore),
+            Some("deleteForever") => Ok(Bulk::DeleteForever),
             Some("folder") => Ok(Bulk::Folder(id("folderId"))),
             Some("sharedFolder") => Ok(Bulk::SharedFolder {
                 to: id("to").ok_or(unread)?,
@@ -63,12 +79,19 @@ impl Bulk {
 /// Why an item of a selection is left as it is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Skip {
-    /// It isn't in the vault any more, or it's in the trash already.
+    /// It isn't in the vault any more, or it's in the trash (for anything
+    /// but restoring it or deleting it for good).
     Gone,
+    /// It isn't in the trash (any more), so it isn't deleted for good.
+    NotInTrash,
     /// It asks for the master password, which wasn't given.
     MasterPassword,
-    /// The organization doesn't let the person delete it.
+    /// The organization doesn't let the person delete it (move it to the
+    /// trash, or delete it for good).
     NoDelete,
+    /// The organization doesn't let the person restore it: delete in the
+    /// item's grid, which the server checks for restoring too.
+    NoRestore,
     /// An organization's item, which stays in its shared folders: the
     /// person's own folders are for their own items, as in the editor.
     Shared,
@@ -88,8 +111,10 @@ impl Skip {
     pub fn name(self) -> &'static str {
         match self {
             Skip::Gone => "gone",
+            Skip::NotInTrash => "notInTrash",
             Skip::MasterPassword => "masterPassword",
             Skip::NoDelete => "noDelete",
+            Skip::NoRestore => "noRestore",
             Skip::Shared => "shared",
             Skip::OtherOwner => "otherOwner",
             Skip::HiddenPasswords => "hiddenPasswords",
@@ -165,18 +190,35 @@ enum Step {
     },
     /// Its own call: the shared folders it's to be in.
     Place(Vec<String>),
-    /// In the one call for all of them (the trash, a folder).
+    /// In the one call for all of them (Archive, the trash, restoring,
+    /// deleting for good, a folder).
     Together,
 }
 
 /// What a bulk action does to one item, or why it leaves it. Only checks
 /// the single-item actions make: the trash asks for delete on the item, as
-/// the item's page offers it; a move between shared folders is the
-/// editor's (`App::save`), which refuses an item whose passwords the person
-/// can't see and checks the rest with `may_place`.
+/// the item's page offers it, and so do restoring it and deleting it for
+/// good (the server's check for both); Archive is the person's own mark,
+/// as a favorite is; a move between shared folders is the editor's
+/// (`App::save`), which refuses an item whose passwords the person can't
+/// see and checks the rest with `may_place`.
 fn step(vault: &Vault, item: &Item, action: &Bulk) -> std::result::Result<Step, Skip> {
+    // Restoring and deleting for good are for items in the trash; the rest
+    // for items out of it.
+    let for_trash = matches!(action, Bulk::Restore | Bulk::DeleteForever);
+    if item.deleted && !for_trash {
+        return Err(Skip::Gone);
+    }
     match action {
-        // The person's own mark: an item they can't edit takes it too.
+        Bulk::Restore if !item.deleted => Ok(Step::Already),
+        Bulk::Restore if vault.grid(item).delete => Ok(Step::Together),
+        Bulk::Restore => Err(Skip::NoRestore),
+        Bulk::DeleteForever if !item.deleted => Err(Skip::NotInTrash),
+        Bulk::DeleteForever if vault.grid(item).delete => Ok(Step::Together),
+        Bulk::DeleteForever => Err(Skip::NoDelete),
+        // The person's own marks: an item they can't edit takes them too.
+        Bulk::Archive(archived) if item.archived == *archived => Ok(Step::Already),
+        Bulk::Archive(_) => Ok(Step::Together),
         Bulk::Favorite(favorite) if item.favorite == *favorite => Ok(Step::Already),
         Bulk::Favorite(favorite) => Ok(Step::Favorite {
             folder: item.folder_id.clone(),
@@ -264,7 +306,7 @@ impl App {
             if !seen.insert(id.as_str()) {
                 continue;
             }
-            let Some(item) = vault.item(id).filter(|item| !item.deleted) else {
+            let Some(item) = vault.item(id) else {
                 skipped.push((id.clone(), Skip::Gone));
                 continue;
             };
@@ -294,8 +336,9 @@ impl App {
     /// Favorites and shared folders go item by item, with the calls a
     /// single item's action makes; the server's refusal of one leaves the
     /// rest to try, and anything else (no connection, signed out) stops
-    /// there. The trash and a folder are one call for all. What went and
-    /// what didn't is in the outcome either way.
+    /// there. Archive, the trash, restoring, deleting for good, and a
+    /// folder are one call for all. What went and what didn't is in the
+    /// outcome either way.
     pub fn bulk(
         &mut self,
         ids: &[String],
@@ -352,9 +395,12 @@ impl App {
         }
         let sent = match action {
             _ if together.is_empty() => Ok(()),
+            Bulk::Archive(archived) => server.archive_items(session, &together, *archived),
             Bulk::Trash => server.trash_items(session, &together),
+            Bulk::Restore => server.restore_items(session, &together),
+            Bulk::DeleteForever => server.delete_items(session, &together),
             Bulk::Folder(folder) => server.move_items(session, &together, folder.as_deref()),
-            // Only those two go together.
+            // Only those go together.
             Bulk::Favorite(_) | Bulk::SharedFolder { .. } => Ok(()),
         };
         out.synced = self.sync().is_ok();
@@ -368,7 +414,10 @@ impl App {
                 for id in together {
                     let item = vault.and_then(|vault| vault.item(&id));
                     let went = match action {
+                        Bulk::Archive(archived) => item.is_some_and(|i| i.archived == *archived),
                         Bulk::Trash => vault.is_some() && item.is_none_or(|i| i.deleted),
+                        Bulk::Restore => item.is_some_and(|i| !i.deleted),
+                        Bulk::DeleteForever => vault.is_some() && item.is_none(),
                         Bulk::Folder(folder) => item.is_some_and(|i| i.folder_id == *folder),
                         Bulk::Favorite(_) | Bulk::SharedFolder { .. } => false,
                     };
