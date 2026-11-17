@@ -159,6 +159,9 @@ pub enum LeftOut {
     SshKeyUnreadable,
     /// An item in the file that couldn't be read.
     Unreadable,
+    /// A kind of item an organization's "Remove card item type" policy
+    /// removes (restricted_types.rs), as the web vault's import leaves out.
+    Restricted,
 }
 
 impl LeftOut {
@@ -171,6 +174,7 @@ impl LeftOut {
             LeftOut::Attachment => "attachment",
             LeftOut::SshKeyUnreadable => "sshKeyUnreadable",
             LeftOut::Unreadable => "unreadable",
+            LeftOut::Restricted => "restricted",
         }
     }
 }
@@ -505,6 +509,15 @@ pub fn read(format: Format, file: &[u8], password: Option<&str>, vault: &Vault) 
         Format::OnePassword1pux => one_password::read(file)?,
         Format::LastPassCsv => lastpass::read(&table(text)?)?,
     };
+    // No item of a kind an organization's "Remove card item type" policy
+    // removes, wherever it would go (upstream's import.service.ts).
+    let before = parsed.items.len();
+    parsed
+        .items
+        .retain(|i| !vault.restricted.refuses_new(ItemKind::from(i.kind)));
+    for _ in parsed.items.len()..before {
+        parsed.leave_out(LeftOut::Restricted);
+    }
     // Our own fields come back only from our own .json.
     parsed.renamed = guard_reserved_fields(&mut parsed.items, format == Format::Json);
     if let Some(browser) = format.browser() {

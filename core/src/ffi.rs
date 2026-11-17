@@ -2025,6 +2025,26 @@ pub unsafe extern "C" fn pb_templates(account: *const c_char) -> *mut c_char {
     })
 }
 
+/// The kinds of item New may not offer, as `pb_list` names kinds
+/// (`["card"]`): those an organization's "Remove card item type" policy
+/// removes (restricted_types.rs), from the open vault; none while locked.
+///
+/// # Safety
+/// `account` is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_restricted_kinds(account: *const c_char) -> *mut c_char {
+    let account = text(account);
+    with_app(&account, |app| match app.vault() {
+        Some(vault) => vault
+            .restricted
+            .removed()
+            .map(|n| kind(ItemKind::from(n)))
+            .filter(|k| *k != "other")
+            .collect(),
+        None => json!([]),
+    })
+}
+
 /// # Safety
 /// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
 #[no_mangle]

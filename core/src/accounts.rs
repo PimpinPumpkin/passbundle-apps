@@ -2035,6 +2035,102 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
+    /// An organization's "Remove card item type" policy is its own
+    /// account's: that account's cards are offered and listed nowhere, while
+    /// another unlocked account without it still offers its own.
+    #[test]
+    fn a_policy_that_removes_cards_holds_only_in_its_own_account() {
+        use crate::vault::ItemKind;
+        let dir = new_dir();
+        let a = keep(&dir, shopper(0));
+        let b = keep(&dir, shopper(1));
+        let mut sync: serde_json::Value = serde_json::from_str(&shopper(0).sync).unwrap();
+        sync["profile"]["organizations"] = serde_json::json!([{
+            "id": "11111111-2222-4333-8444-555555555555", "name": "Shop", "key": null,
+            "status": 2, "type": 2, "enabled": true, "usePolicies": true,
+        }]);
+        sync["policies"] = serde_json::json!([{
+            "id": "p", "organizationId": "11111111-2222-4333-8444-555555555555", "type": 15,
+            "enabled": true, "data": null, "object": "policy",
+        }]);
+        Store::new(dir.join("accounts").join(&a))
+            .save_sync(&sync.to_string())
+            .unwrap();
+        let mut accounts = open(&dir);
+        accounts.switch(&a).unwrap();
+        for id in [&a, &b] {
+            accounts
+                .app(id)
+                .unwrap()
+                .unlock("shopping password 1")
+                .unwrap();
+        }
+        let offered = |accounts: &Accounts, kind| -> Vec<(String, String)> {
+            accounts
+                .fillable_anywhere(kind)
+                .into_iter()
+                .map(|(id, _, i)| (id.to_owned(), i.name.clone()))
+                .collect()
+        };
+        // Autofill: the other account's cards only; identities from both.
+        assert_eq!(
+            offered(&accounts, ItemKind::Card),
+            vec![
+                (b.clone(), "Debit 2".to_owned()),
+                (b.clone(), "Visa 2".to_owned()),
+            ]
+        );
+        assert_eq!(
+            offered(&accounts, ItemKind::Identity),
+            vec![
+                (a.clone(), "Home 1".to_owned()),
+                (b.clone(), "Home 2".to_owned())
+            ]
+        );
+        // "All accounts" and the account's own list: none of its cards, in
+        // the trash or not, and the other's are there.
+        let found: Vec<(String, String)> = accounts
+            .search_all("")
+            .into_iter()
+            .map(|(id, _, i)| (id.to_owned(), i.name.clone()))
+            .collect();
+        assert_eq!(
+            found,
+            vec![
+                (b.clone(), "Debit 2".to_owned()),
+                (a.clone(), "Home 1".to_owned()),
+                (b.clone(), "Home 2".to_owned()),
+                (a.clone(), "Shop".to_owned()),
+                (b.clone(), "Shop".to_owned()),
+                (b.clone(), "Visa 2".to_owned()),
+            ]
+        );
+        assert_eq!(
+            names(&mut accounts, &a),
+            vec!["Home 1", "Old address 1", "Shop"]
+        );
+        assert_eq!(names(&mut accounts, &b).len(), 6);
+        // Making a card: refused in that account only.
+        let vault = accounts.app(&a).unwrap().vault().unwrap();
+        assert!(vault.restricted.refuses_new(ItemKind::Card));
+        assert!(!vault.restricted.refuses_new(ItemKind::Identity));
+        let vault = accounts.app(&b).unwrap().vault().unwrap();
+        assert!(!vault.restricted.refuses_new(ItemKind::Card));
+        // Locked, the other account's cards go too; unlocked again, the
+        // policy still holds.
+        accounts.lock(&b);
+        assert!(offered(&accounts, ItemKind::Card).is_empty());
+        accounts.lock(&a);
+        accounts
+            .app(&a)
+            .unwrap()
+            .unlock("shopping password 1")
+            .unwrap();
+        assert!(offered(&accounts, ItemKind::Card).is_empty());
+        assert_eq!(offered(&accounts, ItemKind::Identity).len(), 1);
+        let _ = fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn the_devices_own_choices_are_every_accounts() {
         let dir = new_dir();

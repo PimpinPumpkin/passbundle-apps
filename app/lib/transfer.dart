@@ -815,6 +815,8 @@ class _ImportDialogState extends State<ImportDialog> {
             '$c SSH ${plural(c, 'key', 'keys')} couldn\'t be read, so ${plural(c, 'it\'s', 'they\'re')} left out. PassBundle reads Ed25519 and RSA keys.',
           ('unreadable', final c) =>
             '$c ${plural(c, 'item', 'items')} couldn\'t be read, so ${plural(c, 'it\'s', 'they\'re')} left out.',
+          ('restricted', final c) =>
+            '$c ${plural(c, 'item is', 'items are')} of a kind an organization you\'re in doesn\'t allow, so ${plural(c, 'it\'s', 'they\'re')} left out.',
           (_, final c) => '$c ${plural(c, 'item is', 'items are')} left out.',
         },
       if (n('renamed') > 0)

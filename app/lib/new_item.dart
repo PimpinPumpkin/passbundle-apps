@@ -40,17 +40,20 @@ const _webVaultKinds = [
 
 /// Asks what's being saved: null if canceled. On a computer a dialog, as
 /// tall as what's in it; on a phone a page of its own. [onWebVault] opens
-/// the web vault, for the kinds only it makes.
+/// the web vault, for the kinds only it makes. [restricted] are the kinds
+/// not to offer (Core.restrictedKinds).
 Future<NewItemChoice?> chooseNewItem(
   BuildContext context, {
   required List<Map<String, dynamic>> templates,
   required bool asDialog,
   VoidCallback? onWebVault,
+  Set<String> restricted = const {},
 }) {
   final picker = NewItemPicker(
     templates: templates,
     dialog: asDialog,
     onWebVault: onWebVault,
+    restricted: restricted,
   );
   if (asDialog) {
     return showDialog<NewItemChoice>(
@@ -75,6 +78,7 @@ class NewItemPicker extends StatefulWidget {
     required this.templates,
     this.dialog = false,
     this.onWebVault,
+    this.restricted = const {},
   });
 
   /// The core's template groups (Core.templates).
@@ -83,6 +87,10 @@ class NewItemPicker extends StatefulWidget {
 
   /// Opens the web vault, which makes the kinds the apps don't yet.
   final VoidCallback? onWebVault;
+
+  /// The kinds an organization's "Remove card item type" policy removes,
+  /// which aren't offered (Core.restrictedKinds).
+  final Set<String> restricted;
 
   @override
   State<NewItemPicker> createState() => _NewItemPickerState();
@@ -127,8 +135,13 @@ class _NewItemPickerState extends State<NewItemPicker> {
               .toList(),
         ),
     ].where((g) => g.$2.isNotEmpty).toList();
+    // None of a kind an organization's policy removes.
+    final mainKinds = _main
+        .where((m) => !widget.restricted.contains(m.$1.kind))
+        .toList();
     // The kinds only the web vault makes, under the rest.
     final elsewhere = _webVaultKinds
+        .where((k) => !widget.restricted.contains(k.kind))
         .where((k) => matches(k.one) || matches(k.many))
         .toList();
     final children = [
@@ -143,7 +156,7 @@ class _NewItemPickerState extends State<NewItemPicker> {
                   : 2;
               return Column(
                 children: [
-                  for (var i = 0; i < _main.length; i += perRow) ...[
+                  for (var i = 0; i < mainKinds.length; i += perRow) ...[
                     if (i > 0) const SizedBox(height: 10),
                     IntrinsicHeight(
                       child: Row(
@@ -152,12 +165,14 @@ class _NewItemPickerState extends State<NewItemPicker> {
                           for (var j = i; j < i + perRow; j++) ...[
                             if (j > i) const SizedBox(width: 10),
                             Expanded(
-                              child: _MainKind(
-                                kind: _main[j].$1,
-                                subtitle: _main[j].$2,
-                                onTap: () =>
-                                    pick(NewItemChoice(_main[j].$1.kind)),
-                              ),
+                              child: j < mainKinds.length
+                                  ? _MainKind(
+                                      kind: mainKinds[j].$1,
+                                      subtitle: mainKinds[j].$2,
+                                      onTap: () =>
+                                          pick(NewItemChoice(mainKinds[j].$1.kind)),
+                                    )
+                                  : const SizedBox.shrink(),
                             ),
                           ],
                         ],
