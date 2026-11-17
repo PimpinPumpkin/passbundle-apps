@@ -102,7 +102,7 @@ object Roles {
         val role: Role,
         /** How it writes a card's expiry, month, or year: "MM/YY", "MM / YYYY", "MMYY", "YY", "YYYY" (Values.kt). */
         val format: String? = null,
-        /** A list's options, for a card's expiry month or year in a list. */
+        /** A list's options, for a card's expiry month or year, or an address's state or country, in a list. */
         val options: List<String>? = null,
     )
 
@@ -146,10 +146,14 @@ object Roles {
         for (field in fields) {
             val seen = Seen(field)
             if (field.options != null) {
-                // A list: only a card's expiry month or year, chosen by its options.
+                // A list: a card's expiry month or year, or an address's state
+                // or country, chosen by its options (Values.option).
                 val role = seen.cardMark ?: seen.cardWords.takeIf { !seen.marked }
                 if (role == Role.CARD_EXPIRY_MONTH || role == Role.CARD_EXPIRY_YEAR) {
                     cards += Found(field.id, role, options = field.options) to (seen.cardMark != null)
+                } else {
+                    val place = seen.identityMark ?: seen.identityWords.takeIf { !seen.marked }
+                    if (place == Role.STATE || place == Role.COUNTRY) identities += Found(field.id, place, options = field.options)
                 }
                 continue
             }

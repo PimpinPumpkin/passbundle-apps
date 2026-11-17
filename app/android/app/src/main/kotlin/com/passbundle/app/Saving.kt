@@ -231,11 +231,21 @@ object Saving {
      * editor's names for its parts (`kind` "identity"); null unless two or
      * more of a name, a street, a city, and a postal code are there. A whole
      * name in one field is split as a card's is (Values.nameParts); a street
-     * in one field, by its lines. Named by its street, else the person's name.
+     * in one field, by its lines. A state or a country chosen from a list
+     * is its option's text, but not a list's first option that isn't one
+     * (its prompt: "Select a state"). Named by its street, else the
+     * person's name.
      */
     fun <T> identity(screen: Roles.Screen<T>, value: (T) -> String?): Map<String, String>? {
         val fields = screen.of(Kind.IDENTITY)
         fun first(role: Role) = fields.filter { it.role == role }.firstNotNullOfOrNull { value(it.id)?.trim()?.ifEmpty { null } }
+
+        fun place(role: Role, names: (String) -> Set<String>) =
+            fields.filter { it.role == role }.firstNotNullOfOrNull { field ->
+                val chosen = value(field.id)?.trim()?.ifEmpty { null }
+                val prompt = chosen != null && chosen == field.options?.firstOrNull()?.trim() && names(chosen) == setOf(chosen)
+                chosen.takeUnless { prompt }
+            }
         var given = first(Role.GIVEN_NAME)
         var family = first(Role.FAMILY_NAME)
         val whole = first(Role.FULL_NAME)
@@ -267,9 +277,9 @@ object Saving {
             address2?.let { "address2" to it },
             address3?.let { "address3" to it },
             city?.let { "city" to it },
-            first(Role.STATE)?.let { "state" to it },
+            place(Role.STATE, Regions::state)?.let { "state" to it },
             postalCode?.let { "postalCode" to it },
-            first(Role.COUNTRY)?.let { "country" to it },
+            place(Role.COUNTRY, Regions::country)?.let { "country" to it },
         ).toMap()
     }
 

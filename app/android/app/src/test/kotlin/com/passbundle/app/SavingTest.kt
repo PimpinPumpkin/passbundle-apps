@@ -295,6 +295,29 @@ class SavingTest {
         assertEquals("Ana López", Saving.identity(shipping, mapOf("given" to "Ana", "family" to "López", "city" to "Springfield")::get)?.get("name"))
     }
 
+    @Test fun `an address's state and country chosen from lists, never a list's prompt`() {
+        val states = listOf("Select a state", "Idaho", "Illinois")
+        val countries = listOf("Choose a country", "Canada", "United States")
+        val lists =
+            screen(
+                page("line1", "address-line1"),
+                page("zip", "postal-code"),
+                page("state", "address-level1", options = states),
+                page("country", "country", options = countries),
+            )
+        val chosen = mapOf("line1" to "1 Example Street", "zip" to "62701", "state" to "Illinois", "country" to "United States")
+        val saved = Saving.identity(lists) { chosen[it] }!!
+        assertEquals("Illinois", saved["state"])
+        assertEquals("United States", saved["country"])
+        val prompts = mapOf("line1" to "1 Example Street", "zip" to "62701", "state" to "Select a state", "country" to "Choose a country")
+        val left = Saving.identity(lists) { prompts[it] }!!
+        assertFalse(left.containsKey("state"))
+        assertFalse(left.containsKey("country"))
+        // A list whose first option is a place has no prompt.
+        val first = screen(page("line1", "address-line1"), page("zip", "postal-code"), page("state", "address-level1", options = listOf("Idaho", "Illinois")))
+        assertEquals("Idaho", Saving.identity(first, mapOf("line1" to "1 Example Street", "zip" to "62701", "state" to "Idaho")::get)?.get("state"))
+    }
+
     @Test fun `months, years, and expiries as people type and lists show them`() {
         for ((text, month) in listOf("07" to 7, "7" to 7, "July" to 7, "Jul" to 7, "07 - July" to 7, "12" to 12, "dec" to 12)) {
             assertEquals(text, month, Saving.month(text))

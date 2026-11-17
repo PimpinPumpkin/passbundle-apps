@@ -136,10 +136,46 @@ class ValuesTest {
         assertNull(Values.yearOption(listOf("2029"), null))
     }
 
-    @Test fun `a list is chosen only for a card's month or year`() {
+    @Test fun `a list is chosen for a card's month or year, and an identity's state or country`() {
         val months = listOf("Month") + (1..12).map { it.toString() }
         assertEquals(7, Values.option(Role.CARD_EXPIRY_MONTH, months) { card[it] })
         assertEquals(1, Values.option(Role.CARD_EXPIRY_YEAR, listOf("Year", "2029")) { card[it] })
-        assertNull(Values.option(Role.COUNTRY, listOf("US", "Canada")) { identity[it] })
+        assertEquals(0, Values.option(Role.COUNTRY, listOf("US", "Canada")) { identity[it] })
+        assertEquals(2, Values.option(Role.STATE, listOf("State", "Idaho", "Illinois", "Indiana")) { identity[it] })
+        // No other list.
+        assertNull(Values.option(Role.CITY, listOf("Springfield", "Chicago")) { identity[it] })
+        assertNull(Values.option(Role.TITLE, listOf("Ms", "Mr")) { identity[it] })
+    }
+
+    @Test fun `a state from a list by its name or its abbreviation`() {
+        val names = listOf("Select a state", "Idaho", "Illinois", "Indiana")
+        val codes = listOf("--", "ID", "IL", "IN")
+        assertEquals(2, Regions.option(names, "IL", Regions::state))
+        assertEquals(2, Regions.option(codes, "Illinois", Regions::state))
+        assertEquals(2, Regions.option(codes, " il ", Regions::state))
+        assertEquals(1, Regions.option(listOf("--", "IL - Illinois", "IN - Indiana"), "Illinois", Regions::state))
+        assertEquals(2, Regions.option(listOf("--", "Indiana (IN)", "Illinois (IL)"), "IL", Regions::state))
+        // Canada's, with or without the accent.
+        assertEquals(1, Regions.option(listOf("Ontario", "Quebec"), "QC", Regions::state))
+        assertEquals(1, Regions.option(listOf("ON", "QC"), "Québec", Regions::state))
+        // Another country's, by the same words only.
+        assertEquals(1, Regions.option(listOf("Berlin", "Bayern"), "bayern", Regions::state))
+        // None fits, or two do: the list is left as it is.
+        assertNull(Regions.option(names, "Ohio", Regions::state))
+        assertNull(Regions.option(names, null, Regions::state))
+        assertNull(Regions.option(names, " ", Regions::state))
+        assertNull(Regions.option(listOf("Georgia", "Georgia"), "GA", Regions::state))
+    }
+
+    @Test fun `a country from a list by its name or its code`() {
+        val names = listOf("Canada", "Germany", "United States", "United Kingdom")
+        assertEquals(2, Regions.option(names, "US", Regions::country))
+        assertEquals(2, Regions.option(names, "USA", Regions::country))
+        assertEquals(3, Regions.option(names, "UK", Regions::country))
+        assertEquals(1, Regions.option(names, "DE", Regions::country))
+        assertEquals(1, Regions.option(listOf("CA", "DE", "US"), "Germany", Regions::country))
+        assertEquals(2, Regions.option(listOf("Canada", "Mexico", "United States of America"), "United States", Regions::country))
+        assertEquals(1, Regions.option(listOf("CA - Canada", "US - United States"), "united states", Regions::country))
+        assertNull(Regions.option(names, "Atlantis", Regions::country))
     }
 }
