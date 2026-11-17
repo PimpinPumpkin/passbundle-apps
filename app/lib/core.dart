@@ -278,6 +278,12 @@ class Core {
     'pb_set_screenshots',
   );
   late final _health = _lib.lookupFunction<_Str1, _Str1>('pb_health');
+  late final _ownHealthSeenBy = _lib.lookupFunction<_Str1, _Str1>(
+    'pb_own_health_seen_by',
+  );
+  late final _testOwnHealthSeenBy = _lib.lookupFunction<_Str1, _Str1>(
+    'pb_test_own_health_seen_by',
+  );
   late final _reminders = _lib.lookupFunction<_Str1, _Str1>('pb_reminders');
   late final _testExpiration = _lib.lookupFunction<_Str1, _Str1>(
     'pb_test_expiration',
@@ -1503,6 +1509,23 @@ class Core {
   /// `{id, weak, reused, unsecured}`. Judged on a background isolate.
   static Future<Answer> health() =>
       _background((c, a) => c._with([a], (p) => c._answer(c._health(p[0]))));
+
+  /// The organizations whose owners and admins see how many of the
+  /// person's own passwords are weak, reused, or exposed, never which ones,
+  /// by name: what the server's `seen-by` last said this unlock, which the
+  /// core asks before it sends those numbers (meta DESIGN.md, "Members' own
+  /// passwords"). Empty when none does.
+  List<String> ownHealthSeenBy() {
+    final names = _with([account], (p) => _answer(_ownHealthSeenBy(p[0])));
+    return names is List ? names.cast<String>() : const [];
+  }
+
+  /// Names [ownHealthSeenBy] answers with instead of the server's, for
+  /// tests, with a core built with its test hooks; null for the core's own.
+  @visibleForTesting
+  void testOwnHealthSeenBy(List<String>? names) => _with([
+    jsonEncode(names),
+  ], (p) => _answer(_testOwnHealthSeenBy(p[0])));
 
   /// The expiration reminders due now (core/src/expiration.rs), each said
   /// once: `title` ("2 items expire soon", or null when nothing is due),

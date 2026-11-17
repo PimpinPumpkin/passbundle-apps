@@ -2001,7 +2001,9 @@ fn a_sign_in_from_another_device_is_approved_in_the_app_and_the_key_reaches_only
 /// while the organization has "Members' own passwords" on, and its owners
 /// see those numbers, never which logins. An organization's items don't
 /// count. With it off (an organization made the upstream way, as here), the
-/// app sends nothing.
+/// app sends nothing. The app keeps who sees them, by name, from the
+/// server's `seen-by`, for the line its screens show the person, and forgets
+/// it when the vault locks.
 #[test]
 fn an_apps_own_logins_numbers_reach_the_organizations_owners() {
     let Some(server) = server() else { return };
@@ -2040,6 +2042,7 @@ fn an_apps_own_logins_numbers_reach_the_organizations_owners() {
         None,
         "sent while the organization has it off"
     );
+    assert!(app.own_health_seen_by().is_empty(), "nobody sees them yet");
 
     let on = server
         .raw(
@@ -2053,6 +2056,7 @@ fn an_apps_own_logins_numbers_reach_the_organizations_owners() {
     app.sync().unwrap();
     let reported = app.own_health_reported().expect("the numbers were sent");
     assert_eq!((reported.logins, reported.weak, reported.reused), (3, 1, 2));
+    assert_eq!(app.own_health_seen_by(), ["Contoso"]);
 
     let seen = server
         .raw(
@@ -2073,6 +2077,9 @@ fn an_apps_own_logins_numbers_reach_the_organizations_owners() {
     // Numbers, and nothing that names an item.
     let text = seen.to_string();
     assert!(!text.contains("Old forum") && !text.contains("Bank"));
+    // Locking forgets who sees them; the next unlock asks again.
+    app.lock();
+    assert!(app.own_health_seen_by().is_empty());
 }
 
 /// An expiration date and reminder days the app's editor sets go to the

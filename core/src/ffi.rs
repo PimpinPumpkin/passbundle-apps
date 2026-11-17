@@ -2764,6 +2764,50 @@ pub unsafe extern "C" fn pb_health(account: *const c_char) -> *mut c_char {
     ))
 }
 
+/// The organizations whose owners and admins see how many of the person's
+/// own passwords are weak, reused, or exposed (never which ones), by name, as
+/// the server's `seen-by` last said this unlock (App::own_health_seen_by):
+/// `["Harbor Dental"]`, or `[]` when none does. For the line Health and
+/// Settings show the person (meta DESIGN.md, "Members' own passwords"). Test
+/// builds (the test-hooks feature) answer what `pb_test_own_health_seen_by`
+/// gave instead, when it gave something.
+///
+/// # Safety
+/// `account` is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_own_health_seen_by(account: *const c_char) -> *mut c_char {
+    let account = text(account);
+    with_app(&account, |app| {
+        #[cfg(feature = "test-hooks")]
+        if let Some(given) = TEST_SEEN_BY
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+        {
+            return json!(given);
+        }
+        json!(app.own_health_seen_by())
+    })
+}
+
+/// Names `pb_own_health_seen_by` answers with instead of the server's, for
+/// tests (the test-hooks feature): a list, replacing any given before, or
+/// `null` for the core's own again.
+#[cfg(feature = "test-hooks")]
+static TEST_SEEN_BY: std::sync::Mutex<Option<Vec<String>>> = std::sync::Mutex::new(None);
+
+/// # Safety
+/// `names` is null or a NUL-terminated UTF-8 string, valid for the call.
+#[cfg(feature = "test-hooks")]
+#[no_mangle]
+pub unsafe extern "C" fn pb_test_own_health_seen_by(names: *const c_char) -> *mut c_char {
+    *TEST_SEEN_BY
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+        serde_json::from_str::<Option<Vec<String>>>(&text(names)).unwrap_or_default();
+    out(json!({ "ok": true }))
+}
+
 /// Health's items: each login with a password to fix, and each item expired
 /// or expiring within 30 days (`expires`, its label), each item once.
 fn health_items(issues: Vec<crate::health::Issues>, expiring: &[(String, String)]) -> Vec<Value> {

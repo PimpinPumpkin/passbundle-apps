@@ -13,13 +13,16 @@
 // (sign_in_requests.dart). On Android and the Mac, updates from PassBundle's
 // releases (updates.dart). On macOS and Windows, whether screenshots of
 // PassBundle are allowed (window_chrome.dart). The plans, where the server
-// enforces them (plan.dart).
+// enforces them (plan.dart). On a phone, which organizations see how many of
+// the person's own passwords are weak, reused, or exposed (own_health.dart),
+// as a computer's Health says.
 import 'package:flutter/material.dart';
 
 import 'accounts.dart';
 import 'autofill_offer.dart';
 import 'core.dart';
 import 'icons.dart';
+import 'own_health.dart';
 import 'pin.dart';
 import 'plan.dart';
 import 'sign_in_requests.dart';
@@ -111,6 +114,12 @@ class _SettingsListState extends State<SettingsList> {
   final core = Core();
   late Map<String, dynamic> preferences = core.preferences();
   late final Map<String, dynamic> policy = core.lockPolicy();
+
+  /// On a phone, the organizations whose admins see how many of the
+  /// person's own passwords are weak, reused, or exposed (own_health.dart).
+  late final List<String> seenBy = isPhone
+      ? core.ownHealthSeenBy()
+      : const [];
   Map<String, dynamic>? status;
 
   /// Unlocking with a PIN, as the core says (Core.pinStatus).
@@ -515,6 +524,19 @@ class _SettingsListState extends State<SettingsList> {
           email: email,
           touchIdOn: isMac && status?['status'] == 'setUp',
         ),
+        // On a phone: who sees how many of this account's own passwords are
+        // weak, reused, or exposed, as Health says it.
+        if (seenByLine(seenBy) case final line?)
+          SettingsGroup(
+            title: 'Your own passwords',
+            children: [
+              ListTile(
+                key: const ValueKey('settings-own-health-seen-by'),
+                leading: const Icon(Icons.visibility_outlined),
+                title: Text(line, style: const TextStyle(fontSize: 14)),
+              ),
+            ],
+          ),
         SettingsGroup(
           title: 'Appearance',
           // With more than one account, this and what follows are this
