@@ -54,7 +54,10 @@ class StandIn {
     final path = request.uri.path;
     asked.add('${request.method} $path');
     final text = await utf8.decodeStream(request);
-    final body = text.isEmpty ? null : jsonDecode(text);
+    // Sign-in's token request is a form, not JSON.
+    final isJson =
+        request.headers.contentType?.mimeType == ContentType.json.mimeType;
+    final body = text.isEmpty || !isJson ? null : jsonDecode(text);
     if (body is Map<String, dynamic>) {
       sent.putIfAbsent(path, () => []).add(body);
     }
@@ -157,12 +160,19 @@ void main() {
 
   const computer = Size(1280, 1100);
 
+  /// The sample vault unlocked on a computer, once its first sync is done:
+  /// the sample's server isn't there, so the vault says to sign in again.
+  /// Until then the sync's spinner turns, and nothing settles.
   Future<void> unlockHere(WidgetTester tester) async {
     setSize(tester, computer);
     await tester.pumpWidget(const PassBundleApp());
     await tester.enterText(find.byType(TextField), samplePassword);
     await tester.tap(find.text('Unlock'));
     await pumpUntil(tester, find.text('Example Mail'));
+    await pumpUntil(
+      tester,
+      find.textContaining('Sign in again to get changes'),
+    );
   }
 
   /// Signed in to a stand-in for the server, on a computer.
@@ -246,6 +256,11 @@ void main() {
       final written = jsonDecode(File(path).readAsStringSync()) as Map;
       expect(written['encrypted'], isFalse);
       expect(written['items'], hasLength(6));
+      // Its notice goes, so the next one shows: the test's clock doesn't
+      // run out its time.
+      ScaffoldMessenger.of(tester.element(find.byType(Sidebar)))
+          .removeCurrentSnackBar();
+      await tester.pumpAndSettle();
 
       // Password-protected: the file password typed twice, the same.
       await tester.tap(await menuEntry(tester, 'Export'));

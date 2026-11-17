@@ -934,10 +934,13 @@ class VaultScreenState extends State<VaultScreen> {
       refreshed++;
     });
     reload();
+    // In place of the notice showing: an earlier archive's Undo is stale
+    // once this one is done.
     showMessage(
       context,
       on ? 'Moved $name to Archive.' : 'Moved $name out of Archive.',
       action: ('Undo', () => archive(id, name, !on)),
+      inPlace: true,
     );
     return true;
   }

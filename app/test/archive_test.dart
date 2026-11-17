@@ -181,9 +181,14 @@ void main() {
       await tester.tap(find.byKey(const ValueKey('archive-item')));
       await pumpUntil(tester, find.text('Moved Example Mail to Archive.'));
       expect(standIn.asked, contains('PUT /api/ciphers/$mail/archive'));
-      // Back on the list, without it, and in Archive.
+      // Back on the list, without it, and in Archive. The notice floats
+      // over the list's foot, where the row is: it goes first.
       await tester.pumpAndSettle();
       expect(find.byKey(const ValueKey('archive-item')), findsNothing);
+      ScaffoldMessenger.of(
+        tester.element(find.byKey(const ValueKey('archive'))),
+      ).removeCurrentSnackBar();
+      await tester.pumpAndSettle();
       await tester.ensureVisible(find.byKey(const ValueKey('archive')));
       await tester.tap(find.byKey(const ValueKey('archive')));
       await tester.pumpAndSettle();
