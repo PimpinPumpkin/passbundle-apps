@@ -197,7 +197,9 @@ impl App {
     }
 
     /// The shared folders an import may go to: those the person may add
-    /// items to, whose organization's key they have, by name.
+    /// items to, whose organization's key they have, by name. Where an
+    /// organization keeps items out of Personal, a new passkey's login goes
+    /// in the first (`App::passkey_create`).
     pub fn import_shared_folders(&self) -> Vec<(String, String, String, String)> {
         let Some(vault) = self.vault.as_ref() else {
             return Vec::new();

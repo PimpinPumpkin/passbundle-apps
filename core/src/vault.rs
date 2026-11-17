@@ -41,6 +41,12 @@ pub struct Profile {
     pub private_key: Option<String>,
     #[serde(default)]
     pub organizations: Vec<OrganizationData>,
+    /// passbundle-server's memberships whose organization key hasn't
+    /// reached the person yet (`organizationsNew`), as sent: read only for
+    /// the policies that bind them (`Vault::keeps_items_out`), so nothing
+    /// in them can keep the vault from opening.
+    #[serde(default)]
+    pub organizations_new: serde_json::Value,
     /// Premium of the person's own (`premium`) and through an organization
     /// or an MSP (`premiumFromOrganization`), as the server works them out:
     /// whether items' two-step codes show (codes.rs).
@@ -1226,6 +1232,11 @@ pub struct Vault {
     /// The item types its organizations' "Remove card item type" policy
     /// removes (restricted_types.rs): no new item may be one.
     pub restricted: RestrictedTypes,
+    /// The organization whose "Remove individual vault" policy binds the
+    /// person, by name (import.rs, `keeping_items_out`): the server refuses
+    /// their own items then, new ones and edits, so a passkey goes in none
+    /// of their own logins (matching.rs, `passkey_target`).
+    pub keeps_items_out: Option<String>,
     /// The items that policy leaves out, by id: in none of the above.
     hidden: HashSet<String>,
     keys: Keyring,
@@ -1361,6 +1372,24 @@ impl Vault {
             &sync.policies,
             sync.profile.organizations.iter().map(|o| o.id.as_str()),
         );
+        let memberships = sync
+            .profile
+            .organizations
+            .iter()
+            .map(|o| crate::import::Membership {
+                organization: &o.id,
+                name: &o.name,
+                role: o.role.and_then(|r| u64::try_from(r).ok()),
+            })
+            .chain(
+                sync.profile
+                    .organizations_new
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(crate::import::Membership::of),
+            );
+        let keeps_items_out = crate::import::keeping_items_out(&sync.policies, memberships);
         let mut items = Vec::new();
         let mut damaged = Vec::new();
         let mut hidden = HashSet::new();
@@ -1397,6 +1426,7 @@ impl Vault {
             damaged,
             sends: crate::send::open_all(&sync.sends, &keys.user),
             restricted,
+            keeps_items_out,
             hidden,
             keys,
         })

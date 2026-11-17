@@ -63,6 +63,7 @@ mod tests {
             key: None,
             private_key: None,
             organizations: Vec::new(),
+            organizations_new: serde_json::Value::Null,
             premium,
             premium_from_organization: from_organization,
         }

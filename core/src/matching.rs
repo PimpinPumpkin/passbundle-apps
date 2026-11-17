@@ -231,6 +231,9 @@ impl Vault {
     ///   folders they can only view, or that hide its passwords. A kind an
     ///   organization's policy removes isn't in the vault at all
     ///   (restricted_types.rs).
+    /// - **Not one of their own** where an organization keeps items out of
+    ///   Personal (`Vault::keeps_items_out`): the server refuses an edit to
+    ///   it. Its owners and admins aren't bound, so theirs still take one.
     /// - **With the site's passkey for this account** (the same site ID and
     ///   user handle): the new one replaces it, as WebAuthn has an
     ///   authenticator do, whatever the login's websites.
@@ -248,6 +251,11 @@ impl Vault {
         }
         if item.archived {
             return Err(Error::Refused("that login is archived"));
+        }
+        if item.organization_id.is_none() && self.keeps_items_out.is_some() {
+            return Err(Error::Refused(
+                "your organization keeps items out of Personal, so that login can't be changed",
+            ));
         }
         let grid = self.grid(item);
         if !grid.edit {
@@ -967,5 +975,116 @@ mod tests {
         for item in [no_username, deleted, archived, note] {
             assert!(suggested(&item).is_empty());
         }
+    }
+
+    /// The vectors' sample vault (tests/vectors/core-v1.json), opened with
+    /// its user key, each item one the person may edit and see, and
+    /// Contoso's shared folder theirs to change, with its sync changed by
+    /// `edit`.
+    fn sample(edit: impl FnOnce(&mut serde_json::Value)) -> Vault {
+        use base64::Engine;
+        let v: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/vectors/core-v1.json")).unwrap();
+        let mut sync = v["sync"].clone();
+        for c in sync["ciphers"].as_array_mut().unwrap() {
+            c["edit"] = true.into();
+            c["viewPassword"] = true.into();
+        }
+        sync["collections"][0]["keykeeper"] = serde_json::json!({
+            "seePasswords": true, "create": true, "edit": true, "delete": true, "export": true,
+            "share": true, "print": true, "viewHistory": true, "manage": false,
+        });
+        edit(&mut sync);
+        let key = base64::engine::general_purpose::STANDARD
+            .decode(v["keys"]["userKey"].as_str().unwrap())
+            .unwrap();
+        Vault::open(
+            &crate::vault::Sync::from_json(&sync.to_string()).unwrap(),
+            crate::crypto::SymmetricKey::from_bytes(&key).unwrap(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn where_an_organization_keeps_items_out_of_personal_no_login_of_ones_own_takes_a_passkey() {
+        // The sample's Backup service has this account's passkey for
+        // backup.example.test, and Example Mail is for example.test: both
+        // the person's own. Office Wi-Fi is Contoso's.
+        const BACKUP: &str = "5f607182-93a4-4b52-cde3-f40516273849";
+        const MAIL: &str = "3d4e5f60-7182-4930-abc1-d2e3f4051627";
+        const OFFICE_WIFI: &str = "4e5f6071-8293-4a41-bcd2-e3f405162738";
+        const CONTOSO: &str = "8f9a7c1e-3b2d-4e5f-9a8b-7c6d5e4f3a2b";
+        let ana: Vec<u8> = (0xa0..=0xaf).collect();
+        let backup = PasskeySite {
+            rp_id: "backup.example.test",
+            user_handle: &ana,
+            app: None,
+        };
+        let offered = |vault: &Vault, site: &PasskeySite<'_>| -> Vec<(String, bool)> {
+            vault
+                .passkey_logins(site)
+                .into_iter()
+                .map(|(i, replaces)| (i.id.clone(), replaces))
+                .collect()
+        };
+        let keeping_out = |role: u64, enabled: bool| {
+            move |sync: &mut serde_json::Value| {
+                sync["profile"]["organizations"][0]["type"] = role.into();
+                sync["policies"] = serde_json::json!([
+                    { "organizationId": CONTOSO, "type": 5, "enabled": enabled }
+                ]);
+            }
+        };
+
+        // A member it binds: neither of their own logins takes one, not
+        // even the one whose passkey it would replace, since the server
+        // refuses an edit to it.
+        let mut member = sample(keeping_out(2, true));
+        assert_eq!(member.keeps_items_out.as_deref(), Some("Contoso"));
+        assert!(offered(&member, &backup).is_empty());
+        for id in [BACKUP, MAIL] {
+            assert_eq!(
+                member.passkey_target(member.item(id).unwrap(), &backup),
+                Err(Error::Refused(
+                    "your organization keeps items out of Personal, so that login can't be changed"
+                ))
+            );
+        }
+        // Contoso's own login, with a website for the site, still does.
+        let wifi = member
+            .items
+            .iter_mut()
+            .find(|i| i.id == OFFICE_WIFI)
+            .unwrap();
+        wifi.uris = vec!["https://office.example.test".into()];
+        wifi.uri_matches = vec![None];
+        let office = PasskeySite {
+            rp_id: "office.example.test",
+            ..backup
+        };
+        assert_eq!(offered(&member, &office), [(OFFICE_WIFI.to_owned(), false)]);
+
+        // Its owners and admins aren't bound, nor is anyone while it's off:
+        // their own logins are offered as ever.
+        for (role, enabled) in [(0, true), (1, true), (2, false)] {
+            let vault = sample(keeping_out(role, enabled));
+            assert_eq!(vault.keeps_items_out, None);
+            assert_eq!(
+                offered(&vault, &backup),
+                [(BACKUP.to_owned(), true), (MAIL.to_owned(), false)]
+            );
+        }
+
+        // A member whose organization key hasn't reached them yet
+        // (passbundle-server's organizationsNew) is bound too.
+        let joining = sample(|sync| {
+            sync["profile"]["organizationsNew"] =
+                serde_json::json!([{ "id": "fabrikam", "name": "Fabrikam", "type": 2 }]);
+            sync["policies"] = serde_json::json!([
+                { "organizationId": "fabrikam", "type": 5, "enabled": true }
+            ]);
+        });
+        assert_eq!(joining.keeps_items_out.as_deref(), Some("Fabrikam"));
+        assert!(offered(&joining, &backup).is_empty());
     }
 }

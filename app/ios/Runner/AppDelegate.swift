@@ -542,17 +542,7 @@ enum Suggestions {
         serviceIdentifier: ASCredentialServiceIdentifier(identifier: domain, type: .domain),
         user: user, recordIdentifier: "\(account)/\(id)")
     }
-    let passkeys = ((Shared.answer(pb_passkey_suggestions()) as? [[String: Any]]) ?? []).compactMap {
-      s -> ASPasskeyCredentialIdentity? in
-      guard let account = s["account"] as? String, let id = s["id"] as? String,
-        let rpId = s["rpId"] as? String, let user = s["userName"] as? String,
-        let credential = (s["credentialId"] as? String).flatMap(Shared.fromBase64url),
-        let handle = (s["userHandle"] as? String).flatMap(Shared.fromBase64url)
-      else { return nil }
-      return ASPasskeyCredentialIdentity(
-        relyingPartyIdentifier: rpId, userName: user, credentialID: credential, userHandle: handle,
-        recordIdentifier: "\(account)/\(id)")
-    }
+    let passkeys = Shared.passkeyIdentities()
     let identities: [any ASCredentialIdentity] = logins + passkeys
     let store = ASCredentialIdentityStore.shared
     let answer = { (stored: Bool) in DispatchQueue.main.async { done(identities.count, stored) } }
