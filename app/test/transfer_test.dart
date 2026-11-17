@@ -456,4 +456,173 @@ void main() {
       expect(find.text('Contoso keeps items out of Personal.'), findsOneWidget);
     },
   );
+
+  testWidgets(
+    'LastPass\'s CSV: its steps, its cards in secure notes, and what came in before anything is saved',
+    (tester) async {
+      final standIn = await signIn(tester);
+      Dialogs(tester).picks.add(
+        fileToPick(
+          'lastpass_export.csv',
+          'url,username,password,totp,extra,name,grouping,fav\n'
+              'https://shop.example.test,ana,made-up-shop-password,,,Example Shop,Shopping,0\n'
+              'http://sn,,,,"NoteType:Credit Card\nName on Card:Test Person\nNumber:4111111111111111\nExpiration Date:June,2030\nNotes:",Made-up card,Shopping,0\n',
+        ),
+      );
+      await tester.tap(await menuEntry(tester, 'Import'));
+      await tester.pumpAndSettle();
+      final lastPass = find.byKey(const ValueKey('import-format-lastpass-csv'));
+      await tester.ensureVisible(lastPass);
+      await tester.pumpAndSettle();
+      expect(find.text('LastPass (.csv)'), findsOneWidget);
+      await tester.tap(lastPass);
+      await tester.pump();
+      // LastPass's own Export, step by step.
+      expect(find.text('Export from LastPass'), findsOneWidget);
+      expect(
+        find.text(
+          'Sign in to LastPass in your browser, and open Advanced options, then Export.',
+        ),
+        findsOneWidget,
+      );
+      await tester.tap(find.byKey(const ValueKey('import-choose-file')));
+      await pumpUntil(tester, find.byKey(const ValueKey('import-go')));
+      expect(find.text('2 items come in: 1 login, 1 card.'), findsOneWidget);
+      expect(
+        find.text(
+          'With 1 folder; one you have already by the same name is used.',
+        ),
+        findsOneWidget,
+      );
+      // Nothing sent yet.
+      expect(standIn.asked, isNot(contains('POST /api/ciphers/import')));
+
+      await tester.tap(find.byKey(const ValueKey('import-go')));
+      await pumpUntil(tester, find.byKey(const ValueKey('import-done')));
+      expect(find.text('2 items came in.'), findsOneWidget);
+      final body = jsonEncode(standIn.sent['/api/ciphers/import']!.single);
+      expect(body, isNot(contains('made-up-shop-password')));
+      expect(body, isNot(contains('4111111111111111')));
+      await tester.tap(find.text('Done'));
+      await tester.pumpAndSettle();
+      expect(find.widgetWithText(ItemRow, 'Example Shop'), findsOneWidget);
+    },
+  );
+
+  testWidgets(
+    '1Password\'s export: its steps, and what came in and what was left out, before anything is saved',
+    (tester) async {
+      // export.data, which the web vault takes by itself too; the core's
+      // tests read it inside its .1pux.
+      Dialogs(tester).picks.add(
+        fileToPick(
+          'export.data',
+          jsonEncode({
+            'accounts': [
+              {
+                'attrs': {'accountName': 'Test Person', 'name': 'Test Person'},
+                'vaults': [
+                  {
+                    'attrs': {'name': 'Personal', 'type': 'P'},
+                    'items': [
+                      {
+                        'uuid': 'madeuplogin',
+                        'favIndex': 1,
+                        'state': 'archived',
+                        'categoryUuid': '001',
+                        'overview': {
+                          'title': 'Made-up login',
+                          'urls': [
+                            {'label': '', 'url': 'https://login.example.test/'},
+                          ],
+                        },
+                        'details': {
+                          'loginFields': [
+                            {
+                              'value': 'ana',
+                              'name': 'username',
+                              'fieldType': 'T',
+                              'designation': 'username',
+                            },
+                            {
+                              'value': 'made-up-1password-password',
+                              'name': 'password',
+                              'fieldType': 'P',
+                              'designation': 'password',
+                            },
+                          ],
+                        },
+                      },
+                      {
+                        'uuid': 'madeupscan',
+                        'favIndex': 0,
+                        'state': 'active',
+                        'categoryUuid': '006',
+                        'overview': {'title': 'Made-up scan'},
+                        'details': {
+                          'notesPlain': 'A scan.',
+                          'documentAttributes': {
+                            'fileName': 'scan.pdf',
+                            'documentId': 'madeupdoc',
+                            'decryptedSize': 12,
+                          },
+                        },
+                      },
+                      {
+                        'uuid': 'broken',
+                        'favIndex': 0,
+                        'state': 'active',
+                        'categoryUuid': '001',
+                        'overview': {'title': 'No details'},
+                      },
+                    ],
+                  },
+                ],
+              },
+            ],
+          }),
+        ),
+      );
+      openSample();
+      await unlockHere(tester);
+      await tester.tap(await menuEntry(tester, 'Import'));
+      await tester.pumpAndSettle();
+      // The web vault's import is for the formats the app doesn't read.
+      expect(
+        find.text('KeePass, Dashlane, Proton Pass, and more'),
+        findsOneWidget,
+      );
+      final onePux = find.byKey(const ValueKey('import-format-1password-1pux'));
+      await tester.ensureVisible(onePux);
+      await tester.pumpAndSettle();
+      expect(find.text('1Password (.1pux)'), findsOneWidget);
+      await tester.tap(onePux);
+      await tester.pump();
+      expect(find.text('Export from 1Password'), findsOneWidget);
+      expect(
+        find.text(
+          'Choose 1PUX as the format, then Export Data, and save the file.',
+        ),
+        findsOneWidget,
+      );
+      await tester.tap(find.byKey(const ValueKey('import-choose-file')));
+      await pumpUntil(tester, find.byKey(const ValueKey('import-go')));
+      expect(find.text('2 items come in: 1 login, 1 note.'), findsOneWidget);
+      expect(find.text('1 is archived, and stays in Archive.'), findsOneWidget);
+      expect(
+        find.text(
+          '1 attached file is left out: PassBundle doesn\'t import attachments yet.',
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.text('1 item couldn\'t be read, so it\'s left out.'),
+        findsOneWidget,
+      );
+      expect(find.byKey(const ValueKey('import-to-personal')), findsOneWidget);
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('import-go')), findsNothing);
+    },
+  );
 }

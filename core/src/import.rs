@@ -1,8 +1,9 @@
 //! Importing a file (meta repo DESIGN.md, "Archive, export, and import in the apps"):
-//! PassBundle's own exports, the browsers' own, and 1Password 8's CSV, read
-//! as upstream's importers for them read them (passbundle-clients,
-//! `libs/importer/src/importers`), so a file comes in the same here as in
-//! the web vault.
+//! PassBundle's own exports, the browsers' own, 1Password's `.1pux` and 1Password
+//! 8's CSV, and LastPass's CSV, read as upstream's importers for them read them
+//! (passbundle-clients, `libs/importer/src/importers`), so a file comes in the
+//! same here as in the web vault (`one_password.rs` says where the `.1pux`
+//! differs).
 //!
 //! - **Nothing is saved until the person has seen what came in** (`read`
 //!   answers what's in the file, and what's left out and why; `App` saves
@@ -25,6 +26,10 @@
 //!   the organization's, for a shared folder), as any new item is.
 
 use std::collections::HashMap;
+
+mod lastpass;
+mod one_password;
+mod ssh_key;
 
 use serde_json::{json, Value};
 use zeroize::Zeroizing;
@@ -51,6 +56,10 @@ pub enum Format {
     Safari,
     /// 1Password 8's CSV.
     OnePasswordCsv,
+    /// 1Password's `.1pux` (a zip), or the `export.data` in one.
+    OnePassword1pux,
+    /// LastPass's CSV.
+    LastPassCsv,
 }
 
 impl Format {
@@ -67,6 +76,8 @@ impl Format {
             "firefox" => Format::Firefox,
             "safari" => Format::Safari,
             "1password-csv" => Format::OnePasswordCsv,
+            "1password-1pux" => Format::OnePassword1pux,
+            "lastpass-csv" => Format::LastPassCsv,
             _ => return None,
         })
     }
@@ -141,6 +152,13 @@ pub enum LeftOut {
     UnknownKind,
     /// Firefox's own account, which older versions export.
     FirefoxAccount,
+    /// A file inside the export (an attachment or a document), which the
+    /// apps don't import.
+    Attachment,
+    /// An SSH key PassBundle doesn't read (not Ed25519 or RSA, or damaged).
+    SshKeyUnreadable,
+    /// An item in the file that couldn't be read.
+    Unreadable,
 }
 
 impl LeftOut {
@@ -150,6 +168,9 @@ impl LeftOut {
             LeftOut::AlreadyThere => "alreadyThere",
             LeftOut::UnknownKind => "unknownKind",
             LeftOut::FirefoxAccount => "firefoxAccount",
+            LeftOut::Attachment => "attachment",
+            LeftOut::SshKeyUnreadable => "sshKeyUnreadable",
+            LeftOut::Unreadable => "unreadable",
         }
     }
 }
@@ -191,9 +212,28 @@ impl Parsed {
     }
 
     fn leave_out(&mut self, why: LeftOut) {
+        self.leave_out_some(why, 1);
+    }
+
+    fn leave_out_some(&mut self, why: LeftOut, count: usize) {
+        if count == 0 {
+            return;
+        }
         match self.left_out.iter_mut().find(|(w, _)| *w == why) {
-            Some((_, n)) => *n += 1,
-            None => self.left_out.push((why, 1)),
+            Some((_, n)) => *n += count,
+            None => self.left_out.push((why, count)),
+        }
+    }
+
+    /// The folder of exactly this name, made once (LastPass's importer
+    /// names its folders itself, without the ones they're inside).
+    fn folder_named(&mut self, name: &str) -> usize {
+        match self.folders.iter().position(|f| f == name) {
+            Some(at) => at,
+            None => {
+                self.folders.push(name.to_owned());
+                self.folders.len() - 1
+            }
         }
     }
 
@@ -334,10 +374,102 @@ fn login() -> Item {
     }
 }
 
+/// A card's brand from its number, as upstream's `getCardBrandByPatterns`
+/// tells it (its patterns as they are, matched against the number as it
+/// is); None for one it doesn't know.
+fn card_brand(number: Option<&str>) -> Option<String> {
+    let number = number.filter(|n| !n.trim_matches(js_space).is_empty())?;
+    let digits = |n: &str| n.bytes().all(|b| b.is_ascii_digit());
+    let after = |prefix: &str, then: usize| {
+        number
+            .strip_prefix(prefix)
+            .is_some_and(|rest| rest.len() == then && digits(rest))
+    };
+    let three = |prefix: &str, from: u32, to: u32| {
+        number.strip_prefix(prefix).is_some_and(|rest| {
+            rest.get(..3)
+                .filter(|d| digits(d))
+                .and_then(|d| d.parse::<u32>().ok())
+                .is_some_and(|d| (from..=to).contains(&d))
+        })
+    };
+    let brand = if number.starts_with('4') {
+        "Visa"
+    } else if (51..=55).any(|p| after(&p.to_string(), 14))
+        || (2221..=2229).any(|p| after(&p.to_string(), 12))
+        || (223..=229).any(|p| after(&p.to_string(), 13))
+        || (23..=26).any(|p| after(&p.to_string(), 14))
+        || (270..=271).any(|p| after(&p.to_string(), 13))
+        || after("2720", 12)
+    {
+        "Mastercard"
+    } else if number.starts_with("34") || number.starts_with("37") {
+        "Amex"
+    } else if number.starts_with("6011")
+        || three("622", 126, 129)
+        || three("622", 130, 199)
+        || three("622", 200, 899)
+        || three("622", 900, 925)
+        || three("622", 644, 649)
+        || number.starts_with("65")
+    {
+        "Discover"
+    } else if number.starts_with("36") || (300..=305).any(|p| number.starts_with(&p.to_string())) {
+        "Diners Club"
+    } else if number.starts_with("3528")
+        || number.starts_with("3529")
+        || (353..=358).any(|p| {
+            number
+                .strip_prefix(&p.to_string())
+                .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit()))
+        })
+    {
+        "JCB"
+    } else {
+        return None;
+    };
+    Some(brand.to_owned())
+}
+
+/// A card's brand from the name another app gives it ("American Express",
+/// "MasterCard", "visa"), as our fork's `cardBrandFromName` reads one.
+fn card_brand_named(name: Option<&str>) -> Option<String> {
+    let key: String = name?
+        .to_lowercase()
+        .chars()
+        .filter(char::is_ascii_lowercase)
+        .collect();
+    let brand = match key.as_str() {
+        "visa" | "visaelectron" => "Visa",
+        "mastercard" | "mc" => "Mastercard",
+        "amex" | "americanexpress" => "Amex",
+        "discover" => "Discover",
+        "diners" | "dinersclub" => "Diners Club",
+        "jcb" => "JCB",
+        "maestro" => "Maestro",
+        "unionpay" | "chinaunionpay" => "UnionPay",
+        "rupay" => "RuPay",
+        _ => return None,
+    };
+    Some(brand.to_owned())
+}
+
 /// Reads a file of the format the person chose, with the password a
 /// password-protected `.json` is under, if they gave one; sorted against
-/// the vault for a browser's export. Nothing is saved.
-pub fn read(format: Format, text: &str, password: Option<&str>, vault: &Vault) -> Result<Read> {
+/// the vault for a browser's export. Nothing is saved. A `.1pux` is read as
+/// the zip it is; every other file as the web vault reads one, as UTF-8
+/// with anything that isn't read as the replacement character.
+pub fn read(format: Format, file: &[u8], password: Option<&str>, vault: &Vault) -> Result<Read> {
+    if format == Format::OnePasswordCsv && one_password::is_zip(file) {
+        return Err(Error::Refused(
+            "that's 1Password's .1pux export, not its CSV. Choose 1Password (.1pux) as its format",
+        ));
+    }
+    let text = Zeroizing::new(match format {
+        Format::OnePassword1pux => String::new(),
+        _ => String::from_utf8_lossy(file).into_owned(),
+    });
+    let text = text.as_str();
     let mut parsed = match format {
         Format::Json => {
             let file: Value = serde_json::from_str(text.trim_matches(js_space))
@@ -370,6 +502,8 @@ pub fn read(format: Format, text: &str, password: Option<&str>, vault: &Vault) -
         Format::Firefox => firefox(&table(text)?, text)?,
         Format::Safari => safari(&table(text)?, text)?,
         Format::OnePasswordCsv => one_password_csv(&table(text)?)?,
+        Format::OnePassword1pux => one_password::read(file)?,
+        Format::LastPassCsv => lastpass::read(&table(text)?)?,
     };
     // Our own fields come back only from our own .json.
     parsed.renamed = guard_reserved_fields(&mut parsed.items, format == Format::Json);

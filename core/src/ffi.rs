@@ -2317,10 +2317,10 @@ fn import_summary(app: &App) -> Value {
 /// Reads a file to import (DESIGN.md in the meta repo, "Export and import
 /// in the apps"): `format` the one the person chose ("json", "csv",
 /// "chrome", "edge", "brave", "opera", "vivaldi", "firefox", "safari",
-/// "1password-csv"), the file at `path`, and a password-protected file's
-/// password once it's asked for (empty before). `{ok, read: "needsPassword"
-/// or "wrongPassword"}`, or what it holds (`import_summary`); nothing is
-/// sent.
+/// "1password-csv", "1password-1pux", "lastpass-csv"), the file at `path`,
+/// and a password-protected file's password once it's asked for (empty
+/// before). `{ok, read: "needsPassword" or "wrongPassword"}`, or what it
+/// holds (`import_summary`); nothing is sent.
 ///
 /// # Safety
 /// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
