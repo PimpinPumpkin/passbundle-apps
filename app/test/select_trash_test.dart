@@ -458,12 +458,21 @@ void main() {
       );
 
       // The two restored are back in All items; the one deleted isn't.
-      await tester.tap(
-        find.descendant(
-          of: find.byType(Sidebar),
-          matching: find.text('All items'),
-        ),
+      // The menu scrolled down to the trash, so back up to All items.
+      final sidebar = find.byType(Sidebar);
+      final allItems = find.descendant(
+        of: sidebar,
+        matching: find.text('All items'),
       );
+      await tester.scrollUntilVisible(
+        allItems,
+        -100,
+        scrollable: find
+            .descendant(of: sidebar, matching: find.byType(Scrollable))
+            .first,
+      );
+      await tester.pump();
+      await tester.tap(allItems);
       await tester.pump();
       expect(names(tester), hasLength(6));
       expect(names(tester), containsAll(['Gate code', 'Everyday card']));
