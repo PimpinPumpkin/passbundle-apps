@@ -110,7 +110,7 @@ void main() {
         for (final action in [
           'New item',
           'Import from browsers',
-          'Import a file in the web vault',
+          'Import a file',
         ]) {
           expect(
             find.descendant(of: empty, matching: find.text(action)),

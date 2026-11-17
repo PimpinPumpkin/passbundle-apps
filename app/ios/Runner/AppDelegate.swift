@@ -30,8 +30,10 @@ import UniformTypeIdentifiers
     // account (now carried over as an account of its own): it goes, and the
     // app offers Face ID again after the next unlock with the master password.
     Biometric.forgetEarlier()
-    // A copy of a file to attach left by a run that stopped partway.
+    // A copy of a file to attach left by a run that stopped partway, and an
+    // export (Exporter, below).
     Picker.forget()
+    Exporter.forget()
     guard let registrar = engineBridge.pluginRegistry.registrar(forPlugin: "PassBundlePlatform") else { return }
     // What only the phone's own code does (docs/phones.md, "Talking to the OS").
     let channel = FlutterMethodChannel(name: "passbundle/platform", binaryMessenger: registrar.messenger())
@@ -135,6 +137,16 @@ import UniformTypeIdentifiers
       case "forgetPicked":
         Picker.forget()
         result(nil)
+      // An export (Exporter, below; app/lib/transfer.dart): the folder the
+      // core writes it in, then iOS's document picker for where it's kept.
+      case "exportFolder":
+        result(Exporter.folder())
+      case "exportFile":
+        guard let path = (call.arguments as? [String: Any])?["path"] as? String else {
+          result(["ok": false, "saved": false])
+          return
+        }
+        Exporter.shared.export(path: path) { saved in result(["ok": true, "saved": saved]) }
       // What iOS may suggest above the keyboard, after each sync (Suggestions, below).
       case "suggest":
         Suggestions.update { count, stored in result(["count": count, "stored": stored]) }
@@ -232,6 +244,86 @@ final class Picker: NSObject, UIDocumentPickerDelegate {
   /// Deletes every copy the picker made.
   static func forget() {
     try? FileManager.default.removeItem(at: folder)
+  }
+
+  private static func top() -> UIViewController? {
+    let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+    var top = scenes.flatMap(\.windows).first(where: \.isKeyWindow)?.rootViewController
+    while let shown = top?.presentedViewController { top = shown }
+    return top
+  }
+}
+
+/// Exporting a file (app/lib/transfer.dart; DESIGN.md in the meta repo,
+/// "Archive, export, and import in the apps"): the core writes the export in
+/// tmp/export, which only this app can read; iOS's document picker copies it
+/// where the person chooses, and it's deleted at once, whatever they chose,
+/// and when the app starts if a run that stopped partway left it.
+final class Exporter: NSObject, UIDocumentPickerDelegate {
+  static let shared = Exporter()
+  private var done: ((Bool) -> Void)?
+  private var file: URL?
+
+  static var directory: URL {
+    FileManager.default.temporaryDirectory.appendingPathComponent("export", isDirectory: true)
+  }
+
+  /// The folder the core writes the export in, new and empty: its path.
+  static func folder() -> String? {
+    forget()
+    do {
+      try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+      return directory.path
+    } catch {
+      return nil
+    }
+  }
+
+  /// Deletes whatever is in the folder.
+  static func forget() {
+    try? FileManager.default.removeItem(at: directory)
+  }
+
+  /// Asks where to keep the file at `path`, one the core wrote in the
+  /// folder: `done(saved)` once the person has chosen.
+  func export(path: String, _ done: @escaping (Bool) -> Void) {
+    // One at a time: an earlier one that never came back saved nothing.
+    finish(false)
+    let url = URL(fileURLWithPath: path)
+    let inFolder =
+      url.deletingLastPathComponent().resolvingSymlinksInPath().path
+      == Exporter.directory.resolvingSymlinksInPath().path
+    guard inFolder, FileManager.default.fileExists(atPath: url.path) else {
+      done(false)
+      return
+    }
+    self.done = done
+    file = url
+    let picker = UIDocumentPickerViewController(forExporting: [url], asCopy: true)
+    picker.delegate = self
+    guard let top = Exporter.top() else {
+      finish(false)
+      return
+    }
+    top.present(picker, animated: true)
+  }
+
+  func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+    finish(!urls.isEmpty)
+  }
+
+  func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
+    finish(false)
+  }
+
+  private func finish(_ saved: Bool) {
+    if let file {
+      try? FileManager.default.removeItem(at: file)
+    }
+    file = nil
+    let done = self.done
+    self.done = nil
+    done?(saved)
   }
 
   private static func top() -> UIViewController? {

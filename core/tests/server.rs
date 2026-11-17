@@ -3788,3 +3788,207 @@ fn where_plans_are_enforced_a_free_account_hears_the_servers_sentence_for_a_file
     };
     assert!(app.save_send(None, &text, None).unwrap().synced);
 }
+
+/// Archive (meta repo DESIGN.md, "Archive, export, and import in the apps"): an item
+/// archived in the app leaves the lists and search, stays archived through
+/// every save the app makes of it (an edit, a favorite, a version restored),
+/// as the server keeps it, and comes back out.
+#[test]
+fn an_archived_item_stays_archived_through_the_apps_saves() {
+    let Some(server) = server() else { return };
+    let url = std::env::var("PB_TEST_SERVER").unwrap();
+    let email = new_email("archive");
+    sign_up(&server, &email);
+    let mut app = signed_in_app(&url, &email);
+    let draft = ItemDraft {
+        name: "Old forum".into(),
+        username: Some("ana".into()),
+        password: secret("not-a-real-password-a1"),
+        uris: vec!["https://forum.example.test".into()],
+        ..ItemDraft::default()
+    };
+    app.save(None, &draft, &[]).unwrap();
+    let id = app.vault().unwrap().items[0].id.clone();
+    assert!(app.set_archived(&id, true).unwrap());
+    let archived = |app: &App| app.vault().unwrap().item(&id).unwrap().archived;
+    assert!(archived(&app));
+    assert!(app.vault().unwrap().search("forum").is_empty());
+    assert_eq!(app.vault().unwrap().archived("forum").len(), 1);
+
+    let mut draft = ItemDraft::of(app.vault().unwrap().item(&id).unwrap());
+    draft.password = secret("not-a-real-password-a2");
+    app.save(Some(&id), &draft, &[]).unwrap();
+    assert!(archived(&app), "an edit kept it archived");
+    app.set_favorite(&id, true).unwrap();
+    assert!(archived(&app), "a favorite kept it archived");
+    let version = app.history(&id).unwrap().versions[0].id.clone();
+    app.restore_version(&id, &version).unwrap();
+    assert!(archived(&app), "a version restored kept it archived");
+    let item = app.vault().unwrap().item(&id).unwrap();
+    assert_eq!(
+        item.password.as_deref().map(String::as_str),
+        Some("not-a-real-password-a1")
+    );
+    // As the server keeps it, on another device too.
+    let mut session = sign_in(&server, &email);
+    assert!(open(&server, &mut session).item(&id).unwrap().archived);
+
+    assert!(app.set_archived(&id, false).unwrap());
+    assert!(!archived(&app));
+    assert_eq!(app.vault().unwrap().search("forum").len(), 1);
+    assert!(!open(&server, &mut session).item(&id).unwrap().archived);
+}
+
+/// Exporting and importing (meta repo DESIGN.md, "Archive, export, and
+/// import in the apps"): one account's `.json` export, plain and password-protected,
+/// comes into another with its folder, fields, favorite, and archive as
+/// they were; a browser's export comes into an organization's shared
+/// folder, under the organization's key; and the server's refusal of an
+/// import into Personal, where it has none to refuse, never happens.
+#[test]
+fn an_export_comes_into_another_account_and_a_browsers_file_into_a_shared_folder() {
+    use passbundle_core::app::{Destination, ImportRead};
+    use passbundle_core::export::Format as ExportFormat;
+    use passbundle_core::import::Format;
+
+    let Some(server) = server() else { return };
+    let url = std::env::var("PB_TEST_SERVER").unwrap();
+    let from = new_email("export");
+    sign_up(&server, &from);
+    let mut app = signed_in_app(&url, &from);
+    let work = app.create_folder("Work").unwrap();
+    let login = ItemDraft {
+        name: "Example Mail".into(),
+        username: Some("ana@example.test".into()),
+        password: secret("not-a-real-password-e1"),
+        totp: secret("JBSWY3DPEHPK3PXP"),
+        uris: vec!["https://mail.example.test/login".into()],
+        fields: vec![Field {
+            name: "Recovery PIN".into(),
+            value: Zeroizing::new("8642".into()),
+            hidden: true,
+            boolean: false,
+        }],
+        folder_id: Some(work),
+        favorite: true,
+        ..ItemDraft::default()
+    };
+    app.save(None, &login, &[]).unwrap();
+    let note = ItemDraft {
+        name: "Old router".into(),
+        notes: secret("Admin page at 192.168.1.1"),
+        note: true,
+        ..ItemDraft::default()
+    };
+    let saved = app.save(None, &note, &[]).unwrap();
+    app.set_archived(&saved.id, true).unwrap();
+    let dir =
+        std::env::temp_dir().join(format!("pb-core-export-{}", uuid::Uuid::new_v4().simple()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let plain = dir.join("export.json");
+    let protected = dir.join("export-protected.json");
+    app.confirm_export(PASSWORD).unwrap();
+    assert_eq!(
+        app.export_to(ExportFormat::Json, &plain, None)
+            .unwrap()
+            .items,
+        2
+    );
+    app.confirm_export(PASSWORD).unwrap();
+    app.export_to(
+        ExportFormat::PasswordProtected,
+        &protected,
+        Some("made-up file password"),
+    )
+    .unwrap();
+
+    let to = new_email("import");
+    sign_up(&server, &to);
+    let mut other = signed_in_app(&url, &to);
+    assert_eq!(
+        other.read_import(Format::Json, &plain, None).unwrap(),
+        ImportRead::Read
+    );
+    assert_eq!(other.save_import(&Destination::Personal).unwrap().added, 2);
+    let check = |vault: &Vault, copies: usize| {
+        let folder = vault.folders.iter().find(|(_, n)| *n == "Work").unwrap().0;
+        let mails: Vec<_> = vault
+            .items
+            .iter()
+            .filter(|i| i.name == "Example Mail")
+            .collect();
+        assert_eq!(mails.len(), copies);
+        for mail in mails {
+            assert_eq!(mail.folder_id.as_deref(), Some(folder.as_str()));
+            assert!(mail.favorite);
+            assert_eq!(
+                mail.password.as_deref().map(String::as_str),
+                Some("not-a-real-password-e1")
+            );
+            assert_eq!(mail.fields[0].value.as_str(), "8642");
+            assert!(mail.fields[0].hidden);
+        }
+        let routers: Vec<_> = vault
+            .items
+            .iter()
+            .filter(|i| i.name == "Old router")
+            .collect();
+        assert_eq!(routers.len(), copies);
+        assert!(routers.iter().all(|r| r.archived));
+        // One folder named Work, used again by the second import.
+        assert_eq!(vault.folders.values().filter(|n| *n == "Work").count(), 1);
+    };
+    check(other.vault().unwrap(), 1);
+    assert_eq!(
+        other
+            .read_import(Format::Json, &protected, Some("made-up file password"))
+            .unwrap(),
+        ImportRead::Read
+    );
+    other.save_import(&Destination::Personal).unwrap();
+    check(other.vault().unwrap(), 2);
+
+    // A browser's export, into the organization's shared folder.
+    let mut session = sign_in(&server, &to);
+    let (org, org_key) = new_organization(&server, &mut session, &to);
+    other.sync().unwrap();
+    let folders = other.import_shared_folders();
+    let (it, ..) = folders
+        .iter()
+        .find(|(_, name, o, _)| name == "IT" && *o == org)
+        .unwrap()
+        .clone();
+    let chrome = dir.join("Chrome Passwords.csv");
+    std::fs::write(
+        &chrome,
+        "name,url,username,password,note\nwiki.example.test,https://wiki.example.test/,ana,not-a-real-password-e2,\n",
+    )
+    .unwrap();
+    other
+        .read_import(Format::Chromium("Google Chrome"), &chrome, None)
+        .unwrap();
+    assert_eq!(
+        other
+            .save_import(&Destination::SharedFolder(it.clone()))
+            .unwrap()
+            .added,
+        1
+    );
+    let vault = other.vault().unwrap();
+    let wiki = vault
+        .items
+        .iter()
+        .find(|i| i.name == "wiki.example.test")
+        .unwrap();
+    assert_eq!(wiki.organization_id.as_deref(), Some(org.as_str()));
+    assert_eq!(wiki.collection_ids, [it]);
+    // Under the organization's key, as the server keeps it.
+    let (sync, _) = server.sync(&mut session).unwrap();
+    let kept = sync.ciphers.iter().find(|c| c.id == wiki.id).unwrap();
+    let name = passbundle_core::crypto::EncString::parse(kept.name.as_deref().unwrap()).unwrap();
+    assert_eq!(
+        name.decrypt_string(&org_key).unwrap().as_str(),
+        "wiki.example.test"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

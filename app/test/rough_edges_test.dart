@@ -253,7 +253,7 @@ void main() {
         const Offset(0, -1000),
       );
       await tester.pumpAndSettle();
-      // Import and Export, each the web vault's.
+      // Import and Export, each the app's own (transfer.dart).
       for (final tool in ['Import', 'Export']) {
         expect(
           find.descendant(of: menu, matching: find.text(tool)),
@@ -261,12 +261,12 @@ void main() {
         );
       }
       expect(find.text('Import and export'), findsNothing);
-      // And the trash, which is the web vault's too.
+      // And the trash, which is the web vault's, the one there.
       expect(
         find.descendant(of: menu, matching: find.text('Trash')),
         findsOneWidget,
       );
-      expect(find.byTooltip('Opens the web vault'), findsNWidgets(3));
+      expect(find.byTooltip('Opens the web vault'), findsOneWidget);
 
       // An SSH key: the web vault edits it, and the item says so.
       await tester.tap(find.text('Build server'));
@@ -291,7 +291,7 @@ void main() {
   );
 
   testWidgets(
-    'a phone\'s Settings opens import and export in the web vault',
+    'a phone\'s Settings has Import and Export, and the web vault',
     (tester) async {
       setSize(tester, const Size(390, 844));
       PhoneStandIn(tester, status: 'unavailable');
@@ -306,12 +306,14 @@ void main() {
       );
       await tester.tap(find.byTooltip('Settings'));
       await tester.pumpAndSettle();
-      for (final row in ['web-import', 'web-export', 'web-vault']) {
+      for (final row in ['import', 'export', 'web-vault']) {
         await tester.ensureVisible(find.byKey(ValueKey(row)));
         await tester.pumpAndSettle();
         expect(find.byKey(ValueKey(row)), findsOneWidget);
       }
+      expect(find.text('Import and export'), findsOneWidget);
       expect(find.text('Web vault'), findsOneWidget);
+      expect(find.byKey(const ValueKey('web-import')), findsNothing);
     },
   );
 

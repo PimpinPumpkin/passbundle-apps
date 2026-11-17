@@ -31,6 +31,7 @@ import 'send.dart';
 import 'settings.dart';
 import 'sign_in_requests.dart';
 import 'theme.dart';
+import 'transfer.dart';
 import 'unlock_offer.dart';
 import 'updates.dart';
 import 'widgets.dart';
@@ -168,6 +169,11 @@ class VaultScreenState extends State<VaultScreen> {
   /// Every item, whatever the search: the menu's counts.
   List<Map<String, dynamic>> everything = [];
 
+  /// The archived items the search finds, for Archive, and how many there
+  /// are in all, for its count.
+  List<Map<String, dynamic>> archived = [];
+  int archivedCount = 0;
+
   /// Every unlocked account's items, with several accounts signed in ("All
   /// accounts"): what the search finds there while it's shown, else all.
   List<Map<String, dynamic>> everyAccount = [];
@@ -257,6 +263,7 @@ class VaultScreenState extends State<VaultScreen> {
     lifecycle;
     updates?.addListener(updateFound);
     settingsAsked.addListener(openSettings);
+    vaultChanged.addListener(reload);
     // Read now, before the first sync has the core.
     final offer = widget.offerBiometric && mayOfferBiometric(widget.core);
     WidgetsBinding.instance.addPostFrameCallback((_) async {
@@ -341,6 +348,7 @@ class VaultScreenState extends State<VaultScreen> {
     signInRequests.stop();
     updates?.removeListener(updateFound);
     settingsAsked.removeListener(openSettings);
+    vaultChanged.removeListener(reload);
     lifecycle.dispose();
     search.dispose();
     // The vault closed (it locked, or the person signed out): its websites'
@@ -387,6 +395,9 @@ class VaultScreenState extends State<VaultScreen> {
       everyAccount = several
           ? widget.core.listAll(filter == Filter.everyAccount ? query : '')
           : const [];
+      final allArchived = widget.core.archived('');
+      archived = searching.isEmpty ? allArchived : widget.core.archived(searching);
+      archivedCount = allArchived.length;
       places = Places(widget.core.places());
       if (selected != null && widget.core.item(selected!) == null) {
         selected = null;
@@ -454,7 +465,11 @@ class VaultScreenState extends State<VaultScreen> {
   }
 
   List<Map<String, dynamic>> get shown => [
-    for (final i in filter == Filter.everyAccount ? everyAccount : all)
+    for (final i in switch (filter) {
+      Filter.everyAccount => everyAccount,
+      Filter.archive => archived,
+      _ => all,
+    })
       if (shows(i, filter, filterId, health: health) &&
           (filter != Filter.health ||
               report == null ||
@@ -488,9 +503,7 @@ class VaultScreenState extends State<VaultScreen> {
   Widget emptyVaultNote() => EmptyVault(
     onNew: newItem,
     onBrowsers: isPhone ? null : importFromBrowsers,
-    onImport: widget.server == null
-        ? null
-        : () => openWebVault('/#/tools/import'),
+    onImport: importFile,
   );
 
   /// What the list shows, by name, for its header.
@@ -506,6 +519,7 @@ class VaultScreenState extends State<VaultScreen> {
     Filter.folder => places.folder(filterId)?['label'] as String?,
     Filter.organization => places.organization(filterId)?['name'] as String?,
     Filter.collection => places.collection(filterId)?['label'] as String?,
+    Filter.archive => 'Archive',
   };
 
   /// Where a new item goes by default: the folder or shared folder shown,
@@ -536,6 +550,8 @@ class VaultScreenState extends State<VaultScreen> {
       Filter.favorites => 'No favorites yet. Star an item to add it here.',
       Filter.all || Filter.everyAccount => 'No items yet. New adds one.',
       Filter.folder || Filter.collection => 'Nothing in this folder yet.',
+      Filter.archive =>
+        'Nothing in Archive. An archived item stays in your vault, out of the lists, search, and filling.',
       _ => 'Nothing here yet.',
     };
   }
@@ -887,8 +903,50 @@ class VaultScreenState extends State<VaultScreen> {
     if (mounted) reload();
   }
 
-  /// Import, export, and the trash are the web vault's: each opens there,
-  /// at [path] ("/#/tools/import").
+  /// Importing a file (transfer.dart), [format] chosen to begin with; the
+  /// vault shows what came in.
+  Future<void> importFile([String? format]) =>
+      showImport(context, format: format, server: widget.server);
+
+  /// Exporting the person's own items to a file (transfer.dart).
+  Future<void> exportFile() async {
+    final said = await showExport(context);
+    if (said != null && mounted) showMessage(context, said);
+  }
+
+  /// Archives an item, or takes it out of the archive (DESIGN.md in the
+  /// meta repo, "Archive, export, and import in the apps"): it leaves the
+  /// lists and search, or comes back, with Undo.
+  /// True if it was done.
+  Future<bool> archive(String id, String name, bool on) async {
+    final answer = await whileBusy(() => Core.setArchived(id, on));
+    if (!mounted) return false;
+    if (!answer.ok) {
+      showMessage(
+        context,
+        answer.error ??
+            (on ? 'Couldn\'t archive it.' : 'Couldn\'t move it out of Archive.'),
+      );
+      return false;
+    }
+    setState(() {
+      selected = null;
+      refreshed++;
+    });
+    reload();
+    // In place of the notice showing: an earlier archive's Undo is stale
+    // once this one is done.
+    showMessage(
+      context,
+      on ? 'Moved $name to Archive.' : 'Moved $name out of Archive.',
+      action: ('Undo', () => archive(id, name, !on)),
+      inPlace: true,
+    );
+    return true;
+  }
+
+  /// The web vault's pages (the trash, an import of another format): each
+  /// opens there, at [path] ("/#/vault?type=trash").
   Future<void> openWebVault(String path) async {
     final server = widget.server;
     final opened = server != null && await Core.openWebsite('$server$path');
@@ -1046,6 +1104,11 @@ class VaultScreenState extends State<VaultScreen> {
         onTrash: (name) async {
           if (await trash(id, name) && mounted) Navigator.of(context).pop();
         },
+        onArchive: (name, on) async {
+          if (await archive(id, name, on) && mounted) {
+            Navigator.of(context).pop();
+          }
+        },
       ),
     ),
   );
@@ -1117,6 +1180,7 @@ class VaultScreenState extends State<VaultScreen> {
             onEdit: () => edit(selected),
             onChanged: reload,
             onTrash: (name) => trash(selected!, name),
+            onArchive: (name, on) => archive(selected!, name, on),
           );
     // The top band is the window's (window_chrome.dart): the menu's top, the
     // list's search, and the item's actions sit where a title bar would, so
@@ -1148,8 +1212,9 @@ class VaultScreenState extends State<VaultScreen> {
                   onGenerator: openGeneratorTool,
                   onSend: openSendTool,
                   onBrowsers: isPhone ? null : importFromBrowsers,
-                  onImport: () => openWebVault('/#/tools/import'),
-                  onExport: () => openWebVault('/#/tools/export'),
+                  onImport: importFile,
+                  onExport: exportFile,
+                  archived: archivedCount,
                   onTrash: () => openWebVault(trashPath),
                   onChoose: choose,
                   onNewFolder: newFolder,
@@ -1610,7 +1675,10 @@ class VaultScreenState extends State<VaultScreen> {
             (e, count(e.filter, e.id), () => choose(e.filter, e.id)),
         ]),
       ],
-      // The trash is the web vault's, after the folders as there.
+      // Archive, then the trash (the web vault's), after the folders as
+      // there.
+      const SliverToBoxAdapter(child: SizedBox(height: 10)),
+      archiveCard(),
       if (widget.server != null) ...[
         const SliverToBoxAdapter(child: SizedBox(height: 10)),
         trashCard(),
@@ -1636,6 +1704,52 @@ class VaultScreenState extends State<VaultScreen> {
       end,
     ];
   }
+
+  /// Archive, on a phone: a row beside the trash, with how many it holds.
+  Widget archiveCard() => card(1, (context, i, radius) {
+    final c = context.colors;
+    return InkWell(
+      key: const ValueKey('archive'),
+      borderRadius: radius,
+      onTap: () => choose(Filter.archive),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: 56),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 8, 12, 8),
+          child: Row(
+            children: [
+              Container(
+                width: 40,
+                height: 40,
+                decoration: BoxDecoration(
+                  color: c.tint,
+                  borderRadius: BorderRadius.circular(11),
+                ),
+                alignment: Alignment.center,
+                child: Glyph(
+                  Glyphs.archive,
+                  size: 21,
+                  color: Theme.of(context).colorScheme.primary,
+                ),
+              ),
+              const SizedBox(width: 12),
+              const Expanded(
+                child: Text(
+                  'Archive',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w500),
+                ),
+              ),
+              Text('$archivedCount', style: TextStyle(color: c.muted, fontSize: 14)),
+              const SizedBox(width: 6),
+              Glyph(Glyphs.chevron, size: 18, color: c.muted, strokeWidth: 2),
+            ],
+          ),
+        ),
+      ),
+    );
+  });
 
   /// The trash, on a phone: a row that opens the web vault's.
   Widget trashCard() => card(1, (context, i, radius) {
@@ -2218,6 +2332,7 @@ class Sidebar extends StatelessWidget {
     this.onBrowsers,
     this.onImport,
     this.onExport,
+    this.archived = 0,
     this.onTrash,
     required this.onChoose,
     required this.onNewFolder,
@@ -2248,8 +2363,8 @@ class Sidebar extends StatelessWidget {
   /// How many items Health has something to fix for.
   final int toFix;
 
-  /// The Tools: the generator, and import and export (the web vault's,
-  /// which open there).
+  /// The Tools: the generator, and importing and exporting a file
+  /// (transfer.dart).
   final VoidCallback? onGenerator;
 
   /// Send (send.dart), in a window of its own.
@@ -2259,6 +2374,9 @@ class Sidebar extends StatelessWidget {
   final VoidCallback? onBrowsers;
   final VoidCallback? onImport;
   final VoidCallback? onExport;
+
+  /// How many items are in Archive, beside the trash.
+  final int archived;
 
   /// The trash, which is the web vault's: restoring and deleting for good.
   final VoidCallback? onTrash;
@@ -2399,7 +2517,7 @@ class Sidebar extends StatelessWidget {
           );
     // The tools, after a line under the folders and the trash, as the web
     // vault's menu has them: the generator and Send, then importing (a
-    // file in the web vault, and this computer's browsers), then exporting.
+    // file, and this computer's browsers), then exporting.
     // The list fades at its foot, so whatever is past it reads as more.
     final tools = [
       if (onGenerator case final open?)
@@ -2422,7 +2540,6 @@ class Sidebar extends StatelessWidget {
           label: 'Import',
           on: false,
           tap: open,
-          trailing: webVaultMark,
         ),
       if (onBrowsers case final open?)
         entry(
@@ -2437,7 +2554,6 @@ class Sidebar extends StatelessWidget {
           label: 'Export',
           on: false,
           tap: open,
-          trailing: webVaultMark,
         ),
     ];
     // The window's buttons at the top left (a Mac's traffic lights, or
@@ -2575,7 +2691,15 @@ class Sidebar extends StatelessWidget {
                           )
                         : null,
                   ),
-                // The trash is the web vault's, after the folders as there.
+                // Archive, then the trash (the web vault's), after the
+                // folders as there.
+                entry(
+                  tile: outline(Glyphs.archive, strong: filter == Filter.archive),
+                  label: 'Archive',
+                  on: filter == Filter.archive,
+                  tap: () => onChoose(Filter.archive),
+                  count: archived,
+                ),
                 if (onTrash case final open?)
                   entry(
                     tile: outline(Glyphs.trash),
@@ -3069,7 +3193,8 @@ class EmptyVault extends StatelessWidget {
   /// This computer's browsers (browser_import.dart).
   final VoidCallback? onBrowsers;
 
-  /// The web vault's import, for a file from another password manager.
+  /// Importing a file (transfer.dart): an export from another password
+  /// manager or a browser.
   final VoidCallback? onImport;
 
   @override
@@ -3121,8 +3246,8 @@ class EmptyVault extends StatelessWidget {
                 const SizedBox(height: 8),
                 OutlinedButton.icon(
                   onPressed: fromFile,
-                  icon: Icon(Icons.open_in_new_rounded, size: 16, color: c.muted),
-                  label: const Text('Import a file in the web vault'),
+                  icon: Glyph(Glyphs.download, size: 18, color: c.muted),
+                  label: const Text('Import a file'),
                 ),
               ],
             ],
@@ -3367,6 +3492,7 @@ class ItemPane extends StatefulWidget {
     required this.places,
     required this.onEdit,
     required this.onTrash,
+    this.onArchive,
     this.onChanged,
     this.server,
     this.phone = false,
@@ -3392,6 +3518,9 @@ class ItemPane extends StatefulWidget {
   /// Opens the editor; done when it closes.
   final Future<void> Function() onEdit;
   final ValueChanged<String> onTrash;
+
+  /// Archives it (true) or takes it out of the archive, by its name.
+  final void Function(String name, bool archive)? onArchive;
 
   /// A page of its own, with Edit and Move to trash at the top.
   final bool phone;
@@ -3842,6 +3971,19 @@ class _ItemPaneState extends State<ItemPane> {
       Padding(
         padding: const EdgeInsets.symmetric(horizontal: 4),
         child: webVaultButton(),
+      ),
+    // The person's own mark, as a favorite is: any item they see takes it.
+    if (widget.onArchive case final archive?)
+      IconButton(
+        key: const ValueKey('archive-item'),
+        tooltip: item['archived'] == true ? 'Move out of Archive' : 'Archive',
+        icon: Glyph(
+          Glyphs.archive,
+          size: 22,
+          color: Theme.of(context).colorScheme.onSurfaceVariant,
+        ),
+        onPressed: () =>
+            archive(item['name'] as String, item['archived'] != true),
       ),
     if (may(item, 'delete'))
       IconButton(

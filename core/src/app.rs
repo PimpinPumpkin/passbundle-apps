@@ -39,6 +39,8 @@ mod send_files;
 pub use send_files::{send_file, MakingFileSend};
 mod sends;
 pub use sends::SavedSend;
+mod transfer;
+pub use transfer::{Destination, Exported, ImportRead, ImportSaved};
 
 /// What `copy` copies for a Send's link, with the Send's id.
 pub const SEND_LINK: &str = "sendLink";
@@ -185,12 +187,19 @@ pub struct App {
     /// or the master password unlocks it. Biometric unlock can't be turned
     /// on meanwhile.
     opened_with_pin: bool,
+    /// When the master password was given to export (app/transfer.rs): one
+    /// export, within a few minutes. Forgotten when the vault locks.
+    export_confirmed: Option<Instant>,
+    /// A file read to import, waiting for the person to see what's in it and
+    /// say where it goes (app/transfer.rs). Forgotten, and its secrets
+    /// wiped, when it's saved or given up, or the vault locks.
+    pending_import: Option<crate::import::Parsed>,
 }
 
 /// Importing from the browsers, when an organization keeps items out of
 /// Personal (upstream's personal ownership policy), as the guided import says it.
 #[cfg(not(phone))]
-const KEEPS_ITEMS_OUT: &str = "your organization keeps items out of Personal, so PassBundle can't import your browsers' passwords there. Ask an admin for a shared folder you can add to, then export from your browser and import that file into the shared folder in the web vault";
+const KEEPS_ITEMS_OUT: &str = "your organization keeps items out of Personal, so PassBundle can't import your browsers' passwords there. Ask an admin for a shared folder you can add to, then export from your browser and choose Import to bring that file into the shared folder";
 
 /// How long a list that autofill or a passkey showed, having unlocked the
 /// vault with "Immediately" chosen, waits to be picked from (`App::offered`).
@@ -271,6 +280,8 @@ impl App {
             own_weak: Default::default(),
             told_agent: false,
             opened_with_pin: false,
+            export_confirmed: None,
+            pending_import: None,
         }
     }
 
@@ -1261,6 +1272,8 @@ impl App {
         self.session = None;
         self.pending = None;
         self.opened_with_pin = false;
+        self.export_confirmed = None;
+        self.pending_import = None;
     }
 
     /// Forgets the vault and the session on this device, unlocking with
@@ -2220,6 +2233,31 @@ impl App {
         };
         server.set_favorite(session, id, folder.as_deref(), favorite)?;
         self.sync()
+    }
+
+    /// Archives an item, or takes it out of the archive (`archived` false),
+    /// then syncs: the person's own mark, as the server keeps it, so an item
+    /// they can't edit takes it too. Archived items stay out of the lists,
+    /// search, and filling (`Item::in_use`). Answers whether the sync after
+    /// it came through; the item shows as it now is either way.
+    pub fn set_archived(&mut self, id: &str, archived: bool) -> Result<bool> {
+        let vault = self.vault.as_ref().ok_or(Error::SignedOut)?;
+        let item = vault.item(id).ok_or(Error::Damaged("no such item"))?;
+        if item.deleted {
+            return Err(Error::Refused(
+                "that item is in the trash; restore it in the web vault first",
+            ));
+        }
+        let (Some(server), Some(session)) = (&self.server, self.session.as_mut()) else {
+            return Err(Error::SignedOut);
+        };
+        let saved = server.set_archived(session, id, archived)?;
+        let synced = self.sync().is_ok();
+        if !synced {
+            // Shown as it is now; a vault the answer doesn't open stays as it was.
+            let _ = self.keep_saved("ciphers", &saved);
+        }
+        Ok(synced)
     }
 
     /// How the app looks on this device: whether logins show their

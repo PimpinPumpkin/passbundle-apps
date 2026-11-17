@@ -1,9 +1,13 @@
-//! Archived items (archived in the web vault, which sends `archivedDate`):
-//! kept in the vault as the server sent them, but out of the way, as the web
-//! vault and the extension have them. Not listed or found by search, not
-//! judged by Health, not reminded about, and not offered for filling or as
-//! passkeys. On the vectors' sample vault kept on this device, with items
-//! archived as the web vault archives them.
+//! Archived items (archived in the web vault, which sends `archivedDate`, or
+//! in the app): kept in the vault as the server sent them, but out of the
+//! way, as the web vault and the extension have them. Not listed or found
+//! by search, not judged by Health, not reminded about, and not offered for
+//! filling or as passkeys. On the vectors' sample vault kept on this device,
+//! with items archived as the web vault archives them; and against a
+//! stand-in for the server (tests/support/stand_in.rs), every save the app
+//! makes of an archived item sends its date as it was, since the server
+//! unarchives an item saved without it, and Archive and Move out of Archive
+//! take an item out of the lists and back.
 
 use std::collections::BTreeMap;
 
@@ -188,4 +192,96 @@ fn health_and_expiration_reminders_leave_archived_items_out() {
     assert_eq!(check(&was).due.total(), 1);
     assert_eq!(check(&app).standing.total(), 0);
     assert_eq!(check(&app).due.total(), 0);
+}
+
+/// What the stand-in for the server keeps (tests/support/stand_in.rs).
+#[path = "support/stand_in.rs"]
+mod stand_in;
+
+const OFFICE_WIFI: &str = "4e5f6071-8293-4a41-bcd2-e3f405162738";
+const IT: &str = "2c3d4e5f-6071-4829-9ab0-c1d2e3f40516";
+
+#[test]
+fn every_save_of_an_archived_item_sends_its_archived_date_as_it_is() {
+    let (url, asked) = stand_in::stand_in_with(vec![], &[MAIL, OFFICE_WIFI, BACKUP]);
+    let sample = stand_in::Sample::new(&url, &[MAIL, OFFICE_WIFI, BACKUP], |_| {});
+    let mut app = sample.unlocked();
+    let item = app.vault().unwrap().item(MAIL).unwrap();
+    assert_eq!(
+        item.kept.archived_date.as_deref(),
+        Some(stand_in::ARCHIVED_AT)
+    );
+
+    // Edited in the app's editor.
+    let mut draft = passbundle_core::vault::ItemDraft::of(item);
+    draft.notes = Some(zeroize::Zeroizing::new("New notes.".into()));
+    app.save(Some(MAIL), &draft, &[]).unwrap();
+    // An organization's item, moved to another of its shared folders.
+    let wifi = app.vault().unwrap().item(OFFICE_WIFI).unwrap();
+    let draft = passbundle_core::vault::ItemDraft::of(wifi);
+    app.save(Some(OFFICE_WIFI), &draft, &[IT.to_owned()])
+        .unwrap();
+    // A version restored from its history (an edit like any other). A
+    // passkey's sign-in, which saves its raised counter, never reaches an
+    // archived login: it isn't offered or signed with.
+    app.history(BACKUP).unwrap();
+    app.restore_version(BACKUP, "version-1").unwrap();
+    assert_eq!(
+        app.passkey_assert(BACKUP, "backup.example.test", &[7u8; 32], true)
+            .err(),
+        Some(Error::Refused("that login is archived"))
+    );
+    // Favoriting, through its own route, sends nothing of the item.
+    app.set_favorite(GATE, true).unwrap();
+
+    let saves = stand_in::sent(&asked, "PUT /api/ciphers/");
+    let full: Vec<&serde_json::Value> = saves.iter().filter(|b| b["type"].is_number()).collect();
+    assert_eq!(full.len(), 3, "{saves:?}");
+    for body in full {
+        assert_eq!(body["archivedDate"], stand_in::ARCHIVED_AT, "{body}");
+    }
+    // Still archived on this device, as the server keeps it.
+    let vault = app.vault().unwrap();
+    for id in [MAIL, OFFICE_WIFI, BACKUP] {
+        assert!(vault.item(id).unwrap().archived, "{id}");
+    }
+    // A new item isn't archived.
+    let new = passbundle_core::vault::ItemDraft {
+        name: "New".into(),
+        ..Default::default()
+    };
+    let body = vault.encrypt_item(&new, None).unwrap();
+    assert!(body["archivedDate"].is_null());
+    // An item not archived stays so.
+    let gate = vault.item(GATE).unwrap();
+    let body = vault
+        .encrypt_item(&passbundle_core::vault::ItemDraft::of(gate), Some(gate))
+        .unwrap();
+    assert!(body["archivedDate"].is_null());
+}
+
+#[test]
+fn archiving_and_unarchiving_take_an_item_out_of_the_lists_and_back() {
+    let (url, asked) = stand_in::stand_in(vec![]);
+    let sample = stand_in::Sample::new(&url, &[], |_| {});
+    let mut app = sample.unlocked();
+    assert!(app.set_archived(GATE, true).unwrap());
+    let vault = app.vault().unwrap();
+    assert!(vault.item(GATE).unwrap().archived);
+    assert!(vault.search("gate").is_empty());
+    assert_eq!(vault.archived("gate").len(), 1);
+    assert_eq!(vault.archived("").len(), 1);
+    assert!(app.set_archived(GATE, false).unwrap());
+    let vault = app.vault().unwrap();
+    assert!(!vault.item(GATE).unwrap().archived);
+    assert_eq!(vault.search("gate").len(), 1);
+    assert!(vault.archived("").is_empty());
+    let paths: Vec<String> = asked
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(p, _)| p.clone())
+        .collect();
+    assert!(paths.contains(&format!("PUT /api/ciphers/{GATE}/archive")));
+    assert!(paths.contains(&format!("PUT /api/ciphers/{GATE}/unarchive")));
 }

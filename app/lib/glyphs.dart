@@ -43,6 +43,7 @@ abstract final class Glyphs {
   static const health =
       'M12 3l8 3v6c0 4.5-3.4 8-8 9-4.6-1-8-4.5-8-9V6Z M8.5 12l2.5 2.5 4.5-5';
   static const download = 'M12 4v11 M8 11l4 4 4-4 M4 20h16';
+  static const archive = 'M3 4h18v4H3Z M5 8v12h14V8 M10 12h4';
   // Export, the other way: out of PassBundle.
   static const upload = 'M12 15V4 M8 8l4-4 4 4 M4 20h16';
   static const trash =

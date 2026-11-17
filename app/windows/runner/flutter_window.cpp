@@ -103,12 +103,42 @@ void AllowCapture(HWND window, bool allowed) {
   }
 }
 
-// Asks the person for a file to attach to an item, or to send in a file Send
-// (`sending`), with Windows' own picker (app/lib/attaching.dart): its path
-// and name, or null when they chose none. The core reads the file where it
-// is, so nothing is copied.
+// A string as Windows takes it.
+std::wstring Utf16FromUtf8(const std::string& utf8) {
+  if (utf8.empty()) {
+    return std::wstring();
+  }
+  const int length =
+      ::MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8.data(),
+                            static_cast<int>(utf8.size()), nullptr, 0);
+  if (length <= 0) {
+    return std::wstring();
+  }
+  std::wstring wide(length, L'\0');
+  ::MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8.data(),
+                        static_cast<int>(utf8.size()), wide.data(), length);
+  return wide;
+}
+
+// Whether a method call's arguments say `key` is true.
+bool FlagAt(const EncodableMap* arguments, const char* key) {
+  if (!arguments) {
+    return false;
+  }
+  const auto wanted = arguments->find(EncodableValue(key));
+  return wanted != arguments->end() &&
+         std::holds_alternative<bool>(wanted->second) &&
+         std::get<bool>(wanted->second);
+}
+
+// Asks the person for a file to attach to an item, to send in a file Send
+// (`sending`), or to import (`importing`; app/lib/transfer.dart), with
+// Windows' own picker (app/lib/attaching.dart): its path and name, or null
+// when they chose none. The core reads the file where it is, so nothing is
+// copied.
 void PickFile(HWND owner,
               bool sending,
+              bool importing,
               flutter::MethodResult<EncodableValue>& result) {
   IFileOpenDialog* dialog = nullptr;
   if (FAILED(::CoCreateInstance(CLSID_FileOpenDialog, nullptr,
@@ -121,8 +151,10 @@ void PickFile(HWND owner,
   dialog->GetOptions(&options);
   dialog->SetOptions(options | FOS_FORCEFILESYSTEM | FOS_FILEMUSTEXIST |
                      FOS_PATHMUSTEXIST);
-  dialog->SetTitle(sending ? L"Choose a file to send" : L"Attach a file");
-  dialog->SetOkButtonLabel(sending ? L"Choose" : L"Attach");
+  dialog->SetTitle(importing ? L"Choose a file to import"
+                   : sending ? L"Choose a file to send"
+                             : L"Attach a file");
+  dialog->SetOkButtonLabel(importing || sending ? L"Choose" : L"Attach");
   const HRESULT shown = dialog->Show(owner);
   std::string path;
   IShellItem* item = nullptr;
@@ -150,6 +182,61 @@ void PickFile(HWND owner,
        EncodableValue(slash == std::string::npos ? path
                                                  : path.substr(slash + 1))},
   }));
+}
+
+// Asks where to save an export (app/lib/transfer.dart), suggesting `name`,
+// with Windows' own dialog, which asks before replacing a file that's
+// there: its path, or null when the person gave up. The core writes the
+// file itself.
+void SaveFile(HWND owner,
+              const std::string& name,
+              flutter::MethodResult<EncodableValue>& result) {
+  IFileSaveDialog* dialog = nullptr;
+  if (FAILED(::CoCreateInstance(CLSID_FileSaveDialog, nullptr,
+                                CLSCTX_INPROC_SERVER,
+                                IID_PPV_ARGS(&dialog)))) {
+    result.Error("picker", "PassBundle couldn't open the save dialog.");
+    return;
+  }
+  FILEOPENDIALOGOPTIONS options = 0;
+  dialog->GetOptions(&options);
+  dialog->SetOptions(options | FOS_FORCEFILESYSTEM | FOS_OVERWRITEPROMPT |
+                     FOS_PATHMUSTEXIST);
+  dialog->SetTitle(L"Save your export");
+  dialog->SetOkButtonLabel(L"Save");
+  const std::wstring wide_name = Utf16FromUtf8(name);
+  if (!wide_name.empty()) {
+    dialog->SetFileName(wide_name.c_str());
+  }
+  // Its kind, so Windows keeps the extension on a name typed without one.
+  const size_t dot = name.find_last_of('.');
+  const std::wstring extension =
+      dot == std::string::npos ? std::wstring()
+                               : Utf16FromUtf8(name.substr(dot + 1));
+  if (!extension.empty()) {
+    dialog->SetDefaultExtension(extension.c_str());
+  }
+  const HRESULT shown = dialog->Show(owner);
+  std::string path;
+  IShellItem* item = nullptr;
+  if (SUCCEEDED(shown) && SUCCEEDED(dialog->GetResult(&item))) {
+    PWSTR wide = nullptr;
+    if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &wide))) {
+      path = Utf8FromUtf16(wide);
+      ::CoTaskMemFree(wide);
+    }
+    item->Release();
+  }
+  dialog->Release();
+  if (shown == HRESULT_FROM_WIN32(ERROR_CANCELLED)) {
+    result.Success();
+    return;
+  }
+  if (path.empty()) {
+    result.Error("picker", "PassBundle couldn't save there.");
+    return;
+  }
+  result.Success(EncodableValue(path));
 }
 
 EncodableValue ButtonName(Win32Window::Button button) {
@@ -204,18 +291,23 @@ bool FlutterWindow::OnCreate() {
       [this](const flutter::MethodCall<flutter::EncodableValue>& call,
              std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>>
                  result) {
+        const auto* arguments =
+            std::get_if<flutter::EncodableMap>(call.arguments());
         if (call.method_name() == "pickFile") {
-          const auto* arguments =
-              std::get_if<flutter::EncodableMap>(call.arguments());
-          bool sending = false;
+          PickFile(GetHandle(), FlagAt(arguments, "send"),
+                   FlagAt(arguments, "import"), *result);
+        } else if (call.method_name() == "saveFile") {
+          std::string name;
           if (arguments) {
-            const auto wanted =
-                arguments->find(flutter::EncodableValue("send"));
-            sending = wanted != arguments->end() &&
-                      std::holds_alternative<bool>(wanted->second) &&
-                      std::get<bool>(wanted->second);
+            const auto given =
+                arguments->find(flutter::EncodableValue("name"));
+            if (given != arguments->end()) {
+              if (const auto* text = std::get_if<std::string>(&given->second)) {
+                name = *text;
+              }
+            }
           }
-          PickFile(GetHandle(), sending, *result);
+          SaveFile(GetHandle(), name, *result);
         } else {
           result->NotImplemented();
         }

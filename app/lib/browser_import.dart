@@ -9,13 +9,15 @@
 // choose Import, each time. A Firefox profile with a Primary Password asks
 // for it, used once and never kept. A browser whose passwords only it can
 // read (Chrome on Windows, Safari) goes to its own Export, said in plain
-// words, with a way to the web vault's guided import. Afterwards, each
+// words, then to importing that file here (transfer.dart), with that
+// browser chosen and its export's steps. Afterwards, each
 // profile read has its own password saving turned off (what it saved
 // stays); an open browser is asked to close first.
 import 'package:flutter/material.dart';
 
 import 'core.dart';
 import 'theme.dart';
+import 'transfer.dart';
 import 'widgets.dart';
 
 /// After unlocking, on a computer: the import, offered once per account
@@ -40,9 +42,6 @@ Future<void> showBrowserImport(
   barrierDismissible: false,
   builder: (_) => BrowserImportDialog(email: email, server: server),
 );
-
-/// The web vault's guided import: the browser's own Export, step by step.
-const guidedImportPath = '/#/tools/import-from-browser';
 
 /// A browser by the name people call it: "Chrome", "Edge", "Firefox".
 String browserOf(Map<String, dynamic> p) =>
@@ -69,7 +68,7 @@ class BrowserImportDialog extends StatefulWidget {
 
   final String? email;
 
-  /// The web vault's address, for the guided import.
+  /// The web vault's address, for the formats it imports.
   final String? server;
 
   @override
@@ -201,14 +200,11 @@ class _BrowserImportDialogState extends State<BrowserImportDialog> {
     if (mounted) setState(() {});
   }
 
-  Future<void> openGuided() async {
-    final server = widget.server;
-    final opened =
-        server != null && await Core.openWebsite('$server$guidedImportPath');
-    if (!opened && mounted) {
-      setState(() => error = 'Couldn\'t open the web vault.');
-    }
-  }
+  /// The browser's own Export, then its file imported here (transfer.dart),
+  /// with that browser chosen and its export's steps; the vault shows what
+  /// came in.
+  Future<void> importWithItsExport(String? browser) =>
+      showImport(context, format: browser, server: widget.server);
 
   @override
   Widget build(BuildContext context) => Dialog(
@@ -315,7 +311,7 @@ class _BrowserImportDialogState extends State<BrowserImportDialog> {
     }
     if (found['keepsItemsOut'] case final String org) {
       return Text(
-        '$org keeps items out of Personal, so PassBundle can\'t import your browsers\' passwords there. Ask an admin for a shared folder you can add to, then export from your browser and import that file into the shared folder in the web vault.',
+        '$org keeps items out of Personal, so PassBundle can\'t import your browsers\' passwords there. Ask an admin for a shared folder you can add to, then export from your browser and choose Import to bring that file into the shared folder.',
         style: muted,
       );
     }
@@ -347,8 +343,8 @@ class _BrowserImportDialogState extends State<BrowserImportDialog> {
             children: [
               ListTile(
                 title: const Text('Import with its own Export'),
-                trailing: const Icon(Icons.open_in_new_rounded, size: 20),
-                onTap: openGuided,
+                trailing: const Icon(Icons.chevron_right_rounded, size: 20),
+                onTap: () => importWithItsExport(g['browser'] as String?),
               ),
             ],
           ),
@@ -467,8 +463,8 @@ class _BrowserImportDialogState extends State<BrowserImportDialog> {
             children: [
               ListTile(
                 title: const Text('Import with its own Export'),
-                trailing: const Icon(Icons.open_in_new_rounded, size: 20),
-                onTap: openGuided,
+                trailing: const Icon(Icons.chevron_right_rounded, size: 20),
+                onTap: () => importWithItsExport(g['browser'] as String?),
               ),
             ],
           ),

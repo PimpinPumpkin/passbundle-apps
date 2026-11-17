@@ -947,10 +947,14 @@ pub struct Kept {
     /// Each of `fields`' upstream type (0 text, 1 hidden, 2 yes or no, 3
     /// linked) and what a linked one is linked to.
     pub field_kinds: Vec<(u8, Option<serde_json::Value>)>,
+    /// When the person archived it, as the server sent it. Every save sends
+    /// it back as it is: a save without it unarchives the item (the server's
+    /// `update_cipher_from_data`).
+    pub archived_date: Option<String>,
 }
 
 /// A website's checksum, as upstream writes it: base64 of the address's SHA-256.
-fn uri_checksum(uri: &str) -> String {
+pub(crate) fn uri_checksum(uri: &str) -> String {
     use base64::Engine;
     use sha2::{Digest, Sha256};
     base64::engine::general_purpose::STANDARD.encode(Sha256::digest(uri.as_bytes()))
@@ -1563,8 +1567,21 @@ impl Vault {
         })
     }
 
+    /// The key a new item's values go under, as `value_key` has it for a
+    /// new item: its organization's, or the user key.
+    pub(crate) fn owner_key(&self, organization_id: Option<&str>) -> Result<&SymmetricKey> {
+        match organization_id {
+            Some(org) => self
+                .keys
+                .organizations
+                .get(org)
+                .ok_or(Error::Damaged("that organization's key doesn't open")),
+            None => Ok(&self.keys.user),
+        }
+    }
+
     /// The key an item's values are under: its own, or its owner's.
-    fn item_value_key<'a>(&'a self, item: &'a Item) -> Result<&'a SymmetricKey> {
+    pub(crate) fn item_value_key<'a>(&'a self, item: &'a Item) -> Result<&'a SymmetricKey> {
         if let Some(key) = item.kept.item_key.as_ref() {
             return Ok(key);
         }
@@ -1774,6 +1791,9 @@ impl Vault {
             "passwordHistory": if history.is_empty() { serde_json::Value::Null } else { history.into() },
             "encryptedFor": self.user_id,
             "lastKnownRevisionDate": editing.and_then(|i| i.revision_date.clone()),
+            // Archived stays archived: the server unarchives an item saved
+            // without its date. A new item isn't archived.
+            "archivedDate": kept.and_then(|k| k.archived_date.clone()),
         });
         let secret =
             |text: &Option<Zeroizing<String>>| enc_opt(text.as_deref().map(String::as_str));
@@ -1855,10 +1875,21 @@ impl Vault {
     /// Items in use whose name, username, or websites contain every word of
     /// the query, ignoring case. An empty query matches every one in use.
     pub fn search<'a>(&'a self, query: &str) -> Vec<&'a Item> {
+        self.found(query, Item::in_use)
+    }
+
+    /// Archived items (not in the trash) whose name, username, or websites
+    /// contain every word of the query, as `search` finds items in use: the
+    /// Archive view, apart from the lists, search, and filling.
+    pub fn archived<'a>(&'a self, query: &str) -> Vec<&'a Item> {
+        self.found(query, |i| i.archived && !i.deleted)
+    }
+
+    fn found<'a>(&'a self, query: &str, keep: impl Fn(&Item) -> bool) -> Vec<&'a Item> {
         let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
         self.items
             .iter()
-            .filter(|i| i.in_use())
+            .filter(|i| keep(i))
             .filter(|i| {
                 let mut haystack = format!(
                     "{} {} {}",
@@ -2075,6 +2106,7 @@ impl Keyring {
             fido2_credentials: login.and_then(|l| l.fido2_credentials.clone()),
             autofill_on_page_load: login.and_then(|l| l.autofill_on_page_load),
             password_revision_date: login.and_then(|l| l.password_revision_date.clone()),
+            archived_date: c.archived_date.clone(),
             uris_sent: login.and_then(|l| l.uris.as_ref()).map(|uris| {
                 uris.iter()
                     .map(|u| {
