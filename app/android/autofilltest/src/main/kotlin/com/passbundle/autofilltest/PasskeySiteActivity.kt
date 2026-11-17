@@ -32,7 +32,11 @@ import java.security.spec.X509EncodedKeySpec
  * (tools/android-autofill-test.sh): it makes a passkey through Android's
  * Credential Manager, then signs in with it, and checks what came back as a
  * site would: the challenge, its own origin, the site's ID, and the signature
- * with the passkey's public key. It says on screen how each went.
+ * with the passkey's public key. Each passkey it makes is for the same
+ * account (user handle), so making one again replaces the last. It can also
+ * ask for one while naming the last it made among those it has
+ * (`excludeCredentials`), which WebAuthn says is refused. It says on screen
+ * how each went.
  */
 class PasskeySiteActivity : Activity() {
     private companion object {
@@ -42,6 +46,9 @@ class PasskeySiteActivity : Activity() {
     private val manager by lazy { CredentialManager.create(this) }
     private lateinit var result: TextView
     private var publicKey: PublicKey? = null
+
+    /** The last passkey made, by its ID (base64url). */
+    private var madeId: String? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -56,12 +63,18 @@ class PasskeySiteActivity : Activity() {
             text = "Sign in with a passkey"
             setOnClickListener { signIn() }
         }
+        val makeKnown = Button(this).apply {
+            id = R.id.make_known_passkey
+            text = "Make a passkey the site has"
+            setOnClickListener { make(known = true) }
+        }
         setContentView(
             LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
                 setPadding(48, 160, 48, 48)
                 addView(make)
                 addView(signIn)
+                addView(makeKnown)
                 addView(result)
             },
         )
@@ -75,8 +88,13 @@ class PasskeySiteActivity : Activity() {
 
     private fun say(words: String) = runOnUiThread { result.text = words }
 
-    private fun make() {
+    /**
+     * Makes a passkey for the site's one account; [known] names the last one
+     * made among those the site has, so it's refused (InvalidStateError).
+     */
+    private fun make(known: Boolean = false) {
         val challenge = challenge()
+        val have = if (known) madeId ?: return say("Make a passkey first") else null
         val request =
             JSONObject()
                 .put("rp", JSONObject().put("id", SITE).put("name", "Passkeys Example"))
@@ -88,6 +106,9 @@ class PasskeySiteActivity : Activity() {
                 .put("authenticatorSelection", JSONObject().put("residentKey", "required").put("userVerification", "preferred"))
                 .put("attestation", "none")
                 .put("timeout", 60000)
+        if (have != null) {
+            request.put("excludeCredentials", JSONArray().put(JSONObject().put("type", "public-key").put("id", have)))
+        }
         manager.createCredentialAsync(
             this,
             CreatePublicKeyCredentialRequest(request.toString()),
@@ -105,11 +126,17 @@ class PasskeySiteActivity : Activity() {
                     if (!authData.copyOfRange(55, 55 + idLength).contentEquals(unb64(json.getString("rawId")))) {
                         return say("Making a passkey went wrong: the credential isn't the one attested")
                     }
+                    if (known) return say("Making a passkey went wrong: one the site has was made again")
                     publicKey = KeyFactory.getInstance("EC").generatePublic(X509EncodedKeySpec(unb64(answer.getString("publicKey"))))
+                    madeId = json.getString("rawId")
                     say("Made a passkey for $SITE")
                 }
 
-                override fun onError(e: CreateCredentialException) = say("Making a passkey failed: ${e.type} ${e.message}")
+                override fun onError(e: CreateCredentialException) {
+                    // WebAuthn's InvalidStateError: the authenticator has one the site named.
+                    if (known && e.type.contains("INVALID_STATE")) return say("Refused: the site has this passkey already")
+                    say("Making a passkey failed: ${e.type} ${e.message}")
+                }
             },
         )
     }

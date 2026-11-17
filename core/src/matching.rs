@@ -30,10 +30,15 @@
 //! Android's own check of what was typed: each card's last 4 digits, as
 //! autofill's list shows them, and each identity's street and postal code
 //! (`save_hints`).
+//!
+//! A new passkey goes in a login the phones offer for it (`passkey_target`,
+//! `passkey_logins`): the login with the site's passkey for that account,
+//! which it replaces, or one for the site by these rules that has none.
 
 use std::collections::HashSet;
 use std::net::IpAddr;
 
+use crate::error::{Error, Result};
 use crate::vault::{Item, ItemKind, Vault};
 
 /// What's asking to be filled.
@@ -215,6 +220,133 @@ impl Vault {
     pub fn save_hints(&self) -> SaveHints {
         save_hints(self.items.iter().map(|i| (i, self.grid(i).see_passwords)))
     }
+
+    /// Whether a new passkey for `site` may go in a login, and if so,
+    /// whether it replaces the login's passkey (docs/core.md, "Passkeys",
+    /// "Where it goes"). The refusal says why not.
+    ///
+    /// - **A login the person may change:** in use (not in the trash or
+    ///   archived), that they may edit and whose passwords they may see, as
+    ///   the apps' editor needs. So never an organization's login in shared
+    ///   folders they can only view, or that hide its passwords. A kind an
+    ///   organization's policy removes isn't in the vault at all
+    ///   (restricted_types.rs).
+    /// - **With the site's passkey for this account** (the same site ID and
+    ///   user handle): the new one replaces it, as WebAuthn has an
+    ///   authenticator do, whatever the login's websites.
+    /// - **With no passkey:** one for the site by the fill list's rules: one
+    ///   of its websites for the site's ID, by its match setting, or the
+    ///   Android app's own `androidapp://` website when an app is asking.
+    /// - **Never one with another passkey** (another account's, or one
+    ///   PassBundle can't read), which the new one would take the place of.
+    pub fn passkey_target(&self, item: &Item, site: &PasskeySite<'_>) -> Result<bool> {
+        if item.kind != ItemKind::Login {
+            return Err(Error::Refused("a passkey goes in a login"));
+        }
+        if item.deleted {
+            return Err(Error::Refused("that login is in the trash"));
+        }
+        if item.archived {
+            return Err(Error::Refused("that login is archived"));
+        }
+        let grid = self.grid(item);
+        if !grid.edit {
+            return Err(Error::Refused(
+                "your organization doesn't let you change that login",
+            ));
+        }
+        if !grid.see_passwords {
+            return Err(Error::Refused(
+                "you can't see that login's passwords, so a passkey can't go in it",
+            ));
+        }
+        if has_passkey_for(item, site) {
+            return Ok(true);
+        }
+        if item.passkey.is_some() || holds_unread_passkey(item) {
+            return Err(Error::Refused(
+                "that login has a passkey for another account or site",
+            ));
+        }
+        let for_site = matches(item, &Target::Website(site.rp_id))
+            || site.app.is_some_and(|app| matches(item, &Target::App(app)));
+        if !for_site {
+            return Err(Error::Refused("that login isn't for this site"));
+        }
+        Ok(false)
+    }
+
+    /// The logins a new passkey for `site` may go in (`passkey_target`),
+    /// each with whether it replaces the login's passkey: those first, then
+    /// by name.
+    pub fn passkey_logins(&self, site: &PasskeySite<'_>) -> Vec<(&Item, bool)> {
+        let mut found: Vec<(&Item, bool)> = self
+            .items
+            .iter()
+            .filter_map(|i| self.passkey_target(i, site).ok().map(|r| (i, r)))
+            .collect();
+        found.sort_by_key(|(i, replaces)| (!replaces, i.name.to_lowercase()));
+        found
+    }
+
+    /// Whether the vault has, outside the trash, a passkey for the site
+    /// (its ID) with one of these credential IDs (raw): one a site lists
+    /// among the passkeys it has already (`excludeCredentials`).
+    pub fn has_passkey_among(&self, rp_id: &str, ids: &[Vec<u8>]) -> bool {
+        !ids.is_empty()
+            && self.items.iter().filter(|i| !i.deleted).any(|i| {
+                i.passkey.as_ref().is_some_and(|p| {
+                    p.rp_id == rp_id
+                        && crate::passkey::credential_id(&p.credential_id)
+                            .is_ok_and(|id| ids.contains(&id))
+                })
+            })
+    }
+}
+
+/// A new passkey's site and the account on it, for where it may go
+/// (`Vault::passkey_target`).
+#[derive(Clone, Copy, Debug)]
+pub struct PasskeySite<'a> {
+    /// The site's ID, which the passkey is bound to.
+    pub rp_id: &'a str,
+    /// The site's ID for the account (WebAuthn's user handle), raw.
+    pub user_handle: &'a [u8],
+    /// The Android app asking, by its package, once the site's Digital
+    /// Asset Links name it (asset_links.rs): its own logins are for the
+    /// site too, as autofill offers them in that app. None for a browser,
+    /// and on iOS.
+    pub app: Option<&'a str>,
+}
+
+/// Whether a login has the site's passkey for this account: the same site
+/// ID and user handle, the passkey a new one for them replaces. Never for
+/// an empty user handle, or one stored that isn't base64.
+pub fn has_passkey_for(item: &Item, site: &PasskeySite<'_>) -> bool {
+    !site.user_handle.is_empty()
+        && item.passkey.as_ref().is_some_and(|p| {
+            p.rp_id == site.rp_id
+                && p.user_handle
+                    .as_deref()
+                    .and_then(crate::passkey::base64_either)
+                    .is_some_and(|handle| handle == site.user_handle)
+        })
+}
+
+/// Whether a login holds a passkey the core couldn't open (one whose values
+/// don't decrypt, or of a shape it doesn't know): it's there, unseen, and
+/// a new one would take its place.
+fn holds_unread_passkey(item: &Item) -> bool {
+    item.passkey.is_none()
+        && item
+            .kept
+            .fido2_credentials
+            .as_ref()
+            .is_some_and(|stored| match stored {
+                serde_json::Value::Null => false,
+                serde_json::Value::Array(list) => !list.is_empty(),
+                _ => true,
+            })
 }
 
 /// Whether an item is a card in use with this number, as its digits

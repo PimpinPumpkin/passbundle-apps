@@ -2160,9 +2160,11 @@ impl App {
 
     /// Makes a passkey for a site (docs/core.md, "Passkeys", "Making one"):
     /// a new ES256 key in upstream's format, saved into the login `new.login`
-    /// names (replacing a passkey it had, and filling in its username if it
-    /// had none) or a new login for the site, before the site hears of it.
-    /// Refused, with nothing made, if the vault already has one of the site's
+    /// names (replacing the site's passkey for this account if it has it,
+    /// keeping its password, and filling in its username if it had none) or
+    /// a new login for the site, before the site hears of it. The login must
+    /// be one the phones offer for it (`Vault::passkey_target`). Refused,
+    /// with nothing made, if the vault already has one of the site's
     /// `exclude` credentials; offline, it's refused too.
     pub fn passkey_create(&mut self, new: &NewPasskey<'_>) -> Result<PasskeyMade> {
         use crate::passkey::{
@@ -2171,25 +2173,29 @@ impl App {
         use base64::Engine;
         let b64url = |bytes: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
         let vault = self.vault.as_ref().ok_or(Error::SignedOut)?;
-        let excluded = vault.items.iter().filter(|i| !i.deleted).any(|i| {
-            i.passkey.as_ref().is_some_and(|p| {
-                p.rp_id == new.rp_id
-                    && credential_id(&p.credential_id).is_ok_and(|id| new.exclude.contains(&id))
-            })
-        });
-        if excluded {
+        if vault.has_passkey_among(new.rp_id, new.exclude) {
             return Err(Error::Refused(ALREADY_HAS_PASSKEY));
         }
+        let site = crate::matching::PasskeySite {
+            rp_id: new.rp_id,
+            user_handle: new.user_handle,
+            app: new.app,
+        };
         let editing = match new.login {
             Some(id) => {
                 let item = vault.item(id).ok_or(Error::Damaged("no such item"))?;
-                if item.kind != crate::vault::ItemKind::Login {
-                    return Err(Error::Refused("a passkey goes in a login"));
-                }
+                // Only a login the phones would offer: one the person may
+                // change, with this account's passkey for the site or none.
+                vault.passkey_target(item, &site)?;
                 if !self.may_use(item) {
                     return Err(Error::MasterPasswordFirst);
                 }
                 Some(item)
+            }
+            // A new login, as the editor makes one: not where an
+            // organization's policy removes logins (restricted_types.rs).
+            None if vault.restricted.refuses_new(crate::vault::ItemKind::Login) => {
+                return Err(REMOVED_KIND);
             }
             None => None,
         };
@@ -2744,6 +2750,10 @@ pub struct NewPasskey<'a> {
     pub login: Option<&'a str>,
     /// The site's credentials it already has (`excludeCredentials`), raw.
     pub exclude: &'a [Vec<u8>],
+    /// The Android app asking, by its package, once the site's asset links
+    /// name it: its own logins may take the passkey too
+    /// (`matching::PasskeySite`). None for a browser, and on iOS.
+    pub app: Option<&'a str>,
 }
 
 /// What making a passkey answers (WebAuthn's attestation), for the OS to

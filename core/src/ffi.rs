@@ -416,7 +416,6 @@ fn accounts_json(accounts: &Accounts) -> Value {
 /// What an item is labeled with when it's listed beside other accounts'
 /// (autofill, passkeys): its account's name, or email, while more than one
 /// account is signed in here; nothing otherwise.
-#[cfg(phone)]
 fn account_label(accounts: &Accounts, id: &str) -> Option<String> {
     (accounts.summaries().len() > 1).then(|| accounts.label(id))
 }
@@ -3317,6 +3316,17 @@ pub unsafe extern "C" fn pb_passkeys(rp_id: *const c_char) -> *mut c_char {
     out(passkeys(&text(rp_id)))
 }
 
+/// The unlocked accounts, the one the screens show first, as `{id, label}`:
+/// where a new passkey can go.
+fn unlocked_accounts(accounts: &Accounts, shown: &str) -> Vec<Value> {
+    let mut unlocked: Vec<Value> = accounts
+        .unlocked()
+        .map(|(id, _)| json!({ "id": id, "label": accounts.label(id) }))
+        .collect();
+    unlocked.sort_by_key(|a| a["id"] != json!(shown));
+    unlocked
+}
+
 /// `pb_passkeys`, for Android's JNI too.
 pub(crate) fn passkeys(rp_id: &str) -> Value {
     accounts_value(|accounts| {
@@ -3324,14 +3334,8 @@ pub(crate) fn passkeys(rp_id: &str) -> Value {
         let Some(shown) = accounts.active().map(str::to_owned) else {
             return json!({ "locked": true, "signedOut": true });
         };
-        // The unlocked accounts, the one shown first: where a new passkey
-        // can go.
         let several = accounts.summaries().len() > 1;
-        let mut unlocked: Vec<Value> = accounts
-            .unlocked()
-            .map(|(id, _)| json!({ "id": id, "label": accounts.label(id) }))
-            .collect();
-        unlocked.sort_by_key(|a| a["id"] != json!(shown));
+        let unlocked = unlocked_accounts(accounts, &shown);
         if unlocked.is_empty() {
             return json!({ "locked": true, "account": shown });
         }
@@ -3433,13 +3437,144 @@ pub(crate) fn passkey_assert(
     })
 }
 
+/// A new passkey's request, as the phones send it (`pb_passkey_logins`,
+/// `pb_passkey_create`): its site's ID, the account's user handle (base64url
+/// in the request), the credential IDs the site has already (`exclude`,
+/// base64url), and the Android app asking (`app`, its package, once the
+/// site's asset links name it; none for a browser, and on iOS).
+struct PasskeyRequest {
+    rp_id: String,
+    user_handle: Vec<u8>,
+    exclude: Vec<Vec<u8>>,
+    app: Option<String>,
+}
+
+impl PasskeyRequest {
+    /// From the request's JSON; None without a site's ID or a user handle.
+    fn read(r: &Value) -> Option<PasskeyRequest> {
+        use base64::Engine;
+        let decode = |text: &str| {
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(text.trim_end_matches('='))
+                .ok()
+        };
+        let rp_id = r["rpId"].as_str()?.to_owned();
+        let user_handle = r["userHandle"].as_str().and_then(decode)?;
+        let exclude = r["exclude"]
+            .as_array()
+            .map(|ids| {
+                ids.iter()
+                    .filter_map(|id| id.as_str().and_then(decode))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let app = r["app"]
+            .as_str()
+            .filter(|a| !a.is_empty())
+            .map(str::to_owned);
+        Some(PasskeyRequest {
+            rp_id,
+            user_handle,
+            exclude,
+            app,
+        })
+    }
+
+    fn site(&self) -> crate::matching::PasskeySite<'_> {
+        crate::matching::PasskeySite {
+            rp_id: &self.rp_id,
+            user_handle: &self.user_handle,
+            app: self.app.as_deref(),
+        }
+    }
+}
+
+/// Where a new passkey can go (docs/core.md, "Passkeys", "Where it goes"),
+/// for a phone to ask before it's made, from every unlocked account: from
+/// `{rpId, userHandle, exclude, app}` as `pb_passkey_create` takes them,
+/// `{locked, account}` while none is unlocked (the account the screens
+/// show, to unlock), or `{ok, locked: false, account, accounts: [{id,
+/// label}], excluded, items: [{id, account, accountLabel, name, userName,
+/// replaces, passkeyUserName, reprompt}]}`. `excluded` says an unlocked
+/// account has one of the site's `exclude` passkeys already: nothing is
+/// offered then, and the site is told so, as WebAuthn has it. `items` are
+/// the logins it can go in (matching.rs, `Vault::passkey_target`), each
+/// with its account's id on this device and, with more than one account
+/// here, its name or email; `replaces` marks the one with the site's
+/// passkey for this account, which the new one would replace (its account
+/// name on the site in `passkeyUserName`), and those come first.
+/// `accounts` are the unlocked ones, the one shown first, where a new login
+/// can go. Never a key or a password.
+///
+/// # Safety
+/// `request` is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_passkey_logins(request: *const c_char) -> *mut c_char {
+    out(passkey_logins(&text(request)))
+}
+
+/// `pb_passkey_logins`, for Android's JNI too.
+pub(crate) fn passkey_logins(request: &str) -> Value {
+    let r: Value = serde_json::from_str(request).unwrap_or(Value::Null);
+    let Some(request) = PasskeyRequest::read(&r) else {
+        return failed(Error::Damaged(
+            "a passkey request without a site or an account",
+        ));
+    };
+    accounts_value(|accounts| {
+        lock_if_due(accounts);
+        let Some(shown) = accounts.active().map(str::to_owned) else {
+            return json!({ "locked": true, "signedOut": true });
+        };
+        let unlocked = unlocked_accounts(accounts, &shown);
+        if unlocked.is_empty() {
+            return json!({ "locked": true, "account": shown });
+        }
+        let excluded = accounts.has_passkey_among(&request.rp_id, &request.exclude);
+        let items: Vec<Value> = if excluded {
+            Vec::new()
+        } else {
+            accounts
+                .passkey_logins(&request.site())
+                .into_iter()
+                .map(|(account, item, replaces)| {
+                    json!({
+                        "id": item.id,
+                        "account": account,
+                        "accountLabel": account_label(accounts, account),
+                        "name": item.name,
+                        "userName": item.username,
+                        "replaces": replaces,
+                        "passkeyUserName": item
+                            .passkey
+                            .as_ref()
+                            .filter(|_| replaces)
+                            .and_then(|p| p.user_name.as_deref()),
+                        "reprompt": item.kept.reprompt != 0,
+                    })
+                })
+                .collect()
+        };
+        json!({
+            "ok": true,
+            "locked": false,
+            "account": shown,
+            "accounts": unlocked,
+            "excluded": excluded,
+            "items": items,
+        })
+    })
+}
+
 /// Makes a passkey for a site (docs/core.md, "Passkeys", "Making one"), from
 /// `{account, rpId, rpName, userHandle, userName, userDisplayName,
-/// userVerified, discoverable, login, exclude}` (IDs and the user handle in
-/// base64url; `account` the account it goes in, by its id on this device;
-/// `login` the item it goes in, or null for a new login): `{ok, itemId,
-/// credentialId, attestationObject, authenticatorData, publicKey}` in
-/// base64url, or the words to show. Waits on the network: it's saved first.
+/// userVerified, discoverable, login, exclude, app}` (IDs and the user
+/// handle in base64url; `account` the account it goes in, by its id on this
+/// device; `login` the item it goes in, one `pb_passkey_logins` offered, or
+/// null for a new login; `app` the Android app asking, by its package, once
+/// the site's asset links name it): `{ok, itemId, credentialId,
+/// attestationObject, authenticatorData, publicKey}` in base64url, or the
+/// words to show. Waits on the network: it's saved first.
 ///
 /// # Safety
 /// `request` is null or a NUL-terminated UTF-8 string, valid for the call.
@@ -3451,29 +3586,18 @@ pub unsafe extern "C" fn pb_passkey_create(request: *const c_char) -> *mut c_cha
 
 /// `pb_passkey_create`, for Android's JNI too (off the main thread).
 pub(crate) fn passkey_create(request: &str) -> Value {
-    use base64::Engine;
-    let decode = |text: &str| {
-        base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .decode(text.trim_end_matches('='))
-            .ok()
-    };
     let r: Value = serde_json::from_str(request).unwrap_or(Value::Null);
-    let (Some(rp_id), Some(user_handle)) = (
-        r["rpId"].as_str().map(str::to_owned),
-        r["userHandle"].as_str().and_then(decode),
-    ) else {
+    let Some(PasskeyRequest {
+        rp_id,
+        user_handle,
+        exclude,
+        app: package,
+    }) = PasskeyRequest::read(&r)
+    else {
         return failed(Error::Damaged(
             "a passkey request without a site or an account",
         ));
     };
-    let exclude: Vec<Vec<u8>> = r["exclude"]
-        .as_array()
-        .map(|ids| {
-            ids.iter()
-                .filter_map(|id| id.as_str().and_then(decode))
-                .collect()
-        })
-        .unwrap_or_default();
     let text_of = |key: &str| r[key].as_str().map(str::to_owned);
     let (rp_name, user_name, user_display_name, login) = (
         text_of("rpName"),
@@ -3497,6 +3621,7 @@ pub(crate) fn passkey_create(request: &str) -> Value {
                 discoverable,
                 login: login.as_deref(),
                 exclude: &exclude,
+                app: package.as_deref(),
             }) {
                 Ok(made) => json!({
                     "ok": true,

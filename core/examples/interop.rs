@@ -193,6 +193,7 @@ fn passkey(
                     discoverable: true,
                     login: None,
                     exclude: &[],
+                    app: None,
                 })
                 .expect("making a passkey");
             json!({
