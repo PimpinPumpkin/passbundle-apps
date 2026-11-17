@@ -295,6 +295,91 @@ final class AutoFillTests: XCTestCase {
     snapshot("5-save-passkey")
   }
 
+  private func isSaving(_ provider: Provider) -> Bool {
+    if case .saving = provider.screen { return true }
+    return false
+  }
+
+  /// A site making a passkey for the account the sample's Backup service
+  /// login has one for (the same site ID and user handle): Backup service
+  /// is picked to replace it, Example Mail (on example.test too) is offered
+  /// beside a new login, and saving asks first whether to replace it, in
+  /// the Android app's words. Another account on the site isn't offered
+  /// Backup service, whose passkey would be lost. (Saving goes to the
+  /// server, which this test has none of: the core's own tests save one,
+  /// core/tests/passkey_logins.rs.)
+  func testANewPasskeyForTheSameAccountAsksToReplaceTheOldOne() throws {
+    let provider = Provider()
+    try show(provider)
+    let ana = try XCTUnwrap(Data(base64Encoded: "oKGio6SlpqeoqaqrrK2urw=="))
+    provider.making = Provider.PasskeyMaking(
+      rpId: "backup.example.test", userName: "backup@example.test", userHandle: ana,
+      clientDataHash: Data(repeating: 7, count: 32), excluded: [])
+    provider.start(domains: [], picked: nil)
+    wait("asked to unlock") { isLocked(provider) }
+    provider.unlock(password: Self.password)
+    wait("asked to save it") { isSaving(provider) }
+    XCTAssertEqual(provider.targets.map(\.name), ["Backup service", "Example Mail"])
+    XCTAssertEqual(provider.targets.map(\.replaces), [true, false])
+    XCTAssertEqual(provider.targets.map(\.account), [Self.work, Self.work])
+    XCTAssertEqual(provider.saveTo?.item, Self.backup)
+    snapshot("6-replace-passkey")
+
+    // Saving asks first: nothing goes to the core until the person says so.
+    provider.save()
+    let asked = try XCTUnwrap(provider.replacing)
+    XCTAssertEqual(asked.item, Self.backup)
+    XCTAssertTrue(isSaving(provider))
+    XCTAssertEqual(
+      provider.replaceTitle(asked), "Replace the passkey for backup@example.test on backup.example.test?")
+    XCTAssertEqual(
+      provider.replaceMessage(asked),
+      "Backup service (in Work) has a passkey for this account already. The new one takes its place, "
+        + "and the old one stops working the next time you sign in to backup.example.test.")
+    // A new login instead: nothing to replace, so nothing to ask.
+    provider.replacing = nil
+    provider.choose(nil)
+    XCTAssertNil(provider.saveTo)
+
+    // Another account on the site: Backup service has this one's passkey.
+    provider.finish(.refused(.userCanceled))
+    let other = Provider()
+    try show(other)
+    other.making = Provider.PasskeyMaking(
+      rpId: "backup.example.test", userName: "bea@example.test", userHandle: Data([1, 2, 3, 4]),
+      clientDataHash: Data(repeating: 7, count: 32), excluded: [])
+    other.start(domains: [], picked: nil)
+    wait("asked to unlock for the other account") { isLocked(other) }
+    other.unlock(password: Self.password)
+    wait("asked to save the other account's") { isSaving(other) }
+    XCTAssertEqual(other.targets.map(\.name), ["Example Mail"])
+    XCTAssertNil(other.saveTo)
+  }
+
+  /// A site that names the sample's passkey among those it has (iOS 18 and
+  /// later give the list): it's told so at once, as WebAuthn has it, and
+  /// isn't offered a replacement.
+  func testASiteThatHasThePasskeyAlreadyIsToldSo() throws {
+    guard #available(iOS 18.0, *) else { throw XCTSkip("iOS 17 doesn't give a site's list of its passkeys.") }
+    let provider = Provider()
+    var refused: ASExtensionError.Code?
+    provider.onFinish = { answer in
+      if case .refused(let code) = answer { refused = code }
+    }
+    try show(provider)
+    let ana = try XCTUnwrap(Data(base64Encoded: "oKGio6SlpqeoqaqrrK2urw=="))
+    let known = try XCTUnwrap(Data(base64Encoded: "DC9qjk0bTzqefFuNKh9uQA=="))
+    provider.making = Provider.PasskeyMaking(
+      rpId: "backup.example.test", userName: "backup@example.test", userHandle: ana,
+      clientDataHash: Data(repeating: 7, count: 32), excluded: [known])
+    provider.start(domains: [], picked: nil)
+    wait("asked to unlock") { isLocked(provider) }
+    provider.unlock(password: Self.password)
+    wait("told the site") { refused != nil }
+    XCTAssertEqual(refused, .matchedExcludedCredential)
+    XCTAssertNil(provider.replacing)
+  }
+
   /// With no account signed in to in the app, it says where to start.
   func testWithNoAccountItSaysToSignInInTheApp() throws {
     try FileManager.default.removeItem(atPath: "\(folder)/accounts.json")
