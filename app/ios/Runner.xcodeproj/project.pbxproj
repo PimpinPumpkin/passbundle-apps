@@ -12,6 +12,9 @@
 		3B3967161E833CAA004F5970 /* AppFrameworkInfo.plist in Resources */ = {isa = PBXBuildFile; fileRef = 3B3967151E833CAA004F5970 /* AppFrameworkInfo.plist */; };
 		74858FAF1ED2DC5600515810 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74858FAE1ED2DC5600515810 /* AppDelegate.swift */; };
 		AF0000000000000000000211 /* DeviceSeal.swift in Sources */ = {isa = PBXBuildFile; fileRef = AF0000000000000000000201 /* DeviceSeal.swift */; };
+		AF0000000000000000000311 /* Reminders.swift in Sources */ = {isa = PBXBuildFile; fileRef = AF0000000000000000000301 /* Reminders.swift */; };
+		AF0000000000000000000312 /* Reminders.swift in Sources */ = {isa = PBXBuildFile; fileRef = AF0000000000000000000301 /* Reminders.swift */; };
+		AF0000000000000000000313 /* RemindersTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AF0000000000000000000302 /* RemindersTests.swift */; };
 		7884E8682EC3CC0700C636F2 /* SceneDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7884E8672EC3CC0400C636F2 /* SceneDelegate.swift */; };
 		78A318202AECB46A00862997 /* FlutterGeneratedPluginSwiftPackage in Frameworks */ = {isa = PBXBuildFile; productRef = 78A3181F2AECB46A00862997 /* FlutterGeneratedPluginSwiftPackage */; };
 		97C146FC1CF9000F007C117D /* Main.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FA1CF9000F007C117D /* Main.storyboard */; };
@@ -85,6 +88,8 @@
 		74858FAD1ED2DC5600515810 /* Runner-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "Runner-Bridging-Header.h"; sourceTree = "<group>"; };
 		74858FAE1ED2DC5600515810 /* AppDelegate.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		AF0000000000000000000201 /* DeviceSeal.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceSeal.swift; sourceTree = "<group>"; };
+		AF0000000000000000000301 /* Reminders.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Reminders.swift; sourceTree = "<group>"; };
+		AF0000000000000000000302 /* RemindersTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemindersTests.swift; sourceTree = "<group>"; };
 		7884E8672EC3CC0400C636F2 /* SceneDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SceneDelegate.swift; sourceTree = "<group>"; };
 		78E0A7A72DC9AD7400C4905E /* FlutterGeneratedPluginSwiftPackage */ = {isa = PBXFileReference; lastKnownFileType = wrapper; name = FlutterGeneratedPluginSwiftPackage; path = Flutter/ephemeral/Packages/FlutterGeneratedPluginSwiftPackage; sourceTree = "<group>"; };
 		7AFA3C8E1D35360C0083082E /* Release.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; name = Release.xcconfig; path = Flutter/Release.xcconfig; sourceTree = "<group>"; };
@@ -212,6 +217,7 @@
 				1498D2331E8E89220040F4C2 /* GeneratedPluginRegistrant.m */,
 				74858FAE1ED2DC5600515810 /* AppDelegate.swift */,
 				AF0000000000000000000201 /* DeviceSeal.swift */,
+				AF0000000000000000000301 /* Reminders.swift */,
 				7884E8672EC3CC0400C636F2 /* SceneDelegate.swift */,
 				74858FAD1ED2DC5600515810 /* Runner-Bridging-Header.h */,
 				AF0000000000000000000008 /* Runner.entitlements */,
@@ -251,6 +257,7 @@
 			isa = PBXGroup;
 			children = (
 				AF0000000000000000000102 /* AutoFillTests.swift */,
+				AF0000000000000000000302 /* RemindersTests.swift */,
 				AF0000000000000000000101 /* TestHost.swift */,
 				AF0000000000000000000104 /* AutoFillTests-Bridging-Header.h */,
 				AF0000000000000000000103 /* AutoFillTests.xcconfig */,
@@ -530,6 +537,7 @@
 			files = (
 				74858FAF1ED2DC5600515810 /* AppDelegate.swift in Sources */,
 				AF0000000000000000000211 /* DeviceSeal.swift in Sources */,
+				AF0000000000000000000311 /* Reminders.swift in Sources */,
 				1498D2341E8E89220040F4C2 /* GeneratedPluginRegistrant.m in Sources */,
 				7884E8682EC3CC0700C636F2 /* SceneDelegate.swift in Sources */,
 				AF0000000000000000000011 /* Shared.swift in Sources */,
@@ -568,6 +576,8 @@
 				AF0000000000000000000112 /* AutoFillTests.swift in Sources */,
 				AF0000000000000000000113 /* Shared.swift in Sources */,
 				AF0000000000000000000114 /* CredentialProviderViewController.swift in Sources */,
+				AF0000000000000000000312 /* Reminders.swift in Sources */,
+				AF0000000000000000000313 /* RemindersTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

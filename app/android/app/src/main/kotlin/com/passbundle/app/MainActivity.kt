@@ -16,10 +16,12 @@ import io.flutter.plugin.common.MethodChannel
  * The app's one screen, which Flutter draws. What's here is what only Android
  * does (docs/phones.md, "Talking to the OS"): the app's own folder,
  * copying straight from the core to the clipboard, turning on autofill and
- * passkeys, security keys and Duo for two-step login, and updates from GitHub.
+ * passkeys, security keys and Duo for two-step login, expiration reminders
+ * while the app is closed (Reminders.kt), and updates from GitHub.
  */
 class MainActivity : FlutterActivity() {
     private var screenOff: BroadcastReceiver? = null
+    private var computer: MethodChannel? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -30,6 +32,22 @@ class MainActivity : FlutterActivity() {
         Picker.forgetLeftOver(this)
         // An export a run that stopped partway left (ExportFile.kt).
         ExportFile.forget(this)
+        // Opened by a tapped expiration reminder: Expiring soon, once unlocked.
+        Reminders.openedBy(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        // A reminder tapped while the app runs: the vault shows Expiring soon,
+        // now or once it's unlocked (main.dart).
+        if (Reminders.openedBy(intent)) computer?.invokeMethod("expiring", null)
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        // Android's question about notifications, for expiration reminders.
+        Reminders.answered(this, requestCode)
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
@@ -43,6 +61,7 @@ class MainActivity : FlutterActivity() {
         // The phone locking (its screen going off) is the computer sleeping:
         // the app locks if the person chose that (main.dart).
         val computer = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "passbundle/computer")
+        this.computer = computer
         screenOff =
             object : BroadcastReceiver() {
                 override fun onReceive(context: Context, intent: Intent) {
@@ -186,6 +205,17 @@ class MainActivity : FlutterActivity() {
                     "autofillSetupStandIn" ->
                         result.success(AutofillSetup.useStandIn(this, call.argument<Boolean>("on") == true))
                     "autofillSetupOpened" -> result.success(AutofillSetup.openedByStandIn())
+                    // Expiration reminders while the app is closed (Reminders.kt;
+                    // closed_reminders.dart): whether notifications show, Android's
+                    // question about them, its settings for them, the plan (dates
+                    // and two numbers, never a name), the days said, and a tap.
+                    "notificationAccess" -> result.success(Reminders.access(this))
+                    "askNotifications" -> Reminders.ask(this) { access -> result.success(access) }
+                    "openNotificationSettings" -> result.success(Reminders.openSettings(this))
+                    "scheduleReminders" ->
+                        result.success(Reminders.schedule(this, ReminderPlan.read(call.argument<List<*>>("days"))))
+                    "remindersDelivered" -> result.success(Reminders.said(this))
+                    "remindersOpened" -> result.success(Reminders.takeOpened())
                     // Updates from PassBundle's GitHub releases (update/Updater.kt).
                     "updateStatus" -> result.success(Updater.status(this))
                     "updateCheck" -> {
@@ -208,6 +238,7 @@ class MainActivity : FlutterActivity() {
     override fun cleanUpFlutterEngine(flutterEngine: FlutterEngine) {
         screenOff?.let { unregisterReceiver(it) }
         screenOff = null
+        computer = null
         Updater.listener = null
         Links.listener = null
         if (SecurityKeys.activity === this) SecurityKeys.activity = null

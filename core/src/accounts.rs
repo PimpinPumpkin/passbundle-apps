@@ -35,6 +35,7 @@ use serde::{Deserialize, Serialize};
 use crate::app::{App, Prepared, State, Step};
 use crate::autolock::{Readings, Reason};
 use crate::error::{Error, Result};
+use crate::expiration::{Counts, Date, Schedule};
 use crate::kdf::normalize_email;
 use crate::secrets::SecretStore;
 use crate::security_key::{KeyAnswer, SecurityKeyRequest};
@@ -1071,6 +1072,29 @@ impl Accounts {
         self.agent = Some((address, program));
     }
 
+    /// What a phone says while PassBundle is closed, for every account here
+    /// (docs/phones.md): each unlocked account's reminders worked out again
+    /// (`App::schedule_reminders`), each locked one's as they were last,
+    /// added up by day from today, the soonest 30 days (expiration.rs,
+    /// `plan`). Beside the app, nothing.
+    pub fn reminder_plan(&mut self) -> Vec<(Date, Counts)> {
+        self.reminder_plan_on(Date::today())
+    }
+
+    /// `reminder_plan`, on a given day (tests).
+    pub fn reminder_plan_on(&mut self, today: Date) -> Vec<(Date, Counts)> {
+        if self.beside {
+            return Vec::new();
+        }
+        for app in &mut self.list {
+            if app.vault().is_some() {
+                let _ = app.schedule_reminders(today);
+            }
+        }
+        let schedules: Vec<Schedule> = self.list.iter().map(App::reminder_schedule).collect();
+        crate::expiration::plan(&schedules, today)
+    }
+
     /// Each account's open vault, with its id: what's unlocked now.
     pub fn unlocked(&self) -> impl Iterator<Item = (&str, &Vault)> {
         self.list
@@ -1360,6 +1384,65 @@ mod tests {
         })
     }
 
+    /// A note that expires on `date` for `make_with`, as the web vault
+    /// sets it: a text field, its name and value encrypted.
+    fn expiring_note(enc: &dyn Fn(&str) -> String, name: &str, date: &str) -> serde_json::Value {
+        serde_json::json!({
+            "id": uuid::Uuid::new_v4().to_string(),
+            "organizationId": null,
+            "folderId": null,
+            "type": 2,
+            "key": null,
+            "favorite": false,
+            "reprompt": 0,
+            "revisionDate": "2026-11-06T12:00:00.000Z",
+            "creationDate": "2026-11-06T12:00:00.000Z",
+            "deletedDate": null,
+            "collectionIds": [],
+            "name": enc(name),
+            "notes": null,
+            "secureNote": { "type": 0 },
+            "fields": [{
+                "name": enc(crate::vault::EXPIRES_FIELD),
+                "value": enc(date),
+                "type": 0,
+                "linkedId": null,
+            }],
+        })
+    }
+
+    /// Two accounts with notes that expire: the first a certificate on
+    /// December 1, 2026, the second a domain on the same day and a license
+    /// on November 20. Made once, as `work` and `personal` are.
+    fn expiring(which: usize) -> &'static Made {
+        static MADE: [OnceLock<Made>; 2] = [OnceLock::new(), OnceLock::new()];
+        MADE[which].get_or_init(|| {
+            let (email, server) = [
+                ("ana@certs.example.test", "https://vault.certs.example.test"),
+                (
+                    "ana@domains.example.test",
+                    "https://vault.domains.example.test",
+                ),
+            ][which];
+            make_with(
+                email,
+                "expiring password 1",
+                server,
+                "Sign-in",
+                move |enc| {
+                    if which == 0 {
+                        vec![expiring_note(enc, "Server certificate", "2026-12-01")]
+                    } else {
+                        vec![
+                            expiring_note(enc, "Domain", "2026-12-01"),
+                            expiring_note(enc, "License", "2026-11-20"),
+                        ]
+                    }
+                },
+            )
+        })
+    }
+
     fn settings(made: &Made, device: &str) -> Settings {
         Settings {
             server: made.server.into(),
@@ -1628,6 +1711,101 @@ mod tests {
             again.state(""),
             State::SignedOut { email: Some(e), .. } if e == personal().email
         ));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// A phone's reminders while PassBundle is closed, for every account on
+    /// it (docs/phones.md): each unlocked one's worked out again, a locked
+    /// one's kept as it was, added up by day; what the phone said counts as
+    /// shown in its own account only; signing out takes an account's days
+    /// off; and a computer, which never asks, keeps no schedule.
+    #[test]
+    fn a_phones_reminders_are_every_accounts_added_up_by_day() {
+        use crate::expiration::{Counts, Date};
+        let day = |text: &str| Date::parse_iso(text).unwrap();
+        let c = |soon, expired| Counts { soon, expired };
+        let dir = new_dir();
+        let certs = keep(&dir, expiring(0));
+        let domains = keep(&dir, expiring(1));
+        let mut accounts = open(&dir);
+        accounts
+            .app(&certs)
+            .unwrap()
+            .unlock(expiring(0).password)
+            .unwrap();
+        accounts
+            .app(&domains)
+            .unwrap()
+            .unlock(expiring(1).password)
+            .unwrap();
+
+        // The 5th: the app said the 30-day steps due today in each account.
+        let today = day("2026-11-05");
+        for (id, due) in [(&certs, 1), (&domains, 2)] {
+            let found = accounts.app(id).unwrap().reminders_on(&[], today).unwrap();
+            assert_eq!(found.due, c(due, 0));
+        }
+        // A computer stops there: no schedule kept.
+        assert!(!dir
+            .join("accounts")
+            .join(&certs)
+            .join("schedule.json")
+            .exists());
+        let plan = accounts.reminder_plan_on(today);
+        assert_eq!(
+            plan,
+            vec![
+                // The license's week and day before, and once it's expired.
+                (day("2026-11-13"), c(1, 0)),
+                (day("2026-11-19"), c(1, 0)),
+                (day("2026-11-21"), c(0, 1)),
+                // The certificate's and the domain's week, day, and expiry.
+                (day("2026-11-24"), c(2, 0)),
+                (day("2026-11-30"), c(2, 0)),
+                (day("2026-12-02"), c(0, 2)),
+            ]
+        );
+        // What each account keeps: ids, dates, and steps, never a name.
+        let kept =
+            fs::read_to_string(dir.join("accounts").join(&domains).join("schedule.json")).unwrap();
+        assert!(kept.contains("2026-11-20") && kept.contains("\"7\""));
+        assert!(!kept.contains("License") && !kept.contains("Domain"));
+
+        // The certificate's account locks: its days stay as they were.
+        accounts.lock(&certs);
+        assert_eq!(accounts.reminder_plan_on(today), plan);
+
+        // The 13th: the phone said the license's week at 9:00, and the app
+        // opening after doesn't say it again; its days up to today go.
+        let on = day("2026-11-13");
+        let found = accounts
+            .app(&domains)
+            .unwrap()
+            .reminders_on(&[on], on)
+            .unwrap();
+        assert_eq!((found.due.total(), found.standing.soon), (0, 2));
+        let left = accounts.app(&domains).unwrap().reminder_schedule();
+        assert!(left.keys().all(|d| d.as_str() > "2026-11-13"));
+        assert_eq!(
+            accounts.reminder_plan_on(on)[0],
+            (day("2026-11-19"), c(1, 0))
+        );
+        // The certificate's account wasn't told: what it had waiting stays,
+        // for when it's unlocked again.
+        assert_eq!(accounts.app(&certs).unwrap().reminder_schedule().len(), 3);
+
+        // Signing out of the domains: only the certificate's days are left.
+        accounts.sign_out(&domains);
+        assert_eq!(
+            accounts.reminder_plan_on(on),
+            vec![
+                (day("2026-11-24"), c(1, 0)),
+                (day("2026-11-30"), c(1, 0)),
+                (day("2026-12-02"), c(0, 1)),
+            ]
+        );
+        accounts.sign_out(&certs);
+        assert!(accounts.reminder_plan_on(on).is_empty());
         let _ = fs::remove_dir_all(dir);
     }
 

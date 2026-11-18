@@ -16,6 +16,7 @@ use crate::clipboard;
 use crate::crypto::{EncString, SymmetricKey};
 use crate::device_approval::{self, SignInRequest};
 use crate::error::{Error, Result};
+use crate::expiration::Date;
 use crate::generator;
 use crate::generator_policy::GeneratorPolicy;
 use crate::kdf::{normalize_email, Prelogin};
@@ -1060,15 +1061,54 @@ impl App {
     /// so it's said once, and every item at one of its steps whether shown
     /// before or not. On a computer, the desktop agent's tray is told those
     /// two numbers (and never which items), on a thread of its own.
-    pub fn reminders(&mut self) -> Result<crate::expiration::Check> {
+    ///
+    /// On a phone, `delivered` is the days whose reminder the phone said
+    /// while PassBundle was closed (docs/phones.md): the steps they covered
+    /// count as shown first, so they aren't said again, and the days up to
+    /// today then leave the phone's schedule (`schedule_reminders`).
+    pub fn reminders(&mut self, delivered: &[Date]) -> Result<crate::expiration::Check> {
+        self.reminders_on(delivered, Date::today())
+    }
+
+    /// `reminders`, on a given day (tests).
+    pub fn reminders_on(
+        &mut self,
+        delivered: &[Date],
+        today: Date,
+    ) -> Result<crate::expiration::Check> {
         let vault = self.vault.as_ref().ok_or(Error::SignedOut)?;
         let mut shown = self.store.shown_reminders();
-        let found = crate::expiration::check(vault, &mut shown, crate::expiration::Date::today());
+        let mut scheduled = self.store.reminder_schedule();
+        crate::expiration::mark_delivered(vault, &scheduled, delivered, today, &mut shown);
+        let found = crate::expiration::check(vault, &mut shown, today);
         self.store.save_shown_reminders(&shown)?;
+        // A computer keeps no schedule, and gets none here.
+        if self.store.has_reminder_schedule() {
+            scheduled.retain(|day, _| Date::parse_iso(day).is_some_and(|d| d > today));
+            self.store.save_reminder_schedule(&scheduled)?;
+        }
         if found.standing.total() > 0 || self.told_agent {
             self.tell_agent(found.standing);
         }
         Ok(found)
+    }
+
+    /// Works out again the reminders a phone says for this account while
+    /// PassBundle is closed, from the open vault and what was shown: the days
+    /// after `today` (expiration.rs, `schedule`). What was waiting for today
+    /// and before stays, until `reminders` hears whether the phone said it.
+    pub fn schedule_reminders(&mut self, today: Date) -> Result<()> {
+        let vault = self.vault.as_ref().ok_or(Error::SignedOut)?;
+        let shown = self.store.shown_reminders();
+        let mut next = self.store.reminder_schedule();
+        next.retain(|day, _| Date::parse_iso(day).is_some_and(|d| d <= today));
+        next.extend(crate::expiration::schedule(vault, &shown, today));
+        self.store.save_reminder_schedule(&next)
+    }
+
+    /// The reminders a phone has waiting for this account, as last worked out.
+    pub fn reminder_schedule(&self) -> crate::expiration::Schedule {
+        self.store.reminder_schedule()
     }
 
     /// Tells the desktop agent how many of this account's items to remind
