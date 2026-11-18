@@ -239,6 +239,17 @@ const OWN_ITEM_KEPT_OUT: Error = Error::Refused(
     "your organization keeps items out of Personal, so this item can't be changed. You can move it to a shared folder in the web vault",
 );
 
+/// Signing in with a passkey that counts its sign-ins, in one of the
+/// person's own logins where an organization keeps items out of Personal
+/// (`Vault::keeps_out`): the raised counter has to be saved in the login,
+/// and the server refuses any change to it, so it's refused before
+/// anything is signed (`App::passkey_assert`; docs/core.md in the meta
+/// repo, "Passkeys", "A counter that can't be saved", says why it isn't
+/// signed without saving).
+const COUNTING_PASSKEY_KEPT_OUT: Error = Error::Refused(
+    "your organization keeps items out of Personal, so this login can't be changed. Its passkey counts its sign-ins, and signing in would change the login. You can move it to a shared folder in the web vault, then try again",
+);
+
 /// How long confirming it's you lasts, to approve a sign-in.
 const CONFIRMATION_LASTS: std::time::Duration = std::time::Duration::from_secs(60);
 
@@ -2139,7 +2150,11 @@ impl App {
     /// sign-in. A login that asks for the master password asks first (and
     /// giving it counts as proof). A passkey that counts its uses has its
     /// counter raised and the login saved before it signs; offline, it's
-    /// refused.
+    /// refused. So is one that counts in a login the server won't take a
+    /// change to, one of the person's own where an organization keeps items
+    /// out of Personal (`Vault::keeps_out`), before anything is signed: a
+    /// site may refuse a counter that didn't move, and one raised but not
+    /// saved would be used again next time (docs/core.md, "Passkeys").
     pub fn passkey_assert(
         &mut self,
         id: &str,
@@ -2167,6 +2182,13 @@ impl App {
             .ok_or(Error::Damaged("a login with no passkey"))?;
         if passkey.rp_id != rp_id {
             return Err(Error::Refused("it's a passkey for another site"));
+        }
+        // One that counts saves its login as it signs in, which the server
+        // refuses for one of the person's own where an organization keeps
+        // items out of Personal: said here, before anything is signed or
+        // sent, in words that say what to do.
+        if passkey.counter > 0 && vault.keeps_out(item).is_some() {
+            return Err(COUNTING_PASSKEY_KEPT_OUT);
         }
         let key = passkey.key()?;
         let raw_id = credential_id(&passkey.credential_id)?;

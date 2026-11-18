@@ -3466,7 +3466,9 @@ fn waiting(call: impl FnOnce() -> Value + Send) -> Value {
 /// `{ok, authenticatorData, signature, credentialId, userHandle}` in
 /// base64url, or the words to show. `client_data_hash` is base64url (32
 /// bytes); `user_verified` is "true" when the person proved who they are in
-/// this sign-in. Waits on the network when the passkey counts its uses.
+/// this sign-in. Waits on the network when the passkey counts its uses
+/// (refused at once, in words that say why, where its login is one of the
+/// person's own that an organization keeps out of Personal).
 ///
 /// # Safety
 /// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
