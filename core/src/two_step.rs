@@ -508,7 +508,10 @@ const DESKTOP_ENTRY: &str = "com.passbundle.app-links.desktop";
 const LINKS: &str = "x-scheme-handler/passbundle";
 
 /// The desktop entry that opens `passbundle://` links with this program,
-/// its path quoted as the Desktop Entry Specification says.
+/// its path quoted as the Desktop Entry Specification says: first the
+/// quoting rule for an Exec argument, then the string escapes every value
+/// takes. So a backslash in the path is written as four, and a dollar sign
+/// as `\\$`, as the specification shows.
 #[cfg(any(target_os = "linux", test))]
 fn desktop_entry(program: &Path) -> String {
     let mut quoted = String::from("\"");
@@ -522,8 +525,18 @@ fn desktop_entry(program: &Path) -> String {
         quoted.push(c);
     }
     quoted.push('"');
+    let mut exec = String::new();
+    for c in quoted.chars() {
+        match c {
+            '\\' => exec.push_str("\\\\"),
+            '\n' => exec.push_str("\\n"),
+            '\t' => exec.push_str("\\t"),
+            '\r' => exec.push_str("\\r"),
+            _ => exec.push(c),
+        }
+    }
     format!(
-        "[Desktop Entry]\nType=Application\nName=PassBundle\nComment=Comes back from Duo to finish signing in\nExec={quoted} %u\nTerminal=false\nNoDisplay=true\nMimeType=x-scheme-handler/passbundle;\n"
+        "[Desktop Entry]\nType=Application\nName=PassBundle\nComment=Comes back from Duo to finish signing in\nExec={exec} %u\nTerminal=false\nNoDisplay=true\nMimeType=x-scheme-handler/passbundle;\n"
     )
 }
 
@@ -917,7 +930,14 @@ mod tests {
     fn the_links_desktop_entry_quotes_the_program() {
         let entry = desktop_entry(Path::new("/home/ana/Pass \"Bundle\"/$100%/passbundle"));
         assert!(
-            entry.contains("Exec=\"/home/ana/Pass \\\"Bundle\\\"/\\$100%%/passbundle\" %u\n"),
+            entry.contains("Exec=\"/home/ana/Pass \\\\\"Bundle\\\\\"/\\\\$100%%/passbundle\" %u\n"),
+            "{entry}"
+        );
+        // A backslash is four, as the specification shows, and a newline
+        // stays on the Exec line.
+        let entry = desktop_entry(Path::new("/opt/a\\b/c\nd/passbundle"));
+        assert!(
+            entry.contains("Exec=\"/opt/a\\\\\\\\b/c\\nd/passbundle\" %u\n"),
             "{entry}"
         );
         assert!(entry.contains("MimeType=x-scheme-handler/passbundle;\n"));
@@ -965,10 +985,15 @@ mod tests {
         );
         // The app's own entry reads back as the program it was written for,
         // with every character it escapes.
-        let program = "/home/ana/Pass \"Bundle\"/$100%/`x`\\y/passbundle";
-        let entry = desktop_entry(Path::new(program));
-        let exec = entry.lines().find_map(|l| l.strip_prefix("Exec=")).unwrap();
-        assert_eq!(exec_arguments(exec), [program, "%u"]);
+        for program in [
+            "/home/ana/Pass \"Bundle\"/$100%/`x`\\y/passbundle",
+            "/opt/a\\$b/c\\\\d/e\\\"f/passbundle",
+            "/opt/tab\there/new\nline/passbundle",
+        ] {
+            let entry = desktop_entry(Path::new(program));
+            let exec = entry.lines().find_map(|l| l.strip_prefix("Exec=")).unwrap();
+            assert_eq!(exec_arguments(exec), [program, "%u"], "{entry}");
+        }
         // The string escapes come first: \s is a space, which ends an
         // argument outside quotes, and a backslash or dollar sign in quotes
         // can be written as the specification shows.

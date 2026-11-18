@@ -249,6 +249,9 @@ class Core {
   late final _approvals = _lib.lookupFunction<_Str1, _Str1>('pb_approvals');
   late final _setApprovals = _lib.lookupFunction<_Str2, _Str2>('pb_set_approvals');
   late final _sync = _lib.lookupFunction<_Str1, _Str1>('pb_sync');
+  late final _dismissTwoStepNudge = _lib.lookupFunction<_Str1, _Str1>(
+    'pb_dismiss_two_step_nudge',
+  );
   late final _syncSettings = _lib.lookupFunction<_Str1, _Str1>('pb_sync_settings');
   late final _lock = _lib.lookupFunction<_Str1, _Str1>('pb_lock');
   late final _signOut = _lib.lookupFunction<_Str1, _Str1>('pb_sign_out');
@@ -851,8 +854,18 @@ class Core {
         ], (p) => c._answer(c._confirmMasterPassword(p[0], p[1], p[2]))),
       );
 
+  /// Brings the account up to date from its server: with `twoStepNudge`,
+  /// which nudge about two-step login its vault shows ("setUp",
+  /// "stronger", or null; two_step_nudge.dart), and offline,
+  /// `keptSecondsAgo`.
   static Future<Answer> sync() =>
       _background((c, a) => c._with([a], (p) => c._answer(c._sync(p[0]))));
+
+  /// "Not now", to either nudge about two-step login: the server hides both
+  /// for 90 days, on every device.
+  static Future<Answer> dismissTwoStepNudge() => _background(
+    (c, a) => c._with([a], (p) => c._answer(c._dismissTwoStepNudge(p[0]))),
+  );
 
   /// Sign-ins waiting for an account's answer (docs/core.md, "Approving a
   /// sign-in"), from the server: `requests`, each `{id, device, ip,
@@ -1693,6 +1706,7 @@ class Core {
       return false;
     }
     final url = uri.toString();
+    if (debugOpenWebsite case final open?) return open(url);
     if (isPhone || Platform.isMacOS) {
       return await platform.invokeMethod<bool>('openUrl', {'url': url}) ??
           false;
@@ -1706,6 +1720,12 @@ class Core {
       return false;
     }
   }
+
+  /// Tests only: what opening a website does instead of opening the browser
+  /// ([openWebsite]), given the address, saying whether it opened. Null is
+  /// the browser.
+  @visibleForTesting
+  static Future<bool> Function(String url)? debugOpenWebsite;
 
   /// Templates for New item, grouped as the web vault groups them
   /// (core/src/templates.rs): `[{name, templates: [{id, name, base,

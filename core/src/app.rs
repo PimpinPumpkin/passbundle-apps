@@ -1011,6 +1011,27 @@ impl App {
         self.own_health
     }
 
+    /// Which nudge about two-step login this account's vault shows
+    /// (two_step_nudge.rs), as its server says now: asked after a sync the
+    /// person started (`pb_sync`), never with each save. None for anything
+    /// that goes wrong (offline, signed out, a server without it): the nudge
+    /// never holds anything up.
+    pub fn two_step_nudge(&mut self) -> Option<crate::two_step_nudge::TwoStepNudge> {
+        let (Some(server), Some(session)) = (&self.server, self.session.as_mut()) else {
+            return None;
+        };
+        server.two_step_nudge(session).ok().flatten()
+    }
+
+    /// "Not now", to either nudge about two-step login: the server hides
+    /// both for 90 days, on every device.
+    pub fn dismiss_two_step_nudge(&mut self) -> Result<()> {
+        let (Some(server), Some(session)) = (&self.server, self.session.as_mut()) else {
+            return Err(Error::SignedOut);
+        };
+        server.dismiss_two_step_nudge(session)
+    }
+
     /// The expiration reminders due today (expiration.rs), each marked shown
     /// so it's said once, and every item at one of its steps whether shown
     /// before or not. On a computer, the desktop agent's tray is told those
