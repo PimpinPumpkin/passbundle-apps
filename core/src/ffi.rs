@@ -317,6 +317,14 @@ fn failed(e: Error) -> Value {
         "confirmFirst": e == Error::ConfirmFirst,
         // The person stopped an upload: nothing to say.
         "canceled": e == Error::Canceled,
+        // A security key asks for its PIN, or didn't take the one sent: the
+        // two-step screen shows the PIN's field (`why`: asks, wrong,
+        // lastTry, freshStart, notAPin), with the key's tries left when it
+        // said. Never the PIN.
+        "securityKeyPin": match e {
+            Error::KeyPin(pin) => json!({ "why": pin.why(), "left": pin.left() }),
+            _ => Value::Null,
+        },
     })
 }
 
@@ -1185,9 +1193,38 @@ pub unsafe extern "C" fn pb_duo_finish(link: *const c_char, remember: bool) -> *
 /// Two-step login's second step with a security key (security_key): the
 /// server's request, then the key asked (which waits for the person, so
 /// the other calls don't wait on it), then the answer sent. The same answer
-/// as `pb_sign_in`.
+/// as `pb_sign_in`; a key that asks for its PIN answers with
+/// `securityKeyPin` (`failed`), and the app tries again with
+/// `pb_security_key_sign_in_with_pin`.
 #[no_mangle]
 pub extern "C" fn pb_security_key_sign_in(remember: bool) -> *mut c_char {
+    security_key_sign_in(None, remember)
+}
+
+/// `pb_security_key_sign_in` with the PIN the person typed after a key
+/// asked for it (security_key/client_pin.rs): sent to the key only if it
+/// asks for it again, and on its last try only with `last_try`. It's in
+/// memory for this call only, and overwritten after; what can't be a key's
+/// PIN is refused before any key is asked.
+///
+/// # Safety
+/// `pin` is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_security_key_sign_in_with_pin(
+    pin: *const c_char,
+    remember: bool,
+    last_try: bool,
+) -> *mut c_char {
+    let typed = Zeroizing::new(text(pin));
+    let pin = match crate::security_key::Pin::new(&typed, last_try) {
+        Ok(pin) => pin,
+        Err(e) => return out(failed(e)),
+    };
+    drop(typed);
+    security_key_sign_in(Some(&pin), remember)
+}
+
+fn security_key_sign_in(pin: Option<&crate::security_key::Pin>, remember: bool) -> *mut c_char {
     out(std::thread::scope(|scope| {
         scope
             .spawn(|| {
@@ -1203,12 +1240,13 @@ pub extern "C" fn pb_security_key_sign_in(remember: bool) -> *mut c_char {
                 let Some((id, request)) = prepared else {
                     return asked;
                 };
-                let answer =
-                    match catch_unwind(AssertUnwindSafe(|| crate::security_key::ask(&request))) {
-                        Ok(Ok(answer)) => answer,
-                        Ok(Err(e)) => return failed(e),
-                        Err(_) => return json!({ "ok": false, "error": STOPPED }),
-                    };
+                let answer = match catch_unwind(AssertUnwindSafe(|| {
+                    crate::security_key::ask(&request, pin)
+                })) {
+                    Ok(Ok(answer)) => answer,
+                    Ok(Err(e)) => return failed(e),
+                    Err(_) => return json!({ "ok": false, "error": STOPPED }),
+                };
                 accounts_value(|accounts| {
                     let result = accounts.finish_with_key(&id, &request, &answer, remember);
                     signed_in(accounts, result)

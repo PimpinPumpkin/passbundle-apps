@@ -39,6 +39,55 @@ pub enum NoNewAccounts {
     Address,
 }
 
+/// A security key that asks for its PIN (`Error::KeyPin`;
+/// security_key/client_pin.rs): the app shows the PIN's field, with the
+/// tries left when the key said, and sends what's typed with the next try.
+/// Never the PIN itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyPin {
+    /// It asks for its PIN: the first time, nothing wrong yet.
+    Asks { left: Option<u32> },
+    /// That wasn't its PIN.
+    Wrong { left: Option<u32> },
+    /// One try left, and the person didn't say to use it: nothing was sent.
+    LastTry,
+    /// After 3 wrong PINs in a row, the key wants unplugging (or taking away
+    /// from the phone) before the next.
+    FreshStart,
+    /// Fewer than 4 characters: no key's PIN. Nothing was sent.
+    TooShort,
+    /// More than 63 bytes: no key's PIN. Nothing was sent.
+    TooLong,
+    /// Ends in a zero byte: no key's PIN. Nothing was sent.
+    NotAPin,
+}
+
+impl KeyPin {
+    /// What it is, for the app: `asks`, `wrong`, `lastTry`, `freshStart`, or
+    /// `notAPin` (anything that can't be a PIN).
+    pub fn why(&self) -> &'static str {
+        match self {
+            KeyPin::Asks { .. } => "asks",
+            KeyPin::Wrong { .. } => "wrong",
+            KeyPin::LastTry => "lastTry",
+            KeyPin::FreshStart => "freshStart",
+            KeyPin::TooShort | KeyPin::TooLong | KeyPin::NotAPin => "notAPin",
+        }
+    }
+
+    /// The tries the key has left, when it said.
+    pub fn left(&self) -> Option<u32> {
+        match self {
+            KeyPin::Asks { left } | KeyPin::Wrong { left } => *left,
+            KeyPin::LastTry => Some(1),
+            _ => None,
+        }
+    }
+}
+
+/// What the app says before the key's last PIN try (`KeyPin::LastTry`).
+pub const LAST_TRY: &str = "This security key has 1 PIN try left. If the next PIN is wrong too, the key locks, and only resetting it with the app from its maker unlocks it, which erases everything on it.";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
     /// The master password didn't open the user key.
@@ -125,6 +174,9 @@ pub enum Error {
     /// the account's credentials, a Duo answer for another sign-in, a code
     /// that isn't a YubiKey's (two_step.rs, security_key).
     TwoStep(&'static str),
+    /// Two-step login with a security key: the key asks for its PIN, or
+    /// didn't take the one sent (security_key/client_pin.rs).
+    KeyPin(KeyPin),
     /// The person stopped a file's upload. The apps show nothing for it.
     Canceled,
     /// Unlocking with a PIN: that wasn't the PIN, and how many tries are
@@ -324,6 +376,18 @@ impl fmt::Display for Error {
             Error::TooManyAccounts => write!(f, "PassBundle keeps up to {} accounts on this device. Sign out of one to add another.", crate::accounts::MOST),
             Error::AlreadyHere => write!(f, "That account is in PassBundle on this device already, under another email or server. Sign out of it there first."),
             Error::TwoStep(sentence) => write!(f, "{sentence}"),
+            Error::KeyPin(KeyPin::Asks { .. }) => write!(f, "This security key asks for its PIN."),
+            Error::KeyPin(KeyPin::Wrong { left: Some(1) }) => write!(f, "That PIN isn't right. 1 try left."),
+            Error::KeyPin(KeyPin::Wrong { left: Some(left) }) => write!(f, "That PIN isn't right. {left} tries left."),
+            Error::KeyPin(KeyPin::Wrong { left: None }) => write!(f, "That PIN isn't right."),
+            Error::KeyPin(KeyPin::LastTry) => write!(f, "{LAST_TRY}"),
+            Error::KeyPin(KeyPin::FreshStart) => write!(
+                f,
+                "After 3 wrong PINs in a row, a security key needs a fresh start: unplug it and plug it in again (on a phone, take it away first), then enter its PIN."
+            ),
+            Error::KeyPin(KeyPin::TooShort) => write!(f, "A security key's PIN has at least 4 characters."),
+            Error::KeyPin(KeyPin::TooLong) => write!(f, "That's longer than a security key's PIN can be."),
+            Error::KeyPin(KeyPin::NotAPin) => write!(f, "That can't be a security key's PIN. Check what you typed."),
             Error::Canceled => write!(f, "The upload was canceled."),
             Error::WrongPin { left: 1 } => write!(f, "That PIN isn't right. 1 try left."),
             Error::WrongPin { left } => write!(f, "That PIN isn't right. {left} tries left."),

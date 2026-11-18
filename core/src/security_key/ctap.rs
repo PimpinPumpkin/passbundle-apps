@@ -4,9 +4,10 @@
 //! (CTAPHID); over NFC, in ISO 7816-4 APDUs. A key that speaks CTAP2 gets
 //! authenticatorGetAssertion; one that only speaks U2F gets U2F's
 //! authenticate, whose answer is turned into the same authenticator data a
-//! CTAP2 key gives. The person's PIN is never asked for: two-step login asks
-//! keys only for a touch (user verification "discouraged"), and a key that
-//! insists on its PIN is told apart so the app can say so.
+//! CTAP2 key gives. Two-step login asks keys for a touch (user verification
+//! "discouraged"); a CTAP2 key that says it wants its PIN, or any CTAP2 key
+//! when the server requires user verification, is sent the PIN the person
+//! typed (client_pin.rs), never otherwise.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -14,7 +15,8 @@ use std::time::{Duration, Instant};
 use sha2::{Digest, Sha256};
 
 use super::cbor::{self, Value};
-use crate::error::{Error, Result};
+use super::client_pin::{self, Info, Pin, Token};
+use crate::error::{Error, KeyPin, Result};
 
 /// A security key on USB, as HID reports of 64 bytes each way (CTAP 2.1, "USB HID").
 pub trait Hid {
@@ -41,6 +43,10 @@ pub struct KeyRequest {
     /// The credentials the account has (`allowCredentials`); a key has to
     /// hold one of them.
     pub allow: Vec<Vec<u8>>,
+    /// The server requires user verification ("required"): a CTAP2 key is
+    /// sent its PIN even before it asks. PassBundle's server says
+    /// "discouraged" for two-step login.
+    pub uv_required: bool,
 }
 
 /// A key's answer: what the server checks.
@@ -81,16 +87,15 @@ pub const CANCELED: &str = "Canceled.";
 pub const TIMED_OUT: &str = "No security key was touched in time. Try again.";
 pub const NOT_THIS_KEY: &str =
     "That security key isn't one this account uses. Try another, or use another way to sign in.";
-pub const WANTS_PIN: &str = "This security key asks for its PIN, which PassBundle can't send it yet. Use another way to sign in, or the web vault.";
 pub const REFUSED: &str = "The security key said no. Try again.";
 const KEY_ERROR: &str = "The security key didn't answer as security keys do. Unplug it, plug it in again, and try again.";
 
-fn key_error() -> Error {
+pub(super) fn key_error() -> Error {
     Error::TwoStep(KEY_ERROR)
 }
 
 /// What a CTAP2 key answered other than success, in the person's words.
-fn ctap2_error(status: u8) -> Error {
+pub(super) fn ctap2_error(status: u8) -> Error {
     match status {
         // KEEPALIVE_CANCEL
         0x2d => Error::TwoStep(CANCELED),
@@ -98,10 +103,20 @@ fn ctap2_error(status: u8) -> Error {
         0x2f => Error::TwoStep(TIMED_OUT),
         // OPERATION_DENIED, NOT_ALLOWED
         0x27 | 0x30 => Error::TwoStep(REFUSED),
-        // PUAT_REQUIRED, PIN_INVALID, PIN_BLOCKED, PIN_AUTH_INVALID,
-        // PIN_AUTH_BLOCKED, PIN_NOT_SET, PIN_POLICY_VIOLATION, UV_BLOCKED,
-        // UV_INVALID
-        0x36 | 0x31 | 0x32 | 0x33 | 0x34 | 0x35 | 0x37 | 0x3c | 0x3f => Error::TwoStep(WANTS_PIN),
+        // PIN_BLOCKED
+        0x32 => Error::TwoStep(client_pin::BLOCKED),
+        // PIN_AUTH_INVALID: the PIN's token wasn't taken.
+        0x33 => Error::TwoStep(client_pin::NOT_TAKEN),
+        // PIN_AUTH_BLOCKED: 3 wrong PINs in a row.
+        0x34 => Error::KeyPin(KeyPin::FreshStart),
+        // PIN_NOT_SET
+        0x35 => Error::TwoStep(client_pin::NOT_SET),
+        // PIN_POLICY_VIOLATION
+        0x37 => Error::TwoStep(client_pin::CHANGE_FIRST),
+        // PUAT_REQUIRED even with the PIN's token, PIN_INVALID (a key's own
+        // prompt), UV_BLOCKED, UV_INVALID, UNAUTHORIZED_PERMISSION: a check
+        // of the person the core doesn't do.
+        0x36 | 0x31 | 0x3c | 0x3f | 0x40 => Error::TwoStep(client_pin::OTHER_CHECK),
         // NO_CREDENTIALS, INVALID_CREDENTIAL
         0x2e | 0x22 => Error::TwoStep(NOT_THIS_KEY),
         _ => key_error(),
@@ -265,7 +280,7 @@ impl<'a> Channel<'a> {
 }
 
 /// A key, however it's reached: CTAP2's messages and U2F's.
-trait Link {
+pub(super) trait Link {
     fn cbor(&mut self, body: &[u8], wait: &Wait) -> Result<Vec<u8>>;
     /// A U2F command's answer and status word.
     fn u2f(&mut self, apdu: &[u8], wait: &Wait) -> Result<(Vec<u8>, u16)>;
@@ -376,27 +391,37 @@ enum Found {
     None,
     /// The list is longer than it takes.
     TooMany,
+    /// It wants its PIN first (PUAT_REQUIRED, which CTAP 2.0 calls
+    /// PIN_REQUIRED).
+    NeedsPin,
 }
 
-/// CTAP2's authenticatorGetAssertion for one site ID.
-fn get_assertion(
-    link: &mut dyn Link,
+/// CTAP2's authenticatorGetAssertion for one site ID, as sent: a touch
+/// always ("up"), and with a PIN's token, its pinUvAuthParam and protocol.
+pub fn get_assertion_request(
     rp_id: &str,
-    request: &KeyRequest,
+    client_data_hash: &[u8; 32],
     allow: &[Vec<u8>],
-    wait: &Wait,
-) -> Result<Found> {
+    token: Option<&Token>,
+) -> Vec<u8> {
     let mut members = vec![
         (Value::Unsigned(1), Value::text(rp_id)),
-        (
-            Value::Unsigned(2),
-            Value::Bytes(request.client_data_hash.to_vec()),
-        ),
+        (Value::Unsigned(2), Value::Bytes(client_data_hash.to_vec())),
         (
             Value::Unsigned(5),
             Value::Map(vec![(Value::text("up"), Value::Bool(true))]),
         ),
     ];
+    if let Some(token) = token {
+        members.push((
+            Value::Unsigned(6),
+            Value::Bytes(token.param(client_data_hash)),
+        ));
+        members.push((
+            Value::Unsigned(7),
+            Value::Unsigned(token.protocol().number()),
+        ));
+    }
     if !allow.is_empty() {
         members.push((
             Value::Unsigned(3),
@@ -415,6 +440,19 @@ fn get_assertion(
     }
     let mut body = vec![0x02];
     body.extend(cbor::encode(&Value::Map(members)));
+    body
+}
+
+/// CTAP2's authenticatorGetAssertion for one site ID.
+fn get_assertion(
+    link: &mut dyn Link,
+    rp_id: &str,
+    request: &KeyRequest,
+    allow: &[Vec<u8>],
+    token: Option<&Token>,
+    wait: &Wait,
+) -> Result<Found> {
+    let body = get_assertion_request(rp_id, &request.client_data_hash, allow, token);
     let answer = link.cbor(&body, wait)?;
     let (&status, rest) = answer.split_first().ok_or_else(key_error)?;
     match status {
@@ -423,6 +461,7 @@ fn get_assertion(
         // The command's too long for the key, or lists more credentials
         // than it takes.
         0x39 | 0x15 if allow.len() > 1 => return Ok(Found::TooMany),
+        0x36 if token.is_none() => return Ok(Found::NeedsPin),
         _ => return Err(ctap2_error(status)),
     }
     let read = cbor::decode(rest)?;
@@ -460,17 +499,90 @@ fn get_assertion(
     }))
 }
 
+/// A key's PIN for one ask: whether the key needs it, what the key said
+/// about it, and the tokens it gave, by site ID. Dropped (and the tokens
+/// with it, overwritten) when the ask ends.
+struct PinAsk<'p> {
+    pin: Option<&'p Pin>,
+    needed: bool,
+    info: Option<Info>,
+    tokens: Vec<(String, Token)>,
+}
+
+impl PinAsk<'_> {
+    /// A token for `rp_id`: one this ask has, or one from the PIN. A CTAP
+    /// 2.1 key ties a token to the site ID it's first used with, so each
+    /// site ID gets its own; a CTAP 2.0 key's token is good for any.
+    fn token(&mut self, link: &mut dyn Link, rp_id: &str, wait: &Wait) -> Result<&Token> {
+        if self.info.is_none() {
+            self.info = Some(client_pin::get_info(link, wait)?);
+        }
+        let info = self.info.as_ref().expect("read above");
+        let kept = self
+            .tokens
+            .iter()
+            .position(|(id, _)| id == rp_id || !info.permissions);
+        let at = match kept {
+            Some(at) => at,
+            None => {
+                let token = client_pin::token(link, info, rp_id, self.pin, wait)?;
+                self.tokens.push((rp_id.to_owned(), token));
+                self.tokens.len() - 1
+            }
+        };
+        Ok(&self.tokens[at].1)
+    }
+}
+
+/// getAssertion for one site ID and these credentials, with the PIN's
+/// token once the key wants it (or the server requires it).
+fn ask_for(
+    link: &mut dyn Link,
+    rp_id: &str,
+    request: &KeyRequest,
+    allow: &[Vec<u8>],
+    pin: &mut PinAsk,
+    wait: &Wait,
+) -> Result<Found> {
+    loop {
+        let token = if pin.needed {
+            Some(pin.token(link, rp_id, wait)?)
+        } else {
+            None
+        };
+        match get_assertion(link, rp_id, request, allow, token, wait)? {
+            // It wants its PIN: asked again, with it.
+            Found::NeedsPin if !pin.needed => pin.needed = true,
+            Found::NeedsPin => return Err(Error::TwoStep(client_pin::OTHER_CHECK)),
+            found => return Ok(found),
+        }
+    }
+}
+
 /// CTAP2, for the site ID, then the AppID; the whole list, or, for a key
-/// that takes fewer, one credential at a time.
-fn ctap2(link: &mut dyn Link, request: &KeyRequest, wait: &Wait) -> Result<KeyAnswer> {
+/// that takes fewer, one credential at a time. The PIN goes to the key
+/// only once it says it wants it, or when the server requires the person
+/// verified.
+fn ctap2(
+    link: &mut dyn Link,
+    request: &KeyRequest,
+    pin: Option<&Pin>,
+    wait: &Wait,
+) -> Result<KeyAnswer> {
     let ids: Vec<(&str, bool)> = std::iter::once((request.rp_id.as_str(), false))
         .chain(request.app_id.as_deref().map(|a| (a, true)))
         .collect();
+    let mut pin = PinAsk {
+        pin,
+        needed: request.uv_required,
+        info: None,
+        tokens: Vec::new(),
+    };
     for (id, app) in ids {
-        let mut found = get_assertion(link, id, request, &request.allow, wait)?;
+        let mut found = ask_for(link, id, request, &request.allow, &mut pin, wait)?;
         if let Found::TooMany = found {
             for one in &request.allow {
-                found = get_assertion(link, id, request, std::slice::from_ref(one), wait)?;
+                found = ask_for(link, id, request, std::slice::from_ref(one), &mut pin, wait)?;
                 if let Found::Answer(_) = found {
                     break;
                 }
@@ -553,11 +665,16 @@ fn u2f(link: &mut dyn Link, request: &KeyRequest, wait: &Wait) -> Result<KeyAnsw
     }
 }
 
-/// Asks a key on USB.
-pub fn ask_hid(device: &mut dyn Hid, request: &KeyRequest, wait: &Wait) -> Result<KeyAnswer> {
+/// Asks a key on USB; with the person's PIN, for a key that asks for it.
+pub fn ask_hid(
+    device: &mut dyn Hid,
+    request: &KeyRequest,
+    pin: Option<&Pin>,
+    wait: &Wait,
+) -> Result<KeyAnswer> {
     let mut channel = Channel::open(device, wait)?;
     if channel.cbor {
-        ctap2(&mut channel, request, wait)
+        ctap2(&mut channel, request, pin, wait)
     } else if channel.msg {
         u2f(&mut channel, request, wait)
     } else {
@@ -565,8 +682,14 @@ pub fn ask_hid(device: &mut dyn Hid, request: &KeyRequest, wait: &Wait) -> Resul
     }
 }
 
-/// Asks a key held to the phone.
-pub fn ask_nfc(device: &mut dyn Nfc, request: &KeyRequest, wait: &Wait) -> Result<KeyAnswer> {
+/// Asks a key held to the phone; with the person's PIN, for a key that
+/// asks for it.
+pub fn ask_nfc(
+    device: &mut dyn Nfc,
+    request: &KeyRequest,
+    pin: Option<&Pin>,
+    wait: &Wait,
+) -> Result<KeyAnswer> {
     let mut link = NfcLink { device };
     let (version, status) = link.exchange(0x00, 0xa4, 0x04, 0x00, &FIDO_AID)?;
     if status != 0x9000 {
@@ -582,7 +705,7 @@ pub fn ask_nfc(device: &mut dyn Nfc, request: &KeyRequest, wait: &Wait) -> Resul
             .cbor(&[0x04], wait)
             .is_ok_and(|info| info.first() == Some(&0x00));
     if speaks_ctap2 {
-        ctap2(&mut link, request, wait)
+        ctap2(&mut link, request, pin, wait)
     } else {
         u2f(&mut link, request, wait)
     }
@@ -590,7 +713,7 @@ pub fn ask_nfc(device: &mut dyn Nfc, request: &KeyRequest, wait: &Wait) -> Resul
 
 #[cfg(test)]
 mod tests {
-    use super::super::soft::{SoftKey, SoftNfc};
+    use super::super::soft::{SoftKey, SoftNfc, PIN_TRIES};
     use super::*;
 
     fn wait(canceled: &AtomicBool) -> Wait<'_> {
@@ -606,6 +729,7 @@ mod tests {
             app_id: Some("https://vault.example.test/app-id.json".into()),
             client_data_hash: sha256(b"client data"),
             allow: vec![vec![9; 64], key.credential_id.clone()],
+            uv_required: false,
         }
     }
 
@@ -614,7 +738,7 @@ mod tests {
         let mut key = SoftKey::new("vault.example.test");
         let request = request(&key);
         let no = AtomicBool::new(false);
-        let answer = ask_hid(&mut key, &request, &wait(&no)).unwrap();
+        let answer = ask_hid(&mut key, &request, None, &wait(&no)).unwrap();
         assert_eq!(answer.credential_id, key.credential_id);
         assert!(!answer.used_app_id);
         assert_eq!(
@@ -636,7 +760,7 @@ mod tests {
         let mut key = SoftKey::new("https://vault.example.test/app-id.json");
         let request = request(&key);
         let no = AtomicBool::new(false);
-        let answer = ask_hid(&mut key, &request, &wait(&no)).unwrap();
+        let answer = ask_hid(&mut key, &request, None, &wait(&no)).unwrap();
         assert!(answer.used_app_id);
         assert_eq!(
             &answer.authenticator_data[..32],
@@ -661,7 +785,7 @@ mod tests {
             key.touch_after = 3;
             let request = request(&key);
             let no = AtomicBool::new(false);
-            let answer = ask_hid(&mut key, &request, &wait(&no)).unwrap();
+            let answer = ask_hid(&mut key, &request, None, &wait(&no)).unwrap();
             assert_eq!(answer.used_app_id, site.starts_with("https://"));
             assert_eq!(&answer.authenticator_data[..32], &sha256(site.as_bytes()));
             assert_eq!(answer.authenticator_data.len(), 37);
@@ -680,26 +804,293 @@ mod tests {
         request.allow = vec![vec![1; 32]];
         let no = AtomicBool::new(false);
         assert_eq!(
-            ask_hid(&mut key, &request, &wait(&no)),
+            ask_hid(&mut key, &request, None, &wait(&no)),
             Err(Error::TwoStep(NOT_THIS_KEY))
         );
         key.ctap2 = false;
         assert_eq!(
-            ask_hid(&mut key, &request, &wait(&no)),
+            ask_hid(&mut key, &request, None, &wait(&no)),
             Err(Error::TwoStep(NOT_THIS_KEY))
         );
     }
 
+    fn pin(typed: &str) -> Pin {
+        Pin::new(typed, false).unwrap()
+    }
+
+    fn verified(answer: &KeyAnswer) -> bool {
+        answer.authenticator_data[32] & 0x04 != 0
+    }
+
     #[test]
-    fn a_key_that_wants_its_pin_is_told_apart() {
-        let mut key = SoftKey::new("vault.example.test");
-        key.wants_pin = true;
+    fn a_key_that_doesnt_ask_for_its_pin_is_never_sent_it() {
+        let mut key = SoftKey::with_pin("vault.example.test", "2580");
+        key.always_uv = false;
+        let request = request(&key);
+        let no = AtomicBool::new(false);
+        let answer = ask_hid(&mut key, &request, Some(&pin("2580")), &wait(&no)).unwrap();
+        assert!(key.verifies(
+            &answer.authenticator_data,
+            &request.client_data_hash,
+            &answer.signature
+        ));
+        assert!(!verified(&answer));
+        assert!(key.heard.is_empty(), "{:?}", key.heard);
+        assert_eq!(key.pin_hashes, 0);
+    }
+
+    #[test]
+    fn a_key_that_asks_for_its_pin_gets_it_with_each_protocol_and_way_of_getting_a_token() {
+        // What the key lists, whether it's CTAP 2.1, the protocol, and the
+        // subcommand that gets its token.
+        for (protocols, ctap21, protocol, subcommand) in [
+            (vec![2, 1], true, 2, 0x09),
+            (vec![1, 2], true, 2, 0x09),
+            (vec![1], true, 1, 0x09),
+            (vec![], false, 1, 0x05),
+            (vec![1], false, 1, 0x05),
+            (vec![2], false, 2, 0x05),
+        ] {
+            let case = format!("{protocols:?} {ctap21}");
+            let mut key = SoftKey::with_pin("vault.example.test", "2580");
+            key.protocols = protocols;
+            key.ctap21 = ctap21;
+            let request = request(&key);
+            let no = AtomicBool::new(false);
+            // Asked without one: it says so, with the tries left, and no
+            // PIN reached it.
+            assert_eq!(
+                ask_hid(&mut key, &request, None, &wait(&no)),
+                Err(Error::KeyPin(KeyPin::Asks { left: Some(8) })),
+                "{case}"
+            );
+            assert_eq!(key.pin_hashes, 0, "{case}");
+            assert_eq!(key.heard, vec![0x01], "{case}");
+            // With it: signed, with the person verified.
+            let answer = ask_hid(&mut key, &request, Some(&pin("2580")), &wait(&no)).unwrap();
+            assert!(key.verifies(
+                &answer.authenticator_data,
+                &request.client_data_hash,
+                &answer.signature
+            ));
+            assert!(verified(&answer), "{case}");
+            assert_eq!(answer.credential_id, key.credential_id, "{case}");
+            assert_eq!(key.token_protocol, Some(protocol), "{case}");
+            assert_eq!(key.heard, vec![0x01, 0x01, 0x02, subcommand], "{case}");
+            assert_eq!(key.pin_hashes, 1, "{case}");
+        }
+    }
+
+    #[test]
+    fn a_key_held_to_the_phone_takes_its_pin() {
+        for ctap21 in [true, false] {
+            let mut nfc = SoftNfc::new(SoftKey::with_pin("vault.example.test", "2580"));
+            nfc.key.ctap21 = ctap21;
+            let request = request(&nfc.key);
+            let no = AtomicBool::new(false);
+            assert_eq!(
+                ask_nfc(&mut nfc, &request, None, &wait(&no)),
+                Err(Error::KeyPin(KeyPin::Asks { left: Some(8) }))
+            );
+            let answer = ask_nfc(&mut nfc, &request, Some(&pin("2580")), &wait(&no)).unwrap();
+            assert!(verified(&answer));
+            assert!(nfc.key.verifies(
+                &answer.authenticator_data,
+                &request.client_data_hash,
+                &answer.signature
+            ));
+        }
+    }
+
+    #[test]
+    fn a_wrong_pin_says_how_many_tries_are_left_and_three_in_a_row_want_a_fresh_start() {
+        for ctap21 in [true, false] {
+            let mut key = SoftKey::with_pin("vault.example.test", "2580");
+            key.ctap21 = ctap21;
+            let request = request(&key);
+            let no = AtomicBool::new(false);
+            let ask = |key: &mut SoftKey, typed: &str| {
+                ask_hid(key, &request, Some(&pin(typed)), &wait(&no))
+            };
+            let wrong = ask(&mut key, "1111").unwrap_err();
+            assert_eq!(wrong, Error::KeyPin(KeyPin::Wrong { left: Some(7) }));
+            assert_eq!(wrong.to_string(), "That PIN isn't right. 7 tries left.");
+            assert_eq!(
+                ask(&mut key, "1112"),
+                Err(Error::KeyPin(KeyPin::Wrong { left: Some(6) }))
+            );
+            // The third in a row.
+            let third = ask(&mut key, "1113").unwrap_err();
+            assert_eq!(third, Error::KeyPin(KeyPin::FreshStart));
+            assert!(third.to_string().contains("unplug it and plug it in again"));
+            assert_eq!(key.pin_tries, 5);
+            // Until it's unplugged, nothing more counts as a try.
+            assert_eq!(
+                ask(&mut key, "2580"),
+                Err(Error::KeyPin(KeyPin::FreshStart))
+            );
+            assert_eq!(key.pin_tries, 5, "{ctap21}");
+            key.replug();
+            assert!(verified(&ask(&mut key, "2580").unwrap()));
+            assert_eq!(key.pin_tries, PIN_TRIES);
+        }
+    }
+
+    #[test]
+    fn the_last_try_is_used_only_when_the_person_says_so() {
+        let mut key = SoftKey::with_pin("vault.example.test", "2580");
+        key.pin_tries = 1;
         let request = request(&key);
         let no = AtomicBool::new(false);
         assert_eq!(
-            ask_hid(&mut key, &request, &wait(&no)),
-            Err(Error::TwoStep(WANTS_PIN))
+            ask_hid(&mut key, &request, None, &wait(&no)),
+            Err(Error::KeyPin(KeyPin::Asks { left: Some(1) }))
         );
+        // Not said: nothing sent.
+        let stopped = ask_hid(&mut key, &request, Some(&pin("2580")), &wait(&no)).unwrap_err();
+        assert_eq!(stopped, Error::KeyPin(KeyPin::LastTry));
+        assert_eq!(stopped.to_string(), crate::error::LAST_TRY);
+        assert_eq!((key.pin_hashes, key.pin_tries), (0, 1));
+        // Said, and right: signed, and the tries are back.
+        let last = Pin::new("2580", true).unwrap();
+        assert!(verified(
+            &ask_hid(&mut key, &request, Some(&last), &wait(&no)).unwrap()
+        ));
+        assert_eq!(key.pin_tries, PIN_TRIES);
+        // Said, and wrong: the key's blocked.
+        key.pin_tries = 1;
+        let wrong = Pin::new("1111", true).unwrap();
+        assert_eq!(
+            ask_hid(&mut key, &request, Some(&wrong), &wait(&no)),
+            Err(Error::TwoStep(client_pin::BLOCKED))
+        );
+        assert_eq!(key.pin_tries, 0);
+    }
+
+    #[test]
+    fn a_blocked_pin_no_pin_set_no_pin_at_all_and_a_pin_to_change_each_say_so() {
+        let no = AtomicBool::new(false);
+        let mut blocked = SoftKey::with_pin("vault.example.test", "2580");
+        blocked.pin_tries = 0;
+        let request = request(&blocked);
+        for given in [None, Some(&pin("2580"))] {
+            assert_eq!(
+                ask_hid(&mut blocked, &request, given, &wait(&no)),
+                Err(Error::TwoStep(client_pin::BLOCKED))
+            );
+        }
+        let mut not_set = SoftKey::new("vault.example.test");
+        not_set.always_uv = true;
+        assert_eq!(
+            ask_hid(&mut not_set, &request, Some(&pin("2580")), &wait(&no)),
+            Err(Error::TwoStep(client_pin::NOT_SET))
+        );
+        let mut no_pin = SoftKey::new("vault.example.test");
+        no_pin.always_uv = true;
+        no_pin.takes_pin = false;
+        assert_eq!(
+            ask_hid(&mut no_pin, &request, Some(&pin("2580")), &wait(&no)),
+            Err(Error::TwoStep(client_pin::OTHER_CHECK))
+        );
+        let mut change = SoftKey::with_pin("vault.example.test", "2580");
+        change.force_pin_change = true;
+        assert_eq!(
+            ask_hid(&mut change, &request, Some(&pin("2580")), &wait(&no)),
+            Err(Error::TwoStep(client_pin::CHANGE_FIRST))
+        );
+        for key in [&blocked, &not_set, &no_pin, &change] {
+            assert_eq!(key.pin_hashes, 0);
+        }
+    }
+
+    #[test]
+    fn the_app_id_gets_a_token_of_its_own_from_a_ctap_2_1_key() {
+        // getPINRetries, getKeyAgreement, and the token, for each site ID
+        // from a 2.1 key; once from a 2.0 key, whose token is good for any.
+        for (ctap21, heard) in [
+            (true, vec![0x01, 0x01, 0x02, 0x09, 0x01, 0x02, 0x09]),
+            (false, vec![0x01, 0x01, 0x02, 0x05]),
+        ] {
+            let mut key = SoftKey::with_pin("https://vault.example.test/app-id.json", "2580");
+            key.ctap21 = ctap21;
+            let request = request(&key);
+            let no = AtomicBool::new(false);
+            assert!(matches!(
+                ask_hid(&mut key, &request, None, &wait(&no)),
+                Err(Error::KeyPin(KeyPin::Asks { .. }))
+            ));
+            let answer = ask_hid(&mut key, &request, Some(&pin("2580")), &wait(&no)).unwrap();
+            assert!(answer.used_app_id);
+            assert!(verified(&answer));
+            assert_eq!(key.heard, heard, "{ctap21}");
+        }
+    }
+
+    #[test]
+    fn a_key_that_takes_one_credential_at_a_time_uses_one_token_for_them() {
+        let mut key = SoftKey::with_pin("vault.example.test", "2580");
+        key.most_in_list = 1;
+        let request = request(&key);
+        let no = AtomicBool::new(false);
+        let answer = ask_hid(&mut key, &request, Some(&pin("2580")), &wait(&no)).unwrap();
+        assert!(verified(&answer));
+        assert_eq!(key.pin_hashes, 1);
+    }
+
+    #[test]
+    fn a_server_that_requires_verification_gets_the_pin_sent_before_the_key_asks() {
+        let mut key = SoftKey::with_pin("vault.example.test", "2580");
+        key.always_uv = false;
+        let mut request = request(&key);
+        request.uv_required = true;
+        let no = AtomicBool::new(false);
+        assert_eq!(
+            ask_hid(&mut key, &request, None, &wait(&no)),
+            Err(Error::KeyPin(KeyPin::Asks { left: Some(8) }))
+        );
+        assert!(verified(
+            &ask_hid(&mut key, &request, Some(&pin("2580")), &wait(&no)).unwrap()
+        ));
+        // A key with no PIN set says so; "preferred" (uv_required false)
+        // asks nothing of it.
+        let mut none = SoftKey::new("vault.example.test");
+        let mut request = super::tests::request(&none);
+        request.uv_required = true;
+        assert_eq!(
+            ask_hid(&mut none, &request, None, &wait(&no)),
+            Err(Error::TwoStep(client_pin::NOT_SET))
+        );
+        request.uv_required = false;
+        none.heard.clear();
+        assert!(!verified(
+            &ask_hid(&mut none, &request, None, &wait(&no)).unwrap()
+        ));
+        assert!(none.heard.is_empty());
+    }
+
+    #[test]
+    fn the_pin_is_never_in_an_errors_words() {
+        let mut key = SoftKey::with_pin("vault.example.test", "2580");
+        let request = request(&key);
+        let no = AtomicBool::new(false);
+        for typed in ["8642", "97531", "Grüße 7"] {
+            let said = ask_hid(&mut key, &request, Some(&pin(typed)), &wait(&no))
+                .unwrap_err()
+                .to_string();
+            assert!(!said.contains(typed), "{said}");
+            key.replug();
+        }
+        for why in [
+            KeyPin::Asks { left: Some(3) },
+            KeyPin::Wrong { left: None },
+            KeyPin::LastTry,
+            KeyPin::FreshStart,
+            KeyPin::TooShort,
+            KeyPin::TooLong,
+            KeyPin::NotAPin,
+        ] {
+            assert!(!Error::KeyPin(why).to_string().is_empty());
+        }
     }
 
     #[test]
@@ -715,7 +1106,7 @@ mod tests {
                 stop.store(true, Ordering::SeqCst);
             });
             assert_eq!(
-                ask_hid(&mut key, &request, &wait(&canceled)),
+                ask_hid(&mut key, &request, None, &wait(&canceled)),
                 Err(Error::TwoStep(CANCELED))
             );
         });
@@ -730,7 +1121,7 @@ mod tests {
             canceled: &no,
         };
         assert_eq!(
-            ask_hid(&mut key, &request, &short),
+            ask_hid(&mut key, &request, None, &short),
             Err(Error::TwoStep(TIMED_OUT))
         );
     }
@@ -744,7 +1135,7 @@ mod tests {
             nfc.says_u2f = says_u2f;
             let request = request(&nfc.key);
             let no = AtomicBool::new(false);
-            let answer = ask_nfc(&mut nfc, &request, &wait(&no)).unwrap();
+            let answer = ask_nfc(&mut nfc, &request, None, &wait(&no)).unwrap();
             assert_eq!(answer.credential_id, nfc.key.credential_id);
             assert!(nfc.key.verifies(
                 &answer.authenticator_data,
@@ -764,7 +1155,7 @@ mod tests {
         key.most_in_list = 1;
         let request = request(&key);
         let no = AtomicBool::new(false);
-        let answer = ask_hid(&mut key, &request, &wait(&no)).unwrap();
+        let answer = ask_hid(&mut key, &request, None, &wait(&no)).unwrap();
         assert_eq!(answer.credential_id, key.credential_id);
     }
 
@@ -774,6 +1165,6 @@ mod tests {
         key.noise = true;
         let request = request(&key);
         let no = AtomicBool::new(false);
-        assert!(ask_hid(&mut key, &request, &wait(&no)).is_ok());
+        assert!(ask_hid(&mut key, &request, None, &wait(&no)).is_ok());
     }
 }
