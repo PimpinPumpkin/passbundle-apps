@@ -1,0 +1,74 @@
+{
+  "description": "Signing in with a device from PassBundle's apps, the asking side, version 1: DESIGN.md, \"Approving a sign-in from another device\", \"Our apps asking\". Made by docs/vectors/make-device-signin-v1.mjs with Node's crypto and EFF's long word list.",
+  "accessCode": {
+    "alphabet": "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789",
+    "length": 25
+  },
+  "email": "dana@example.test",
+  "request": {
+    "privateKey": "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDN2FEg+hT2CJP4m661Mw18+ihYUwD7iLFco92r0Pi1093QhyGzuyBlu26tIo+M3djUFQbSbqqT18vzlwMp2sCYJ6f3E9h7YTPmAR85uBuIus3nZCUOnUmYQnT9+A1QZjb4PtCyIkNOhfI5qrGCtRjw/diHwUzoT1vGgFzBEEY5PRa8J67mKajLG/tZKqJczytCDJ+zdGLFbn4m8zZ6v1HnjmfgSWLMbz03tngruiYZ+JhQ5ll5grjrRdsq7feqf1sPoZng60qfZwd9fjDcMIeGlnAAS7ztUCd2XEm6L+hjA9K2pd5K+h1ROK9ItGs2XgSneudsFj3gT2tgUxnYQrxlAgMBAAECggEAAsGSOIRQsoij3pDLEo8H77PzxVb7LOMEKO7iwXGvWtPm5OtiRqNLSEFttnC/hk3UIObVLA0iSI97ohvUBYPxzze8toC0Bdbj2IEMV3wBFmAV8LK1ElCF0z2Ujm/7UafEtac1qSTvTMZbW21PKiZdmqBzfUHX00Z4vpwqYcVjg1GpafH53qfwUIMZWXV0vVF38da70HMDOY/olegUjkFUGKqkCCoZgJlWWg3VSGcjrzvl98IcJM5EtSi5Z5JkhBGqbz3GdWjYVhNpWK0Mnq1skVjfTOGLwFgB2q7Cd9ZF4qA4Aahd9Nk6c12D9yy6X6Jv4Qg92OdxAFWyudk0AQ47YQKBgQD2vip3oXhmTwsK4bTHH9w8AA1hEWI5Qe50y48CNEnAjeis89pOlhF8tSqHgFZk5oGQcCbhFO7zK7aBJQDuPj17pKekKRr5i1YoHJpe6ZlOAZTtsDiTmfkxZBasC7IFASW1M+HDFK6+L0O59q1X4mnPnCNiP9vWyfRHF3QIgGqYVQKBgQDVkVlQLGNf0ZIS3/WUaWDX1EBnRvQP9v1LfVSbc9u4JxuIzS35BdaxFFyUjq0Z7SHI0R4Fnl3xYl6c4/9kBMiCPBdd9d2E4otHgN2beOxXMpuA7RMfcErL3B8QA8E2/qV6wdF+Mbf06alNOVG/DkipT5LHNXrCLML7ktj7+IXj0QKBgCahzZpfcK9sDsmMXzaSGXRXecDJ7PwUA5bLzD9HGokIbvatU2/cdS52WwtOH7i6kmyf8qZpFaSDIpcDySqEGjJCrHC6ctvBYiLzn4PexT7+Zmf0oFcT031VM2uKhTvdWx8M2XsmwNlMIyl5othQvcpgovWeE/iENDfxRxyRpp7lAoGAHfX4G6E+h7C012UH5Lwr09t49YQktSCnRDHe7rgAOQNzf2uZaXgCOHFs04J4kkyMEsoTdiJTd4ufTk9GAtgQ8QRRGuNlIkFN3MgdTrRWI51750hbCGwOci79RJfiQT7UJDaQly2OaxNkpurFpxHv66C4LK45/IefCv/85MxmrCECgYEA8NrQk+m3lkfL/NUGRoPtGH3fOCRs3aKWxz2X1kFrPygh7DRz91BKUyI8AaxiaQ3nyo07CCq08aMObAN/a6TckQyXSQDiwnieGjKkX+r5u0sZtwbMJSsh4+VCI3e+lXjILvyMC2sYm7FCU0RFsatJvqo1tnr1ZGIqL5gA2NHYo1Y=",
+    "publicKey": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAzdhRIPoU9giT+JuutTMNfPooWFMA+4ixXKPdq9D4tdPd0Ichs7sgZbturSKPjN3Y1BUG0m6qk9fL85cDKdrAmCen9xPYe2Ez5gEfObgbiLrN52QlDp1JmEJ0/fgNUGY2+D7QsiJDToXyOaqxgrUY8P3Yh8FM6E9bxoBcwRBGOT0WvCeu5imoyxv7WSqiXM8rQgyfs3RixW5+JvM2er9R545n4ElizG89N7Z4K7omGfiYUOZZeYK460XbKu33qn9bD6GZ4OtKn2cHfX4w3DCHhpZwAEu87VAndlxJui/oYwPStqXeSvodUTivSLRrNl4Ep3rnbBY94E9rYFMZ2EK8ZQIDAQAB"
+  },
+  "fingerprints": [
+    {
+      "why": "the account's email and the request's key",
+      "email": "dana@example.test",
+      "phrase": "pacifier-unvisited-amuser-sublime-tropics"
+    },
+    {
+      "why": "the same email typed with capitals: the same phrase",
+      "email": "Dana@Example.TEST",
+      "phrase": "pacifier-unvisited-amuser-sublime-tropics"
+    }
+  ],
+  "approval": {
+    "userKey": "QEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaW1xdXl9gYWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXp7fH1+fw==",
+    "seed": "oKGio6SlpqeoqaqrrK2ur7CxsrM=",
+    "key": "4.uJ0HtsUf/kq4sZcoHx0kdwdSdH4qDJetGHbrAp+hoE/O6YS7hflu4Hz/7mTft10kycwTLeJLnQQoU24qPsJTyx1UUf0LuUBa1aECfKHxCcwZntwTZUd2f5x9fj8eZWqwstVtwoSaned42yu4PsPZ6qtbQOVN98nNNODTujSShvn7vPhSV/m+i0HUpe5cHHWkG0pHOG5TWfSfq87RFYrja+uc3fY+YVVLSzrSEpD1us1MdqLPvl5YpBeWnmn9XIp4jMPPSFaiWkrANp2iS5svwCim/L8K8Kc6PNQmZGe3KyB7DZLYv8UpGHlK8ijepA1i6V28oP9QmLnkpUEgfYLovA=="
+  },
+  "account": {
+    "iv": "EBESExQVFhcYGRobHB0eHw==",
+    "privateKey": "2.EBESExQVFhcYGRobHB0eHw==|Z1pGbJB3nNPglECoDgIIrPJRe2hYfDEuG9Lq2h8UflMWOeLnxUJSoVc5ipIYoldxBb3pwr4Ktg0FJfubyfjtwnRPhdH2vvvLj1LqvQ27IrSHjGAs82hxTFILacLXHcE+m0psBuegOMEGofWFcYCFtmD111F+RnPwXf90MgYABm+LMkpzK/+i/rk7t2c4eimB+TqjEPSVE7lBfDlKsy32/CrL+IQy3eduyjS5sOYelnGqsMJNWYp1lZK2wWIYxPWV1LbcFGcviGwCCj2su4x8aAbOzfETL6pwv+ZlXSz5AKg5aWb7mjX5TIrVErllrpsKfAtgDtMQnFZ5z9Tf2SFomBZw9WqMLb3GmvXDiU5Q0JPf3EzmRKuMoMbll0rZzZtvn+VwE1CcXK4dneNPGnv5Un1pSmBhYr5TXJ8Kwqnmy8F9RxbdU9kTsqyPjEXJehHJjwRMidcwEXVou12vWBRcFoE2EvTdUf3Ky+nr2ixyQ7/HUDPoyJao31SHmBXhhdqKGvrxtuHvpjkk+qA2wfUBRbjpnbPVqM1G1B/XJHXu3OIjcgiodkePyYEqIOW1ZmpClhmMNSFgj2um6hmogG7YVYOsCu5uKuhlMqQ4w0R2Iqcz6UhKfmtV/qpmY2/6LI3MtQMoTpT0SWOoo/ys42ANTvjorV/KIt6mCzk0FmbqITurvf5bvw5+kOQ8qo+5TzNAy5hHxFyiGhYWl3MBUbaIZ8B0isc0+eHKMot04d7PH0LBhWobLcxW/YVOXI+D4ZGe7pYnjnWRpHBPblgAR5V2edMPUgV1XSbMnBAeiS5DdiiuS3iXLUdCC6fQ75ws85r2pZ8YVxVwjAUO385RvEoGfi84vIdGbwaIVLDJYsEK2ubsda9BjrE3D0zJtE1afK9C5tc3NO18Mj/lbF5lcMf61HIH4OPu9NNu5dstlryD1rpr0XvACkvBMkZl+3dU9yLCUNLDaFIUyaIMd+aPM28qDRVWYM1Kl+gF8f/8nSrnH7PSYMVHQty5szef8iLqtwmk3oHeP3gRppCACYmi5k+0q8Nb/8AczZ1Muxkko8sublBQBHUHSO/m3OUkrkKOdRfk/jLf0BNf19IItHTbtS3Lhq8u3kFSkiYW0xv+G9oDnCS+dZymeZp9RVa2NsI8xcjaANhluMOAmsUowd2wkqEHGsgCBdXk0cqTBqWwjKHifeKhLhwj0vtB2G6YtlJxP/VhKNg69v/7ol1JxodVOZvHguu4K4iN2T8XEMiL13yoW1YEzVBwo7b2Vlq/I2RmjiYeDk9Q6N90uPpeShU20WhzBc5Nabp3xO7g/7vYvSPUXXolAr9+5ofoRz8MaKcEPAtIoVIyjLcDjQ2o3rb887dXwBbGKfwdy1c3V63UNLqj5DWArty6bLzaixzVmkiw3HfaaKleQIL4C1qyP4E4xQdCkupKOM6gMC9N0eqW/T6HATKx4Z73k5191/WMFB+tKw7yIjpkA8YaJ2hrOfV0jCAQHQhOlc5Fi7j8KdIHJSsG0cSDj5x4RtMa4aMs71s0qFnVKZ12/0WyGJSKbXQJwTU2P57932dzGI+GUmUioe/f/DmkX5TFjW4IVDwDjo9b00WFqa2UMqY5WZ+eBUElyMz30T8l4UmMW0KBq9s6sQdR6AU=|/6H6ejB3Y7KKVQsCAs/+Rsy88UxLxfP8GjPbbS1rg9c=",
+    "publicKey": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAvMGo9Py48l5NUzxRHx/9YRBoz7Z9SYosp0ygQIo4mNk50sozh/keezEONR0QkTVNgNi/IQ3qDH2Nnw13qsXXPeLMAKdN3RR8YlgkgHc+fA6f7fkgjo2hahsqvDPZvvz/81F+0OFRk7QWjWPOH4obefNTBwCM5tP5oO/nsun0gH7uJ5z0zKvTxEez3Naxe413gaLNiaBc8AXSI37FNbK58VBzevXwEqEL78TYazTVgxOURPOHkXKDxBWW2dv2jEcLrRl3WJaEfKWYvdNZAQkPrpyYMoERDpQigMsC5jUMsIV23/43gj92S+FJpN1jeKM4hoRSc2nqjjBSdLsfWv/j7wIDAQAB"
+  },
+  "notTheAccount": {
+    "why": "another account's user key: it opens, but not the account's private key",
+    "userKey": "kJGSk5SVlpeYmZqbnJ2en6ChoqOkpaanqKmqq6ytrq+wsbKztLW2t7i5uru8vb6/wMHCw8TFxsfIycrLzM3Ozw==",
+    "seed": "wMHCw8TFxsfIycrLzM3Oz9DR0tM=",
+    "key": "4.ImHa8uHXWt28fy7nJvU1Ee0sDCaW9nXs9j5pV/ef3oJ8sSvv0CLIZuqgm1sOh+5/Im7AeeHvbbiGbLmU1gX0k/xioc+i/CSdEVZXnC67s8NvK1irc7raQzDv3iZ7mKM6TAhQ9EBTqPXlFT4qlMqRlmQ/ofTqqscdIrH4g9QJ/esAh3zi69Ck1v5PmiADq4qelp8GSvlchsKC5xs+i/m+e8k6U22HLJyJOxGRs0OgEQG6wTIYS5vz1AslQspI/PnGdMaTZOS7czcglTL6dYf4twPscHha2GyxURJqH7j0S16sCmc5uEMPcI28dtETzxx4JKyO2B/OScdbhrtTRA8MyA=="
+  },
+  "refused": [
+    {
+      "why": "wrapped to another device's key",
+      "key": "4.dLU5bsrBvf86SC7g+nn4t4J4YEgqNq0hfgQq/FaZQzQKLCs8FnQEbHCcegngPyM8Z7WmUEZqSlBdUXDa1G7scvElbSNmO7UGpAVZgovfp4xLWFk3FAnKrYZy0jyVhWHSsf7HOqz1M+90EiQRCI75Xa2Jw9xZm7lrxpnHsbqx44GPILIrz8Fejk9W3td4nJOMdEt/IZO21usLh0Htb+l+QWeQf8oz/y2P8pVmdbTBvrx33MfDLlYJjC8BGjRZI9dbr7f8lehvEamnRqG1YGp4NVcpBDcLtn/+T8lZ+PzN86H/ymozC1LfQxZ0p4T5SX88COsSLk096oyPoVuJR5zKtg=="
+    },
+    {
+      "why": "a 32-byte key, not a user key",
+      "key": "4.MXcpWEdv1xAjJ1M/l6W62ge5dLvrQBAcREtC8dGt6Ry7OPsuknmywE2EGTlnftZ+F8hauZQ8rPWLs9yzlM9JAoh4Fkk85KZXjOi0vsluHDBX6DsjNiJrzcXmQvjuKzl3zHzsxPx00/FY8kz9XK1pHKPW8Y8F0Ew1DDkCRoqzD2fZW0yW5PFXKkMyadgwGX4vX3ShXT6DO8z8RHx7w1ZlLoT8B0Gso0A1v1MQxInq0t8XaPvHlgLobDqAsJrVjt3U5cImFs9lfZFqux4c7+0LzUbyS5oX3TPCcKolrvKQOW6JVg8dagGqhsMG1ANnEZ7xx2VakLjtvzDfxIkKxjezGg=="
+    },
+    {
+      "why": "a 65-byte key, not a user key",
+      "key": "4.OuYONqBlnvQLD5sZn/nuXg5pmLAQgf+xAYSC6CQhOoFI9ngg1K3zFO9ZkDC1lVZgabB4+rcN2QqsLaJPZKcjrimCnyjKmoHP9I/qWhiQjzjqiWcwuaEbY9+KXw1hxgW96saKQy5xfYBp62SscLiUXxbekQnXbWGaE7gPnMeP21P8c0d7c2lW0efxdSYMv3jIFmlTk8sIUDEm1cEHUUEwkH2Ir6jIe2AEK9uimYZPMJITHKz8tX3zXgqVaozG5Fefif7mV0r87KoIMhQYnaWNoB7nhsP9wPzaujKzjjWFnDsaDeayASXipChZaYE+Izawxoux1nvhtNQfwRViLzReYA=="
+    },
+    {
+      "why": "RSA-OAEP with SHA-256 (type 3), not what an approval carries",
+      "key": "3.bpX8oeHn/JfQ4N3UfgXa4HM8ok00XKg2e3jHevbYhJZ2D5b/TXGP2KwfRbwELUDX+7gu+aPu61sdaF2Dp1MeZaeC+bNXUIBxSwMgxwHPwwNXyeaqQQmof6BI7IXzXvte4NEyLVYGsvD0phN62QtDcamLsG2LTALesYi23QlO3XvmSVBOlKW8V0NEzYTWdbjJCpyLHrX41TmtS5HaoGpz00Rlniejd/+WrS0X41hntvDYpS4wlwL26u1X1UQg4NwQaRA0MWebQ0Fr2BZxmO5D2wdgnLJhvuWS38j24NzchoPd6kqSHFqmCRDI/4ziR3MJ4R8cI795iAIAYWov2HhQJw=="
+    },
+    {
+      "why": "a symmetric string (type 2), not a wrap",
+      "key": "2.ICEiIyQlJicoKSorLC0uLw==|/zYiyl9kEzU8vM32/LsFn26uHwZAS1I0Br60OkbeZJHk6SNE/vDpO1RCW0ZRFKVx+l+E1GX4/o53Jb4PBfbRDuTktG71pihrb+SEqM02LmQ=|GzLPcEogGrMWqKMUtUwpfdeDrScYWQIYkouTH39YUyk="
+    },
+    {
+      "why": "the wrap, changed",
+      "key": "4.uJ0HtsUf/kq4sZcoHx0kdwdSdH4qDJetGHbrAp+hoE/O6YS7hflu4Hz/7mTft10kycwTLeJLnQQoU24qPsJTyx1UUf0LuUBa1aECfKHxCcwZntwTZUd2f5x9fj8eZWqwstVtwoSaned42yu4PsPZ6qtbQOVN98nNNODTujSShvn7vPhSV/m+i0HUpe5cHHWkG0pHOG5TWfSfq87RFYrja+uc3fY+YVVLSzrSEpD1us1MdqLPvl5YpBeWnmn9XIp4jMPPSFaiWkrANp2iS5svwCim/L8K8Kc6PNQmZGe3KyB7DZLYv8UpGHlK8ijepA1i6V28oP9QmLnkpUEgfYLovQ=="
+    },
+    {
+      "why": "not an encrypted string",
+      "key": "not a key"
+    },
+    {
+      "why": "empty",
+      "key": ""
+    }
+  ]
+}

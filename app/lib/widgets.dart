@@ -622,7 +622,9 @@ class WorkingButton extends StatelessWidget {
 
   final String label;
   final bool working;
-  final VoidCallback onPressed;
+
+  /// Null keeps it off, as while another of the screen's calls is out.
+  final VoidCallback? onPressed;
 
   /// Its look, where it isn't the primary one ([dangerButton]).
   final ButtonStyle? style;

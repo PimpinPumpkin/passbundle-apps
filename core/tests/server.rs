@@ -2617,6 +2617,159 @@ fn a_sign_in_from_another_device_is_approved_in_the_app_and_the_key_reaches_only
     assert_eq!(app.sign_in_requests().err(), Some(Error::SignedOut));
 }
 
+/// How the request an app made to sign in with a device stands now.
+fn asked_status(app: &mut App) -> passbundle_core::device_signin::Status {
+    match app.device_sign_in_status().unwrap() {
+        Step::DeviceSignIn(request) => request.status,
+        other => panic!("not a request to sign in with a device: {other:?}"),
+    }
+}
+
+/// Signing in with a device from the app (DESIGN.md in the meta repo,
+/// "Approving a sign-in from another device", "Our apps asking"): an app on
+/// a device the account knows asks, an app signed in with the master
+/// password approves with the core's own approving code, and the asking app
+/// signs in and opens the vault with the user key the approval brought;
+/// later the master password unlocks it. Its session, which began from an
+/// approval, approves nothing, before and after a refresh. A device the
+/// account doesn't know can't ask; a denial ends a request; and with
+/// two-step login on, the second step follows the approval.
+#[test]
+fn an_app_signs_in_with_another_apps_approval_and_its_session_approves_nothing() {
+    use passbundle_core::device_signin::Status;
+    let Some(server) = server() else { return };
+    let url = std::env::var("PB_TEST_SERVER").unwrap();
+    let email = new_email("asking");
+    sign_up(&server, &email);
+
+    // A device the account doesn't know: told so, with no request made.
+    let mut stranger = new_app();
+    let refused = stranger.sign_in_with_device(&url, &email).unwrap_err();
+    assert!(
+        refused.to_string().starts_with(
+            "Sign in with a device works on a device that has signed in to this account before."
+        ),
+        "{refused}"
+    );
+    assert!(!stranger.signing_in());
+
+    // The asking app's device signed in once with the master password, and
+    // signed out: the account knows it.
+    let mut asking = new_app();
+    assert_eq!(asking.sign_in(&url, &email, PASSWORD).unwrap(), Step::Done);
+    asking.sign_out();
+    let mut approving = signed_in_app(&url, &email);
+
+    let Step::DeviceSignIn(request) = asking.sign_in_with_device(&url, &email).unwrap() else {
+        panic!("a request to sign in with a device");
+    };
+    assert_eq!(request.status, Status::Waiting);
+    assert!(asking.signing_in());
+    // Both devices show the same phrase.
+    let listed = approving.sign_in_requests().unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].fingerprint, request.fingerprint);
+    assert_eq!(asked_status(&mut asking), Status::Waiting);
+
+    approving.confirm_with_master_password(PASSWORD).unwrap();
+    approving
+        .answer_sign_in_request(&listed[0].id, &listed[0].fingerprint, true)
+        .unwrap();
+    // The core asks the server no more often than every 5 seconds.
+    std::thread::sleep(std::time::Duration::from_millis(4_100));
+    assert_eq!(asking.device_sign_in_status().unwrap(), Step::Done);
+    assert!(!asking.signing_in());
+    assert!(matches!(asking.state(), State::Unlocked { .. }));
+    // The account's own vault: the user key opened its keys.
+    assert_eq!(
+        asking.vault().unwrap().user_id,
+        approving.vault().unwrap().user_id
+    );
+
+    // Its session began from an approval: another device's request isn't
+    // listed there, and approving it is refused before anything is sent,
+    // while the master password's session lists it.
+    let third = Device::new_identifier();
+    sign_in(
+        &Server::new(&url, Device::this_one(&third)).unwrap(),
+        &email,
+    );
+    let (third_id, _, _) = ask_to_sign_in(&url, &email, &third);
+    assert!(asking.sign_in_requests().unwrap().is_empty());
+    let phrase = approving
+        .sign_in_requests()
+        .unwrap()
+        .into_iter()
+        .find(|r| r.id == third_id)
+        .unwrap()
+        .fingerprint;
+    let not_here = asking.answer_sign_in_request(&third_id, &phrase, true);
+    assert!(
+        matches!(&not_here, Err(Error::Refused(why)) if why.starts_with("this device signed in with another device's approval")),
+        "{not_here:?}"
+    );
+
+    // Locked, the master password unlocks it, as after any sign-in; its
+    // refreshed session still began from an approval.
+    asking.lock();
+    assert!(matches!(asking.state(), State::Locked { .. }));
+    asking.unlock(PASSWORD).unwrap();
+    assert!(asking.sign_in_requests().unwrap().is_empty());
+    assert_eq!(approving.sign_in_requests().unwrap().len(), 1);
+
+    // Denied on the other device: the request ends, and says so.
+    asking.sign_out();
+    let Step::DeviceSignIn(denied) = asking.sign_in_with_device(&url, &email).unwrap() else {
+        panic!("a request to sign in with a device");
+    };
+    let listed = approving.sign_in_requests().unwrap();
+    let mine = listed
+        .iter()
+        .find(|r| r.fingerprint == denied.fingerprint)
+        .unwrap();
+    approving
+        .answer_sign_in_request(&mine.id, "", false)
+        .unwrap();
+    assert_eq!(asked_status(&mut asking), Status::Denied);
+    assert!(!asking.signing_in());
+
+    // With two-step login on, its second step follows the approval, with
+    // the same request.
+    let mut session = sign_in(&server, &email);
+    let totp = turn_on_authenticator(&server, &mut session, &email);
+    let Step::DeviceSignIn(two_step) = asking.sign_in_with_device(&url, &email).unwrap() else {
+        panic!("a request to sign in with a device");
+    };
+    let listed = approving.sign_in_requests().unwrap();
+    let mine = listed
+        .iter()
+        .find(|r| r.fingerprint == two_step.fingerprint)
+        .unwrap();
+    approving.confirm_with_master_password(PASSWORD).unwrap();
+    approving
+        .answer_sign_in_request(&mine.id, &mine.fingerprint, true)
+        .unwrap();
+    let Step::TwoFactor(offer) = asking.device_sign_in_status().unwrap() else {
+        panic!("two-step login should follow");
+    };
+    assert!(offer.providers.contains(&0), "{:?}", offer.providers);
+    let now = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    };
+    // A code from the next window, so it isn't the one used to turn it on.
+    std::thread::sleep(std::time::Duration::from_secs(totp.seconds_left(now()) + 1));
+    assert_eq!(
+        asking
+            .finish_sign_in(0, &totp.code_at(now()), false)
+            .unwrap(),
+        Step::Done
+    );
+    assert!(asking.vault().is_some());
+}
+
 /// The person's own logins' numbers (DESIGN.md in the meta repo, "Members'
 /// own passwords"): a member of an organization's app tells the server how
 /// many of their own logins have weak or reused passwords, after each sync,
