@@ -141,8 +141,9 @@ pub struct Accounts {
     /// once its vault has come down (`promote`). Made when first asked for,
     /// in a folder of its own that nothing is written to before then.
     adding: Option<App>,
-    /// The account whose sign-in waits for its second step: one of `list`
-    /// (signing in again), or "" for `adding`.
+    /// The account whose sign-in waits for its second step, or for another
+    /// device's approval: one of `list` (signing in again), or "" for
+    /// `adding`.
     signing_in: Option<String>,
     install: String,
     last: Option<Last>,
@@ -729,6 +730,40 @@ impl Accounts {
             .expect("routed to one")
             .sign_in(server, email, password);
         self.after(&id, signed_in)
+    }
+
+    /// Asks to sign in to an account with another device's approval
+    /// (`App::sign_in_with_device`), routed as `sign_in`: the phrase to
+    /// compare. Asking again sends a new request in its place ("Resend").
+    pub fn sign_in_with_device(&mut self, server: &str, email: &str) -> Result<Step> {
+        let id = self.route(server, email)?;
+        self.give_up_others(&id);
+        let asked = self
+            .app(&id)
+            .expect("routed to one")
+            .sign_in_with_device(server, email);
+        self.after(&id, asked)
+    }
+
+    /// Whether a request to sign in with a device waits for its answer, for
+    /// the account being signed in to.
+    pub fn asking_device(&self) -> bool {
+        self.signing_in
+            .as_deref()
+            .and_then(|id| self.get(id))
+            .is_some_and(App::asking_device)
+    }
+
+    /// How the request to sign in with a device stands now
+    /// (`App::device_sign_in_status`); `Done` once it's approved and the
+    /// vault is open.
+    pub fn device_sign_in_status(&mut self) -> Result<Step> {
+        let id = self.signing_in.clone().ok_or(Error::SignedOut)?;
+        let asked = self
+            .app_kept(&id)
+            .ok_or(Error::SignedOut)?
+            .device_sign_in_status();
+        self.after(&id, asked)
     }
 
     /// Makes an account on the server, then signs in to it (`App::register`);

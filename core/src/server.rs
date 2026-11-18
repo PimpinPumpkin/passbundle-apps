@@ -86,6 +86,30 @@ impl Session {
     pub fn device_token(&self) -> Option<&str> {
         self.device_token.as_deref().map(String::as_str)
     }
+
+    /// Whether this session began from another device's approval
+    /// (device_signin.rs), as its access token says (`signed_in_with`): such
+    /// a session doesn't approve a "Sign in with a device" request. False
+    /// until the session has an access token (unlocking from the kept sync
+    /// leaves it empty until the first refresh), and from a server that
+    /// doesn't say.
+    pub fn from_approval(&self) -> bool {
+        signed_in_with(&self.access_token).as_deref() == Some("authrequest")
+    }
+}
+
+/// How the session an access token belongs to signed in, as passbundle-server
+/// puts it in the token (`keykeeper_signin`: "password", "authrequest",
+/// "sso", or an API key's), from refresh to refresh. Read from the token's
+/// claims without checking its signature: it decides only what the screens
+/// offer, and the server checks it again for anything it allows. None from a
+/// server that doesn't say, or for a token that isn't a JWT.
+pub(crate) fn signed_in_with(access_token: &str) -> Option<String> {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+    let claims = access_token.split('.').nth(1)?;
+    let claims = URL_SAFE_NO_PAD.decode(claims.trim_end_matches('=')).ok()?;
+    let claims: Value = serde_json::from_slice(&claims).ok()?;
+    claims["keykeeper_signin"].as_str().map(str::to_owned)
 }
 
 /// Two-step login's second step: the method, as the server numbers them
@@ -103,8 +127,9 @@ pub struct TwoFactor {
 /// again.
 pub struct PendingSignIn {
     email: String,
-    login_hash: Zeroizing<String>,
-    stretched: SymmetricKey,
+    /// What it signs in with: the master password, or another device's
+    /// approval.
+    proof: Proof,
     /// The device token this device was given last time (secrets.rs), sent
     /// as two-step login's "remember" token (provider 5) until the server
     /// answers with two-step login instead.
@@ -126,7 +151,54 @@ pub struct PendingSignIn {
     pub(crate) spent: bool,
 }
 
+/// What a sign-in proves, sent again with each of its tries.
+enum Proof {
+    /// The master password: its login hash, sent, and the stretched master
+    /// key, which opens the user key in the server's answer. Kept so the KDF
+    /// runs once.
+    Password {
+        login_hash: Zeroizing<String>,
+        stretched: SymmetricKey,
+    },
+    /// Another device's approval (device_signin.rs): the request's id and
+    /// access code, sent as `authRequest` and the password, and the user key
+    /// the approval brought, which must open the account's private key in
+    /// the server's answer.
+    Approval {
+        request: String,
+        access_code: Zeroizing<String>,
+        user_key: SymmetricKey,
+    },
+}
+
 impl PendingSignIn {
+    /// A sign-in with another device's approval of the request `request`
+    /// (device_signin.rs): its access code, and the user key it brought.
+    /// `remembered` is this device's device token, sent as a password
+    /// sign-in sends it.
+    pub(crate) fn approved(
+        email: &str,
+        request: &str,
+        access_code: &str,
+        user_key: SymmetricKey,
+        remembered: Option<Zeroizing<String>>,
+    ) -> PendingSignIn {
+        PendingSignIn {
+            email: normalize_email(email),
+            proof: Proof::Approval {
+                request: request.to_owned(),
+                access_code: Zeroizing::new(access_code.to_owned()),
+                user_key,
+            },
+            remembered: remembered.filter(|t| !t.trim().is_empty()),
+            forget_remembered: false,
+            check: None,
+            offer: Offer::default(),
+            offered_at: Instant::now(),
+            spent: false,
+        }
+    }
+
     fn renew(&mut self, offer: Offer) {
         self.offer = offer;
         self.offered_at = Instant::now();
@@ -171,6 +243,10 @@ struct TokenResponse {
     key: Option<String>,
     #[serde(rename = "TwoFactorToken")]
     two_factor_token: Option<String>,
+    /// The account's private key, under the user key: what a user key from
+    /// another device's approval must open (device_signin.rs).
+    #[serde(rename = "PrivateKey")]
+    private_key: Option<String>,
 }
 
 /// The largest attachment file upstream's servers take: 500 MB before
@@ -650,7 +726,7 @@ impl Server {
         Ok((status, body))
     }
 
-    fn checked(status: u16, body: Value) -> Result<Value> {
+    pub(crate) fn checked(status: u16, body: Value) -> Result<Value> {
         match status {
             200..=299 => Ok(body),
             401 => Err(Error::SignedOut),
@@ -738,8 +814,10 @@ impl Server {
         let master = MasterKey::derive(password, email, &kdf)?;
         let mut pending = PendingSignIn {
             email: normalize_email(email),
-            login_hash: Zeroizing::new(master.login_hash(password)),
-            stretched: master.stretch(),
+            proof: Proof::Password {
+                login_hash: Zeroizing::new(master.login_hash(password)),
+                stretched: master.stretch(),
+            },
             remembered: remembered.filter(|t| !t.trim().is_empty()),
             forget_remembered: false,
             check: None,
@@ -884,15 +962,30 @@ impl Server {
         &self.base
     }
 
-    /// Asks the server to email a sign-in code (provider 1).
+    /// Asks the server to email a sign-in code (provider 1): with the
+    /// master password's hash, or for a sign-in with another device's
+    /// approval, the request's id and access code (upstream's fields), never
+    /// a password.
     pub fn send_email_code(&self, pending: &PendingSignIn) -> Result<()> {
+        let body = match &pending.proof {
+            Proof::Password { login_hash, .. } => json!({
+                "email": pending.email,
+                "masterPasswordHash": login_hash.as_str(),
+            }),
+            Proof::Approval {
+                request,
+                access_code,
+                ..
+            } => json!({
+                "email": pending.email,
+                "authRequestId": request,
+                "authRequestAccessCode": access_code.as_str(),
+            }),
+        };
         let (status, body) = self.answer(
             self.agent
                 .post(self.url("/api/two-factor/send-email-login"))
-                .send_json(json!({
-                    "email": pending.email,
-                    "masterPasswordHash": pending.login_hash.as_str(),
-                })),
+                .send_json(body),
         )?;
         Self::checked(status, body).map(|_| ())
     }
@@ -904,16 +997,29 @@ impl Server {
         new_device: Option<&str>,
     ) -> Result<Token> {
         let kind = self.device.kind.to_string();
+        // The master password's hash, or an approval's access code with its
+        // request (upstream's `authRequest`).
+        let (password, request) = match &pending.proof {
+            Proof::Password { login_hash, .. } => (login_hash.as_str(), None),
+            Proof::Approval {
+                request,
+                access_code,
+                ..
+            } => (access_code.as_str(), Some(request.as_str())),
+        };
         let mut form: Vec<(&str, &str)> = vec![
             ("grant_type", "password"),
             ("username", pending.email.as_str()),
-            ("password", pending.login_hash.as_str()),
+            ("password", password),
             ("scope", "api offline_access"),
             ("client_id", self.device.client_id()),
             ("deviceType", kind.as_str()),
             ("deviceIdentifier", self.device.identifier.as_str()),
             ("deviceName", self.device.name.as_str()),
         ];
+        if let Some(request) = request {
+            form.push(("authRequest", request));
+        }
         let provider;
         // The device token, as two-step login's "remember" token, where
         // upstream's apps send it: so this device isn't new to the account
@@ -972,6 +1078,17 @@ impl Server {
             // incorrect"), and so does the core: never which one it was.
             return Err(match message_of(&body) {
                 Some(m) if m.to_lowercase().contains("password is incorrect") => Error::WrongSignIn,
+                // An approval the server won't sign in with: used already,
+                // past its 15 minutes, or asked from another address
+                // (device_signin.rs). Never a wrong code.
+                Some(m)
+                    if request.is_some()
+                        && ["access code is incorrect", "auth request not found"]
+                            .iter()
+                            .any(|said| m.to_lowercase().contains(said)) =>
+                {
+                    crate::device_signin::UNUSABLE
+                }
                 _ if second.is_some() => Error::WrongCode,
                 Some(m) => new_device::refusal(&m).unwrap_or(Error::Server(m)),
                 None => Error::WrongSignIn,
@@ -980,15 +1097,26 @@ impl Server {
         let body = Self::checked(status, body)?;
         let token: TokenResponse = serde_json::from_value(body)
             .map_err(|_| Error::Malformed("a sign-in answer it doesn't know".into()))?;
-        let key = EncString::parse(
-            token
-                .key
-                .as_deref()
-                .ok_or(Error::Malformed("a sign-in answer with no key".into()))?,
-        )?;
-        let user_key = match key.decrypt_key(&pending.stretched) {
-            Err(Error::Refused(_)) => return Err(Error::WrongSignIn),
-            other => other?,
+        let user_key = match &pending.proof {
+            Proof::Password { stretched, .. } => {
+                let key = EncString::parse(
+                    token
+                        .key
+                        .as_deref()
+                        .ok_or(Error::Malformed("a sign-in answer with no key".into()))?,
+                )?;
+                match key.decrypt_key(stretched) {
+                    Err(Error::Refused(_)) => return Err(Error::WrongSignIn),
+                    other => other?,
+                }
+            }
+            // The approval's user key, only if it's this account's: it
+            // opens the account's private key in the answer, before anything
+            // of the sign-in is kept.
+            Proof::Approval { user_key, .. } => {
+                crate::device_signin::opens_account(user_key, token.private_key.as_deref())?;
+                user_key.clone()
+            }
         };
         Ok(Token::Done(Session {
             access_token: Zeroizing::new(token.access_token),
@@ -1773,6 +1901,89 @@ impl Server {
         .map(|_| ())
     }
 
+    /// Whether this device has finished a sign-in to the account with this
+    /// email, so it may ask to sign in with a device (upstream's `GET
+    /// /api/devices/knowndevice`, with the email in base64url and this
+    /// install's identifier). A server answers the same for an email with no
+    /// account as for a device it doesn't know.
+    pub fn known_device(&self, email: &str) -> Result<bool> {
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+        let (status, body) = self.answer(
+            self.agent
+                .get(self.url("/api/devices/knowndevice"))
+                .header(
+                    "X-Request-Email",
+                    &URL_SAFE_NO_PAD.encode(normalize_email(email)),
+                )
+                .header("X-Device-Identifier", &self.device.identifier)
+                .config()
+                .timeout_global(Some(Duration::from_secs(15)))
+                .build()
+                .call(),
+        )?;
+        Ok(Self::checked(status, body)?.as_bool() == Some(true))
+    }
+
+    /// Asks to sign in with a device (device_signin.rs; `POST
+    /// /api/auth-requests`, type 0, "authenticate and unlock"): the email,
+    /// this device's identifier, the request's public key (SubjectPublicKeyInfo
+    /// DER, base64), and its access code, with this device's type in
+    /// `Device-Type`, which the server keeps and checks when the answer is
+    /// read and at the sign-in. The request's id.
+    pub fn ask_to_sign_in(
+        &self,
+        email: &str,
+        public_key: &str,
+        access_code: &str,
+    ) -> Result<String> {
+        let (status, body) = self.answer(
+            self.agent
+                .post(self.url("/api/auth-requests"))
+                .header("Device-Type", &self.device.kind.to_string())
+                .config()
+                .timeout_global(Some(Duration::from_secs(15)))
+                .build()
+                .send_json(json!({
+                    "email": normalize_email(email),
+                    "deviceIdentifier": self.device.identifier,
+                    "publicKey": public_key,
+                    "accessCode": access_code,
+                    "type": 0,
+                })),
+        )?;
+        let body = Self::checked(status, body)?;
+        let id = body["id"]
+            .as_str()
+            .ok_or(Error::Malformed("a sign-in request with no id".into()))?;
+        Ok(path_id(id)?.to_owned())
+    }
+
+    /// The answer to a sign-in request this device made (`GET
+    /// /api/auth-requests/<id>/response?code=`, with `Device-Type`): the
+    /// server's status and body as they came, for device_signin.rs to read.
+    /// The access code goes in the address, as upstream sends it: the
+    /// server's own log leaves it out. At most 15 seconds, as it's asked
+    /// again soon.
+    pub fn sign_in_answer(&self, id: &str, access_code: &str) -> Result<(u16, Value)> {
+        // Letters and digits only (device_signin::ACCESS_CODE_ALPHABET):
+        // nothing in it needs encoding.
+        if !access_code.bytes().all(|b| b.is_ascii_alphanumeric()) {
+            return Err(Error::Malformed("an access code that isn't one".into()));
+        }
+        self.answer(
+            self.agent
+                .get(self.url(&format!(
+                    "/api/auth-requests/{}/response?code={access_code}",
+                    path_id(id)?
+                )))
+                .header("Device-Type", &self.device.kind.to_string())
+                .config()
+                .timeout_global(Some(Duration::from_secs(15)))
+                .build()
+                .call(),
+        )
+    }
+
     /// Sign-in requests waiting for this account's answer (device_approval.rs),
     /// as the server lists them, and the server's clock (its `Date`), so how
     /// long each has left is by the server's time, not this device's. With
@@ -2496,6 +2707,55 @@ mod tests {
         );
         assert!(bad("https://vault.example.test").is_none());
         assert!(Error::BadAddress(BadAddress::NotHttps).about_the_server());
+    }
+
+    #[test]
+    fn an_access_token_says_whether_its_session_began_from_an_approval() {
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+        let token = |claims: Value| {
+            format!(
+                "eyJhbGciOiJSUzI1NiJ9.{}.c2lnbmF0dXJl",
+                URL_SAFE_NO_PAD.encode(claims.to_string())
+            )
+        };
+        let mut session = a_session();
+        session.access_token = Zeroizing::new(token(json!({ "keykeeper_signin": "authrequest" })));
+        assert!(session.from_approval());
+        for other in [
+            token(json!({ "keykeeper_signin": "password" })),
+            token(json!({ "keykeeper_signin": "sso" })),
+            // A server that doesn't say, a token that isn't a JWT, and the
+            // empty token a session has before its first refresh.
+            token(json!({ "sub": "u" })),
+            "not-a-jwt".to_owned(),
+            "a.%%%.b".to_owned(),
+            String::new(),
+        ] {
+            session.access_token = Zeroizing::new(other.clone());
+            assert!(!session.from_approval(), "{other}");
+        }
+        assert_eq!(
+            signed_in_with(&token(json!({ "keykeeper_signin": "password" }))).as_deref(),
+            Some("password")
+        );
+    }
+
+    #[test]
+    fn an_answer_is_read_only_with_an_access_code_that_needs_no_encoding() {
+        let server = Server::new("http://127.0.0.1:9", Device::this_one("d")).unwrap();
+        for code in ["abc#def", "abc/def", "abc%20", "abc def", "abc&code=x"] {
+            assert!(
+                matches!(
+                    server.sign_in_answer("6f1c2b0e-0000-4000-8000-000000000001", code),
+                    Err(Error::Malformed(_))
+                ),
+                "{code}"
+            );
+        }
+        assert!(matches!(
+            server.sign_in_answer("../../api/sync", "abc"),
+            Err(Error::Malformed(_))
+        ));
     }
 
     #[test]
