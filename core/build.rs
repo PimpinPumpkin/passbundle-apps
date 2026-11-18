@@ -13,7 +13,9 @@ fn main() {
     ) {
         println!("cargo::rustc-cfg=phone");
     }
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    // Where Cargo runs this script from now, not where it was compiled: a
+    // target folder shared by two checkouts reuses one build script.
+    let root = std::path::PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("Cargo sets it"));
     let brand_path = root.join("../brand/brand.json");
     println!("cargo:rerun-if-changed={}", brand_path.display());
     let brand: serde_json::Value =

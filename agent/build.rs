@@ -5,7 +5,9 @@
 use std::{env, fs, path::Path};
 
 fn main() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    // Where Cargo runs this script from now, not where it was compiled: a
+    // target folder shared by two checkouts reuses one build script.
+    let root = std::path::PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("Cargo sets it"));
     let brand_path = root.join("../brand/brand.json");
     let key_path = root.join("update-key.pub");
     println!("cargo:rerun-if-changed={}", brand_path.display());
