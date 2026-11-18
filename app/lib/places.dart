@@ -42,9 +42,44 @@ class Places {
     : folders = ((json['folders'] as List?) ?? const [])
           .cast<Map<String, dynamic>>(),
       organizations = ((json['organizations'] as List?) ?? const [])
-          .cast<Map<String, dynamic>>();
+          .cast<Map<String, dynamic>>(),
+      newItems =
+          (json['newItems'] as Map?)?.cast<String, dynamic>() ?? const {};
 
   static final empty = Places(const {});
+
+  /// Where a new item may go, as the core has it for every screen that
+  /// makes one (core/src/app.rs, `new_item_places`): `{personal,
+  /// keepsItemsOut, start}`.
+  final Map<String, dynamic> newItems;
+
+  /// Personal and the person's own folders take new items: no organization
+  /// keeps items out of Personal. Otherwise only the shared folders with
+  /// `canCreate` do.
+  bool get newInPersonal => newItems['personal'] != false;
+
+  /// The organization that keeps items out of Personal, by name.
+  String? get keepsItemsOut => newItems['keepsItemsOut'] as String?;
+
+  /// Where a new item starts when no place shown takes it: a shared folder,
+  /// as its organization's id and its own, where an organization keeps
+  /// items out of Personal; null for Personal.
+  (String, String)? get newItemStart => switch (newItems['start']) {
+    {
+      'organizationId': final String org,
+      'collectionId': final String folder,
+    } =>
+      (org, folder),
+    _ => null,
+  };
+
+  /// Nowhere takes a new item: an organization keeps items out of Personal,
+  /// and the person has no shared folder they can add to.
+  bool get nowhereNew => !newInPersonal && newItemStart == null;
+
+  /// What the screens say then, in the import's words (transfer.dart).
+  String get nowhereWords =>
+      '${keepsItemsOut ?? 'Your organization'} keeps items out of Personal, and you have no shared folder you can add to. Ask an admin for one, then try again.';
 
   /// The person's own folders, nested: `{id, name, label, depth, parentId}`.
   final List<Map<String, dynamic>> folders;

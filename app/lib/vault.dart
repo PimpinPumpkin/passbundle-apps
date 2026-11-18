@@ -942,7 +942,8 @@ class VaultScreenState extends State<VaultScreen> {
   /// New item: from "All accounts", which account it goes in, with more
   /// than one unlocked (the chosen account's vault opens to make it there);
   /// anywhere else it's the account shown's, which the menu names. Then the
-  /// picker (the main kinds, then templates), then its editor.
+  /// picker (the main kinds, then templates), then its editor; or, where a
+  /// new item has nowhere to go ([nowhereToAdd]), only the words.
   Future<void> newItem({bool ask = true}) async {
     if (ask && widget.menu != null && filter == Filter.everyAccount) {
       final account = await chooseAccount(context, widget.menu!);
@@ -958,7 +959,7 @@ class VaultScreenState extends State<VaultScreen> {
         return;
       }
     }
-    if (!mounted) return;
+    if (!mounted || nowhereToAdd()) return;
     final wide = isWide(context);
     final choice = await chooseNewItem(
       context,
@@ -971,11 +972,31 @@ class VaultScreenState extends State<VaultScreen> {
     await edit(null, null, choice);
   }
 
+  /// Where an organization keeps items out of Personal and the person has
+  /// no shared folder they can add to, a new item has nowhere to go
+  /// (core/src/app.rs, `new_item_places`): the vault says so, in the
+  /// import's words, and opens no editor. True then.
+  bool nowhereToAdd() {
+    if (!places.nowhereNew) return false;
+    showMessage(context, places.nowhereWords, seconds: 8);
+    return true;
+  }
+
   Future<void> edit([
-    String? id,
+    String? editId,
     Map<String, dynamic>? prefill,
     NewItemChoice? choice,
   ]) async {
+    // A new password Android's autofill offered to save for one of the
+    // person's own logins, where an organization keeps items out of
+    // Personal: the server refuses a change to it (`keptOutBy`), so it
+    // goes in a new login, where a new item goes.
+    final keptOut =
+        editId != null &&
+        prefill != null &&
+        widget.core.item(editId)?['keptOutBy'] != null;
+    final id = keptOut ? null : editId;
+    if (id == null && nowhereToAdd()) return;
     final wide = isWide(context);
     // An item that asks for the master password gets it before its editor
     // opens, so the editor shows its secrets, not blanks (Android's "Save
@@ -4743,6 +4764,21 @@ class _ItemPaneState extends State<ItemPane> {
           padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
           child: Text(
             'Your organization hides this item\'s passwords from you.',
+            style: TextStyle(color: c.muted, fontSize: 13),
+          ),
+        ),
+      );
+    }
+    // One of the person's own, where an organization keeps items out of
+    // Personal: the server refuses a change to it, so it has no Edit, and
+    // says why (core/src/ffi.rs, pb_item's `keptOutBy`).
+    if (item['keptOutBy'] case final String org) {
+      rows.add(
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+          child: Text(
+            '$org keeps items out of Personal, so this item can\'t be changed. You can move it to a shared folder in the web vault.',
+            key: const ValueKey('kept-out'),
             style: TextStyle(color: c.muted, fontSize: 13),
           ),
         ),
