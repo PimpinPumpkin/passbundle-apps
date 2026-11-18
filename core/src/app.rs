@@ -1,9 +1,10 @@
 //! One account's state, as the screens see it: signed out, locked, or
 //! unlocked, and everything they ask for. One per account signed in on this
 //! device (accounts.rs, which the bridge, ffi.rs, holds), each with its own
-//! folder, keys, choices, and lock. See docs/core.md: signing in, two-step
-//! login, the new-device check, unlocking from the kept sync, and syncing
-//! with the kept refresh token.
+//! folder, keys, choices, and lock. See docs/core.md: signing in (with the
+//! master password, or another device's approval), two-step login, the
+//! new-device check, unlocking from the kept sync, and syncing with the kept
+//! refresh token.
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime};
@@ -15,6 +16,7 @@ use crate::autolock::{AutoLock, Preferences, Readings, Reason};
 use crate::clipboard;
 use crate::crypto::{EncString, SymmetricKey};
 use crate::device_approval::{self, SignInRequest};
+use crate::device_signin;
 use crate::error::{Error, Result};
 use crate::expiration::Date;
 use crate::generator;
@@ -91,6 +93,10 @@ pub enum Step {
     /// another of the account's devices, and how it stands. Ask how it
     /// stands every few seconds (`new_device_status`).
     NewDevice(new_device::Check),
+    /// Signing in with a device (device_signin.rs): the phrase to compare
+    /// on the approving device, and how the request stands. Ask how it
+    /// stands every few seconds while it waits (`device_sign_in_status`).
+    DeviceSignIn(device_signin::Request),
 }
 
 /// How many of what the generator made its history keeps.
@@ -115,6 +121,10 @@ pub struct App {
     server: Option<Server>,
     session: Option<Session>,
     pending: Option<PendingSignIn>,
+    /// A request to sign in with a device, waiting for another device's
+    /// approval (device_signin.rs): its private key and access code, in
+    /// memory only, until it ends.
+    asking: Option<AskingHere>,
     vault: Option<Vault>,
     /// The agent's address and program, when not the ones installed next to this app (tests).
     agent: Option<(PathBuf, PathBuf)>,
@@ -254,6 +264,22 @@ const COUNTING_PASSKEY_KEPT_OUT: Error = Error::Refused(
 /// How long confirming it's you lasts, to approve a sign-in.
 const CONFIRMATION_LASTS: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// Approving a "Sign in with a device" request from a session that itself
+/// began from an approval: the server refuses it (DESIGN.md in the meta
+/// repo, "Approving a sign-in from another device", "Who approves").
+const APPROVAL_SESSION: Error = Error::Refused(
+    "this device signed in with another device's approval, so it can't approve another device's sign-in. To approve one here, sign out, then sign in with your master password",
+);
+
+/// A request to sign in with a device (device_signin.rs), with the server
+/// it went to and the account's settings, which the account takes once the
+/// sign-in goes through: until then, nothing of the account here changes.
+struct AskingHere {
+    server: Server,
+    settings: Settings,
+    asking: device_signin::Asking,
+}
+
 /// An item's past versions, opened (`App::history`).
 pub struct History {
     pub id: String,
@@ -297,6 +323,7 @@ impl App {
             server,
             session: None,
             pending: None,
+            asking: None,
             vault: None,
             agent: None,
             preferences,
@@ -363,16 +390,25 @@ impl App {
         self.install_identifier = Some(identifier.to_owned());
     }
 
-    /// Whether a sign-in waits for its second step (`finish_sign_in`), or
-    /// for the new-device check (`new_device_status`).
+    /// Whether a sign-in waits for its second step (`finish_sign_in`), for
+    /// the new-device check (`new_device_status`), or for another device's
+    /// approval (`device_sign_in_status`).
     pub fn signing_in(&self) -> bool {
-        self.pending.is_some()
+        self.pending.is_some() || self.asking.is_some()
     }
 
-    /// Gives up on a sign-in waiting for its second step: the account is
+    /// Whether a request to sign in with a device waits for its answer
+    /// (`device_sign_in_status`).
+    pub fn asking_device(&self) -> bool {
+        self.asking.is_some()
+    }
+
+    /// Gives up on a sign-in waiting for its second step, or for another
+    /// device's approval (whose private key goes with it): the account is
     /// as it was kept (its server and email as on this device).
     pub fn cancel_sign_in(&mut self) {
         self.pending = None;
+        self.asking = None;
         self.settings = self.store.settings();
         self.server = self
             .settings
@@ -520,6 +556,121 @@ impl App {
                 self.waiting_step()
             }
         }
+    }
+
+    /// Asks to sign in with a device (device_signin.rs; DESIGN.md in the
+    /// meta repo, "Our apps asking"): the KDF settings first, as a password
+    /// sign-in has them, so the master password unlocks later; then, only on
+    /// a device that has signed in to the account before, a new key pair and
+    /// access code, and the request. Its phrase, for the person to compare
+    /// on the approving device; then ask how it stands every few seconds
+    /// (`device_sign_in_status`). Asking again (the screen's "Resend") sends
+    /// a new request, which replaces this one, and drops its key.
+    pub fn sign_in_with_device(&mut self, server_url: &str, email: &str) -> Result<Step> {
+        let identifier = self.device_identifier();
+        let server = Server::new(server_url, Device::this_one(&identifier))?;
+        let prelogin = server.prelogin(email)?;
+        crate::kdf::Kdf::from_prelogin(&prelogin)?;
+        if !server.known_device(email)? {
+            return Err(device_signin::NOT_KNOWN_HERE);
+        }
+        self.lock();
+        let asking = device_signin::Asking::start(&server, email)?;
+        let request = asking.request(Instant::now());
+        self.asking = Some(AskingHere {
+            settings: Settings {
+                server: server_url.trim().trim_end_matches('/').to_owned(),
+                email: normalize_email(email),
+                kdf: prelogin.kdf,
+                kdf_iterations: prelogin.kdf_iterations,
+                kdf_memory: prelogin.kdf_memory,
+                kdf_parallelism: prelogin.kdf_parallelism,
+                device_identifier: identifier,
+            },
+            server,
+            asking,
+        });
+        Ok(Step::DeviceSignIn(request))
+    }
+
+    /// How the request to sign in with a device stands now, asked every few
+    /// seconds while it waits (the core asks the server only every 5
+    /// seconds, then 10: device_signin.rs). Once it's approved, the core
+    /// opens the user key, signs in with the approval, and opens the vault
+    /// with it (`Done`), or two-step login follows (`TwoFactor`). A denial,
+    /// the 15 minutes, a key that doesn't open this account, or an approval
+    /// the server won't sign in with ends it, and says so (`DeviceSignIn`
+    /// with that status); so does any other refusal of the sign-in (an
+    /// organization's rules), as an error. Whatever ends it drops its private
+    /// key. Offline, it waits, and signs in once the server can be reached.
+    pub fn device_sign_in_status(&mut self) -> Result<Step> {
+        self.device_sign_in_status_at(Instant::now())
+    }
+
+    pub(crate) fn device_sign_in_status_at(&mut self, now: Instant) -> Result<Step> {
+        let here = self.asking.as_mut().ok_or(Error::SignedOut)?;
+        let user_key = match here.asking.ask_at(&here.server, now)? {
+            device_signin::Next::Waiting => {
+                return Ok(Step::DeviceSignIn(here.asking.request(now)))
+            }
+            device_signin::Next::Ended(status) => return Ok(self.device_sign_in_ended(status, now)),
+            device_signin::Next::Approved(user_key) => user_key,
+        };
+        let (request, access_code, email) = here.asking.proof();
+        let remembered = self.secrets.get_secret(
+            Secret::DeviceToken,
+            &here.settings.server,
+            &here.settings.email,
+        );
+        let mut pending =
+            PendingSignIn::approved(email, request, access_code, user_key.clone(), remembered);
+        match here.server.send_sign_in(&mut pending, None, None) {
+            // Not reached: tried again at the next ask, without asking the
+            // server for the answer again.
+            Err(e) if e.offline() => {
+                here.asking.keep_approved(user_key);
+                Err(e)
+            }
+            Err(e) if e == device_signin::BAD_KEY => {
+                Ok(self.device_sign_in_ended(device_signin::Status::BadKey, now))
+            }
+            Err(e) if e == device_signin::UNUSABLE => {
+                Ok(self.device_sign_in_ended(device_signin::Status::Unusable, now))
+            }
+            Err(e) => {
+                // An organization's rules, or the server's own refusal: said
+                // where a password sign-in says it.
+                self.asking = None;
+                Err(e)
+            }
+            Ok(next) => {
+                let here = self.asking.take().expect("asked above");
+                self.settings = Some(here.settings);
+                self.server = Some(here.server);
+                match next {
+                    Next::Done(session) => self.signed_in(session),
+                    Next::TwoFactor | Next::NewDevice => {
+                        self.pending = Some(pending);
+                        self.waiting_step()
+                    }
+                }
+            }
+        }
+    }
+
+    /// A request to sign in with a device ended as `status`: its key and
+    /// code are dropped, and the screens hear how it ended.
+    fn device_sign_in_ended(&mut self, status: device_signin::Status, now: Instant) -> Step {
+        let ended = self
+            .asking
+            .take()
+            .map(|here| here.asking.request_as(status, now));
+        Step::DeviceSignIn(ended.unwrap_or(device_signin::Request {
+            email: String::new(),
+            fingerprint: String::new(),
+            status,
+            left: 0,
+        }))
     }
 
     /// What a sign-in waits for now, as the server last said: two-step
@@ -1395,6 +1546,7 @@ impl App {
         self.vault = None;
         self.session = None;
         self.pending = None;
+        self.asking = None;
         self.opened_with_pin = false;
         self.export_confirmed = None;
         self.pending_import = None;
@@ -1551,6 +1703,7 @@ impl App {
             server: server.clone(),
             access_token: session.access_token.clone(),
             email,
+            approves: !session.from_approval(),
         })
     }
 
@@ -1572,7 +1725,12 @@ impl App {
                 .map(|d| d.as_secs())
                 .unwrap_or(0)
         });
-        let requests = device_approval::parse_pending(&body, &call.email, server_now);
+        // A session that began from an approval approves none: none listed.
+        let requests = if call.approves {
+            device_approval::parse_pending(&body, &call.email, server_now)
+        } else {
+            Vec::new()
+        };
         self.sign_in_requests = Some((Instant::now(), requests));
         Ok(self.kept_sign_in_requests())
     }
@@ -1665,6 +1823,11 @@ impl App {
         fingerprint: &str,
         approve: bool,
     ) -> Result<()> {
+        // The server refuses an approval from a session that began from one;
+        // nothing is sent.
+        if approve && self.session.as_ref().is_some_and(Session::from_approval) {
+            return Err(APPROVAL_SESSION);
+        }
         let request = self
             .kept_sign_in_requests()
             .into_iter()
@@ -2799,11 +2962,18 @@ pub struct SignInRequestsCall {
     server: Server,
     access_token: Zeroizing<String>,
     email: String,
+    /// Whether this session may approve a "Sign in with a device" request:
+    /// not one that began from an approval itself (`Session::from_approval`).
+    pub approves: bool,
 }
 
 impl SignInRequestsCall {
-    /// The server's list, and its clock.
+    /// The server's list, and its clock; for a session that may not approve
+    /// one, none, without asking.
     pub fn fetch(&self) -> Result<(serde_json::Value, Option<u64>)> {
+        if !self.approves {
+            return Ok((serde_json::json!({ "data": [] }), None));
+        }
         self.server.pending_sign_in_requests(&self.access_token)
     }
 

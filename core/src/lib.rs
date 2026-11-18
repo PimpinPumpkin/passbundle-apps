@@ -15,6 +15,7 @@ pub mod codes;
 pub mod crypto;
 pub mod csv;
 pub mod device_approval;
+pub mod device_signin;
 pub mod error;
 pub mod expiration;
 pub mod export;
