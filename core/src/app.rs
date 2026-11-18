@@ -226,6 +226,19 @@ const NO_SHARED_FOLDER: Error = Error::Refused(
     "your organization keeps items out of Personal, and you have no shared folder you can add to. Ask an admin for one, then try again",
 );
 
+/// A new item saved to Personal where an organization keeps items out of
+/// it (`App::new_item_places`), as the import says it (app/transfer.rs).
+const NOT_IN_PERSONAL: Error = Error::Refused(
+    "your organization keeps items out of Personal, so PassBundle can't save it there. Choose a shared folder you can add to, or ask an admin for one",
+);
+
+/// A change to one of the person's own items where an organization keeps
+/// items out of Personal (`Vault::keeps_out`): the server refuses it, and
+/// moving it to a shared folder is the web vault's.
+const OWN_ITEM_KEPT_OUT: Error = Error::Refused(
+    "your organization keeps items out of Personal, so this item can't be changed. You can move it to a shared folder in the web vault",
+);
+
 /// How long confirming it's you lasts, to approve a sign-in.
 const CONFIRMATION_LASTS: std::time::Duration = std::time::Duration::from_secs(60);
 
@@ -1766,6 +1779,15 @@ impl App {
         {
             return Err(REMOVED_KIND);
         }
+        // An organization's "Remove individual vault": nothing new in
+        // Personal, and no change to the person's own items, as the server
+        // has it; a new one goes in a shared folder (`new_item_places`).
+        if id.is_none() && draft.organization_id.is_none() && vault.keeps_items_out.is_some() {
+            return Err(NOT_IN_PERSONAL);
+        }
+        if editing.is_some_and(|item| vault.keeps_out(item).is_some()) {
+            return Err(OWN_ITEM_KEPT_OUT);
+        }
         // The editor reveals an item's secrets into its fields; one that asks
         // for the master password can't be edited before it's given, or its
         // empty fields would be saved over its secrets.
@@ -2317,12 +2339,25 @@ impl App {
     }
 
     /// Where a new item goes when nobody picks a place for it (a new
-    /// passkey's login): Personal (None), unless an organization keeps items
-    /// out of it (`keeps_items_out`; the server would refuse it there). Then
-    /// a shared folder the person may add items to, in the order an import
-    /// offers them (`import_shared_folders`), the first where they may also
-    /// edit items and see passwords before any other; as its organization
-    /// and its id. With none, it's refused, saying what to do.
+    /// passkey's login): Personal (None), or where an organization keeps
+    /// items out of it, a shared folder (`new_item_places`, `start`), as its
+    /// organization and its id. With none, it's refused, saying what to do.
+    fn new_item_place(&self) -> Result<Option<(String, String)>> {
+        let places = self.new_item_places();
+        if places.nowhere() {
+            return Err(NO_SHARED_FOLDER);
+        }
+        Ok(places.start)
+    }
+
+    /// Where a new item may go, the one rule every screen that makes one
+    /// keeps to (the editor, Android's autofill saving into it, and a new
+    /// passkey's login): Personal and the person's own folders, unless an
+    /// organization keeps items out of Personal (`Vault::keeps_items_out`;
+    /// the server would refuse it there). Then only a shared folder the
+    /// person may add items to, as an import has them
+    /// (`import_shared_folders`), starting in the first where they may also
+    /// edit items and see passwords, before any other.
     ///
     /// Why those first: a passkey in a folder that hides passwords still
     /// signs in (it's used and never shown, as a hidden password still
@@ -2331,25 +2366,34 @@ impl App {
     /// account's next passkey for the site in place of this one
     /// (`Vault::passkey_target` needs edit and see passwords, as the editor
     /// does), so signing up there again would leave two.
-    fn new_item_place(&self) -> Result<Option<(String, String)>> {
-        if self.keeps_items_out().is_none() {
-            return Ok(None);
-        }
-        let vault = self.vault.as_ref().ok_or(Error::SignedOut)?;
-        let folders = self.import_shared_folders();
+    pub fn new_item_places(&self) -> NewItemPlaces {
+        let Some(vault) = self.vault.as_ref() else {
+            return NewItemPlaces::default();
+        };
+        let Some(keeps_items_out) = vault.keeps_items_out.clone() else {
+            return NewItemPlaces::default();
+        };
+        let shared: Vec<(String, String)> = self
+            .import_shared_folders()
+            .into_iter()
+            .map(|(folder, _, organization, _)| (organization, folder))
+            .collect();
         let replaceable = |id: &str| {
             vault
                 .collection_grids
                 .get(id)
                 .is_some_and(|g| g.edit && g.see_passwords)
         };
-        let (folder, _, organization, _) = folders
+        let start = shared
             .iter()
-            .find(|(id, ..)| replaceable(id))
-            .or_else(|| folders.first())
-            .cloned()
-            .ok_or(NO_SHARED_FOLDER)?;
-        Ok(Some((organization, folder)))
+            .find(|(_, folder)| replaceable(folder))
+            .or_else(|| shared.first())
+            .cloned();
+        NewItemPlaces {
+            keeps_items_out: Some(keeps_items_out),
+            shared,
+            start,
+        }
     }
 
     /// Favorites an item or not, then syncs: the person's own mark, as
@@ -2814,6 +2858,34 @@ mod same_account_tests {
 fn same_key(a: &SymmetricKey, b: &SymmetricKey) -> bool {
     let (a, b) = (a.to_bytes(), b.to_bytes());
     a.len() == b.len() && a.iter().zip(b.iter()).fold(0u8, |d, (x, y)| d | (x ^ y)) == 0
+}
+
+/// Where a new item may go (`App::new_item_places`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NewItemPlaces {
+    /// The organization that keeps items out of Personal, by name; None
+    /// where Personal and the person's own folders take new items.
+    pub keeps_items_out: Option<String>,
+    /// Where an organization keeps items out of Personal, the shared
+    /// folders a new item may go in, as their organization's id and their
+    /// own, in the order an import offers them.
+    pub shared: Vec<(String, String)>,
+    /// Where a new item starts, and goes when nobody picks a place: one of
+    /// `shared`; None for Personal, or for nowhere at all (`nowhere`).
+    pub start: Option<(String, String)>,
+}
+
+impl NewItemPlaces {
+    /// Personal takes new items.
+    pub fn personal(&self) -> bool {
+        self.keeps_items_out.is_none()
+    }
+
+    /// Nowhere takes one: an organization keeps items out of Personal, and
+    /// the person has no shared folder to add to.
+    pub fn nowhere(&self) -> bool {
+        !self.personal() && self.start.is_none()
+    }
 }
 
 /// A passkey to make (`App::passkey_create`): what the site asked for.

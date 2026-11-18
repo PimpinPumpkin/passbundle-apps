@@ -4,7 +4,10 @@
 // the New item picker (new_item.dart): a kind, or a template with its
 // fields. Where it goes is one Folder picker, grouped by owner, as the web
 // vault has it: Personal and its folders, then each organization's shared
-// folders the person may add items to. Closing it with anything changed
+// folders the person may add items to. Where an organization keeps items
+// out of Personal, a new item is offered only those shared folders and
+// starts where the core starts one (places.dart, `newItemStart`); with none,
+// the vault opens no editor (vault.dart). Closing it with anything changed
 // (Cancel, Escape, or Android's Back) asks first, as the web vault does; a
 // click outside it never closes it.
 import 'dart:convert';
@@ -283,7 +286,7 @@ class _ItemEditorState extends State<ItemEditor> {
         );
       }
     }
-    if (id == null) pickPlace(widget.place ?? 'personal:');
+    if (id == null) pickPlace(startPlace);
     final prefill = widget.prefill;
     // A new password for this login (a sign-in Android's autofill offered to save).
     if (id != null && item != null && prefill != null) {
@@ -323,6 +326,22 @@ class _ItemEditorState extends State<ItemEditor> {
       ? 'personal:${folderId ?? ''}'
       : 'org:$organizationId:${collectionId ?? ''}';
 
+  /// Where a new item starts: the place it was opened for, where a new item
+  /// may go there, else where the core starts one: Personal, or a shared
+  /// folder where an organization keeps items out of Personal.
+  String get startPlace {
+    final places = widget.places;
+    final asked = widget.place;
+    if (asked != null &&
+        (asked.startsWith('personal:')
+            ? places.newInPersonal
+            : places.collection(asked.split(':').last)?['canCreate'] == true)) {
+      return asked;
+    }
+    final start = places.newItemStart;
+    return start == null ? 'personal:' : 'org:${start.$1}:${start.$2}';
+  }
+
   /// Puts the item where the picker says.
   void pickPlace(String value) {
     final parts = value.split(':');
@@ -360,10 +379,11 @@ class _ItemEditorState extends State<ItemEditor> {
   /// The Folder picker's choices, grouped by owner: (value, label, glyph,
   /// depth), a heading's value starting with "heading:". An item stays with
   /// its owner (moving it between owners is the web vault's), and goes only
-  /// into shared folders the person may add items to (or is in already).
+  /// into shared folders the person may add items to (or is in already). A
+  /// new item goes in Personal only where the core says it may.
   List<(String, String, String, int)> get placeOptions {
     final options = <(String, String, String, int)>[];
-    if (!editing || organizationId == null) {
+    if (editing ? organizationId == null : widget.places.newInPersonal) {
       options.add(('heading:personal', 'Personal', Glyphs.person, 0));
       options.add(('personal:', 'No folder', Glyphs.folder, 1));
       for (final f in widget.places.folders) {
@@ -781,6 +801,10 @@ class _ItemEditorState extends State<ItemEditor> {
     setState(() => fields.add(_Field(named, kind == 2 ? 'false' : '', kind)));
   }
 
+  /// A new item that can't go in Personal, as an organization keeps items
+  /// out of it: the picker says so, as the import does.
+  bool get keptOut => !editing && !widget.places.newInPersonal;
+
   /// One Folder picker, grouped by owner, as the web vault has it.
   Widget folderPicker() {
     final c = context.colors;
@@ -843,11 +867,13 @@ class _ItemEditorState extends State<ItemEditor> {
                   setState(() => pickPlace(v));
                 },
         ),
-        if (alsoIn.isNotEmpty || placeLocked)
+        if (alsoIn.isNotEmpty || placeLocked || keptOut)
           _Footnote(
             [
               if (alsoIn.isNotEmpty) 'Also in ${alsoIn.join(', ')}.',
               if (placeLocked) 'Your organization doesn\'t let you move it to another shared folder.',
+              if (keptOut)
+                '${widget.places.keepsItemsOut ?? 'Your organization'} keeps items out of Personal.',
             ].join(' '),
           ),
       ],
