@@ -1199,7 +1199,9 @@ fn where_an_organization_keeps_items_out_of_personal_a_new_passkeys_login_goes_i
     members.sync().unwrap();
 
     // Now the server refuses the member a login of their own, and an edit
-    // to the one they have; so it isn't offered, and is refused unsent.
+    // to the one they have (`..._a_new_item_goes_in_a_shared_folder`,
+    // below), and the app refuses both before sending; so it isn't
+    // offered, and is refused unsent.
     assert!(members.keeps_items_out().is_some());
     let mine = ItemDraft {
         name: "Mine".into(),
@@ -1209,13 +1211,13 @@ fn where_an_organization_keeps_items_out_of_personal_a_new_passkeys_login_goes_i
         .save(None, &mine, &[])
         .unwrap_err()
         .to_string()
-        .contains("personal vault"));
+        .contains("keeps items out of Personal"));
     let shop_draft = ItemDraft::of(members.vault().unwrap().item(&shop).unwrap());
     assert!(members
         .save(Some(&shop), &shop_draft, &[])
         .unwrap_err()
         .to_string()
-        .contains("personal vault"));
+        .contains("keeps items out of Personal"));
     assert!(offered(&members).is_empty());
     assert_eq!(
         members
@@ -1302,6 +1304,147 @@ fn where_an_organization_keeps_items_out_of_personal_a_new_passkeys_login_goes_i
     assert_eq!(item.organization_id, None);
     assert!(item.collection_ids.is_empty());
     assert!(offered(&owners).contains(&(made.item_id.clone(), true)));
+}
+
+/// Where an organization keeps items out of Personal, a new item from the
+/// editor goes in a shared folder (`App::new_item_places`): a member it
+/// binds is offered no Personal, only the shared folders they may add to,
+/// starting in one that shows passwords (IT) before one that hides them
+/// (Accounting, first by name), and what they save there is the
+/// organization's, in IT, under its key. The server refuses the member's
+/// own items, new ones and edits, and the app refuses them before sending.
+/// The owner, whom the policy doesn't bind, saves to Personal.
+#[test]
+fn where_an_organization_keeps_items_out_of_personal_a_new_item_goes_in_a_shared_folder() {
+    let Some(server) = server() else { return };
+    let url = std::env::var("PB_TEST_SERVER").unwrap();
+    let (owner, member) = (new_email("new-items-owner"), new_email("new-items-member"));
+    for email in [&owner, &member] {
+        sign_up(&server, email);
+    }
+    let mut session = sign_in(&server, &owner);
+    let (org_id, org_key) = new_organization(&server, &mut session, &owner);
+    let it = open(&server, &mut session)
+        .collections
+        .keys()
+        .next()
+        .unwrap()
+        .clone();
+    let mut owners = signed_in_app(&url, &owner);
+    let accounting = owners.create_collection(&org_id, "Accounting").unwrap();
+    join(
+        &server,
+        &mut session,
+        &org_id,
+        &org_key,
+        &member,
+        json!([
+            { "id": it, "readOnly": false, "hidePasswords": false, "manage": false },
+            { "id": accounting, "readOnly": false, "hidePasswords": true, "manage": false },
+        ]),
+    );
+
+    // One of the member's own, from before the policy.
+    let mut members = signed_in_app(&url, &member);
+    assert!(members.new_item_places().personal());
+    let own = members
+        .save(
+            None,
+            &ItemDraft {
+                name: "Before".into(),
+                password: secret("not-a-real-password-new-items"),
+                ..ItemDraft::default()
+            },
+            &[],
+        )
+        .unwrap()
+        .id;
+    server
+        .raw(
+            &mut session,
+            "PUT",
+            &format!("/api/organizations/{org_id}/policies/5"),
+            Some(json!({ "policy": { "enabled": true, "data": null } })),
+        )
+        .unwrap();
+    members.sync().unwrap();
+
+    // Not Personal now: the shared folders, starting in IT.
+    let places = members.new_item_places();
+    assert!(!places.personal());
+    assert!(!places.nowhere());
+    assert_eq!(places.keeps_items_out.as_deref(), Some("Contoso"));
+    assert_eq!(
+        places.shared,
+        [
+            (org_id.clone(), accounting.clone()),
+            (org_id.clone(), it.clone())
+        ]
+    );
+    assert_eq!(places.start, Some((org_id.clone(), it.clone())));
+
+    // The server refuses the member's own, new and edited; the app refuses
+    // them before sending, and says their own item can't be changed.
+    let mine = ItemDraft {
+        name: "Mine".into(),
+        ..ItemDraft::default()
+    };
+    let mut direct = sign_in(&server, &member);
+    let vault = open(&server, &mut direct);
+    let new_one = vault.encrypt_item(&mine, None).unwrap();
+    let refused = server
+        .save_item(&mut direct, None, new_one, &[])
+        .unwrap_err();
+    assert!(refused.to_string().contains("personal vault"), "{refused}");
+    let item = vault.item(&own).unwrap();
+    let edited = vault
+        .encrypt_item(&ItemDraft::of(item), Some(item))
+        .unwrap();
+    let refused = server
+        .save_item(&mut direct, Some(&own), edited, &[])
+        .unwrap_err();
+    assert!(refused.to_string().contains("personal vault"), "{refused}");
+    assert!(members
+        .save(None, &mine, &[])
+        .unwrap_err()
+        .to_string()
+        .contains("keeps items out of Personal"));
+    let kept_out = members.vault().unwrap();
+    assert_eq!(
+        kept_out.keeps_out(kept_out.item(&own).unwrap()),
+        Some("Contoso")
+    );
+
+    // Saved where it starts: the organization's, in IT, under its key.
+    let (organization, folder) = places.start.clone().unwrap();
+    let router = ItemDraft {
+        name: "Router".into(),
+        password: secret("not-a-real-password-router"),
+        organization_id: Some(organization),
+        ..ItemDraft::default()
+    };
+    let saved = members.save(None, &router, &[folder]).unwrap();
+    let item = members.vault().unwrap().item(&saved.id).unwrap();
+    assert_eq!(item.organization_id.as_deref(), Some(org_id.as_str()));
+    assert_eq!(item.collection_ids, std::slice::from_ref(&it));
+    let (sync, _) = server.sync(&mut session).unwrap();
+    let kept = sync.ciphers.iter().find(|c| c.id == saved.id).unwrap();
+    let name = passbundle_core::crypto::EncString::parse(kept.name.as_deref().unwrap()).unwrap();
+    assert_eq!(name.decrypt_string(&org_key).unwrap().as_str(), "Router");
+
+    // The owner isn't bound: Personal for them.
+    owners.sync().unwrap();
+    assert!(owners.new_item_places().personal());
+    let ours = owners.save(None, &mine, &[]).unwrap();
+    assert_eq!(
+        owners
+            .vault()
+            .unwrap()
+            .item(&ours.id)
+            .unwrap()
+            .organization_id,
+        None
+    );
 }
 
 /// An SSH key on the server comes through the core's sync: the core says

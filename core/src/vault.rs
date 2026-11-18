@@ -1510,6 +1510,18 @@ impl Vault {
         folders.iter().any(|g| g.view_history && g.delete)
     }
 
+    /// The organization that keeps this item out of Personal, by name: one
+    /// of the person's own items, where an organization's "Remove individual
+    /// vault" binds them (`keeps_items_out`). The server refuses any change
+    /// to it then, though it may still be favorited, archived, trashed, or
+    /// moved to a shared folder in the web vault.
+    pub fn keeps_out(&self, item: &Item) -> Option<&str> {
+        if item.organization_id.is_some() {
+            return None;
+        }
+        self.keeps_items_out.as_deref()
+    }
+
     /// Encrypts a draft as the server takes it (upstream's cipher request):
     /// a new item under its organization's key, or the user key, without an
     /// item key, like the other apps. Pass the item being edited, if any, so
