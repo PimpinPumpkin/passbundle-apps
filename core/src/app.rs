@@ -178,6 +178,11 @@ pub struct App {
     /// the server doesn't take them; forgotten when the vault locks.
     own_health: Option<crate::health::OwnCounts>,
     own_health_unheard: bool,
+    /// The organizations whose owners and admins see those numbers, by name,
+    /// as the server's `seen-by` last said this unlock (`report_own_health`
+    /// asks it), for the line the screens show the person; empty when none
+    /// does. Forgotten when the vault locks.
+    own_health_seen_by: Vec<String>,
     /// Each own login's weak-or-not, by id and revision (health::own_counts).
     own_weak: std::collections::HashMap<String, bool>,
     /// The desktop agent's tray was told of items to be reminded about, so
@@ -302,6 +307,7 @@ impl App {
             pick_by: None,
             own_health: None,
             own_health_unheard: false,
+            own_health_seen_by: Vec::new(),
             own_weak: Default::default(),
             told_agent: false,
             opened_with_pin: false,
@@ -955,7 +961,8 @@ impl App {
     /// joined has "Members' own passwords" on, which the server says
     /// (`own_health_seen_by`), once each unlock and again when the numbers
     /// change, and not again this unlock once a server says it doesn't take
-    /// them. Never fails a sync.
+    /// them. Never fails a sync. What `seen-by` answers is kept for the
+    /// person to see (`own_health_seen_by`).
     fn report_own_health(&mut self) {
         if self.own_health_unheard {
             return;
@@ -966,6 +973,7 @@ impl App {
             return;
         };
         if !vault.in_an_organization() {
+            self.own_health_seen_by.clear();
             return;
         }
         let counts = crate::health::own_counts(vault, &mut self.own_weak);
@@ -973,10 +981,16 @@ impl App {
             return;
         }
         match server.own_health_seen_by(session) {
-            Ok(Some(seen_by)) if seen_by.is_empty() => return,
-            Ok(Some(_)) => {}
+            Ok(Some(seen_by)) => {
+                let nobody = seen_by.is_empty();
+                self.own_health_seen_by = seen_by;
+                if nobody {
+                    return;
+                }
+            }
             Ok(None) => {
                 self.own_health_unheard = true;
+                self.own_health_seen_by.clear();
                 return;
             }
             // Tried again at the next sync.
@@ -984,12 +998,24 @@ impl App {
         }
         match server.report_own_health(session, &counts) {
             Ok(Some(true)) => self.own_health = Some(counts),
-            // Turned off since: nothing was kept, so it's sent again later.
-            Ok(Some(false)) => {}
-            Ok(None) => self.own_health_unheard = true,
+            // Turned off since: nothing was kept, nobody sees them, and
+            // they're sent again later.
+            Ok(Some(false)) => self.own_health_seen_by.clear(),
+            Ok(None) => {
+                self.own_health_unheard = true;
+                self.own_health_seen_by.clear();
+            }
             // Tried again at the next sync.
             Err(_) => {}
         }
+    }
+
+    /// The organizations whose owners and admins see how many of the
+    /// person's own passwords are weak, reused, or exposed, by name, as the
+    /// server last said this unlock (`report_own_health`); empty when none
+    /// does, or before the first sync. For the line the screens show.
+    pub fn own_health_seen_by(&self) -> &[String] {
+        &self.own_health_seen_by
     }
 
     /// What the person's own logins' numbers were last told the server as,
@@ -1304,6 +1330,7 @@ impl App {
     pub fn lock(&mut self) {
         self.own_health = None;
         self.own_health_unheard = false;
+        self.own_health_seen_by.clear();
         self.own_weak.clear();
         self.pick_by = None;
         self.sign_in_requests = None;

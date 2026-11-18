@@ -28,6 +28,7 @@ import 'glyphs.dart';
 import 'history.dart';
 import 'icons.dart';
 import 'new_item.dart';
+import 'own_health.dart';
 import 'places.dart';
 import 'selection.dart';
 import 'send.dart';
@@ -203,6 +204,11 @@ class VaultScreenState extends State<VaultScreen> {
   /// The report Health shows (`weak`, `reused`, `unsecured`, `expiring`),
   /// or null for everything it has to fix.
   String? report;
+
+  /// The organizations whose admins see how many of the person's own
+  /// passwords are weak, reused, or exposed, by name, which Health says
+  /// (own_health.dart); empty while none does.
+  List<String> seenBy = const [];
   bool syncing = false;
   bool signedOut = false;
 
@@ -455,6 +461,7 @@ class VaultScreenState extends State<VaultScreen> {
       trashed = searching.isEmpty ? allTrashed : widget.core.trashed(searching);
       trashedCount = allTrashed.length;
       places = Places(widget.core.places());
+      seenBy = widget.core.ownHealthSeenBy();
       if (selected != null && widget.core.item(selected!) == null) {
         selected = null;
       }
@@ -634,6 +641,18 @@ class VaultScreenState extends State<VaultScreen> {
     // The search is every account's there, and this one's elsewhere.
     if (searchesChange && query.isNotEmpty) reload();
   }
+
+  /// Over Health's list on a computer: its reports, and who sees how many of
+  /// the person's own passwords are weak, reused, or exposed (own_health.dart).
+  Widget get healthHeader => Column(
+    crossAxisAlignment: CrossAxisAlignment.stretch,
+    mainAxisSize: MainAxisSize.min,
+    children: [
+      if (health.isNotEmpty) healthReportsBar,
+      if (health.isNotEmpty && seenBy.isNotEmpty) const SizedBox(height: 10),
+      if (seenBy.isNotEmpty) SeenByLine(seenBy),
+    ],
+  );
 
   /// Health's reports, each with how many items, as a row of choices over
   /// its list: picking one shows only its items.
@@ -1541,8 +1560,10 @@ class VaultScreenState extends State<VaultScreen> {
                     banner: banners,
                     items: shown,
                     emptyState: emptyVault ? emptyVaultNote() : null,
-                    header: filter == Filter.health && health.isNotEmpty
-                        ? healthReportsBar
+                    header:
+                        filter == Filter.health &&
+                            (health.isNotEmpty || seenBy.isNotEmpty)
+                        ? healthHeader
                         : null,
                     badges: !const {
                       Filter.folder,
@@ -1889,6 +1910,13 @@ class VaultScreenState extends State<VaultScreen> {
           SliverPadding(
             padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
             sliver: SliverToBoxAdapter(child: healthReportsBar),
+          ),
+        // Who sees how many of the person's own passwords are weak, reused,
+        // or exposed, as on a computer (own_health.dart).
+        if (filter == Filter.health && seenBy.isNotEmpty && query.isEmpty)
+          SliverPadding(
+            padding: const EdgeInsets.fromLTRB(20, 8, 20, 4),
+            sliver: SliverToBoxAdapter(child: SeenByLine(seenBy)),
           ),
         if (inside.isNotEmpty) ...[
           const SliverToBoxAdapter(child: SizedBox(height: 8)),
@@ -3094,7 +3122,8 @@ class ItemList extends StatefulWidget {
   /// what to do first ([EmptyVault]).
   final Widget? emptyState;
 
-  /// Over the rows, under the title: Health's reports.
+  /// Over the rows, under the title: Health's reports, and who sees how many
+  /// of the person's own passwords are weak, reused, or exposed.
   final Widget? header;
 
   /// What the list shows: All items, a kind, a folder.
