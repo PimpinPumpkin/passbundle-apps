@@ -2086,7 +2086,25 @@ pub unsafe extern "C" fn pb_places(account: *const c_char) -> *mut c_char {
                 })
             })
             .collect();
-        json!({ "folders": folders, "organizations": organizations })
+        json!({ "folders": folders, "organizations": organizations, "newItems": new_items(app) })
+    })
+}
+
+/// Where a new item may go (`App::new_item_places`), for the editor's
+/// Folder picker: `{personal, keepsItemsOut, start}`. Personal and the
+/// person's own folders take new items unless an organization keeps items
+/// out of Personal (`personal` false, the organization in `keepsItemsOut`,
+/// by name); then only the shared folders with `canCreate`, starting in
+/// `start` (`{organizationId, collectionId}`), and with no such folder
+/// (`start` null), nowhere: the editor isn't opened.
+fn new_items(app: &App) -> Value {
+    let places = app.new_item_places();
+    json!({
+        "personal": places.personal(),
+        "keepsItemsOut": places.keeps_items_out,
+        "start": places.start.map(|(organization, folder)| json!({
+            "organizationId": organization, "collectionId": folder,
+        })),
     })
 }
 
@@ -2163,6 +2181,11 @@ pub unsafe extern "C" fn pb_item(account: *const c_char, id: *const c_char) -> *
         // it's given, as upstream's apps do.
         view["reprompt"] = json!(item.kept.reprompt != 0);
         view["mayUse"] = json!(app.may_use(item));
+        // One of the person's own where an organization keeps items out of
+        // Personal: that organization, by name. The server refuses a change
+        // to it then, so it isn't editable; the web vault can move it to a
+        // shared folder.
+        view["keptOutBy"] = json!(vault.keeps_out(item));
         if !app.may_use(item) {
             return view;
         }
@@ -2293,7 +2316,9 @@ pub unsafe extern "C" fn pb_item(account: *const c_char, id: *const c_char) -> *
         // The app edits logins, notes, cards, and identities, where the
         // person may; the web vault edits SSH keys and the newer kinds, and
         // the item says so (`editInWebVault`), so Edit isn't just gone.
-        let may_edit = vault.grid(item).edit && vault.grid(item).see_passwords;
+        let may_edit = vault.grid(item).edit
+            && vault.grid(item).see_passwords
+            && vault.keeps_out(item).is_none();
         let app_edits = matches!(
             item.kind,
             ItemKind::Login | ItemKind::SecureNote | ItemKind::Card | ItemKind::Identity

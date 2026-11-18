@@ -252,7 +252,7 @@ impl Vault {
         if item.archived {
             return Err(Error::Refused("that login is archived"));
         }
-        if item.organization_id.is_none() && self.keeps_items_out.is_some() {
+        if self.keeps_out(item).is_some() {
             return Err(Error::Refused(
                 "your organization keeps items out of Personal, so that login can't be changed",
             ));
