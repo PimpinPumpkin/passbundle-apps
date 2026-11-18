@@ -170,6 +170,11 @@ jobs:
       - name: Build the desktop agent
         working-directory: agent
         run: cargo build --locked --release
+      - name: The agent and its host need no C or C++ runtime installed
+        # They link it in (agent/.cargo/config.toml): the update task runs the
+        # agent as SYSTEM, which must load no runtime library from PATH.
+        working-directory: agent
+        run: cargo run --locked --example imports -- target/release/passbundle-agent.exe target/release/passbundle-agent-host.exe
       - name: Install Flutter at the pinned release
         run: |
           git clone --quiet --depth 1 --branch "$FLUTTER_VERSION" https://github.com/flutter/flutter.git "$RUNNER_TEMP/flutter"

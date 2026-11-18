@@ -2,6 +2,12 @@
 //! (`src/main.rs`) and the native-messaging host (`src/host.rs`). See
 //! README.md and DESIGN.md, "Desktop agent".
 
+// Both programs link the C runtime in on Windows, so the update task (as
+// SYSTEM) loads no runtime library that could come from PATH
+// (`.cargo/config.toml`, which a build from this folder takes).
+#[cfg(all(windows, target_env = "msvc", not(target_feature = "crt-static")))]
+compile_error!("build the agent from its own folder, so it takes .cargo/config.toml: on Windows it links the C runtime in (+crt-static)");
+
 pub mod brand {
     include!(concat!(env!("OUT_DIR"), "/brand.rs"));
 }
