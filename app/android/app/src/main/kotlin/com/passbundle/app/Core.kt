@@ -171,9 +171,11 @@ object Core {
      * Where a new passkey can go, from the request as JSON (the site's ID, the
      * user handle, the credentials the site has, and the app asking): every
      * unlocked account's logins it can go in, the one whose passkey it would
-     * replace first, and whether the site has one of PassBundle's already
-     * (`excluded`); or `locked`, with the `account` to unlock (ffi.rs,
-     * `pb_passkey_logins`). Never a key or a password.
+     * replace first, whether the site has one of PassBundle's already
+     * (`excluded`), and each unlocked account, saying whether a new login
+     * can go in it (`newLogin`) and if not, why (`noNewLogin`); or `locked`,
+     * with the `account` to unlock (ffi.rs, `pb_passkey_logins`). Never a
+     * key or a password.
      */
     @JvmStatic external fun passkeyLogins(request: String): String?
 

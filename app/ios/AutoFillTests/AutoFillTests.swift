@@ -396,6 +396,86 @@ final class AutoFillTests: XCTestCase {
     XCTAssertNil(provider.replacing)
   }
 
+  /// The sample's organization, Contoso, and what saving a new passkey
+  /// says where it keeps the person's items out of Personal and they have
+  /// no shared folder to add to: the core's words, New's in the app
+  /// (core/src/app.rs, `no_new_passkey_login`; app/lib/places.dart).
+  static let contoso = "8f9a7c1e-3b2d-4e5f-9a8b-7c6d5e4f3a2b"
+  static let nowhere =
+    "Contoso keeps items out of Personal, and you have no shared folder you can add to. "
+    + "Ask an admin for one, then try again."
+
+  /// An account's kept sync with Contoso keeping items out of Personal
+  /// (upstream's "Remove individual vault", policy 5) and the person a
+  /// member it binds (upstream's type 2, not its owner), who may only view
+  /// its shared folder IT: nowhere a new login could go. As the server
+  /// sends it (app/test/new_items_test.dart has the same).
+  private func keepOutOfPersonal(_ account: String) throws {
+    let file = URL(fileURLWithPath: "\(folder)/accounts/\(account)/sync.json")
+    var sync = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: file)) as? [String: Any])
+    var profile = try XCTUnwrap(sync["profile"] as? [String: Any])
+    var organizations = try XCTUnwrap(profile["organizations"] as? [[String: Any]])
+    organizations[0]["type"] = 2
+    profile["organizations"] = organizations
+    sync["profile"] = profile
+    var collections = try XCTUnwrap(sync["collections"] as? [[String: Any]])
+    collections[0]["readOnly"] = true
+    sync["collections"] = collections
+    sync["policies"] = [
+      [
+        "id": "p-keeps-out", "organizationId": Self.contoso, "type": 5, "enabled": true,
+        "data": NSNull(), "object": "policy",
+      ]
+    ]
+    try JSONSerialization.data(withJSONObject: sync).write(to: file)
+  }
+
+  /// Where Contoso keeps the Work account's items out of Personal and it
+  /// has no shared folder to add to, saving a passkey offers that account
+  /// no new login, nor any of its own logins (Example Mail, for
+  /// example.test, isn't offered): it says why, in the core's words,
+  /// before anything is picked, and Save makes nothing. The Personal
+  /// account, which Contoso doesn't bind, once unlocked here, takes it in a
+  /// new login or its own Example Mail.
+  func testWhereNoNewLoginCanBeMadeSavingAPasskeySaysWhyBeforeAnythingIsPicked() throws {
+    try keepOutOfPersonal(Self.work)
+    let provider = Provider()
+    var ended = false
+    provider.onFinish = { _ in ended = true }
+    try show(provider)
+    provider.making = Provider.PasskeyMaking(
+      rpId: "new.example.test", userName: "ana@new.example.test", userHandle: Data([1, 2, 3, 4]),
+      clientDataHash: Data(repeating: 7, count: 32), excluded: [])
+    provider.start(domains: [], picked: nil)
+    wait("asked to unlock") { isLocked(provider) }
+    provider.unlock(password: Self.password)
+    wait("asked to save it") { isSaving(provider) }
+    XCTAssertTrue(provider.targets.isEmpty)
+    XCTAssertEqual(provider.noNewLogin, [Self.work: Self.nowhere])
+    XCTAssertEqual(provider.whyNoNewLogin, Self.nowhere)
+    XCTAssertTrue(provider.takers.isEmpty)
+    XCTAssertNil(provider.saveIn)
+    XCTAssertNil(provider.saveTo)
+    snapshot("7-no-new-login")
+    // Nowhere to save it: nothing goes to the core, and the request goes on.
+    provider.save()
+    XCTAssertTrue(isSaving(provider))
+    XCTAssertNil(provider.replacing)
+    XCTAssertFalse(ended)
+
+    // The Personal account takes it: a new login there, or its Example Mail.
+    provider.askToUnlock(provider.locked[0])
+    wait("asked to unlock the personal account") { isLocked(provider) }
+    provider.unlock(password: Self.password)
+    wait("asked to save it again") { isSaving(provider) }
+    XCTAssertNil(provider.whyNoNewLogin)
+    XCTAssertEqual(provider.takers.map(\.id), [Self.personal])
+    XCTAssertEqual(provider.saveIn, Self.personal)
+    XCTAssertEqual(provider.targets.map(\.name), ["Example Mail"])
+    XCTAssertEqual(provider.targets.map(\.account), [Self.personal])
+    XCTAssertEqual(provider.noNewLogin, [Self.work: Self.nowhere])
+  }
+
   /// With no account signed in to in the app, it says where to start.
   func testWithNoAccountItSaysToSignInInTheApp() throws {
     try FileManager.default.removeItem(atPath: "\(folder)/accounts.json")

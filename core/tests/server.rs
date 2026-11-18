@@ -1306,6 +1306,181 @@ fn where_an_organization_keeps_items_out_of_personal_a_new_passkeys_login_goes_i
     assert!(offered(&owners).contains(&(made.item_id.clone(), true)));
 }
 
+/// Where an organization keeps items out of Personal, the phones hear
+/// before they'd offer a new login for a passkey whether one can be made
+/// (`App::no_new_passkey_login`): yes for a member with a shared folder to
+/// add to, and for the owner, whom the policy doesn't bind; for a member
+/// who may only view theirs, no, in the words New says it in, naming the
+/// organization. And a passkey that counts its sign-ins, in a login of the
+/// member's own, would have its login saved as it signs in, which the
+/// server now refuses: the core refuses it before it signs, in its own
+/// words, and its counter stays where it was. One that counts in a shared
+/// folder they may edit has its raised counter saved and signs in.
+#[test]
+fn where_an_organization_keeps_items_out_of_personal_a_passkey_that_counts_signs_in_only_where_it_can_be_saved(
+) {
+    use passbundle_core::app::NewPasskey;
+
+    let Some(server) = server() else { return };
+    let url = std::env::var("PB_TEST_SERVER").unwrap();
+    let (owner, member, viewer) = (
+        new_email("counts-owner"),
+        new_email("counts-member"),
+        new_email("counts-viewer"),
+    );
+    for email in [&owner, &member, &viewer] {
+        sign_up(&server, email);
+    }
+    let mut session = sign_in(&server, &owner);
+    let (org_id, org_key) = new_organization(&server, &mut session, &owner);
+    let it = open(&server, &mut session)
+        .collections
+        .keys()
+        .next()
+        .unwrap()
+        .clone();
+    join(
+        &server,
+        &mut session,
+        &org_id,
+        &org_key,
+        &member,
+        json!([{ "id": it, "readOnly": false, "hidePasswords": false, "manage": false }]),
+    );
+    join(
+        &server,
+        &mut session,
+        &org_id,
+        &org_key,
+        &viewer,
+        json!([{ "id": it, "readOnly": true, "hidePasswords": false, "manage": false }]),
+    );
+    let new = |rp_id: &'static str| NewPasskey {
+        rp_id,
+        rp_name: None,
+        user_handle: &[8; 16],
+        user_name: Some("ana@counts.example.test"),
+        user_display_name: None,
+        user_verified: true,
+        discoverable: true,
+        login: None,
+        exclude: &[],
+        app: None,
+    };
+    // A passkey's counter saved as `counter`, as another device signing in
+    // with it saves it (a passkey imported from an authenticator that
+    // counts its sign-ins starts above 0): the server's answer.
+    let save_counter = |app: &App, id: &str, counter: u32| {
+        let mut direct = sign_in(&server, &member);
+        let vault = app.vault().unwrap();
+        let item = vault.item(id).unwrap();
+        let stored = item
+            .passkey
+            .as_ref()
+            .unwrap()
+            .with_counter(item.kept.fido2_credentials.as_ref().unwrap(), counter);
+        let body = vault
+            .encrypt_item_with(&ItemDraft::of(item), Some(item), Some(stored))
+            .unwrap();
+        server.save_item(&mut direct, Some(id), body, &item.collection_ids)
+    };
+    let counter = |app: &App, id: &str| {
+        app.vault()
+            .unwrap()
+            .item(id)
+            .unwrap()
+            .passkey
+            .as_ref()
+            .unwrap()
+            .counter
+    };
+
+    // Before the policy: a passkey of the member's own that counts, at 5.
+    let mut members = signed_in_app(&url, &member);
+    let own = members
+        .passkey_create(&new("own.counts.example.test"))
+        .unwrap()
+        .item_id;
+    assert_eq!(
+        members.vault().unwrap().item(&own).unwrap().organization_id,
+        None
+    );
+    save_counter(&members, &own, 5).unwrap();
+    members.sync().unwrap();
+    assert_eq!(counter(&members, &own), 5);
+    server
+        .raw(
+            &mut session,
+            "PUT",
+            &format!("/api/organizations/{org_id}/policies/5"),
+            Some(json!({ "policy": { "enabled": true, "data": null } })),
+        )
+        .unwrap();
+    members.sync().unwrap();
+
+    // The phones hear a new login can go in IT for the member.
+    assert_eq!(members.no_new_passkey_login(), None);
+    assert_eq!(
+        members.new_passkey_login(),
+        Ok(Some((org_id.clone(), it.clone())))
+    );
+
+    // The server refuses the member's own login its raised counter now, in
+    // its own words, so signing in with it is refused first, in the core's,
+    // before anything is signed; its counter stays at 5.
+    let refused = save_counter(&members, &own, 6).unwrap_err();
+    assert!(refused.to_string().contains("personal vault"), "{refused}");
+    let hash = [9u8; 32];
+    assert_eq!(
+        members
+            .passkey_assert(&own, "own.counts.example.test", &hash, true)
+            .err(),
+        Some(Error::Refused(
+            "your organization keeps items out of Personal, so this login can't be changed. Its passkey counts its sign-ins, and signing in would change the login. You can move it to a shared folder in the web vault, then try again"
+        ))
+    );
+    members.sync().unwrap();
+    assert_eq!(counter(&members, &own), 5);
+
+    // One in IT, which the member may edit, that counts: its raised
+    // counter is saved, then it signs in with it.
+    let shared = members
+        .passkey_create(&new("shared.counts.example.test"))
+        .unwrap()
+        .item_id;
+    assert_eq!(
+        members
+            .vault()
+            .unwrap()
+            .item(&shared)
+            .unwrap()
+            .organization_id
+            .as_deref(),
+        Some(org_id.as_str())
+    );
+    save_counter(&members, &shared, 5).unwrap();
+    members.sync().unwrap();
+    let signed = members
+        .passkey_assert(&shared, "shared.counts.example.test", &hash, true)
+        .unwrap();
+    assert_eq!(&signed.authenticator_data[33..], &[0, 0, 0, 6]);
+    members.sync().unwrap();
+    assert_eq!(counter(&members, &shared), 6);
+
+    // The viewer has no shared folder to add to: no new login, and why,
+    // naming the organization, as New says it.
+    let viewers = signed_in_app(&url, &viewer);
+    assert_eq!(
+        viewers.no_new_passkey_login().as_deref(),
+        Some("Contoso keeps items out of Personal, and you have no shared folder you can add to. Ask an admin for one, then try again.")
+    );
+
+    // The owner isn't bound: a new login, in Personal.
+    let owners = signed_in_app(&url, &owner);
+    assert_eq!(owners.no_new_passkey_login(), None);
+    assert_eq!(owners.new_passkey_login(), Ok(None));
+}
+
 /// Where an organization keeps items out of Personal, a new item from the
 /// editor goes in a shared folder (`App::new_item_places`): a member it
 /// binds is offered no Personal, only the shared folders they may add to,

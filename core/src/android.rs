@@ -437,8 +437,8 @@ pub fn passkey_assert<'caller>(
 
 /// Where a new passkey can go (docs/core.md, "Passkeys", "Where it goes"),
 /// from the request as JSON, answering JSON: the logins it can go in, from
-/// every unlocked account, never a key or a password (ffi.rs,
-/// `pb_passkey_logins`).
+/// every unlocked account, and whether a new login can go in each, never a
+/// key or a password (ffi.rs, `pb_passkey_logins`).
 #[cfg(feature = "ffi")]
 #[jni_mangle("com.passbundle.app.Core")]
 pub fn passkey_logins<'caller>(

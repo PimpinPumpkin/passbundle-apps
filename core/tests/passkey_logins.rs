@@ -6,7 +6,11 @@
 //! replaces), and making one into a login, in place of its old passkey or
 //! beside its password, never into one the phones wouldn't offer; a new
 //! login goes in a shared folder where an organization keeps items out of
-//! Personal, and isn't made with no shared folder to add to. The
+//! Personal, and isn't made, or offered, with no shared folder to add to
+//! (the phones hear why before they'd offer one). A passkey that counts,
+//! in a login of the person's own that an organization keeps out of
+//! Personal, is refused before it signs, since its raised counter can't be
+//! saved there. The
 //! sample's Backup service login has a passkey for backup.example.test; its
 //! Example Mail login is on mail.example.test, the same site by the default
 //! match (example.test).
@@ -652,6 +656,212 @@ fn with_no_shared_folder_to_add_to_no_new_login_is_made() {
     let item = app.vault().unwrap().item(&made.item_id).unwrap();
     assert_eq!(item.organization_id, None);
     assert!(item.collection_ids.is_empty());
+}
+
+/// The sample with Contoso keeping items out of Personal, the person's role
+/// in it `role` (upstream's numbers: 0 owner, 1 admin, 2 user), its shared
+/// folder IT taking new items from them or not (`create`; they may still
+/// edit its items and see their passwords), and the sync changed further
+/// by `edit`.
+fn bound_as(url: &str, role: u64, create: bool, edit: impl FnOnce(&mut Value)) -> Sample {
+    Sample::new(url, &[], move |sync| {
+        sync["profile"]["organizations"][0]["type"] = role.into();
+        sync["policies"] = json!([{ "organizationId": ORG, "type": 5, "enabled": true }]);
+        sync["collections"][0]["keykeeper"]["create"] = create.into();
+        edit(sync);
+    })
+}
+
+/// What the phones say in place of a new login where Contoso keeps the
+/// person's items out of Personal and they have no shared folder to add
+/// to: the words New says it in (places.dart in the app, `nowhereWords`).
+const NOWHERE: &str = "Contoso keeps items out of Personal, and you have no shared folder you can add to. Ask an admin for one, then try again.";
+
+#[test]
+fn the_phones_hear_whether_a_new_login_can_take_a_passkey_before_they_offer_one() {
+    let (url, asked) = stand_in(vec![]);
+    let handle = [4u8; 16];
+
+    // A member Contoso binds, with IT to add to: a new login goes there,
+    // so it's offered.
+    let with_folder = bound_as(&url, 2, true, |_| {});
+    let app = with_folder.unlocked();
+    assert_eq!(
+        app.new_passkey_login(),
+        Ok(Some((ORG.to_owned(), IT.to_owned())))
+    );
+    assert_eq!(app.no_new_passkey_login(), None);
+
+    // Without one, a new login isn't offered: the phones say why, naming
+    // Contoso. Asked for anyway, nothing is made or sent.
+    let without = bound_as(&url, 2, false, |_| {});
+    let mut app = without.unlocked();
+    assert_eq!(app.no_new_passkey_login().as_deref(), Some(NOWHERE));
+    // Nor is their own Example Mail, for example.test, offered.
+    assert!(offered(&app, &site("new.example.test", &handle)).is_empty());
+    assert_eq!(
+        app.new_passkey_login(),
+        Err(Error::Refused(
+            "your organization keeps items out of Personal, and you have no shared folder you can add to. Ask an admin for one, then try again"
+        ))
+    );
+    assert!(app
+        .passkey_create(&new_passkey("new.example.test", &handle, None, &[]))
+        .is_err());
+    assert_eq!(saves(&asked), 0);
+
+    // Its owners and admins aren't bound, folder or not, nor is anyone
+    // where no organization keeps items out of Personal: a new login, in
+    // Personal.
+    for role in [0, 1] {
+        let sample = bound_as(&url, role, false, |_| {});
+        let app = sample.unlocked();
+        assert_eq!(app.new_passkey_login(), Ok(None), "role {role}");
+        assert_eq!(app.no_new_passkey_login(), None, "role {role}");
+    }
+    let free = Sample::new(&url, &[], |_| {});
+    let app = free.unlocked();
+    assert_eq!(app.no_new_passkey_login(), None);
+    assert_eq!(
+        offered(&app, &site("new.example.test", &handle)),
+        ids(&[(MAIL, false)])
+    );
+
+    // A policy that removes logins makes none either, and says so.
+    let removed = Sample::new(&url, &[], |sync| {
+        sync["policies"] = json!([{
+            "organizationId": ORG, "type": 15, "enabled": true, "data": [1],
+        }]);
+    });
+    assert_eq!(
+        removed.unlocked().no_new_passkey_login().as_deref(),
+        Some("An organization you're in doesn't allow that kind of item.")
+    );
+}
+
+#[test]
+fn with_no_new_login_to_offer_a_shared_login_the_person_may_change_still_takes_the_passkey() {
+    let (url, asked) = stand_in(vec![]);
+    let handle = [3u8; 16];
+    let office = websites(&url, OFFICE_WIFI, &["https://office.example.test"]);
+    // A member Contoso binds, who may change IT's items but add none:
+    // Contoso's Office Wi-Fi, for the site, is offered, and no new login.
+    let sample = bound_as(&url, 2, false, move |sync| {
+        for c in sync["ciphers"].as_array_mut().unwrap() {
+            if c["id"] == OFFICE_WIFI {
+                c["login"]["uris"] = office.clone();
+            }
+        }
+    });
+    let mut app = sample.unlocked();
+    let new = site("office.example.test", &handle);
+    assert_eq!(offered(&app, &new), ids(&[(OFFICE_WIFI, false)]));
+    assert_eq!(app.no_new_passkey_login().as_deref(), Some(NOWHERE));
+    // Picked, it goes in beside the login's password, in IT.
+    let made = app
+        .passkey_create(&new_passkey(
+            "office.example.test",
+            &handle,
+            Some(OFFICE_WIFI),
+            &[],
+        ))
+        .unwrap();
+    assert_eq!(made.item_id, OFFICE_WIFI);
+    assert_eq!(saves(&asked), 1);
+    assert_eq!(
+        sent(&asked, &format!("PUT /api/ciphers/{OFFICE_WIFI}")).len(),
+        1
+    );
+    let item = app.vault().unwrap().item(OFFICE_WIFI).unwrap();
+    assert_eq!(item.organization_id.as_deref(), Some(ORG));
+    assert_eq!(item.passkey.as_ref().unwrap().rp_id, "office.example.test");
+    signs_with(&mut app, OFFICE_WIFI, "office.example.test", &made);
+}
+
+/// Backup service's passkey as stored, counting its sign-ins from 5, as
+/// one imported from an authenticator that counts them: encrypted with its
+/// login's key, to keep on the device in place of the sample's (which
+/// stays at 0).
+fn counting_from_5(url: &str) -> Value {
+    let sample = Sample::new(url, &[], |_| {});
+    let app = sample.unlocked();
+    let item = app.vault().unwrap().item(BACKUP).unwrap();
+    let passkey = item.passkey.as_ref().unwrap();
+    assert_eq!(passkey.counter, 0);
+    passkey.with_counter(item.kept.fido2_credentials.as_ref().unwrap(), 5)
+}
+
+/// The counter of an item's passkey, as the vault has it now.
+fn counter(app: &App, id: &str) -> u32 {
+    app.vault()
+        .unwrap()
+        .item(id)
+        .unwrap()
+        .passkey
+        .as_ref()
+        .unwrap()
+        .counter
+}
+
+const COUNTING_KEPT_OUT: &str = "your organization keeps items out of Personal, so this login can't be changed. Its passkey counts its sign-ins, and signing in would change the login. You can move it to a shared folder in the web vault, then try again";
+
+#[test]
+fn a_passkey_that_counts_in_a_login_kept_out_of_personal_is_refused_before_it_signs() {
+    let (url, asked) = stand_in(vec![]);
+    let hash = [7u8; 32];
+    let counting = counting_from_5(&url);
+    let counts = |sync: &mut Value| {
+        for c in sync["ciphers"].as_array_mut().unwrap() {
+            if c["id"] == BACKUP {
+                c["login"]["fido2Credentials"] = counting.clone();
+            }
+        }
+    };
+
+    // A member Contoso binds: Backup service is their own, and its passkey
+    // counts, so signing in would save the login with the raised counter,
+    // which the server refuses. It's still listed for the site, and signing
+    // in with it is refused in words that say what to do, with nothing
+    // signed or sent and the counter where it was.
+    let member = bound_as(&url, 2, true, counts);
+    let mut app = member.unlocked();
+    let vault = app.vault().unwrap();
+    assert_eq!(
+        vault.keeps_out(vault.item(BACKUP).unwrap()),
+        Some("Contoso")
+    );
+    assert_eq!(counter(&app, BACKUP), 5);
+    assert_eq!(app.passkeys_for(SITE).len(), 1);
+    assert_eq!(
+        app.passkey_assert(BACKUP, SITE, &hash, true).err(),
+        Some(Error::Refused(COUNTING_KEPT_OUT))
+    );
+    assert_eq!(saves(&asked), 0);
+    assert_eq!(counter(&app, BACKUP), 5);
+
+    // One that doesn't count (the sample's own, at 0) has nothing to save:
+    // it signs in from the kept-out login as ever, its counter still 0.
+    let plain = bound_as(&url, 2, true, |_| {});
+    let mut app = plain.unlocked();
+    let signed = app.passkey_assert(BACKUP, SITE, &hash, true).unwrap();
+    assert_eq!(&signed.authenticator_data[33..], &[0, 0, 0, 0]);
+    assert_eq!(saves(&asked), 0);
+
+    // Its owners and admins aren't bound: the raised counter is saved in
+    // the login first, then it signs with it.
+    for role in [0, 1] {
+        let sample = bound_as(&url, role, true, counts);
+        let mut app = sample.unlocked();
+        let before = saves(&asked);
+        let signed = app.passkey_assert(BACKUP, SITE, &hash, true).unwrap();
+        assert_eq!(
+            &signed.authenticator_data[33..],
+            &[0, 0, 0, 6],
+            "role {role}"
+        );
+        assert_eq!(saves(&asked), before + 1, "role {role}");
+        assert_eq!(counter(&app, BACKUP), 6, "role {role}");
+    }
 }
 
 #[test]

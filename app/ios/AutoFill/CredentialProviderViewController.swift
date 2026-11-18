@@ -303,8 +303,18 @@ final class Provider: ObservableObject {
   @Published var biometric: String?
   /// The site's passkeys, when it asks for one.
   @Published var passkeys: [Login] = []
-  /// The account a new passkey goes in: one unlocked here.
+  /// The account a new passkey's new login goes in: one unlocked here
+  /// that takes one (`takers`).
   @Published var saveIn: String?
+  /// The accounts unlocked here a new login can't go in, each with why, in
+  /// the core's words (`pb_passkey_logins`' `accounts`): where an
+  /// organization keeps the person's items out of Personal and they have
+  /// no shared folder to add to.
+  @Published var noNewLogin: [String: String] = [:]
+  /// Where no account unlocked here takes a new login: why, in the words
+  /// the core gives for the first of them (the one the app shows), said in
+  /// place of offering one, before anything is picked.
+  @Published var whyNoNewLogin: String?
   /// The logins a new passkey can go in, from each account unlocked here
   /// (`pb_passkey_logins`): the one whose passkey it replaces first.
   @Published var targets: [Login] = []
@@ -374,6 +384,8 @@ final class Provider: ObservableObject {
     verified = []
     targets = []
     saveTo = nil
+    noNewLogin = [:]
+    whyNoNewLogin = nil
     replacing = nil
     chose = false
     replaceAgreed = nil
@@ -468,6 +480,9 @@ final class Provider: ObservableObject {
   /// The accounts still locked here, to unlock for their logins too.
   var locked: [Account] { accounts.filter { !$0.unlocked } }
 
+  /// The accounts unlocked here a new passkey's new login can go in.
+  var takers: [Account] { accounts.filter { $0.unlocked && noNewLogin[$0.id] == nil } }
+
   /// Back to the logins (or to saving a new passkey), from unlocking another
   /// account or a login's master password, once an account is unlocked here.
   func backToLogins() {
@@ -478,18 +493,33 @@ final class Provider: ObservableObject {
   /// The website's logins from each unlocked account, the one the app shows
   /// first, by name, and its passkeys when it asks for one; a suggestion
   /// picked fills or signs at once. Making a passkey asks to save it, with
-  /// the logins it can go in.
+  /// the logins it can go in, and a new login where one can be made.
   private func show() {
     note = nil
     if let making {
-      let unlocked = accounts.filter(\.unlocked).map(\.id)
-      if saveIn == nil || !unlocked.contains(saveIn!) { saveIn = unlocked.first }
       let answer = passkeyLogins(making)
       // The site has one of PassBundle's passkeys already (iOS 18 and later
       // give its list): it's told so, as WebAuthn has it, and nothing is
       // offered in its place.
       if answer?["excluded"] as? Bool == true {
         if #available(iOS 18.0, *) { return finish(.refused(.matchedExcludedCredential)) }
+      }
+      // A new login goes only in an account the core says takes one; where
+      // none here does, the core's words say why instead of offering one.
+      let listed = (answer?["accounts"] as? [[String: Any]]) ?? []
+      var refused: [String: String] = [:]
+      for account in listed {
+        guard let id = account["id"] as? String, account["newLogin"] as? Bool == false else { continue }
+        refused[id] = account["noNewLogin"] as? String ?? "Couldn't save the passkey."
+      }
+      noNewLogin = refused
+      let takers = self.takers.map(\.id)
+      if saveIn == nil || !takers.contains(saveIn!) { saveIn = takers.first }
+      // Where none here takes one: why, in the words for the first the
+      // core lists (the one the app shows).
+      whyNoNewLogin = nil
+      if takers.isEmpty {
+        whyNoNewLogin = listed.compactMap { $0["id"] as? String }.compactMap { refused[$0] }.first
       }
       targets = ((answer?["items"] as? [[String: Any]]) ?? []).compactMap(Self.target)
       if let picked = saveTo, !targets.contains(picked) { saveTo = nil }
@@ -978,7 +1008,9 @@ struct ProviderView: View {
   /// Saving a new passkey: the site's ID first, as iOS checked it, and the
   /// account's name on the site; then the logins it can go in (the one
   /// whose passkey it replaces picked at first), or a new login in the
-  /// PassBundle account chosen. Replacing a passkey asks first.
+  /// PassBundle account chosen, of those that take one. Where none does,
+  /// there's no new login, and the core's words say why. Replacing a
+  /// passkey asks first.
   private var saving: some View {
     Form {
       Section {
@@ -996,20 +1028,32 @@ struct ProviderView: View {
           ForEach(provider.targets) { login in
             target(login)
           }
-          target(nil)
+          if provider.whyNoNewLogin == nil {
+            target(nil)
+          }
         } header: {
           Text("Where it goes")
         } footer: {
-          Text("Add it to one of your logins for this website, or to a new login.")
+          if let why = provider.whyNoNewLogin {
+            Text("Add it to one of your logins for this website. \(why)")
+          } else {
+            Text("Add it to one of your logins for this website, or to a new login.")
+          }
+        }
+      } else if let why = provider.whyNoNewLogin {
+        // No login for the site, and nowhere for a new one: why, before
+        // anything is picked.
+        Section {
+          Text(why)
         }
       }
       Section {
         // A login picked above is in its own account; a new one goes in
-        // the account chosen here.
-        let unlocked = provider.accounts.filter(\.unlocked)
-        if provider.saveTo == nil, provider.accounts.count > 1, !unlocked.isEmpty {
+        // the account chosen here, of those that take one.
+        let takers = provider.takers
+        if provider.saveTo == nil, provider.accounts.count > 1, !takers.isEmpty {
           Picker("Save in", selection: $provider.saveIn) {
-            ForEach(unlocked) { account in
+            ForEach(takers) { account in
               Text(account.label).tag(Optional(account.id))
             }
           }
