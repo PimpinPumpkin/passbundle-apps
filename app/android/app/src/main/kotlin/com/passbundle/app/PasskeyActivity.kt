@@ -382,14 +382,17 @@ class PasskeyActivity : Activity() {
      * takes a new login (an organization keeps the person's items out of
      * Personal and they have no shared folder to add to): the core's words
      * say why, before anything is picked, and the site hears it isn't saved.
+     * The app that asked hears only that: the core's words name the
+     * person's organization, which is theirs to see, not the asking app's.
      */
     private fun nowhere(why: String) {
+        val notSaved = "PassBundle couldn't save the passkey."
         val dialog =
             AlertDialog.Builder(this)
                 .setTitle("PassBundle can't save this passkey")
                 .setMessage(why)
-                .setPositiveButton("OK") { _, _ -> failCreate(why, toast = false) }
-                .setOnCancelListener { failCreate(why, toast = false) }
+                .setPositiveButton("OK") { _, _ -> failCreate(notSaved, toast = false) }
+                .setOnCancelListener { failCreate(notSaved, toast = false) }
                 .create()
         guard(dialog)
         dialog.show()
