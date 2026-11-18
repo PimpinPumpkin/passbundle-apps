@@ -17,12 +17,14 @@
 //! at most once a day as the app opens, if the person leaves that on and the
 //! copy is a release's. Where it can't replace itself (a folder only an
 //! administrator can change, as a system-wide install or a package's), it
-//! only says there's a new version.
+//! only says there's a new version: for a .deb, an .rpm, or a Flatpak, with
+//! that package manager's way to update it ([`package`]).
 
 pub mod access;
 pub mod bundle;
 pub mod fetch;
 pub mod manifest;
+pub mod package;
 pub mod process;
 pub mod swap;
 pub mod unpack;
