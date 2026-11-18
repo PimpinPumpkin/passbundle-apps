@@ -4,6 +4,7 @@ import LocalAuthentication
 import Security
 import UIKit
 import UniformTypeIdentifiers
+import UserNotifications
 
 @main
 @objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate {
@@ -12,6 +13,9 @@ import UniformTypeIdentifiers
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
   ) -> Bool {
     Snapshot.cover()
+    // Expiration reminders (Reminders.swift): one shown while PassBundle is
+    // in front, or tapped, comes here, even when the tap opens the app.
+    UNUserNotificationCenter.current().delegate = self
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)
   }
 
@@ -171,6 +175,36 @@ import UniformTypeIdentifiers
         result(AutoFillSetup.useStandIn(on))
       case "autofillSetupOpened":
         result(AutoFillSetup.opened)
+      // Expiration reminders while the app is closed (Reminders.swift;
+      // closed_reminders.dart): whether notifications show, iOS's question
+      // about them, Settings' page for them, the plan (dates and two
+      // numbers, never a name), the days said, and a tap.
+      case "notificationAccess":
+        Reminders.access(center: UNUserNotificationCenter.current()) { access in
+          DispatchQueue.main.async { result(access) }
+        }
+      case "askNotifications":
+        Reminders.ask(center: UNUserNotificationCenter.current()) { access in
+          DispatchQueue.main.async { result(access) }
+        }
+      case "openNotificationSettings":
+        guard let url = URL(string: UIApplication.openNotificationSettingsURLString) else {
+          result(false)
+          return
+        }
+        UIApplication.shared.open(url) { opened in result(opened) }
+      case "scheduleReminders":
+        let days = Reminders.read((call.arguments as? [String: Any])?["days"])
+        Reminders.schedule(days, center: UNUserNotificationCenter.current()) { added in
+          DispatchQueue.main.async { result(added) }
+        }
+      case "remindersDelivered":
+        Reminders.said(center: UNUserNotificationCenter.current()) { days in
+          DispatchQueue.main.async { result(days) }
+        }
+      case "remindersOpened":
+        result(Reminders.opened)
+        Reminders.opened = false
       default:
         result(FlutterMethodNotImplemented)
       }
@@ -178,6 +212,7 @@ import UniformTypeIdentifiers
     // The phone locking: iOS's notice that protected data is about to become
     // unavailable. The app locks, if the person chose that (main.dart).
     let computer = FlutterMethodChannel(name: "passbundle/computer", binaryMessenger: registrar.messenger())
+    self.computer = computer
     phoneLocks = NotificationCenter.default.addObserver(
       forName: UIApplication.protectedDataWillBecomeUnavailableNotification, object: nil, queue: .main
     ) { _ in
@@ -186,6 +221,40 @@ import UniformTypeIdentifiers
   }
 
   private var phoneLocks: NSObjectProtocol?
+  private var computer: FlutterMethodChannel?
+
+  // An expiration reminder iOS shows while PassBundle is in front: a banner
+  // as at any other time, and kept as said, so the vault doesn't say it
+  // again (Reminders.swift). Anything else, as Flutter would.
+  override func userNotificationCenter(
+    _ center: UNUserNotificationCenter, willPresent notification: UNNotification,
+    withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+  ) {
+    let identifier = notification.request.identifier
+    guard Reminders.day(of: identifier) != nil else {
+      super.userNotificationCenter(center, willPresent: notification, withCompletionHandler: completionHandler)
+      return
+    }
+    Reminders.keepSaid(identifier)
+    completionHandler([.banner, .list, .sound])
+  }
+
+  // One tapped: kept as said, and the vault shows Expiring soon, now or
+  // once it's unlocked (main.dart, vault.dart).
+  override func userNotificationCenter(
+    _ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
+    withCompletionHandler completionHandler: @escaping () -> Void
+  ) {
+    let identifier = response.notification.request.identifier
+    guard Reminders.day(of: identifier) != nil else {
+      super.userNotificationCenter(center, didReceive: response, withCompletionHandler: completionHandler)
+      return
+    }
+    Reminders.keepSaid(identifier)
+    Reminders.opened = true
+    computer?.invokeMethod("expiring", arguments: nil)
+    completionHandler()
+  }
 }
 
 /// Picking a file to attach to an item (docs/phones.md, "Attachments"):

@@ -20,6 +20,10 @@
 // confirmation (no key goes); a wrong number says it denied the sign-in;
 // Deny denies; "Not now" brings it back after 2 minutes; one answered
 // elsewhere closes; and Settings lists them beside the requests.
+//
+// And a session that began from another device's approval
+// (device_sign_in.dart): Settings says why it can't approve a "Sign in with
+// a device" request, while a new device's check still shows there.
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -98,9 +102,17 @@ class StandIn implements SignInRequestSource {
     return Answer({'ok': true});
   }
 
+  /// Whether the account shown may approve a "Sign in with a device"
+  /// request: not when its session began from an approval.
+  bool approvesHere = true;
+
   @override
-  Future<Answer> list() async =>
-      Answer({'ok': true, 'requests': requests, 'checks': checks});
+  Future<Answer> list() async => Answer({
+    'ok': true,
+    'requests': requests,
+    'checks': checks,
+    'approvesHere': approvesHere,
+  });
 
   @override
   Future<Answer> answerCheck(
@@ -379,6 +391,45 @@ void main() {
     list.stop();
     expect(list.checks, isEmpty);
   });
+
+  testWidgets(
+    'Settings says why a session that began from an approval approves no request',
+    (tester) async {
+      final source = StandIn()
+        ..approvesHere = false
+        ..checks = [checkWaiting('c1')];
+      final list = SignInRequests(source)..start();
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: passBundleTheme(Brightness.light),
+          home: Scaffold(
+            body: SingleChildScrollView(
+              child: SignInRequestsSettings(requests: list),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final note = find.byKey(const ValueKey('approval-session'));
+      expect(note, findsOneWidget);
+      expect(
+        find.textContaining(
+          'This device signed in with another device\'s approval',
+        ),
+        findsOneWidget,
+      );
+      expect(find.text('A new device\'s number still works here.'), findsOneWidget);
+      // A new device's check still shows, to answer with its number.
+      expect(find.byKey(const ValueKey('new-device-check-c1')), findsOneWidget);
+
+      // Signed in with the master password since: the note goes.
+      source.approvesHere = true;
+      await list.check();
+      await tester.pumpAndSettle();
+      expect(note, findsNothing);
+      list.stop();
+    },
+  );
 
   testWidgets('Settings lists a new device\'s check beside the requests', (
     tester,

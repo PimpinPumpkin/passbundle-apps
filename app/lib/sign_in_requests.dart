@@ -17,6 +17,10 @@
 // unlocked one while a vault is shown, and each request is listed,
 // confirmed, and answered for its own account, which the prompt names.
 //
+// A session that began from another device's approval (device_sign_in.dart)
+// approves no "Sign in with a device" request: the server refuses it, so the
+// core lists none for it, and Settings says why.
+//
 // Beside them, sign-ins on new devices that the new-device check holds
 // (DESIGN.md in the meta repo, "New-device check"): the prompt shows the
 // device, where it's from, and when, and takes the number the new device
@@ -173,7 +177,9 @@ String timeLeft(Duration left) => left.inMinutes < 1
 
 /// What the prompt and Settings ask of the core, which tests stand in for.
 abstract class SignInRequestSource {
-  /// The requests waiting, from the server (`ok`, `requests`).
+  /// The requests waiting, from the server (`ok`, `requests`, `checks`),
+  /// and whether the account shown may approve a "Sign in with a device"
+  /// request (`approvesHere`: not when its session began from an approval).
   Future<Answer> list();
 
   /// Approves or denies one, for its [account] (the one shown when null);
@@ -216,6 +222,7 @@ class CoreSignInRequests implements SignInRequestSource {
     final checks = <Map<String, dynamic>>[];
     Answer? failed;
     var listed = false;
+    var approvesHere = true;
     for (final (id, email) in unlocked) {
       final answer = await Core.signInRequests(id);
       if (!answer.ok) {
@@ -223,6 +230,9 @@ class CoreSignInRequests implements SignInRequestSource {
         continue;
       }
       listed = true;
+      if (id == shown && answer.body['approves'] == false) {
+        approvesHere = false;
+      }
       for (final r in (answer.body['requests'] as List? ?? const [])) {
         requests.add({
           ...Map<String, dynamic>.from(r as Map),
@@ -240,7 +250,12 @@ class CoreSignInRequests implements SignInRequestSource {
       }
     }
     if (!listed && failed != null) return failed;
-    return Answer({'ok': true, 'requests': requests, 'checks': checks});
+    return Answer({
+      'ok': true,
+      'requests': requests,
+      'checks': checks,
+      'approvesHere': approvesHere,
+    });
   }
 
   @override
@@ -294,6 +309,10 @@ class SignInRequests extends ChangeNotifier {
 
   /// Sign-ins on new devices waiting for a number.
   List<NewDeviceCheck> checks = const [];
+
+  /// Whether the account shown may approve a "Sign in with a device"
+  /// request: not when its session began from another device's approval.
+  bool approvesHere = true;
   final _prompted = <String>{};
 
   /// When each check was last prompted for.
@@ -357,6 +376,7 @@ class SignInRequests extends ChangeNotifier {
     pause();
     requests = const [];
     checks = const [];
+    approvesHere = true;
     _prompted.clear();
     _promptedDevices.clear();
     _promptedChecks.clear();
@@ -387,6 +407,7 @@ class SignInRequests extends ChangeNotifier {
                 .cast<Map<String, dynamic>>())
           NewDeviceCheck(c),
       ];
+      approvesHere = answer.body['approvesHere'] != false;
       notifyListeners();
     } finally {
       _asking = false;
@@ -1109,9 +1130,22 @@ class _SignInRequestsSettingsState extends State<SignInRequestsSettings> {
       footer:
           note ??
           'When you sign in on a new device, or choose "Sign in with a device" '
-              'on the web vault or in the browser extension, approve it here.${isPhone ? ' Requests show while PassBundle is open.' : ''}',
+              'on another device, approve it here.${isPhone ? ' Requests show while PassBundle is open.' : ''}',
       footerColor: note == null ? null : Theme.of(context).colorScheme.error,
       children: [
+        if (!requests.approvesHere)
+          ListTile(
+            key: const ValueKey('approval-session'),
+            leading: const Icon(Icons.info_outline),
+            title: const Text(
+              'This device signed in with another device\'s approval, so it '
+              'can\'t approve "Sign in with a device" requests. To approve '
+              'them here, sign out, then sign in with your master password.',
+            ),
+            subtitle: const Text(
+              'A new device\'s number still works here.',
+            ),
+          ),
         if (waiting.isEmpty && checks.isEmpty)
           const ListTile(title: Text('None waiting')),
         for (final c in checks)

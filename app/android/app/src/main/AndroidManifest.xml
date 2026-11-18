@@ -12,6 +12,9 @@
     <uses-feature android:name="android.hardware.nfc" android:required="false" />
     <!-- Security keys plugged in, for two-step login (SecurityKeys.kt); Android asks the person each time. -->
     <uses-feature android:name="android.hardware.usb.host" android:required="false" />
+    <!-- Expiration reminders while PassBundle is closed (Reminders.kt): its notifications, which Android 13 and later ask the person about once, and its alarms set again after the phone restarts. No exact alarms: each is inexact, at 9:00. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <application
         android:label="PassBundle"
         android:name="${applicationName}"
@@ -110,6 +113,17 @@
         <receiver
             android:name=".update.InstallStatus"
             android:exported="false" />
+        <!-- An expiration reminder's alarm, and the phone restarting, the app updating, or the clock or time zone changing, which set the alarms again (Reminders.kt). Only Android sends these. -->
+        <receiver
+            android:name=".ReminderAlarm"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <action android:name="android.intent.action.TIME_SET" />
+                <action android:name="android.intent.action.TIMEZONE_CHANGED" />
+            </intent-filter>
+        </receiver>
         <!-- What an organization's MDM can set: the server (app_restrictions.xml). -->
         <meta-data
             android:name="android.content.APP_RESTRICTIONS"

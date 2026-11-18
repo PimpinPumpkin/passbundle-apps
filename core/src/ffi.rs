@@ -352,6 +352,11 @@ fn step(result: crate::Result<Step>) -> Value {
             "step": "newDevice",
             "check": new_device_check(&check),
         }),
+        Ok(Step::DeviceSignIn(request)) => json!({
+            "ok": true,
+            "step": "deviceSignIn",
+            "request": device_sign_in(&request),
+        }),
         // A single sign-on went through: the master password for the
         // account's email unlocks next (`pb_sso_unlock`).
         Ok(Step::MasterPassword(email)) => json!({
@@ -361,6 +366,19 @@ fn step(result: crate::Result<Step>) -> Value {
         }),
         Err(e) => failed(e),
     }
+}
+
+/// A request to sign in with a device, as its screen shows it
+/// (device_signin.rs): `{email, fingerprint, status ("waiting", "denied",
+/// "expired", "badKey", "unusable"), secondsLeft}`. Never its key or access
+/// code.
+fn device_sign_in(request: &crate::device_signin::Request) -> Value {
+    json!({
+        "email": request.email,
+        "fingerprint": request.fingerprint,
+        "status": request.status.name(),
+        "secondsLeft": request.left,
+    })
 }
 
 /// A sign-in the new-device check holds, as the waiting screen shows it
@@ -630,8 +648,9 @@ pub unsafe extern "C" fn pb_list_all(query: *const c_char) -> *mut c_char {
     })
 }
 
-/// Gives up the sign-in waiting for its second step, and the account being
-/// added: answers as `pb_accounts`.
+/// Gives up the sign-in waiting for its second step, or for another
+/// device's approval (its key with it), and the account being added:
+/// answers as `pb_accounts`.
 #[no_mangle]
 pub extern "C" fn pb_cancel_sign_in() -> *mut c_char {
     with_accounts(|accounts| {
@@ -1055,6 +1074,49 @@ pub unsafe extern "C" fn pb_finish_sign_in(
     with_accounts_waiting(|accounts| {
         let result = accounts.finish_sign_in(provider, &code, remember);
         signed_in(accounts, result)
+    })
+}
+
+/// Asks to sign in with another device's approval (DESIGN.md in the meta
+/// repo, "Our apps asking"), on a device that has signed in to the account
+/// before: the same answer as `pb_sign_in`, `deviceSignIn` with the phrase to
+/// compare. Asked again, it sends a new request in this one's place
+/// ("Resend"). `pb_cancel_sign_in` gives it up.
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_sign_in_with_device(
+    server: *const c_char,
+    email: *const c_char,
+) -> *mut c_char {
+    let (server, email) = (text(server), text(email));
+    with_accounts_waiting(|accounts| {
+        let result = accounts.sign_in_with_device(&server, &email);
+        asked_device(accounts, result)
+    })
+}
+
+/// `signed_in`, and on a failure whether a request to sign in with a device
+/// still waits (`asking`): a moment offline or a problem of the server's
+/// leaves it waiting; a refusal of the sign-in ends it.
+fn asked_device(accounts: &Accounts, result: crate::Result<Step>) -> Value {
+    let mut answer = signed_in(accounts, result);
+    if answer["ok"] != json!(true) {
+        answer["asking"] = json!(accounts.asking_device());
+    }
+    answer
+}
+
+/// How the request to sign in with a device stands now, asked every 5
+/// seconds while it waits: the same answer as `pb_sign_in` (`deviceSignIn`
+/// with how it stands, `twoFactor`, or `done` once it's approved and the
+/// vault is open).
+#[no_mangle]
+pub extern "C" fn pb_device_sign_in_status() -> *mut c_char {
+    with_accounts_waiting(|accounts| {
+        let result = accounts.device_sign_in_status();
+        asked_device(accounts, result)
     })
 }
 
@@ -2904,14 +2966,25 @@ pub unsafe extern "C" fn pb_test_expiration(given: *const c_char) -> *mut c_char
 /// standing: {soon, expired}}`. `title` is what to say ("2 items expire
 /// soon"), null when nothing is due; `standing` is every item at one of its
 /// steps, shown before or not, which a computer's desktop agent is told for
-/// its tray.
+/// its tray. On a phone, `delivered` is the days whose reminder the phone
+/// said while PassBundle was closed (`["YYYY-MM-DD"]`; null, or anything
+/// else, for none): what they covered counts as shown first
+/// (`App::reminders`).
 ///
 /// # Safety
-/// `account` is null or a NUL-terminated UTF-8 string, valid for the call.
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
 #[no_mangle]
-pub unsafe extern "C" fn pb_reminders(account: *const c_char) -> *mut c_char {
+pub unsafe extern "C" fn pb_reminders(
+    account: *const c_char,
+    delivered: *const c_char,
+) -> *mut c_char {
     let account = text(account);
-    with_app(&account, |app| match app.reminders() {
+    let delivered: Vec<expiration::Date> = serde_json::from_str::<Vec<String>>(&text(delivered))
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|day| expiration::Date::parse_iso(day))
+        .collect();
+    with_app(&account, |app| match app.reminders(&delivered) {
         Ok(found) => json!({
             "ok": true,
             "title": expiration::words(found.due),
@@ -2919,6 +2992,26 @@ pub unsafe extern "C" fn pb_reminders(account: *const c_char) -> *mut c_char {
             "standing": found.standing,
         }),
         Err(e) => failed(e),
+    })
+}
+
+/// What a phone says while PassBundle is closed (docs/phones.md), for every
+/// account on it: `{ok, days: [{date, soon, expired}]}`, the days from today
+/// with reminders ("YYYY-MM-DD"), soonest first, at most 30, each with how
+/// many items expire soon and how many have expired, never which. Each
+/// unlocked account's are worked out again first (`Accounts::reminder_plan`).
+/// The phone makes its own words from the two numbers.
+#[no_mangle]
+pub extern "C" fn pb_reminder_plan() -> *mut c_char {
+    with_accounts(|accounts| {
+        let days: Vec<Value> = accounts
+            .reminder_plan()
+            .into_iter()
+            .map(|(date, counts)| {
+                json!({ "date": date.iso(), "soon": counts.soon, "expired": counts.expired })
+            })
+            .collect();
+        json!({ "ok": true, "days": days })
     })
 }
 
@@ -3943,6 +4036,9 @@ pub unsafe extern "C" fn pb_sign_in_requests(account: *const c_char) -> *mut c_c
                             json!({
                                 "ok": true,
                                 "requests": sign_in_requests(&requests),
+                                // A session that began from another
+                                // device's approval approves none.
+                                "approves": call.approves,
                                 "checks": new_device_checks(&checks),
                                 "locationSource": source.map(|s| json!({ "name": s.name, "url": s.url })),
                             })

@@ -208,6 +208,12 @@ class Core {
   late final _newDeviceCode = _lib.lookupFunction<_Str1, _Str1>(
     'pb_new_device_code',
   );
+  late final _signInWithDevice = _lib.lookupFunction<_Str2, _Str2>(
+    'pb_sign_in_with_device',
+  );
+  late final _deviceSignInStatus = _lib.lookupFunction<_Str0, _Str0>(
+    'pb_device_sign_in_status',
+  );
   late final _duoStart = _lib.lookupFunction<_Str0, _Str0>('pb_duo_start');
   late final _duoFinish = _lib
       .lookupFunction<
@@ -295,7 +301,10 @@ class Core {
   late final _testOwnHealthSeenBy = _lib.lookupFunction<_Str1, _Str1>(
     'pb_test_own_health_seen_by',
   );
-  late final _reminders = _lib.lookupFunction<_Str1, _Str1>('pb_reminders');
+  late final _reminders = _lib.lookupFunction<_Str2, _Str2>('pb_reminders');
+  late final _reminderPlan = _lib.lookupFunction<_Str0, _Str0>(
+    'pb_reminder_plan',
+  );
   late final _testExpiration = _lib.lookupFunction<_Str1, _Str1>(
     'pb_test_expiration',
   );
@@ -653,6 +662,34 @@ class Core {
       (c, _) => c._with([code], (p) => c._answer(c._newDeviceCode(p[0]))),
     ),
   );
+
+  /// Asks to sign in with another device's approval (device_sign_in.dart,
+  /// core/src/device_signin.rs), on a device that has signed in to the
+  /// account before: as [signIn] answers, `deviceSignIn` with its `request`
+  /// (the phrase to compare, and how it stands). Asked again, it sends a new
+  /// request in this one's place ("Resend"). A failure says whether a
+  /// request still waits (`asking`).
+  static Future<Answer> signInWithDevice(String server, String email) =>
+      _signedIn(
+        _background(
+          (c, _) => c._with([
+            server,
+            email,
+          ], (p) => c._answer(c._signInWithDevice(p[0], p[1]))),
+        ),
+      );
+
+  /// How the request to sign in with a device stands now, asked every 5
+  /// seconds while it waits: as [signIn] answers, `deviceSignIn` with its
+  /// `request`, `twoFactor`, or `done` once it's approved and the vault is
+  /// open. A failure says whether the request still waits (`asking`).
+  static Future<Answer> deviceSignInStatus() =>
+      _signedIn(_background((c, _) => c._answer(c._deviceSignInStatus())));
+
+  /// Gives up the request to sign in with a device, and its key with it,
+  /// away from the screens: a call asking how it stands may have the core.
+  static Future<Answer> giveUpDeviceSignIn() =>
+      _background((c, _) => {...c.cancelSignIn(), 'ok': true});
 
   /// Duo's address for the sign-in waiting for its second step, for the
   /// browser (two_step.dart): `{ok, url}`, or a sign-in that went through
@@ -1604,9 +1641,23 @@ class Core {
   /// once: `title` ("2 items expire soon", or null when nothing is due),
   /// `due` and `standing` (`{soon, expired}`). On a computer the core also
   /// tells the desktop agent's tray `standing`: how many items, never which.
-  static Future<Answer> reminders() => _background(
-    (c, a) => c._with([a], (p) => c._answer(c._reminders(p[0]))),
-  );
+  /// On a phone, [delivered] is the days ("YYYY-MM-DD") whose reminder the
+  /// phone said while PassBundle was closed (closed_reminders.dart): what
+  /// they covered counts as said already.
+  static Future<Answer> reminders([List<String> delivered = const []]) =>
+      _background(
+        (c, a) => c._with([
+          a,
+          jsonEncode(delivered),
+        ], (p) => c._answer(c._reminders(p[0], p[1]))),
+      );
+
+  /// What a phone says while PassBundle is closed, for every account on it
+  /// (closed_reminders.dart): `days`, each `{date, soon, expired}`, from
+  /// today, soonest first, at most 30. Each unlocked account's are worked
+  /// out again first. How many items, never which.
+  static Future<Answer> reminderPlan() =>
+      _background((c, _) => c._answer(c._reminderPlan()));
 
   /// An item's past versions (core/src/history.rs), from the server:
   /// `{hidePasswords, canRestore, canClear, unreadable, versions: [{id,

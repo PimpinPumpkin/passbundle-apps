@@ -17,6 +17,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:passbundle/attaching.dart';
 import 'package:passbundle/core.dart';
+import 'package:passbundle/device_sign_in.dart';
 import 'package:passbundle/icons.dart';
 import 'package:passbundle/main.dart';
 import 'package:passbundle/sign_in_requests.dart';
@@ -125,6 +126,30 @@ Future<void> unlock(WidgetTester tester, {bool phone = false}) async {
   await pumpUntil(tester, find.text(phone ? 'Logins' : 'Backup service'));
   // The offline banner (no server behind the sample) settles first.
   await pumpUntil(tester, find.textContaining('Sign in again to get changes'));
+}
+
+/// Signing in with a device (device_sign_in.dart), as the core answers while
+/// the request waits for another device's approval.
+class _DeviceSignIn extends DeviceSignInCalls {
+  static final _waiting = Answer({
+    'ok': true,
+    'step': 'deviceSignIn',
+    'request': {
+      'email': 'dana@example.test',
+      'fingerprint': 'pacifier-unvisited-amuser-sublime-tropics',
+      'status': 'waiting',
+      'secondsLeft': 900,
+    },
+  });
+
+  @override
+  Future<Answer> start(String server, String email) async => _waiting;
+
+  @override
+  Future<Answer> status() async => _waiting;
+
+  @override
+  Future<void> giveUp() async {}
 }
 
 /// A sign-in waiting for an answer (sign_in_requests.dart), as the core
@@ -241,6 +266,33 @@ void main() {
       await tester.pumpWidget(PassBundleApp(themeMode: theme));
       await shoot('sign-in-$b', tester);
     });
+
+    // Signing in with a device: the phrase to compare with the approving
+    // device's, on a computer and on a phone.
+    for (final phone in [false, true]) {
+      final where = phone ? 'phone' : 'desktop';
+      shots('signing in with a device, $where, $b', (tester) async {
+        debugDeviceSignIn = _DeviceSignIn();
+        addTearDown(() => debugDeviceSignIn = null);
+        if (phone) {
+          await size(tester, const Size(390, 844));
+          PhoneStandIn(tester);
+        } else {
+          await size(tester, const Size(1280, 800));
+          onComputer(tester, windows);
+        }
+        openEmpty();
+        await tester.pumpWidget(PassBundleApp(themeMode: theme));
+        await tester.enterText(
+          find.widgetWithText(TextField, 'Email'),
+          'dana@example.test',
+        );
+        await tester.tap(find.byKey(const ValueKey('sign-in-with-device')));
+        await tester.pump();
+        await tester.pump();
+        await shoot('device-sign-in-$where-$b', tester);
+      });
+    }
 
     shots('unlock, vault, item, editor, desktop, $b', (tester) async {
       await size(tester, const Size(1280, 800));

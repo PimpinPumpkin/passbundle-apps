@@ -1,6 +1,8 @@
 // Signing in (with two-step login, and the new-device check on a device the
-// account has never used), making an account, and unlocking the vault kept
-// on this device, with the master password, biometrics, or a PIN (pin.dart).
+// account has never used, or with another device's approval instead of the
+// master password: device_sign_in.dart), making an account, and unlocking
+// the vault kept on this device, with the master password, biometrics, or a
+// PIN (pin.dart).
 // The master password or PIN goes to the core and the
 // field is cleared at once (docs/core.md, "Memory"). People sign in to
 // PassBundle's own server without being asked; a server an organization set
@@ -18,6 +20,7 @@ import 'package:flutter/material.dart';
 
 import 'accounts.dart';
 import 'core.dart';
+import 'device_sign_in.dart';
 import 'new_device.dart';
 import 'sso.dart';
 import 'theme.dart';
@@ -351,6 +354,60 @@ class _SignInScreenState extends State<SignInScreen> {
     });
   }
 
+  /// Signing in with a device: the core's answer with the request
+  /// (device_sign_in.dart), and the server it went to.
+  Map<String, dynamic>? deviceRequest;
+  String deviceServer = '';
+
+  /// Asking to sign in with a device: its button spins meanwhile.
+  bool startingDevice = false;
+
+  /// "Sign in with a device": the request, with the email and server typed
+  /// above. The master password field doesn't keep anything typed in it.
+  Future<void> signInWithDevice() async {
+    final address = email.text.trim();
+    if (address.isEmpty) {
+      setState(
+        () => emailError = 'Type your email first, then sign in with a device.',
+      );
+      return;
+    }
+    password.clear();
+    final server = signInTo;
+    setState(() {
+      working = true;
+      startingDevice = true;
+      error = null;
+      emailError = null;
+      serverError = null;
+    });
+    final answer = await whileBusy(
+      () => deviceSignInCalls.start(server, address),
+    );
+    if (!mounted) return;
+    setState(() => startingDevice = false);
+    if (aboutTheServer(answer)) return;
+    if (answer.ok && answer.body['step'] == 'deviceSignIn') {
+      setState(() {
+        working = false;
+        deviceRequest = answer.body;
+        deviceServer = server;
+      });
+    } else {
+      signedIn(answer);
+    }
+  }
+
+  /// Back from signing in with a device to the master password, with what
+  /// to say under it.
+  void backToPassword(String? said) {
+    setState(() {
+      deviceRequest = null;
+      working = false;
+      error = said;
+    });
+  }
+
   Future<void> signIn() async {
     final typed = password.text;
     // The core has it now; the field doesn't keep it.
@@ -510,13 +567,18 @@ class _SignInScreenState extends State<SignInScreen> {
     canPop:
         twoStep == null &&
         newDevice == null &&
+        deviceRequest == null &&
         sso == null &&
         ssoUnlock == null &&
         !creating &&
         widget.onCancel == null,
     onPopInvokedWithResult: (popped, _) {
       if (popped || working) return;
-      if (ssoUnlock != null) {
+      if (deviceRequest != null) {
+        // The request is given up, and its key with it.
+        deviceSignInCalls.giveUp();
+        backToPassword(null);
+      } else if (ssoUnlock != null) {
         startOverAfterSso();
       } else if (sso != null) {
         // The single sign-on screen stops a browser it was waiting on.
@@ -548,6 +610,21 @@ class _SignInScreenState extends State<SignInScreen> {
   );
 
   Widget _screen(BuildContext context) {
+    final asked = deviceRequest;
+    if (asked != null) {
+      return DeviceSignInScreen(
+        // Each request's screen starts afresh.
+        key: ObjectKey(asked),
+        server: deviceServer,
+        answer: asked,
+        onSignedIn: widget.onSignedIn,
+        onTwoStep: (offer) => setState(() {
+          deviceRequest = null;
+          twoStep = offer;
+        }),
+        onPassword: backToPassword,
+      );
+    }
     if (ssoUnlock case final account?) {
       return SsoUnlockScreen(
         key: ValueKey(account),
@@ -652,7 +729,29 @@ class _SignInScreenState extends State<SignInScreen> {
           ),
         ),
         const SizedBox(height: 16),
-        WorkingButton(label: 'Sign in', working: working, onPressed: signIn),
+        WorkingButton(
+          label: 'Sign in',
+          // Asking to sign in with a device spins its own button.
+          working: working && !startingDevice,
+          onPressed: startingDevice ? null : signIn,
+        ),
+        const SizedBox(height: 4),
+        // Instead of the master password: approved on another device where
+        // the person is signed in.
+        TextButton.icon(
+          key: const ValueKey('sign-in-with-device'),
+          onPressed: working || gettingHint ? null : signInWithDevice,
+          icon: startingDevice
+              ? const SizedBox.square(
+                  dimension: 18,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    semanticsLabel: 'Asking to sign in with a device',
+                  ),
+                )
+              : const Icon(Icons.devices_outlined, size: 20),
+          label: const Text('Sign in with a device'),
+        ),
         // The organization's sign-in instead (sso.dart).
         TextButton(
           key: const ValueKey('use-sso'),
