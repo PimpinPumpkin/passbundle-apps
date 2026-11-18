@@ -13,6 +13,7 @@ import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 
 import 'accounts.dart';
+import 'closed_reminders.dart';
 import 'core.dart';
 import 'sign_in.dart';
 import 'theme.dart';
@@ -56,6 +57,10 @@ Future<void> main(List<String> args) async {
     unawaited(SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge));
   }
   await Core.openOnThisDevice();
+  // On a phone, the reminders it says while PassBundle is closed, as each
+  // account last had them: an account a policy signed out of while closed
+  // is gone, and so are its (closed_reminders.dart).
+  unawaited(scheduleClosedReminders());
   // How the window's top is drawn on a computer (window_chrome.dart), known
   // before the first frame, so the app opens as it stays.
   await WindowFrameKeeper.instance.load();
@@ -225,8 +230,12 @@ class _PassBundleAppState extends State<PassBundleApp> {
       // Shown unlocked (or signed out): an ask from before is done with.
       if (state['state'] != 'locked') biometricAsksTaken = biometricAsks;
     });
-    // An account signed out of: iOS forgets what it suggested from it.
-    if (signedIn.length < before.length) Core.suggest();
+    // An account signed out of: iOS forgets what it suggested from it, and
+    // the phone the reminders it had waiting for it (closed_reminders.dart).
+    if (signedIn.length < before.length) {
+      Core.suggest();
+      unawaited(scheduleClosedReminders());
+    }
     watch();
   }
 
@@ -316,6 +325,9 @@ class _PassBundleAppState extends State<PassBundleApp> {
     if (call.method == 'settings' && state['state'] == 'unlocked') {
       settingsAsked.value++;
     }
+    // A phone's expiration reminder tapped while PassBundle runs: the vault
+    // shows Expiring soon, now or once it's unlocked (closed_reminders.dart).
+    if (call.method == 'expiring') expiringAsked.value++;
   }
 
   /// The person used the app: the core hears it at most once a second.

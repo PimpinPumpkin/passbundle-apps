@@ -90,6 +90,9 @@ pub struct Screenshots {
 /// The account's sealed refresh token, on the Mac (secrets.rs).
 const SEALED_REFRESH_TOKEN: &str = "session.sealed";
 
+/// The expiration reminders a phone has waiting for the account (expiration.rs).
+const REMINDER_SCHEDULE: &str = "schedule.json";
+
 impl Store {
     /// The app's own folder: the OS's local app data folder (AppData\Local on
     /// Windows, Application Support on macOS, ~/.local/share on Linux), in
@@ -237,13 +240,14 @@ impl Store {
         }
     }
 
-    /// Signing out forgets the vault, the reminders shown for its items,
-    /// and the account's PIN (pin.rs); the server and email stay, to sign
-    /// in again.
+    /// Signing out forgets the vault, the reminders shown for its items and
+    /// those a phone has waiting, and the account's PIN (pin.rs); the server
+    /// and email stay, to sign in again.
     pub fn forget_vault(&self) {
         for name in [
             "sync.json",
             "reminders.json",
+            REMINDER_SCHEDULE,
             SEALED_REFRESH_TOKEN,
             crate::pin::FILE,
         ] {
@@ -263,6 +267,26 @@ impl Store {
         self.write(
             "reminders.json",
             &serde_json::to_string_pretty(shown).expect("reminders always serialize"),
+        )
+    }
+
+    /// The reminders a phone has waiting for this account's items, by day
+    /// (expiration.rs, `Schedule`): ids, dates, and steps, never a name.
+    /// None kept on a computer, which never asks for them.
+    pub fn reminder_schedule(&self) -> crate::expiration::Schedule {
+        self.read(REMINDER_SCHEDULE)
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn has_reminder_schedule(&self) -> bool {
+        self.path(REMINDER_SCHEDULE).is_some_and(|p| p.is_file())
+    }
+
+    pub fn save_reminder_schedule(&self, schedule: &crate::expiration::Schedule) -> Result<()> {
+        self.write(
+            REMINDER_SCHEDULE,
+            &serde_json::to_string_pretty(schedule).expect("a schedule always serializes"),
         )
     }
 

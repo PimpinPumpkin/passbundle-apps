@@ -7,7 +7,8 @@ use std::collections::HashMap;
 
 use passbundle_core::crypto::{EncString, SymmetricKey};
 use passbundle_core::expiration::{
-    self, check, expiring, Counts, Date, Remind, ShownReminders, State, REMIND_FIELD,
+    self, check, expiring, mark_delivered, plan, schedule, Counts, Date, Remind, Schedule, Shown,
+    ShownReminders, State, MOST_REMINDER_DAYS, REMIND_FIELD,
 };
 use passbundle_core::health::{own_counts, OwnCounts};
 use passbundle_core::kdf::Prelogin;
@@ -18,6 +19,7 @@ const WIFI: &str = "4e5f6071-8293-4a41-bcd2-e3f405162738";
 const BACKUP: &str = "5f607182-93a4-4b52-cde3-f40516273849";
 const GATE: &str = "60718293-a4b5-4c63-def4-05162738495a";
 const CARD: &str = "718293a4-b5c6-4d74-8f01-162738495a6b";
+const IDENTITY: &str = "8293a4b5-c6d7-4e85-9012-2738495a6b7c";
 
 struct Sample {
     v: serde_json::Value,
@@ -363,5 +365,285 @@ fn own_logins_are_counted_in_numbers_only_never_an_organizations() {
     assert_eq!(
         sent,
         serde_json::json!({ "logins": 2, "weak": 1, "reused": 0 })
+    );
+}
+
+/// A phone's schedule as the days it says something, and how many.
+fn said(schedule: &Schedule) -> Vec<(String, Counts)> {
+    schedule
+        .iter()
+        .map(|(day, steps)| (day.clone(), expiration::counts(steps)))
+        .collect()
+}
+
+fn c(soon: u32, expired: u32) -> Counts {
+    Counts { soon, expired }
+}
+
+/// The days a phone reminds on while PassBundle is closed (docs/phones.md),
+/// by the in-app rules: each item's own days, then once expired, each step
+/// once for a date, nothing for `none`; several items on one day are one
+/// day's count; today's, and what's further off than the item's days, wait.
+#[test]
+fn a_phone_schedules_each_coming_day_by_each_items_own_days() {
+    let mut sample = Sample::new();
+    // 30, 7, and 1 day before, by default.
+    sample.field(MAIL, EXPIRES_FIELD, "2026-12-01");
+    // 7 and 1 day before, and its date a week sooner.
+    sample.field(GATE, EXPIRES_FIELD, "2026-11-20");
+    sample.field(GATE, REMIND_FIELD, "7,1");
+    // The same date as the gate code, with the default days.
+    sample.field(IDENTITY, EXPIRES_FIELD, "2026-11-20");
+    // "Don't remind me": never, even once it has expired.
+    sample.field(CARD, EXPIRES_FIELD, "2026-11-20");
+    sample.field(CARD, REMIND_FIELD, "none");
+    let vault = sample.open();
+    let today = day("2026-11-07");
+
+    let ahead = schedule(&vault, &ShownReminders::new(), today);
+    assert_eq!(
+        said(&ahead),
+        vec![
+            // A week before the gate code and the identity: both.
+            ("2026-11-13".into(), c(2, 0)),
+            ("2026-11-19".into(), c(2, 0)),
+            // Once they've expired.
+            ("2026-11-21".into(), c(0, 2)),
+            ("2026-11-24".into(), c(1, 0)),
+            ("2026-11-30".into(), c(1, 0)),
+            ("2026-12-02".into(), c(0, 1)),
+        ]
+    );
+    // Today's are the app's own to say (Example Mail at 30 days, the
+    // identity at 30), and the card says nothing.
+    assert!(!ahead.contains_key("2026-11-07"));
+    assert!(ahead.values().all(|steps| !steps.contains_key(CARD)));
+    // What's kept is ids, dates, and steps, never a name.
+    assert_eq!(
+        ahead["2026-11-13"][GATE],
+        Shown {
+            date: "2026-11-20".into(),
+            level: "7".into()
+        }
+    );
+    let kept = serde_json::to_string(&ahead).unwrap();
+    assert!(!kept.contains("Example Mail") && !kept.contains("Gate code"));
+
+    // As the app says them, each day: the same days and counts.
+    let mut shown = ShownReminders::new();
+    let mut found = Vec::new();
+    for ahead in 0..=60 {
+        let on = today.plus_days(ahead).unwrap();
+        let due = check(&vault, &mut shown, on).due;
+        if ahead > 0 && due.total() > 0 {
+            found.push((on.iso(), due));
+        }
+    }
+    assert_eq!(
+        found,
+        said(&schedule(&vault, &ShownReminders::new(), today))
+    );
+
+    // All of it, as the phone gets it: from today, with its words.
+    let days = plan([&ahead], today);
+    assert_eq!(days.len(), 6);
+    assert_eq!(days[0], (day("2026-11-13"), c(2, 0)));
+    assert_eq!(
+        expiration::words(days[2].1).as_deref(),
+        Some("2 items have expired")
+    );
+}
+
+/// What was shown already, and what's due today, aren't scheduled again;
+/// a step further on still is.
+#[test]
+fn a_step_already_shown_or_due_today_is_not_scheduled_again() {
+    let mut sample = Sample::new();
+    sample.field(MAIL, EXPIRES_FIELD, "2026-12-01");
+    sample.field(GATE, EXPIRES_FIELD, "2026-12-01");
+    let vault = sample.open();
+    // The app said Example Mail's week before, on the 24th.
+    let mut shown = ShownReminders::new();
+    shown.insert(
+        MAIL.into(),
+        Shown {
+            date: "2026-12-01".into(),
+            level: "7".into(),
+        },
+    );
+    // The 26th: the gate code is due at 7 days today, unsaid as yet.
+    let ahead = schedule(&vault, &shown, day("2026-11-26"));
+    assert_eq!(
+        said(&ahead),
+        vec![
+            ("2026-11-30".into(), c(2, 0)),
+            ("2026-12-02".into(), c(0, 2)),
+        ]
+    );
+    // Nothing is marked shown by working it out.
+    assert_eq!(shown.len(), 1);
+}
+
+/// A day the phone said counts as shown, so the app doesn't say it again
+/// that day; a day it didn't (it was off) the app says, as before; and a
+/// date changed since the day was worked out is reminded about anew.
+#[test]
+fn what_the_phone_said_is_shown_and_what_it_didnt_the_app_says() {
+    let mut sample = Sample::new();
+    sample.field(MAIL, EXPIRES_FIELD, "2026-12-01");
+    sample.field(GATE, EXPIRES_FIELD, "2026-11-20");
+    sample.field(GATE, REMIND_FIELD, "7,1");
+    let vault = sample.open();
+    // Worked out on the 12th, with the 30-day step said in the app then.
+    let mut shown = ShownReminders::new();
+    check(&vault, &mut shown, day("2026-11-12"));
+    let ahead = schedule(&vault, &shown, day("2026-11-12"));
+    assert_eq!(said(&ahead)[0], ("2026-11-13".into(), c(1, 0)));
+
+    // The 13th: the phone said it at 9:00, so the app opening later doesn't.
+    let mut after = shown.clone();
+    mark_delivered(
+        &vault,
+        &ahead,
+        &[day("2026-11-13")],
+        day("2026-11-13"),
+        &mut after,
+    );
+    assert_eq!(check(&vault, &mut after, day("2026-11-13")).due, c(0, 0));
+    // The phone was off at 9:00: the app says it, as it would have.
+    let mut off = shown.clone();
+    mark_delivered(&vault, &ahead, &[], day("2026-11-13"), &mut off);
+    assert_eq!(check(&vault, &mut off, day("2026-11-13")).due, c(1, 0));
+    // Said on the 13th, opened on the 19th: only the day before is new.
+    let mut later = shown.clone();
+    mark_delivered(
+        &vault,
+        &ahead,
+        &[day("2026-11-13")],
+        day("2026-11-19"),
+        &mut later,
+    );
+    let found = check(&vault, &mut later, day("2026-11-19"));
+    // (Example Mail stands at its 30 days, said on the 12th.)
+    assert_eq!((found.due, found.standing), (c(1, 0), c(2, 0)));
+    // A day that hasn't come yet marks nothing, whatever the phone says.
+    let mut early = shown.clone();
+    mark_delivered(
+        &vault,
+        &ahead,
+        &[day("2026-11-19")],
+        day("2026-11-13"),
+        &mut early,
+    );
+    assert_eq!(early, shown);
+    // And a delivered day never takes back a step further on.
+    let mut further = shown.clone();
+    further.insert(
+        GATE.into(),
+        Shown {
+            date: "2026-11-20".into(),
+            level: "expired".into(),
+        },
+    );
+    let before = further.clone();
+    mark_delivered(
+        &vault,
+        &ahead,
+        &[day("2026-11-13")],
+        day("2026-11-21"),
+        &mut further,
+    );
+    assert_eq!(further, before);
+
+    // Renewed after the 12th, somewhere else: the phone's 9:00 still said the
+    // old date's week, but that's not this date's. A week before the new
+    // date, the app reminds, and the phone works out the new date's days.
+    let mut renewed = Sample::new();
+    renewed.field(MAIL, EXPIRES_FIELD, "2026-12-01");
+    renewed.field(GATE, EXPIRES_FIELD, "2026-11-27");
+    renewed.field(GATE, REMIND_FIELD, "7,1");
+    let now = renewed.open();
+    let mut kept = shown.clone();
+    mark_delivered(
+        &now,
+        &ahead,
+        &[day("2026-11-13")],
+        day("2026-11-14"),
+        &mut kept,
+    );
+    assert!(!kept.contains_key(GATE));
+    assert_eq!(check(&now, &mut kept, day("2026-11-14")).due, c(0, 0));
+    assert_eq!(
+        said(&schedule(&now, &kept, day("2026-11-14")))[0],
+        ("2026-11-20".into(), c(1, 0))
+    );
+    assert_eq!(check(&now, &mut kept, day("2026-11-20")).due, c(1, 0));
+}
+
+/// At most 30 days with a reminder waiting (iOS keeps 64 notifications for
+/// an app at most), the soonest, for one account or all of them.
+#[test]
+fn at_most_thirty_days_are_scheduled_the_soonest() {
+    let mut sample = Sample::new();
+    // A reminder each of the 40 days before, then once expired.
+    let every: Vec<String> = (1..=40).rev().map(|d| d.to_string()).collect();
+    sample.field(MAIL, EXPIRES_FIELD, "2026-12-20");
+    sample.field(MAIL, REMIND_FIELD, &every.join(","));
+    let vault = sample.open();
+    let today = day("2026-11-07");
+    let ahead = schedule(&vault, &ShownReminders::new(), today);
+    assert_eq!(ahead.len(), MOST_REMINDER_DAYS);
+    assert_eq!(ahead.keys().next().unwrap(), "2026-11-10");
+    assert_eq!(ahead.keys().last().unwrap(), "2026-12-09");
+
+    // Two accounts' together: still 30 days, the soonest of either.
+    let mut other = Sample::new();
+    other.field(GATE, EXPIRES_FIELD, "2026-11-09");
+    other.field(GATE, REMIND_FIELD, "1");
+    let theirs = schedule(&other.open(), &ShownReminders::new(), today);
+    let days = plan([&ahead, &theirs], today);
+    assert_eq!(days.len(), MOST_REMINDER_DAYS);
+    assert_eq!(days[0], (day("2026-11-08"), c(1, 0)));
+    assert_eq!(days[1], (day("2026-11-10"), c(1, 1)));
+    assert_eq!(days[29].0, day("2026-12-08"));
+}
+
+/// Every account's days as one: each day's counts added up, from today
+/// (what was waiting for a day gone by isn't said), never a day with
+/// nothing to say.
+#[test]
+fn two_accounts_days_add_up_from_today() {
+    let mut work = Sample::new();
+    work.field(MAIL, EXPIRES_FIELD, "2026-12-01");
+    let mut home = Sample::new();
+    home.field(GATE, EXPIRES_FIELD, "2026-12-01");
+    home.field(IDENTITY, EXPIRES_FIELD, "2026-11-25");
+    home.field(IDENTITY, REMIND_FIELD, "1");
+    let today = day("2026-11-07");
+    let mut theirs = schedule(&work.open(), &ShownReminders::new(), today);
+    let ours = schedule(&home.open(), &ShownReminders::new(), today);
+    // A day gone by, and a day with something unreadable, kept from before.
+    theirs.insert("2026-11-01".into(), theirs["2026-11-24"].clone());
+    let mut odd = ShownReminders::new();
+    odd.insert(
+        MAIL.into(),
+        Shown {
+            date: "2026-12-01".into(),
+            level: "soon".into(),
+        },
+    );
+    theirs.insert("2026-11-08".into(), odd);
+    assert_eq!(
+        plan([&theirs, &ours], today),
+        vec![
+            (day("2026-11-24"), c(3, 0)),
+            (day("2026-11-26"), c(0, 1)),
+            (day("2026-11-30"), c(2, 0)),
+            (day("2026-12-02"), c(0, 2)),
+        ]
+    );
+    assert_eq!(
+        plan([&theirs], day("2026-11-30")),
+        vec![(day("2026-11-30"), c(1, 0)), (day("2026-12-02"), c(0, 1)),]
     );
 }

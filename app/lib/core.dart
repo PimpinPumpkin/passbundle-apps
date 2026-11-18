@@ -293,7 +293,10 @@ class Core {
   late final _testOwnHealthSeenBy = _lib.lookupFunction<_Str1, _Str1>(
     'pb_test_own_health_seen_by',
   );
-  late final _reminders = _lib.lookupFunction<_Str1, _Str1>('pb_reminders');
+  late final _reminders = _lib.lookupFunction<_Str2, _Str2>('pb_reminders');
+  late final _reminderPlan = _lib.lookupFunction<_Str0, _Str0>(
+    'pb_reminder_plan',
+  );
   late final _testExpiration = _lib.lookupFunction<_Str1, _Str1>(
     'pb_test_expiration',
   );
@@ -1578,9 +1581,23 @@ class Core {
   /// once: `title` ("2 items expire soon", or null when nothing is due),
   /// `due` and `standing` (`{soon, expired}`). On a computer the core also
   /// tells the desktop agent's tray `standing`: how many items, never which.
-  static Future<Answer> reminders() => _background(
-    (c, a) => c._with([a], (p) => c._answer(c._reminders(p[0]))),
-  );
+  /// On a phone, [delivered] is the days ("YYYY-MM-DD") whose reminder the
+  /// phone said while PassBundle was closed (closed_reminders.dart): what
+  /// they covered counts as said already.
+  static Future<Answer> reminders([List<String> delivered = const []]) =>
+      _background(
+        (c, a) => c._with([
+          a,
+          jsonEncode(delivered),
+        ], (p) => c._answer(c._reminders(p[0], p[1]))),
+      );
+
+  /// What a phone says while PassBundle is closed, for every account on it
+  /// (closed_reminders.dart): `days`, each `{date, soon, expired}`, from
+  /// today, soonest first, at most 30. Each unlocked account's are worked
+  /// out again first. How many items, never which.
+  static Future<Answer> reminderPlan() =>
+      _background((c, _) => c._answer(c._reminderPlan()));
 
   /// An item's past versions (core/src/history.rs), from the server:
   /// `{hidePasswords, canRestore, canClear, unreadable, versions: [{id,
