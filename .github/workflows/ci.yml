@@ -447,6 +447,11 @@ jobs:
             exit 1
           fi
           grep -q "release builds can't include it" refused.txt
+          if cargo build --locked --release --features test-update 2> refused.txt; then
+            echo "A release build included the update test's key and site." >&2
+            exit 1
+          fi
+          grep -q "release builds can't include them" refused.txt
       - name: Size, version, and a run in the tray
         if: runner.os != 'Linux'
         run: |

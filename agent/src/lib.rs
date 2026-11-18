@@ -10,13 +10,17 @@ pub mod channel;
 pub mod config;
 pub mod instance;
 pub mod ipc;
+pub mod machine;
 pub mod protocol;
+pub mod release;
 pub mod reminders;
 #[cfg_attr(not(windows), allow(dead_code))] // Used by Windows Hello.
 pub mod sealed;
 pub mod server;
+pub mod swap;
 #[cfg(any(windows, target_os = "macos"))]
 pub mod tray;
+pub mod unpack;
 pub mod update;
 pub mod version;
 #[cfg(windows)]
