@@ -3397,6 +3397,23 @@ fn unlocked_accounts(accounts: &Accounts, shown: &str) -> Vec<Value> {
     unlocked
 }
 
+/// The unlocked accounts, as `unlocked_accounts` has them, each saying
+/// whether a new passkey can go in a new login there (`newLogin`), and if
+/// not, why (`noNewLogin`), in the words the phones show in place of
+/// offering one (`App::no_new_passkey_login`).
+fn new_login_accounts(accounts: &Accounts, shown: &str) -> Vec<Value> {
+    let mut unlocked = unlocked_accounts(accounts, shown);
+    for account in &mut unlocked {
+        let why = account["id"]
+            .as_str()
+            .and_then(|id| accounts.get(id))
+            .and_then(App::no_new_passkey_login);
+        account["newLogin"] = json!(why.is_none());
+        account["noNewLogin"] = json!(why);
+    }
+    unlocked
+}
+
 /// `pb_passkeys`, for Android's JNI too.
 pub(crate) fn passkeys(rp_id: &str) -> Value {
     accounts_value(|accounts| {
@@ -3564,17 +3581,22 @@ impl PasskeyRequest {
 /// `{rpId, userHandle, exclude, app}` as `pb_passkey_create` takes them,
 /// `{locked, account}` while none is unlocked (the account the screens
 /// show, to unlock), or `{ok, locked: false, account, accounts: [{id,
-/// label}], excluded, items: [{id, account, accountLabel, name, userName,
-/// replaces, passkeyUserName, reprompt}]}`. `excluded` says an unlocked
-/// account has one of the site's `exclude` passkeys already: nothing is
-/// offered then, and the site is told so, as WebAuthn has it. `items` are
-/// the logins it can go in (matching.rs, `Vault::passkey_target`), each
-/// with its account's id on this device and, with more than one account
-/// here, its name or email; `replaces` marks the one with the site's
-/// passkey for this account, which the new one would replace (its account
-/// name on the site in `passkeyUserName`), and those come first.
-/// `accounts` are the unlocked ones, the one shown first, where a new login
-/// can go. Never a key or a password.
+/// label, newLogin, noNewLogin}], excluded, items: [{id, account,
+/// accountLabel, name, userName, replaces, passkeyUserName, reprompt}]}`.
+/// `excluded` says an unlocked account has one of the site's `exclude`
+/// passkeys already: nothing is offered then, and the site is told so, as
+/// WebAuthn has it. `items` are the logins it can go in (matching.rs,
+/// `Vault::passkey_target`), each with its account's id on this device
+/// and, with more than one account here, its name or email; `replaces`
+/// marks the one with the site's passkey for this account, which the new
+/// one would replace (its account name on the site in `passkeyUserName`),
+/// and those come first. `accounts` are the unlocked ones, the one shown
+/// first, each saying whether a new login can go in it (`newLogin`), as
+/// `pb_passkey_create` would make one (`App::new_passkey_login`), and if
+/// not, the words to show in place of offering one (`noNewLogin`): where
+/// an organization keeps items out of Personal and the person has no
+/// shared folder to add to, or a policy removes logins. Never a key or a
+/// password.
 ///
 /// # Safety
 /// `request` is null or a NUL-terminated UTF-8 string, valid for the call.
@@ -3596,7 +3618,7 @@ pub(crate) fn passkey_logins(request: &str) -> Value {
         let Some(shown) = accounts.active().map(str::to_owned) else {
             return json!({ "locked": true, "signedOut": true });
         };
-        let unlocked = unlocked_accounts(accounts, &shown);
+        let unlocked = new_login_accounts(accounts, &shown);
         if unlocked.is_empty() {
             return json!({ "locked": true, "account": shown });
         }

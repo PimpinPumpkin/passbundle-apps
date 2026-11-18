@@ -242,22 +242,44 @@ class PasskeyActivity : Activity() {
         }
     }
 
-    /** Asks where the passkey goes, from the logins the core says it can go in (PasskeySaving.step). */
+    /**
+     * Asks where the passkey goes, from the logins the core says it can go
+     * in and the accounts a new login can go in (PasskeySaving.step): a new
+     * login is offered only where the core says one can be made, and where
+     * none can, the core's words say why before anything is picked.
+     */
     private fun where(m: Making) {
         background({ JSONObject(Core.passkeyLogins(m.request().toString()) ?: "{}") }) { result ->
             val answer = result ?: JSONObject()
             if (answer.optBoolean("locked")) return@background failCreate("Unlock PassBundle, then try again.")
             if (!answer.optBoolean("ok")) return@background failCreate(Responses.text(answer, "error") ?: "PassBundle couldn't save the passkey.")
-            when (val step = PasskeySaving.step(answer.optBoolean("excluded"), logins(answer))) {
+            val accounts = accounts(answer)
+            val shown = answer.optString("account")
+            when (val step = PasskeySaving.step(answer.optBoolean("excluded"), logins(answer), PasskeySaving.noNewLogin(accounts))) {
                 PasskeySaving.Step.Excluded -> failCreateExcluded()
                 is PasskeySaving.Step.Replace -> confirmReplace(m, step.login, back = null)
-                is PasskeySaving.Step.Choose -> chooseLogin(m, step.logins)
+                is PasskeySaving.Step.Choose -> chooseLogin(m, step, accounts, shown)
                 PasskeySaving.Step.New ->
-                    chooseAccount { account, label ->
+                    chooseAccount(accounts, shown) { account, label ->
                         if (account == null) return@chooseAccount failCreate(null)
                         confirmCreate(m, account, label)
                     }
+                is PasskeySaving.Step.Nowhere -> nowhere(step.why)
             }
+        }
+    }
+
+    /** The accounts unlocked here (Core.passkeyLogins), the one the screens show first, each saying whether a new login can go in it. */
+    private fun accounts(answer: JSONObject): List<PasskeySaving.Account> {
+        val unlocked = answer.optJSONArray("accounts") ?: return emptyList()
+        return (0 until unlocked.length()).mapNotNull { at ->
+            val account = unlocked.optJSONObject(at) ?: return@mapNotNull null
+            PasskeySaving.Account(
+                id = Responses.text(account, "id") ?: return@mapNotNull null,
+                label = account.optString("label"),
+                newLogin = account.optBoolean("newLogin", true),
+                noNewLogin = Responses.text(account, "noNewLogin"),
+            )
         }
     }
 
@@ -280,23 +302,22 @@ class PasskeyActivity : Activity() {
     }
 
     /**
-     * The account a new passkey goes in: with more than one unlocked, a
-     * choice of them (`done(null, null)` if the person cancels); else the
-     * one unlocked, or the one the screens show.
+     * The account a new passkey's new login goes in, of those unlocked
+     * that take one (PasskeySaving.newLoginIn): with more than one, a
+     * choice of them (`done(null, null)` if the person cancels); else that
+     * one, named when another unlocked here couldn't take it, or the one
+     * the screens show ([shown]).
      */
-    private fun chooseAccount(done: (String?, String?) -> Unit) {
-        val answer = runCatching { JSONObject(Core.passkeys("") ?: "{}") }.getOrDefault(JSONObject())
-        val unlocked = answer.optJSONArray("accounts") ?: JSONArray()
-        val choices = (0 until unlocked.length()).mapNotNull { unlocked.optJSONObject(it) }
+    private fun chooseAccount(accounts: List<PasskeySaving.Account>, shown: String, done: (String?, String?) -> Unit) {
+        val (choices, named) = PasskeySaving.newLoginIn(accounts)
         if (choices.size < 2) {
-            val only = choices.firstOrNull()
-            return done(only?.optString("id") ?: answer.optString("account"), null)
+            return done(choices.firstOrNull()?.id ?: shown, named)
         }
-        val labels = choices.map { it.optString("label") }.toTypedArray()
+        val labels = choices.map { it.label }.toTypedArray()
         val dialog =
             AlertDialog.Builder(this)
                 .setTitle("Save the passkey in which account?")
-                .setItems(labels) { _, which -> done(choices[which].optString("id"), labels[which]) }
+                .setItems(labels) { _, which -> done(choices[which].id, labels[which]) }
                 .setNegativeButton("Cancel") { _, _ -> done(null, null) }
                 .setOnCancelListener { done(null, null) }
                 .create()
@@ -325,18 +346,20 @@ class PasskeyActivity : Activity() {
      * "Save a passkey in PassBundle?" with the logins it can go in, each in
      * its own account, then "New login": picking a login adds the passkey to
      * it, keeping its password; one with this account's passkey for the site
-     * asks to replace it first.
+     * asks to replace it first. Where no account here takes a new login,
+     * there's no "New login", and the question says why.
      */
-    private fun chooseLogin(m: Making, logins: List<PasskeySaving.Login>) {
+    private fun chooseLogin(m: Making, step: PasskeySaving.Step.Choose, accounts: List<PasskeySaving.Account>, shown: String) {
+        val logins = step.logins
         val builder = AlertDialog.Builder(this)
         val dialog =
             builder
-                .setCustomTitle(heading(builder, "Save a passkey in PassBundle?", PasskeySaving.choose(m.rpId, m.site, m.userName)))
-                .setItems(PasskeySaving.rows(logins).toTypedArray<CharSequence>()) { _, which ->
+                .setCustomTitle(heading(builder, "Save a passkey in PassBundle?", PasskeySaving.choose(m.rpId, m.site, m.userName, step.noNewLogin)))
+                .setItems(PasskeySaving.rows(logins, newLogin = step.noNewLogin == null).toTypedArray<CharSequence>()) { _, which ->
                     val login = logins.getOrNull(which)
                     when {
-                        login == null -> newLogin(m)
-                        login.replaces -> confirmReplace(m, login) { chooseLogin(m, logins) }
+                        login == null -> newLogin(m, accounts, shown)
+                        login.replaces -> confirmReplace(m, login) { chooseLogin(m, step, accounts, shown) }
                         else -> save(m, login.account, login)
                     }
                 }.setNegativeButton("Cancel") { _, _ -> failCreate(null) }
@@ -346,12 +369,30 @@ class PasskeyActivity : Activity() {
         dialog.show()
     }
 
-    /** "New login" from the list: in the account the person picks, with more than one unlocked. */
-    private fun newLogin(m: Making) {
-        chooseAccount { account, _ ->
+    /** "New login" from the list: in the account the person picks, of those unlocked that take one. */
+    private fun newLogin(m: Making, accounts: List<PasskeySaving.Account>, shown: String) {
+        chooseAccount(accounts, shown) { account, _ ->
             if (account == null) return@chooseAccount failCreate(null)
             save(m, account, null)
         }
+    }
+
+    /**
+     * No login for the site takes the passkey, and no account unlocked here
+     * takes a new login (an organization keeps the person's items out of
+     * Personal and they have no shared folder to add to): the core's words
+     * say why, before anything is picked, and the site hears it isn't saved.
+     */
+    private fun nowhere(why: String) {
+        val dialog =
+            AlertDialog.Builder(this)
+                .setTitle("PassBundle can't save this passkey")
+                .setMessage(why)
+                .setPositiveButton("OK") { _, _ -> failCreate(why, toast = false) }
+                .setOnCancelListener { failCreate(why, toast = false) }
+                .create()
+        guard(dialog)
+        dialog.show()
     }
 
     /**
@@ -492,8 +533,9 @@ class PasskeyActivity : Activity() {
         answer(result)
     }
 
-    private fun failCreate(words: String?) {
-        words?.let { Toast.makeText(this, it, Toast.LENGTH_LONG).show() }
+    /** The site hears no passkey was saved: [words] why, shown here too unless a dialog said them already ([toast]). */
+    private fun failCreate(words: String?, toast: Boolean = true) {
+        if (toast) words?.let { Toast.makeText(this, it, Toast.LENGTH_LONG).show() }
         val result = Intent()
         PendingIntentHandler.setCreateCredentialException(
             result,

@@ -14,8 +14,14 @@ package com.passbundle.app
  *   and user handle): "Replace the passkey for <user> on <site>?", which
  *   says the old one stops working at the site's next sign-in.
  * - **Otherwise, logins for the site:** a list of them (each in its own
- *   account, labeled when there's more than one), then "New login".
- * - **None:** "Save a passkey in PassBundle?" for a new login.
+ *   account, labeled when there's more than one), then "New login" where
+ *   an account unlocked here takes one (`Account.newLogin`); where none
+ *   does, why, in the core's words, over the list instead.
+ * - **None:** "Save a passkey in PassBundle?" for a new login, in an
+ *   account that takes one; where none does (an organization keeps the
+ *   person's items out of Personal and they have no shared folder to add
+ *   to: core/src/app.rs, `no_new_passkey_login`), why, before anything is
+ *   picked, and nothing is saved.
  */
 object PasskeySaving {
     /** A login a new passkey can go in, as the core lists it. */
@@ -35,6 +41,18 @@ object PasskeySaving {
         val reprompt: Boolean = false,
     )
 
+    /** An account unlocked here, as the core lists them (Core.passkeyLogins' `accounts`). */
+    data class Account(
+        /** Its id on this device. */
+        val id: String,
+        /** Its name or email. */
+        val label: String,
+        /** A new login for the passkey can go in it (`newLogin`). */
+        val newLogin: Boolean = true,
+        /** Where one can't, why, in the core's words (`noNewLogin`). */
+        val noNewLogin: String? = null,
+    )
+
     /** What PasskeyActivity asks first. */
     sealed interface Step {
         /** The site has one already: it's told so, and nothing is asked. */
@@ -43,15 +61,25 @@ object PasskeySaving {
         /** One login has this account's passkey for the site: replace it? */
         data class Replace(val login: Login) : Step
 
-        /** The logins it can go in, then "New login". */
-        data class Choose(val logins: List<Login>) : Step
+        /**
+         * The logins it can go in, then "New login"; or, where no account
+         * here takes a new login, why not ([noNewLogin]) instead.
+         */
+        data class Choose(val logins: List<Login>, val noNewLogin: String? = null) : Step
 
         /** None: a new login. */
         data object New : Step
+
+        /** None, and no account here takes a new login: why, and nothing is saved. */
+        data class Nowhere(val why: String) : Step
     }
 
-    /** From what the core says: whether the site has one already, and the logins it can go in. */
-    fun step(excluded: Boolean, logins: List<Login>): Step {
+    /**
+     * From what the core says: whether the site has one already, the logins
+     * it can go in, and why no account unlocked here takes a new login, if
+     * none does ([noNewLogin]).
+     */
+    fun step(excluded: Boolean, logins: List<Login>, noNewLogin: String? = null): Step {
         val replacing = logins.filter { it.replaces }
         return when {
             excluded -> Step.Excluded
@@ -59,9 +87,29 @@ object PasskeySaving {
             // passkey for the site. More than one (saved before PassBundle
             // replaced them) is the list's to choose from.
             replacing.size == 1 -> Step.Replace(replacing.single())
-            logins.isNotEmpty() -> Step.Choose(logins)
-            else -> Step.New
+            logins.isNotEmpty() -> Step.Choose(logins, noNewLogin)
+            noNewLogin == null -> Step.New
+            else -> Step.Nowhere(noNewLogin)
         }
+    }
+
+    /**
+     * Why no account unlocked here takes a new login, in the core's words
+     * for the first of them (the one the screens show); null when one does.
+     */
+    fun noNewLogin(accounts: List<Account>): String? {
+        if (accounts.isEmpty() || accounts.any { it.newLogin }) return null
+        return accounts.first().noNewLogin ?: "PassBundle couldn't save the passkey."
+    }
+
+    /**
+     * The accounts a new login can go in, of those unlocked here, and the
+     * label to name it by when there's no choice to make: one, while
+     * another here couldn't take it, so it's clear which.
+     */
+    fun newLoginIn(accounts: List<Account>): Pair<List<Account>, String?> {
+        val takers = accounts.filter { it.newLogin }
+        return takers to takers.singleOrNull()?.label?.takeIf { accounts.size > 1 }
     }
 
     const val NEW_LOGIN = "New login"
@@ -76,8 +124,9 @@ object PasskeySaving {
         return if (under.isEmpty()) login.name else "${login.name}\n${under.joinToString(" · ")}"
     }
 
-    /** The list's rows: each login, then a new login. */
-    fun rows(logins: List<Login>): List<String> = logins.map { row(it) } + NEW_LOGIN
+    /** The list's rows: each login, then a new login where one can be made ([newLogin]). */
+    fun rows(logins: List<Login>, newLogin: Boolean = true): List<String> =
+        logins.map { row(it) } + listOfNotNull(NEW_LOGIN.takeIf { newLogin })
 
     /**
      * The site, as every question about a new passkey names it: its ID
@@ -91,9 +140,16 @@ object PasskeySaving {
     fun newLogin(rpId: String, site: String, userName: String, accountLabel: String?): String =
         "${site(rpId, site, userName)}, in a new login${if (accountLabel == null) "" else " in $accountLabel"}."
 
-    /** "Save a passkey in PassBundle?" over the list of logins it can go in. */
-    fun choose(rpId: String, site: String, userName: String): String =
-        "${site(rpId, site, userName)}. Add it to one of your logins for this site, or to a new login."
+    /**
+     * "Save a passkey in PassBundle?" over the list of logins it can go in;
+     * where no new login can be made, without one, and why ([noNewLogin]).
+     */
+    fun choose(rpId: String, site: String, userName: String, noNewLogin: String? = null): String =
+        if (noNewLogin == null) {
+            "${site(rpId, site, userName)}. Add it to one of your logins for this site, or to a new login."
+        } else {
+            "${site(rpId, site, userName)}. Add it to one of your logins for this site. $noNewLogin"
+        }
 
     /** Who the passkey is for, in the question: the account's name on the site, as the site gives it or the old passkey has it. */
     fun who(userName: String, login: Login): String =

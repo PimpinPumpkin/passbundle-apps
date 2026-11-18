@@ -52,9 +52,12 @@ char *pb_passkeys(const char *rp_id);
 char *pb_passkey_assert(const char *account, const char *id, const char *rp_id, const char *client_data_hash,
                         const char *user_verified);
 // Where a new passkey can go, from every account unlocked here, from {rpId,
-// userHandle, exclude}: {locked, excluded, items: [{id, account, accountLabel,
-// name, userName, replaces, passkeyUserName, reprompt}]}, the login whose
-// passkey for the site and account it replaces first; never a key or a password.
+// userHandle, exclude}: {locked, excluded, accounts: [{id, label, newLogin,
+// noNewLogin}], items: [{id, account, accountLabel, name, userName, replaces,
+// passkeyUserName, reprompt}]}, the login whose passkey for the site and
+// account it replaces first; each account says whether a new login can go in
+// it, and if not, why (noNewLogin, the words to show in place of offering
+// one); never a key or a password.
 char *pb_passkey_logins(const char *request);
 // Makes a passkey, from {account, rpId, userHandle, userName, userVerified,
 // discoverable, exclude, login}: in the login named (one pb_passkey_logins

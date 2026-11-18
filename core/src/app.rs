@@ -2221,9 +2221,10 @@ impl App {
     /// a new login for the site, before the site hears of it. The login must
     /// be one the phones offer for it (`Vault::passkey_target`); a new one
     /// goes in Personal, or in a shared folder where an organization keeps
-    /// items out of Personal (`new_item_place`). Refused, with nothing made,
-    /// if the vault already has one of the site's `exclude` credentials;
-    /// offline, it's refused too.
+    /// items out of Personal, and only where the phones would offer a new
+    /// login (`new_passkey_login`). Refused, with nothing made, if the vault
+    /// already has one of the site's `exclude` credentials; offline, it's
+    /// refused too.
     pub fn passkey_create(&mut self, new: &NewPasskey<'_>) -> Result<PasskeyMade> {
         use crate::passkey::{
             attestation_object, authenticator_data, credential_id, flags, Attested, Key,
@@ -2250,18 +2251,15 @@ impl App {
                 }
                 Some(item)
             }
-            // A new login, as the editor makes one: not where an
-            // organization's policy removes logins (restricted_types.rs).
-            None if vault.restricted.refuses_new(crate::vault::ItemKind::Login) => {
-                return Err(REMOVED_KIND);
-            }
             None => None,
         };
-        // A new login's place, checked before anything is made: Personal,
-        // or a shared folder where an organization keeps items out of it.
+        // A new login's place, checked before anything is made, as the
+        // phones checked it before offering one (`new_passkey_login`):
+        // Personal, or a shared folder where an organization keeps items
+        // out of it.
         let place = match editing {
             Some(_) => None,
-            None => self.new_item_place()?,
+            None => self.new_passkey_login()?,
         };
         let mut draft = match editing {
             Some(item) => ItemDraft::of(item),
@@ -2348,6 +2346,36 @@ impl App {
             return Err(NO_SHARED_FOLDER);
         }
         Ok(places.start)
+    }
+
+    /// Where a new passkey's new login goes (`passkey_create` with no
+    /// login named), as the editor makes one: Personal (None), or where an
+    /// organization keeps items out of it, a shared folder
+    /// (`new_item_place`), as its organization and its id. Refused where
+    /// none can be made: an organization's policy removes logins
+    /// (restricted_types.rs), or keeps items out of Personal and the person
+    /// has no shared folder to add to. The phones ask first, before they
+    /// offer a new login (`no_new_passkey_login`).
+    pub fn new_passkey_login(&self) -> Result<Option<(String, String)>> {
+        let vault = self.vault.as_ref().ok_or(Error::SignedOut)?;
+        if vault.restricted.refuses_new(crate::vault::ItemKind::Login) {
+            return Err(REMOVED_KIND);
+        }
+        self.new_item_place()
+    }
+
+    /// Why a new passkey can't go in a new login in this account, in the
+    /// words the phones show in place of offering one, before anyone picks
+    /// it (`pb_passkey_logins`, each account's `noNewLogin`); None where it
+    /// can (`new_passkey_login`). With nowhere to put it, the organization
+    /// keeping items out of Personal is named, as the editor's New names it
+    /// (`NewItemPlaces::nowhere_words`).
+    pub fn no_new_passkey_login(&self) -> Option<String> {
+        let refused = self.new_passkey_login().err()?;
+        let named = (refused == NO_SHARED_FOLDER)
+            .then(|| self.new_item_places().nowhere_words())
+            .flatten();
+        Some(named.unwrap_or_else(|| refused.to_string()))
     }
 
     /// Where a new item may go, the one rule every screen that makes one
@@ -2885,6 +2913,54 @@ impl NewItemPlaces {
     /// the person has no shared folder to add to.
     pub fn nowhere(&self) -> bool {
         !self.personal() && self.start.is_none()
+    }
+
+    /// What's said where nowhere takes a new item: the import's words
+    /// (`NO_SHARED_FOLDER`), naming the organization, as the editor's New
+    /// says them (places.dart in the app, `nowhereWords`) and the phones'
+    /// passkey sheets say them in place of a new login
+    /// (`App::no_new_passkey_login`). None where somewhere takes one.
+    pub fn nowhere_words(&self) -> Option<String> {
+        let organization = self.keeps_items_out.as_deref().filter(|_| self.nowhere())?;
+        Some(format!(
+            "{organization} keeps items out of Personal, and you have no shared folder you can add to. Ask an admin for one, then try again."
+        ))
+    }
+}
+
+#[cfg(test)]
+mod new_item_places_tests {
+    use super::*;
+
+    #[test]
+    fn nowhere_is_said_in_the_imports_words_naming_the_organization() {
+        let nowhere = NewItemPlaces {
+            keeps_items_out: Some("Contoso".into()),
+            shared: Vec::new(),
+            start: None,
+        };
+        assert!(nowhere.nowhere());
+        assert_eq!(
+            nowhere.nowhere_words(),
+            Some(
+                NO_SHARED_FOLDER
+                    .to_string()
+                    .replacen("Your organization", "Contoso", 1)
+            )
+        );
+        assert_eq!(
+            nowhere.nowhere_words().as_deref(),
+            Some("Contoso keeps items out of Personal, and you have no shared folder you can add to. Ask an admin for one, then try again.")
+        );
+        // A shared folder to add to, or Personal: nothing to say.
+        let folder = (String::from("contoso"), String::from("it"));
+        let shared = NewItemPlaces {
+            shared: vec![folder.clone()],
+            start: Some(folder),
+            ..nowhere
+        };
+        assert_eq!(shared.nowhere_words(), None);
+        assert_eq!(NewItemPlaces::default().nowhere_words(), None);
     }
 }
 
