@@ -154,13 +154,20 @@ fn utc_today() -> Date {
     })
 }
 
-/// The date stored on an item, when it has a valid one (the first field of
-/// that name, as the web vault reads it).
+/// The date stored on an item, when it has a valid one: its template's
+/// expiration date field's while that holds a date, else the first field
+/// named `keykeeper.expires`, as the web vault reads it (DESIGN.md, "A date
+/// field that sets Expires": the field wins where another app changed one
+/// and not the other).
 pub fn stored(item: &Item) -> Option<Date> {
-    item.fields
-        .iter()
-        .find(|f| f.name == EXPIRES_FIELD)
-        .and_then(|f| Date::parse_iso(f.value.as_str()))
+    crate::templates::expiration_field(item)
+        .and_then(|f| Date::parse_iso(f.value.trim()))
+        .or_else(|| {
+            item.fields
+                .iter()
+                .find(|f| f.name == EXPIRES_FIELD)
+                .and_then(|f| Date::parse_iso(f.value.as_str()))
+        })
 }
 
 /// A card expires at the end of its expiry month; a two-digit year is this
