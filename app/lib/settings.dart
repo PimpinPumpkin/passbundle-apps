@@ -15,11 +15,13 @@
 // PassBundle are allowed (window_chrome.dart). The plans, where the server
 // enforces them (plan.dart). On a phone, which organizations see how many of
 // the person's own passwords are weak, reused, or exposed (own_health.dart),
-// as a computer's Health says.
+// as a computer's Health says, and expiration reminders while PassBundle is
+// closed (closed_reminders.dart).
 import 'package:flutter/material.dart';
 
 import 'accounts.dart';
 import 'autofill_offer.dart';
+import 'closed_reminders.dart';
 import 'core.dart';
 import 'icons.dart';
 import 'own_health.dart';
@@ -595,6 +597,9 @@ class _SettingsListState extends State<SettingsList> {
               ),
           ],
         ),
+        // On a phone: expiration reminders while PassBundle is closed, the
+        // device's, for every account on it.
+        if (isPhone) const ClosedRemindersSetting(),
         if (browsers.isNotEmpty)
           SettingsGroup(
             title: 'Browsers you trust for autofill',

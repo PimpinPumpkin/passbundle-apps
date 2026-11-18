@@ -92,9 +92,30 @@ impl Date {
         era * 146_097 + doe - 719_468
     }
 
+    /// The date so many days since 1970-01-01 (`civil_from_days`, the other
+    /// way); None outside the years `new` takes.
+    fn from_ordinal(days: i64) -> Option<Date> {
+        let z = days + 719_468;
+        let era = z.div_euclid(146_097);
+        let doe = z - era * 146_097;
+        let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let day = (doy - (153 * mp + 2) / 5 + 1) as u32;
+        let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+        let year = i32::try_from(yoe + era * 400 + i64::from(month <= 2)).ok()?;
+        Date::new(year, month, day)
+    }
+
     /// Whole days from this date to `later`; negative when it's earlier.
     pub fn days_until(&self, later: Date) -> i64 {
         later.ordinal() - self.ordinal()
+    }
+
+    /// The date `days` after this one (before it, when negative), or None
+    /// past the years `new` takes.
+    pub fn plus_days(&self, days: i64) -> Option<Date> {
+        Date::from_ordinal(self.ordinal() + days)
     }
 
     /// Today, where this device is.
@@ -137,17 +158,7 @@ fn utc_today() -> Date {
     let days = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs() / 86_400) as i64;
-    // `civil_from_days`, the other way.
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    let year = (yoe + era * 400 + i64::from(month <= 2)) as i32;
-    Date::new(year, month, day).unwrap_or(Date {
+    Date::from_ordinal(days).unwrap_or(Date {
         year: 1970,
         month: 1,
         day: 1,
@@ -463,6 +474,138 @@ pub fn check(vault: &Vault, shown: &mut ShownReminders, today: Date) -> Check {
     found
 }
 
+/// How far ahead a phone's reminders are worked out, in days.
+pub const SCHEDULE_DAYS: i64 = 60;
+
+/// The most days a phone has a reminder waiting for, in all: iOS keeps at
+/// most 64 waiting notifications for an app.
+pub const MOST_REMINDER_DAYS: usize = 30;
+
+/// The reminders a phone says while PassBundle is closed (DESIGN.md,
+/// "Reminders, on the device"): for each day ("YYYY-MM-DD"), the steps its
+/// notification covers, by item id, as what was shown is kept. Ids, dates,
+/// and steps, never a name. Kept per account on this device (store.rs).
+pub type Schedule = BTreeMap<String, ShownReminders>;
+
+/// The reminders due on each day after `today`, up to `SCHEDULE_DAYS`
+/// ahead, by the same rules as `check`: each item's own days, then once
+/// expired, each step once for a date, nothing for `none`. What was shown
+/// counts as said, and so does what's due today, which is the app's own to
+/// say (`check`). At most `MOST_REMINDER_DAYS` days, the soonest.
+pub fn schedule(vault: &Vault, shown: &ShownReminders, today: Date) -> Schedule {
+    let items: Vec<(&Item, Date, String, Remind)> = vault
+        .items
+        .iter()
+        .filter(|i| remindable(i))
+        .filter_map(|i| {
+            let date = expiry(i)?;
+            Some((i, date, date.iso(), Remind::of(i)))
+        })
+        .filter(|(_, _, _, remind)| *remind != Remind::Never)
+        .collect();
+    let mut said = shown.clone();
+    let mut found = Schedule::new();
+    for ahead in 0..=SCHEDULE_DAYS {
+        let Some(day) = today.plus_days(ahead) else {
+            break;
+        };
+        let mut due = ShownReminders::new();
+        for (item, date, iso, remind) in &items {
+            let Some(step) = step(status(*date, day), remind) else {
+                continue;
+            };
+            if should_remind(said.get(&item.id), iso, step) {
+                let at = Shown {
+                    date: iso.clone(),
+                    level: step.key(),
+                };
+                said.insert(item.id.clone(), at.clone());
+                if ahead > 0 {
+                    due.insert(item.id.clone(), at);
+                }
+            }
+        }
+        if !due.is_empty() {
+            found.insert(day.iso(), due);
+            if found.len() == MOST_REMINDER_DAYS {
+                break;
+            }
+        }
+    }
+    found
+}
+
+/// How many items a day's reminders are about, and whether each expires
+/// soon or has expired.
+pub fn counts(steps: &ShownReminders) -> Counts {
+    let mut counts = Counts::default();
+    for shown in steps.values() {
+        if let Some(step) = Step::from_key(&shown.level) {
+            counts.add(step);
+        }
+    }
+    counts
+}
+
+/// The phone said these days' reminders (`delivered`): each step one of
+/// them covered (`scheduled`, up to `today`) counts as shown, so the app
+/// doesn't say it again. Only for the date the item has now (one changed
+/// since is reminded about as a new date), and only a step more urgent than
+/// what was shown. A day the phone didn't say (it was off) isn't marked, and
+/// `check` says what's due then, as before.
+pub fn mark_delivered(
+    vault: &Vault,
+    scheduled: &Schedule,
+    delivered: &[Date],
+    today: Date,
+    shown: &mut ShownReminders,
+) {
+    for day in delivered.iter().filter(|d| **d <= today) {
+        let Some(steps) = scheduled.get(&day.iso()) else {
+            continue;
+        };
+        for (id, at) in steps {
+            let Some(item) = vault.item(id) else {
+                continue;
+            };
+            if expiry(item).map(|d| d.iso()).as_deref() != Some(at.date.as_str()) {
+                continue;
+            }
+            let Some(step) = Step::from_key(&at.level) else {
+                continue;
+            };
+            if should_remind(shown.get(id), &at.date, step) {
+                shown.insert(id.clone(), at.clone());
+            }
+        }
+    }
+}
+
+/// Every account's schedule as one, for the phone to say: from `today` on,
+/// each day's counts added up across accounts, the soonest
+/// `MOST_REMINDER_DAYS` days.
+pub fn plan<'a>(
+    schedules: impl IntoIterator<Item = &'a Schedule>,
+    today: Date,
+) -> Vec<(Date, Counts)> {
+    let mut days: BTreeMap<Date, Counts> = BTreeMap::new();
+    for schedule in schedules {
+        for (day, steps) in schedule {
+            let Some(date) = Date::parse_iso(day).filter(|d| *d >= today) else {
+                continue;
+            };
+            let found = counts(steps);
+            if found.total() == 0 {
+                continue;
+            }
+            let sum = days.entry(date).or_default();
+            sum.soon += found.soon;
+            sum.expired += found.expired;
+        }
+    }
+    days.into_iter().take(MOST_REMINDER_DAYS).collect()
+}
+
 /// The items expired or expiring within `SOON_DAYS`, whatever their
 /// reminder days: the "Expiring soon" list and Health.
 pub fn expiring(vault: &Vault, today: Date) -> Vec<(&Item, Status)> {
@@ -549,6 +692,15 @@ mod tests {
         assert_eq!(d("2028-02-28").days_until(d("2028-03-01")), 2);
         assert_eq!(d("2026-11-07").days_until(d("2026-11-02")), -5);
         assert_eq!(d("1970-01-01").ordinal(), 0);
+        // And back: the dates so many days on, across months, leap days, and years.
+        assert_eq!(d("2026-11-07").plus_days(25), Some(d("2026-12-02")));
+        assert_eq!(d("2028-02-28").plus_days(1), Some(d("2028-02-29")));
+        assert_eq!(d("2026-12-31").plus_days(60), Some(d("2027-03-01")));
+        assert_eq!(d("2026-01-05").plus_days(-6), Some(d("2025-12-30")));
+        assert_eq!(d("9999-12-31").plus_days(1), None);
+        for days in [-600_000, -1, 0, 1, 20_765, 2_900_000] {
+            assert_eq!(Date::from_ordinal(days).map(|d| d.ordinal()), Some(days));
+        }
         let today = Date::today();
         assert_eq!(today.days_until(today), 0);
         assert!(utc_today().days_until(today).abs() <= 1);
