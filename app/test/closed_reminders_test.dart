@@ -120,6 +120,7 @@ Future<void> comeBack(WidgetTester tester) async {
 
 void main() {
   setUpAll(loadFonts);
+  setUp(forgetClosedRemindersScheduling);
 
   testWidgets(
     'the first time there\'s a reminder to schedule, a sheet asks; Turn on asks the phone, which gets each day\'s counts and never a name',
@@ -225,12 +226,16 @@ void main() {
       );
       await sheetUp(tester);
       await tester.tap(find.byKey(const ValueKey('closed-reminders-turn-on')));
-      await pumpUntilGone(tester, find.text(offered));
       await pumpUntilTrue(
         tester,
         () => phone.scheduled.isNotEmpty,
         'the phone told',
       );
+      // The sheet slides away on the test's clock, which only pumping with
+      // time moves.
+      await tester.pumpAndSettle();
+      expect(find.text(offered), findsNothing);
+      expect(phone.asked, 1);
       expect(phone.access, 'refused');
       expect(phone.waiting, isEmpty);
 

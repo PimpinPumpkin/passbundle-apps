@@ -170,6 +170,14 @@ Future<void> scheduleClosedReminders() async {
 Future<void>? _scheduling;
 bool _again = false;
 
+/// For tests, before each: nothing being scheduled. A test can end while a
+/// scheduling still waits on the core, and then nothing would schedule again
+/// in the tests after it.
+void forgetClosedRemindersScheduling() {
+  _scheduling = null;
+  _again = false;
+}
+
 Future<void> _scheduleOnce() async {
   final access = await notificationAccess();
   // The phone's code doesn't answer: nothing to hand it.
