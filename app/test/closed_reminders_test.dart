@@ -85,6 +85,13 @@ Future<void> pumpUntilTrue(
   throw TestFailure('Never happened: $what');
 }
 
+/// The sheet that asks, up all the way: it's there from the first frame of
+/// sliding in, below the foot of the screen, where a tap misses it.
+Future<void> sheetUp(WidgetTester tester) async {
+  await pumpUntil(tester, find.text(offered));
+  await tester.pump(const Duration(seconds: 1));
+}
+
 /// A phone's tab, from the bar at its foot.
 Future<void> tab(WidgetTester tester, String name) async {
   await tester.tap(
@@ -118,7 +125,7 @@ void main() {
     'the first time there\'s a reminder to schedule, a sheet asks; Turn on asks the phone, which gets each day\'s counts and never a name',
     (tester) async {
       final phone = await unlockOnPhone(tester, twoExpiring);
-      await pumpUntil(tester, find.text(offered));
+      await sheetUp(tester);
       // Nothing for the phone before it's been asked.
       expect(phone.waiting ?? const [], isEmpty);
       expect(
@@ -171,7 +178,7 @@ void main() {
     'Not now leaves it off with nothing for the phone; Settings turns it on, which asks the phone, and off, which takes every day away',
     (tester) async {
       final phone = await unlockOnPhone(tester, twoExpiring);
-      await pumpUntil(tester, find.text(offered));
+      await sheetUp(tester);
       await tester.tap(find.text('Not now'));
       await tester.pumpAndSettle();
       await pumpUntilTrue(
@@ -216,7 +223,7 @@ void main() {
         twoExpiring,
         phone: NotificationsStandIn(allow: false),
       );
-      await pumpUntil(tester, find.text(offered));
+      await sheetUp(tester);
       await tester.tap(find.byKey(const ValueKey('closed-reminders-turn-on')));
       await pumpUntilGone(tester, find.text(offered));
       await pumpUntilTrue(
