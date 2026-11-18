@@ -312,6 +312,10 @@ void main() {
         ),
       );
       expect(made!.ok, isTrue, reason: made.error);
+      // Not now to the nudge about two-step login, as the website's other
+      // screenshots say for their people, so it isn't in the pictures.
+      final notNow = await tester.runAsync(Core.dismissTwoStepNudge);
+      expect(notNow!.ok, isTrue, reason: notNow.error);
       Future<void> save(
         String? id,
         String name,

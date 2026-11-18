@@ -33,6 +33,10 @@ fn main() {
     let mut app = App::open(Store::new(&dir), Box::new(MemorySecretStore::default()));
     app.sign_in(server_url, email, password)
         .expect("signing in");
+    // Not now to the nudge about two-step login, so the phone tests' vault
+    // shows what they look for; the nudge has tests of its own
+    // (app/test/two_step_nudge_test.dart).
+    let _ = app.dismiss_two_step_nudge();
     app.save(
         None,
         &ItemDraft {

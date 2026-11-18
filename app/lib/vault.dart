@@ -8,7 +8,9 @@
 // screen only while revealed, and never when the person's shared folder
 // hides them. Several items can be selected in a list and moved, favorited,
 // archived, or put in the trash together, and the trash restores them or
-// deletes them for good (selection.dart).
+// deletes them for good (selection.dart). Above the list, someone no rule
+// requires two-step login of is nudged to set it up, or to add something
+// stronger than email codes (two_step_nudge.dart).
 import 'dart:async';
 import 'dart:math' as math;
 
@@ -33,6 +35,7 @@ import 'settings.dart';
 import 'sign_in_requests.dart';
 import 'theme.dart';
 import 'transfer.dart';
+import 'two_step_nudge.dart';
 import 'unlock_offer.dart';
 import 'updates.dart';
 import 'widgets.dart';
@@ -209,6 +212,16 @@ class VaultScreenState extends State<VaultScreen> {
   /// time it opens.
   int? offline;
 
+  /// Which nudge about two-step login shows above the list
+  /// (two_step_nudge.dart): "setUp", "stronger", or null. This account's
+  /// server's answer at the last sync.
+  String? twoStepNudge;
+
+  /// Set it up opened the web vault's two-step settings in the browser:
+  /// coming back to the app syncs, so a method just set up there ends the
+  /// nudge here.
+  bool settingUpTwoStep = false;
+
   /// On a phone: the items (0), the generator (1), Send (2), or Settings
   /// (3).
   int tab = 0;
@@ -227,6 +240,13 @@ class VaultScreenState extends State<VaultScreen> {
       signInRequests.resume();
     },
     onHide: signInRequests.pause,
+    // Back from setting up two-step login in the browser: the vault syncs,
+    // which asks the server about the nudge again.
+    onResume: () {
+      if (!settingUpTwoStep) return;
+      settingUpTwoStep = false;
+      unawaited(sync());
+    },
   );
 
   /// A sign-in request open over the vault (sign_in_requests.dart): one at
@@ -472,6 +492,8 @@ class VaultScreenState extends State<VaultScreen> {
       offline = answer.offline
           ? (answer.body['keptSecondsAgo'] as num?)?.toInt() ?? 0
           : null;
+      // Offline, signed out, or a server without it: no nudge.
+      twoStepNudge = answer.ok ? twoStepNudgeOf(answer.body) : null;
     });
     if (!answer.ok && !answer.signedOut && !answer.offline) {
       showMessage(context, answer.error ?? 'Couldn\'t sync.');
@@ -1367,10 +1389,49 @@ class VaultScreenState extends State<VaultScreen> {
           ],
         );
 
-  /// The banners under the list's search: signed out or offline, and what's
-  /// expiring.
+  /// The nudge about two-step login, above the list (two_step_nudge.dart):
+  /// this account's, so none in "All accounts", which lists several
+  /// accounts' items.
+  Widget? get twoStepNudgeBanner {
+    final nudge = twoStepNudge;
+    if (nudge == null || filter == Filter.everyAccount) return null;
+    return TwoStepNudgeBanner(
+      nudge: nudge,
+      onSetUp: setUpTwoStep,
+      onNotNow: notNowTwoStep,
+    );
+  }
+
+  /// Set it up: the web vault's two-step login settings, in the browser.
+  Future<void> setUpTwoStep() async {
+    final server = widget.server;
+    // Before the browser takes the screen, so coming back is heard.
+    settingUpTwoStep = true;
+    final opened =
+        server != null && await Core.openWebsite('$server$webVaultTwoStepPath');
+    if (!opened) {
+      settingUpTwoStep = false;
+      if (mounted) showMessage(context, 'Couldn\'t open the web vault.');
+    }
+  }
+
+  /// Not now: hidden here at once, and on every device for 90 days once the
+  /// server has it. If the server can't be told, the nudge comes back at a
+  /// later sync; nothing waits on it.
+  Future<void> notNowTwoStep() async {
+    setState(() => twoStepNudge = null);
+    await whileBusy(Core.dismissTwoStepNudge);
+  }
+
+  /// The banners under the list's search: signed out or offline, what's
+  /// expiring, and the nudge about two-step login.
   Widget? get banners {
-    final showing = [?signedOutBanner, ?offlineBanner, ?reminderBanner];
+    final showing = [
+      ?signedOutBanner,
+      ?offlineBanner,
+      ?reminderBanner,
+      ?twoStepNudgeBanner,
+    ];
     if (showing.isEmpty) return null;
     if (showing.length == 1) return showing.single;
     return Column(mainAxisSize: MainAxisSize.min, children: showing);
@@ -1753,6 +1814,9 @@ class VaultScreenState extends State<VaultScreen> {
             ),
           ),
         ),
+        // The nudge about two-step login, above the list (on the Items tab
+        // only).
+        ?twoStepNudgeBanner,
         Expanded(
           child: RefreshIndicator(
             onRefresh: sync,

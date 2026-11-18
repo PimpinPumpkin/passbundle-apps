@@ -44,6 +44,7 @@ pub mod synced_settings;
 pub mod templates;
 pub mod totp;
 pub mod two_step;
+pub mod two_step_nudge;
 #[cfg(not(phone))]
 pub mod updates;
 pub mod vault;

@@ -2379,6 +2379,38 @@ fn an_apps_own_logins_numbers_reach_the_organizations_owners() {
     assert!(!text.contains("Old forum") && !text.contains("Bank"));
 }
 
+/// The nudges about two-step login (two_step_nudge.rs; the meta repo's
+/// DESIGN.md, "A nudge for everyone else"): after a sync, a new account
+/// with no two-step login is asked to set it up; Not now hides it for the
+/// account, another device's session too; and an authenticator app ends
+/// it. Email codes need a server that sends email, which these tests don't
+/// have: the meta repo's mail tests have the second nudge.
+#[test]
+fn a_new_account_is_nudged_to_set_up_two_step_login_until_not_now() {
+    use passbundle_core::two_step_nudge::TwoStepNudge;
+    let Some(server) = server() else { return };
+    let url = std::env::var("PB_TEST_SERVER").unwrap();
+    let email = new_email("nudge");
+    sign_up(&server, &email);
+    let mut app = signed_in_app(&url, &email);
+    app.sync().unwrap();
+    assert_eq!(app.two_step_nudge(), Some(TwoStepNudge::SetUp));
+    app.dismiss_two_step_nudge().unwrap();
+    assert_eq!(app.two_step_nudge(), None);
+    let mut elsewhere = sign_in(&server, &email);
+    assert_eq!(server.two_step_nudge(&mut elsewhere).unwrap(), None);
+
+    let keeper = new_email("nudge-keeper");
+    sign_up(&server, &keeper);
+    let mut session = sign_in(&server, &keeper);
+    assert_eq!(
+        server.two_step_nudge(&mut session).unwrap(),
+        Some(TwoStepNudge::SetUp)
+    );
+    turn_on_authenticator(&server, &mut session, &keeper);
+    assert_eq!(server.two_step_nudge(&mut session).unwrap(), None);
+}
+
 /// An expiration date and reminder days the app's editor sets go to the
 /// server as the web vault keeps them (text fields named `keykeeper.expires`
 /// and `keykeeper.remind`), come back with the next sync, stay through an
