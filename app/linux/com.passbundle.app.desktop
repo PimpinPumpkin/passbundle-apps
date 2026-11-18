@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=PassBundle
+GenericName=Password Manager
+Comment=Your passwords, on this computer and your others
+Exec=/opt/passbundle/passbundle %u
+Icon=com.passbundle.app
+Terminal=false
+Categories=Utility;Security;
+StartupWMClass=com.passbundle.app
+MimeType=x-scheme-handler/passbundle;

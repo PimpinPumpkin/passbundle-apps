@@ -1,23 +1,39 @@
-# Linux test releases (README, "Windows and Linux test releases"): every
-# commit on main that passes CI, built again from that commit for 64-bit
-# Intel and AMD (x64) and for 64-bit ARM (arm64), and published as a GitHub
-# release, which the app's updater reads (core/src/updates).
+# Linux test releases (README, "Windows and Linux test releases" and "Linux
+# packages"): every commit on main that passes CI, built again from that
+# commit for 64-bit Intel and AMD (x64) and for 64-bit ARM (arm64), and
+# published as a GitHub release, which the app's updater reads
+# (core/src/updates). Each release has the tarballs and the same build as a
+# .deb and an .rpm, each installed, checked, opened, and removed on a clean
+# Ubuntu or Fedora before anything is published. A Flatpak is built from it
+# too, as a check only: it isn't published.
 #
 # What's signed is the release's manifest (its tag, version, and each
-# file's name, platform, size, and SHA-256), with PassBundle's Ed25519 test
-# release key, whose public half the app has (core/src/updates/mod.rs,
-# PINNED_KEYS). Four jobs, as the Android, Mac, and Windows releases'
-# (release.yml, macos-release.yml, windows-release.yml), so the key and the
-# token that can publish never meet the build's own code (Rust crates' build
-# scripts and macros, CMake, Flutter):
+# tarball's name, platform, size, and SHA-256), with PassBundle's Ed25519
+# test release key, whose public half the app has (core/src/updates/mod.rs,
+# PINNED_KEYS). The jobs are split as the Android, Mac, and Windows
+# releases' are (release.yml, macos-release.yml, windows-release.yml), so the
+# key and the token that can publish never meet the build's own code (Rust
+# crates' build scripts and macros, CMake, Flutter):
 #
-#   plan     the version, whether there's anything new, and the notes (git only)
-#   build    the app and the core and its updater, without test hooks, packed
-#            as the release's tarball, one per chip type; no secrets, read-only
-#   sign     the only job with the key: checks the tarballs, then writes and
-#            signs their manifest with jq, OpenSSL, and this file's own shell,
-#            running nothing from the repository; read-only
-#   publish  the only job that can write: gh release create; no secrets
+#   plan      the version, whether there's anything new, and the notes (git only)
+#   build     the app and the core and its updater, without test hooks, packed
+#             as the release's tarball and its .deb (tools/linux-packages.sh),
+#             one each per chip type; no secrets, read-only
+#   rpm       the tarball as an .rpm, made in a Fedora container, where
+#             rpmbuild finds what it depends on; no secrets, read-only
+#   test-deb, each package on a clean Ubuntu or Fedora container: installed,
+#   test-rpm  checked, opened, and removed (tools/linux-package-test.sh)
+#   flatpak   the Flatpak built from the x64 tarball, installed, and opened
+#             (tools/flatpak-check.sh); a check, which publishing doesn't wait on
+#   sign      the only job with the key: checks the tarballs and the packages,
+#             then writes and signs the tarballs' manifest with jq, OpenSSL, and
+#             this file's own shell, running nothing from the repository;
+#             read-only
+#   publish   the only job that can write: gh release create; no secrets
+#
+# A pull request that changes any of this (the paths below) runs everything
+# but sign and publish: the app and its packages are built and tested, and
+# nothing is published.
 #
 # Tagged linux-v<major>.<minor>.<build>: the major and minor are
 # pubspec.yaml's, and the build is this workflow's run number, which only
@@ -36,12 +52,22 @@ on:
     types: [completed]
     branches: [main]
   workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/linux-release.yml
+      - app/linux/**
+      - tools/flatpak-check.sh
+      - tools/linux-package-test.sh
+      - tools/linux-packages.sh
+      - tools/release-folder.sh
 
 permissions: {}
 
 concurrency:
-  group: linux-release
-  cancel-in-progress: false
+  # Releases one at a time, and never cancelled; a pull request's runs apart
+  # from them, only its newest.
+  group: ${{ github.event_name == 'pull_request' && format('linux-release-{0}', github.ref) || 'linux-release' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   FLUTTER_VERSION: 3.47.6
@@ -54,7 +80,8 @@ jobs:
   plan:
     name: What to release
     # Only main's own pushes that passed CI (not a fork's branch that's also
-    # called main), or a run started by hand on main.
+    # called main), or a run started by hand on main; or a pull request,
+    # which builds and tests and never publishes.
     if: >-
       (github.event_name == 'workflow_run'
         && github.event.workflow_run.conclusion == 'success'
@@ -62,6 +89,7 @@ jobs:
         && github.event.workflow_run.head_branch == 'main'
         && github.event.workflow_run.head_repository.full_name == github.repository)
       || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
+      || github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -71,6 +99,7 @@ jobs:
         shell: bash
     outputs:
       release: ${{ steps.plan.outputs.release }}
+      build-it: ${{ steps.plan.outputs.build-it }}
       sha: ${{ steps.plan.outputs.sha }}
       version: ${{ steps.plan.outputs.version }}
       build: ${{ steps.plan.outputs.build }}
@@ -87,6 +116,7 @@ jobs:
         id: plan
         env:
           BUILD: ${{ github.run_number }}
+          EVENT: ${{ github.event_name }}
         run: |
           sha=$(git rev-parse HEAD)
           base=$(sed -n 's/^version: \([0-9]*\.[0-9]*\)\..*/\1/p' app/pubspec.yaml)
@@ -100,14 +130,21 @@ jobs:
             echo "build=$BUILD"
             echo "last=$last"
           } >> "$GITHUB_OUTPUT"
-          # A commit already released, or older than the last release (CI
-          # runs can finish out of order), isn't released again.
-          if [ -n "$last" ] && git merge-base --is-ancestor "$sha" "$last"; then
+          # A pull request is built and tested, never released. A commit
+          # already released, or older than the last release (CI runs can
+          # finish out of order), isn't released again.
+          if [ "$EVENT" = pull_request ]; then
+            echo "A pull request: building and testing ${sha:0:9} as $version, with its packages, and publishing nothing." | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            echo "build-it=true" >> "$GITHUB_OUTPUT"
+          elif [ -n "$last" ] && git merge-base --is-ancestor "$sha" "$last"; then
             echo "${sha:0:9} is already in $last: nothing new to release." | tee -a "$GITHUB_STEP_SUMMARY"
             echo "release=false" >> "$GITHUB_OUTPUT"
+            echo "build-it=false" >> "$GITHUB_OUTPUT"
           else
             echo "Releasing ${sha:0:9} as $version (the last release is ${last:-none})." | tee -a "$GITHUB_STEP_SUMMARY"
             echo "release=true" >> "$GITHUB_OUTPUT"
+            echo "build-it=true" >> "$GITHUB_OUTPUT"
           fi
       - name: The notes, the commit subjects since the last release
         id: notes
@@ -129,9 +166,9 @@ jobs:
             echo
             echo "${changes:-- Maintenance}"
             echo
-            echo "Files: PassBundle-$VERSION-linux-x64.tar.gz is the app for 64-bit Intel and AMD computers, and PassBundle-$VERSION-linux-arm64.tar.gz for 64-bit ARM ones; each needs GTK 3. manifest.json names them, with their sizes and SHA-256, and manifest.json.sig is the manifest's signature. SHA256SUMS lists their SHA-256."
+            echo "Files: PassBundle-$VERSION-linux-x64.tar.gz is the app for 64-bit Intel and AMD computers, and PassBundle-$VERSION-linux-arm64.tar.gz for 64-bit ARM ones; each needs GTK 3. manifest.json names them, with their sizes and SHA-256, and manifest.json.sig is the manifest's signature. The same app comes as packages that install it to /opt/passbundle: passbundle_${VERSION}_amd64.deb and passbundle_${VERSION}_arm64.deb for Debian and Ubuntu (sudo apt install ./passbundle_${VERSION}_amd64.deb), and passbundle-$VERSION-1.x86_64.rpm and passbundle-$VERSION-1.aarch64.rpm for Fedora and other RPM systems (sudo dnf install ./passbundle-$VERSION-1.x86_64.rpm). SHA256SUMS lists every file's SHA-256."
             echo
-            echo "A test build: its manifest is signed with PassBundle's Ed25519 test release key (public key ${UPDATE_PUBLIC_KEY}). Unpack it into a folder of your own, such as ~/.local/opt (mkdir -p ~/.local/opt && tar -xzf PassBundle-$VERSION-linux-x64.tar.gz -C ~/.local/opt), and open ~/.local/opt/PassBundle/passbundle. After that, PassBundle updates itself from these releases (Settings, Updates). Installed where only root can change it (/opt, say), it only says when there's a new version."
+            echo "A test build: its manifest is signed with PassBundle's Ed25519 test release key (public key ${UPDATE_PUBLIC_KEY}); the packages aren't signed yet. Unpack the tarball into a folder of your own, such as ~/.local/opt (mkdir -p ~/.local/opt && tar -xzf PassBundle-$VERSION-linux-x64.tar.gz -C ~/.local/opt), and open ~/.local/opt/PassBundle/passbundle. After that, PassBundle updates itself from these releases (Settings, Updates). Installed where only root can change it (/opt, say), it only says when there's a new version; from a package, install the next release's package the same way to update it."
           )
           echo "$notes"
           end="NOTES_$(od -An -N12 -tx1 /dev/urandom | tr -d ' \n')"
@@ -140,7 +177,7 @@ jobs:
   build:
     name: Build ${{ needs.plan.outputs.version }} (${{ matrix.platform }})
     needs: plan
-    if: needs.plan.outputs.release == 'true'
+    if: needs.plan.outputs.build-it == 'true'
     strategy:
       matrix:
         include:
@@ -233,16 +270,188 @@ jobs:
           tar --sort=name --owner=0 --group=0 --numeric-owner --mtime="@$(git log -1 --format=%ct)" \
             -czf "dist/PassBundle-$VERSION-$PLATFORM.tar.gz" -C stage PassBundle
           ls -l dist
+      # From the tarball, so the package holds exactly what it does. Its
+      # dependencies are the Debian packages of the libraries its programs
+      # link to (dpkg-shlibdeps), which this machine has from the build.
+      - name: The .deb, from the tarball
+        run: |
+          sudo apt-get install -y --no-install-recommends dpkg-dev
+          mkdir unpacked
+          tar -xzf "dist/PassBundle-$VERSION-$PLATFORM.tar.gz" -C unpacked
+          tools/linux-packages.sh deb unpacked/PassBundle "$VERSION" "$PLATFORM" packages
+          ls -l packages
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: passbundle-${{ matrix.platform }}-${{ needs.plan.outputs.version }}-unsigned
           path: dist
           if-no-files-found: error
           retention-days: 7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: passbundle-${{ matrix.platform }}-deb-${{ needs.plan.outputs.version }}-unsigned
+          path: packages
+          if-no-files-found: error
+          retention-days: 7
+
+  rpm:
+    name: .rpm ${{ needs.plan.outputs.version }} (${{ matrix.platform }})
+    needs: [plan, build]
+    strategy:
+      matrix:
+        include:
+          - platform: linux-x64
+            runner: ubuntu-24.04
+          - platform: linux-arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    # Fedora's own rpmbuild, whose generator finds what the package depends on
+    # (the libraries its programs link to, by name). The clean systems here
+    # are pinned by digest (docker-library/repo-info: each image's index,
+    # for both chips).
+    container: fedora@sha256:a7d72ba2745b100a3351087472e5ee7b2450af7cf331e7673007e3817612839c # 45
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    env:
+      VERSION: ${{ needs.plan.outputs.version }}
+      PLATFORM: ${{ matrix.platform }}
+    steps:
+      - name: rpmbuild, and what the script uses
+        run: dnf install -y rpm-build tar gzip findutils
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: passbundle-${{ matrix.platform }}-${{ needs.plan.outputs.version }}-unsigned
+          path: unsigned
+      - name: The .rpm, from the tarball
+        run: |
+          mkdir unpacked
+          tar -xzf "unsigned/PassBundle-$VERSION-$PLATFORM.tar.gz" -C unpacked
+          bash tools/linux-packages.sh rpm unpacked/PassBundle "$VERSION" "$PLATFORM" packages
+          ls -l packages
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: passbundle-${{ matrix.platform }}-rpm-${{ needs.plan.outputs.version }}-unsigned
+          path: packages
+          if-no-files-found: error
+          retention-days: 7
+
+  test-deb:
+    name: .deb on a clean Ubuntu (${{ matrix.platform }})
+    needs: [plan, build]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x64
+            runner: ubuntu-24.04
+            arch: amd64
+          - platform: linux-arm64
+            runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    container: ubuntu@sha256:73b999393d07f2bf65a40373778a44dc9a6d54ad7718d29247d8ff9413c4d6a8 # 24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: passbundle-${{ matrix.platform }}-deb-${{ needs.plan.outputs.version }}-unsigned
+          path: packages
+      - name: Install it, check every file, open the app and a passbundle:// link, and remove it
+        env:
+          PACKAGE: packages/passbundle_${{ needs.plan.outputs.version }}_${{ matrix.arch }}.deb
+        run: bash tools/linux-package-test.sh "$PACKAGE"
+
+  test-rpm:
+    name: .rpm on a clean Fedora (${{ matrix.platform }})
+    needs: [plan, rpm]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x64
+            runner: ubuntu-24.04
+            arch: x86_64
+          - platform: linux-arm64
+            runner: ubuntu-24.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    container: fedora@sha256:a7d72ba2745b100a3351087472e5ee7b2450af7cf331e7673007e3817612839c # 45
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: passbundle-${{ matrix.platform }}-rpm-${{ needs.plan.outputs.version }}-unsigned
+          path: packages
+      - name: Install it, check every file, open the app and a passbundle:// link, and remove it
+        env:
+          PACKAGE: packages/passbundle-${{ needs.plan.outputs.version }}-1.${{ matrix.arch }}.rpm
+        run: bash tools/linux-package-test.sh "$PACKAGE"
+
+  flatpak:
+    name: Flatpak ${{ needs.plan.outputs.version }} (a check, not published)
+    needs: [plan, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    env:
+      VERSION: ${{ needs.plan.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: passbundle-linux-x64-${{ needs.plan.outputs.version }}-unsigned
+          path: unsigned
+      - name: flatpak and flatpak-builder from Ubuntu's own packages, a virtual display, and xdg-utils
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends flatpak flatpak-builder xvfb xdg-utils desktop-file-utils dbus
+          # Ubuntu 24.04 keeps programs from setting up the user namespaces
+          # Flatpak's sandbox (bubblewrap) is made of; this runner is thrown
+          # away after.
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+      - name: Build it, install it, and open the app and a passbundle:// link in its sandbox
+        run: tools/flatpak-check.sh "unsigned/PassBundle-$VERSION-linux-x64.tar.gz"
 
   sign:
     name: Sign ${{ needs.plan.outputs.version }}
-    needs: [plan, build]
+    # Only a release, once both packages passed on both chips. Never a pull
+    # request's run.
+    needs: [plan, build, rpm, test-deb, test-rpm]
+    if: needs.plan.outputs.release == 'true' && github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     # Once the user makes a "desktop-release" environment (Settings,
@@ -259,7 +468,7 @@ jobs:
     env:
       VERSION: ${{ needs.plan.outputs.version }}
     # No checkout: nothing from the repository runs here, only the runner's
-    # own tools (unzip, jq, OpenSSL) and this file's own shell.
+    # own tools (tar, dpkg-deb, jq, OpenSSL) and this file's own shell.
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -268,7 +477,7 @@ jobs:
           merge-multiple: true
       # Everything about the build's archives, before the key is anywhere
       # near: the key is written only once there's a manifest to sign.
-      - name: Check the tarballs, and write their manifest
+      - name: Check the tarballs and the packages, and write the tarballs' manifest
         env:
           SHA: ${{ needs.plan.outputs.sha }}
           NOTES: ${{ needs.plan.outputs.notes }}
@@ -295,6 +504,23 @@ jobs:
             files=$(jq -c --arg name "$tarball" --arg platform "$platform" \
               --argjson size "$(stat -c %s "dist/$tarball")" --arg sha "$(sha256sum "dist/$tarball" | cut -d' ' -f1)" \
               '. + [{name: $name, platform: $platform, size: $size, sha256: $sha}]' <<< "$files")
+          done
+          # The packages of the same build, as tested: named for this
+          # release, and each .deb is passbundle at this version for its chip;
+          # each .rpm starts as an RPM file does. They aren't in the manifest,
+          # which is the app's updater's (one file per platform), and the app
+          # never installs them.
+          for arch in amd64 arm64; do
+            deb="passbundle_${VERSION}_$arch.deb"
+            test "$(dpkg-deb --field "unsigned/$deb" Package)" = passbundle
+            test "$(dpkg-deb --field "unsigned/$deb" Version)" = "$VERSION"
+            test "$(dpkg-deb --field "unsigned/$deb" Architecture)" = "$arch"
+            cp "unsigned/$deb" dist/
+          done
+          for arch in x86_64 aarch64; do
+            rpm="passbundle-$VERSION-1.$arch.rpm"
+            test "$(od -An -tx1 -N4 "unsigned/$rpm" | tr -d ' \n')" = edabeedb
+            cp "unsigned/$rpm" dist/
           done
           # The manifest (DESIGN.md in the meta repo, "Desktop updates"; the
           # same as tools/desktop-update-test.sh's, which CI runs on every
@@ -335,7 +561,7 @@ jobs:
           openssl base64 -d -A -in dist/manifest.json.sig > "$RUNNER_TEMP/check"
           openssl pkeyutl -verify -pubin -keyform DER -inkey "$RUNNER_TEMP/public.der" -rawin \
             -in "$RUNNER_TEMP/signed" -sigfile "$RUNNER_TEMP/check"
-          (cd dist && sha256sum PassBundle-*.tar.gz manifest.json manifest.json.sig > SHA256SUMS && cat SHA256SUMS)
+          (cd dist && sha256sum PassBundle-*.tar.gz passbundle_*.deb passbundle-*.rpm manifest.json manifest.json.sig > SHA256SUMS && cat SHA256SUMS)
           ls -l dist
       - name: Remove the key
         if: always()
@@ -351,7 +577,7 @@ jobs:
   publish:
     name: Publish ${{ needs.plan.outputs.version }}
     needs: [plan, sign]
-    if: needs.sign.outputs.signed == 'true'
+    if: needs.sign.outputs.signed == 'true' && github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     # The only job that can write, with no secrets but its token, and no
@@ -382,5 +608,6 @@ jobs:
             --title "PassBundle $VERSION for Linux" \
             --notes-file "$RUNNER_TEMP/notes.md" \
             --latest=false \
-            dist/PassBundle-"$VERSION"-linux-*.tar.gz dist/manifest.json dist/manifest.json.sig dist/SHA256SUMS
+            dist/PassBundle-"$VERSION"-linux-*.tar.gz dist/passbundle_"$VERSION"_*.deb dist/passbundle-"$VERSION"-1.*.rpm \
+            dist/manifest.json dist/manifest.json.sig dist/SHA256SUMS
           echo "Published https://github.com/$GITHUB_REPOSITORY/releases/tag/linux-v$VERSION" | tee -a "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,65 @@
+# PassBundle as a Flatpak (README, "Linux packages"; the meta repo's
+# DESIGN.md, "Linux packages"). CI builds it from each Linux build as a check
+# only (linux-release.yml, tools/flatpak-check.sh): it isn't attached to the
+# releases or published anywhere. Putting it on Flathub is the owner's call.
+#
+# It's a release's PassBundle folder as it is, from the release's tarball
+# (PassBundle.tar.gz, which tools/flatpak-check.sh puts next to this file;
+# for Flathub, the release's address and SHA-256 instead), in
+# /app/passbundle, with the app's desktop entry and icon. Flatpak exports
+# both to the desktop, and the entry takes passbundle:// links, Duo's way
+# back at sign-in.
+#
+# Its permissions are what the app uses, and nothing more:
+#   network                      its server, and GitHub's releases to say
+#                                when there's a new version
+#   ipc, wayland, fallback-x11,  its window, drawn with the GPU
+#   dri
+#   org.freedesktop.secrets      the sign-in it keeps in the desktop's
+#                                keyring (core/src/secrets.rs)
+#   org.gnome.Mutter.IdleMonitor locking after the computer's been idle, and
+#   org.freedesktop.login1       when the screen locks (core/src/autolock.rs)
+#   (system bus)
+#   xdg-download                 saving an attachment to Downloads
+# Files it opens or saves otherwise go through the desktop's file chooser
+# (the portal), and websites open in the browser through the portal too.
+# Not here, so these don't work in the Flatpak: security keys (they'd take
+# every device), the browser import (it reads other apps' folders), the
+# desktop agent's socket, and the policy an install script writes in
+# /etc/passbundle (the server is typed in instead).
+id: com.passbundle.app
+runtime: org.freedesktop.Platform
+runtime-version: '26.08'
+sdk: org.freedesktop.Sdk
+command: passbundle
+# No AppStream metadata yet (a metainfo file, which Flathub asks for), so
+# nothing to compose.
+appstream-compose: false
+finish-args:
+  - --share=network
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+  - --talk-name=org.freedesktop.secrets
+  - --talk-name=org.gnome.Mutter.IdleMonitor
+  - --system-talk-name=org.freedesktop.login1
+  - --filesystem=xdg-download
+modules:
+  - name: passbundle
+    buildsystem: simple
+    build-commands:
+      - cp -R bundle /app/passbundle
+      - mkdir -p /app/bin
+      - ln -s /app/passbundle/passbundle /app/bin/passbundle
+      # The install script's entry, running the app's command: Flatpak
+      # rewrites it to run the app in its sandbox when it exports it.
+      - install -Dm644 com.passbundle.app.desktop /app/share/applications/com.passbundle.app.desktop
+      - sed -i 's|^Exec=.*|Exec=passbundle %u|' /app/share/applications/com.passbundle.app.desktop
+      - install -Dm644 bundle/data/com.passbundle.app.png /app/share/icons/hicolor/256x256/apps/com.passbundle.app.png
+    sources:
+      - type: archive
+        path: PassBundle.tar.gz
+        dest: bundle
+      - type: file
+        path: ../com.passbundle.app.desktop
