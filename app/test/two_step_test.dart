@@ -14,7 +14,8 @@ import 'support.dart';
 class FakeCalls extends TwoStepCalls {
   FakeCalls({this.answers = const [], this.links = const []});
 
-  /// Answers, in order, for finish, sendEmail, securityKey, duoStart, and duoFinish.
+  /// Answers, in order, for finish, sendEmail, securityKey,
+  /// securityKeyWithPin, duoStart, and duoFinish.
   final List<Map<String, dynamic>> answers;
 
   /// The links Duo comes back with, in order (null: given up).
@@ -43,6 +44,12 @@ class FakeCalls extends TwoStepCalls {
       _next('securityKey${remember ? ' remember' : ''}');
 
   @override
+  Future<Answer> securityKeyWithPin(String pin, bool remember, bool lastTry) =>
+      _next(
+        'securityKeyPin $pin${remember ? ' remember' : ''}${lastTry ? ' lastTry' : ''}',
+      );
+
+  @override
   void cancelSecurityKey() => asked.add('cancelSecurityKey');
 
   @override
@@ -67,6 +74,15 @@ class FakeCalls extends TwoStepCalls {
 }
 
 const _otp = 'cccccbhuinjdtrbftdrldjlrgkdeubffnkhjfjifvlbr';
+
+/// The core's answer when a key asks for its PIN (core/src/ffi.rs, `failed`).
+Map<String, dynamic> _pinAnswer(String why, int? left, String error) => {
+  'ok': false,
+  'error': error,
+  'securityKeyPin': {'why': why, 'left': left},
+};
+
+const _asks = 'This security key asks for its PIN.';
 
 void main() {
   setUpAll(loadFonts);
@@ -366,6 +382,248 @@ void main() {
     await tester.tap(find.text('Continue'));
     await tester.pump();
     expect(shown.calls.asked, ['sendEmail', 'finish email 123456']);
+    expect(shown.heard, ['signedIn']);
+  });
+
+  Finder pinField() => find.byKey(const ValueKey('security-key-pin'));
+
+  String pinTyped(WidgetTester tester) =>
+      tester.widget<TextField>(pinField()).controller!.text;
+
+  testWidgets(
+    'a key that asks for its PIN gets a field with its tries left; a wrong PIN asks again, and the right one signs in',
+    (tester) async {
+      final shown = await show(
+        tester,
+        {
+          'providers': [7],
+          'securityKey': 'usb',
+        },
+        answers: [
+          _pinAnswer('asks', 8, _asks),
+          _pinAnswer('wrong', 7, 'That PIN isn\'t right. 7 tries left.'),
+        ],
+      );
+      expect(pinField(), findsNothing);
+      await tester.tap(find.text('Use security key'));
+      await tester.pump();
+      expect(pinField(), findsOneWidget);
+      expect(find.text('Security key PIN'), findsOneWidget);
+      expect(find.text('8 tries left'), findsOneWidget);
+      expect(
+        find.text(
+          'Enter your security key\'s PIN, then touch the key when it blinks.',
+        ),
+        findsOneWidget,
+      );
+      // Asking isn't an error, and there's no last-try warning yet.
+      expect(find.text(_asks), findsNothing);
+      expect(find.text(lastTryWarning), findsNothing);
+      // The PIN is hidden as it's typed.
+      expect(tester.widget<TextField>(pinField()).obscureText, isTrue);
+      await tester.enterText(pinField(), '1111');
+      await tester.tap(find.text('Continue'));
+      await tester.pump();
+      expect(find.text('That PIN isn\'t right. 7 tries left.'), findsOneWidget);
+      // The field let go of what was typed.
+      expect(pinTyped(tester), '');
+      await tester.enterText(pinField(), '2580');
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await tester.pump();
+      expect(shown.calls.asked, [
+        'securityKey',
+        'securityKeyPin 1111',
+        'securityKeyPin 2580',
+      ]);
+      expect(pinTyped(tester), '');
+      expect(shown.heard, ['signedIn']);
+    },
+  );
+
+  testWidgets(
+    'on a phone, the key is held to the phone again after its PIN',
+    (tester) async {
+      await show(
+        tester,
+        {
+          'providers': [7],
+          'securityKey': 'phone',
+        },
+        answers: [_pinAnswer('asks', 8, _asks)],
+      );
+      await tester.tap(find.text('Use security key'));
+      await tester.pump();
+      expect(
+        find.text(
+          'Enter your security key\'s PIN, then hold the key to the back of your phone again, or keep it plugged in.',
+        ),
+        findsOneWidget,
+      );
+    },
+  );
+
+  testWidgets(
+    'the last try is used only once the person checks "Use the last try"',
+    (tester) async {
+      final shown = await show(
+        tester,
+        {
+          'providers': [7],
+          'securityKey': 'usb',
+        },
+        answers: [
+          _pinAnswer('asks', 1, _asks),
+          _pinAnswer(
+            'notAPin',
+            null,
+            'A security key\'s PIN has at least 4 characters.',
+          ),
+        ],
+      );
+      await tester.tap(find.text('Don\'t ask again on this device for 30 days'));
+      await tester.pump();
+      await tester.tap(find.text('Use security key'));
+      await tester.pump();
+      expect(find.text('1 try left'), findsOneWidget);
+      expect(find.text(lastTryWarning), findsOneWidget);
+      expect(find.text('Use the last try'), findsOneWidget);
+      await tester.enterText(pinField(), '2580');
+      await tester.tap(find.text('Continue'));
+      await tester.pump();
+      // Nothing sent, and what was typed stays.
+      expect(find.text(checkLastTryFirst), findsOneWidget);
+      expect(shown.calls.asked, ['securityKey remember']);
+      expect(pinTyped(tester), '2580');
+      // Something that can't be a PIN reaches no key: the last try stands,
+      // and its box is off again.
+      await tester.tap(find.text('Use the last try'));
+      await tester.pump();
+      await tester.enterText(pinField(), '25');
+      await tester.tap(find.text('Continue'));
+      await tester.pump();
+      expect(
+        find.text('A security key\'s PIN has at least 4 characters.'),
+        findsOneWidget,
+      );
+      expect(find.text(lastTryWarning), findsOneWidget);
+      await tester.tap(find.text('Use the last try'));
+      await tester.pump();
+      await tester.enterText(pinField(), '2580');
+      await tester.tap(find.text('Continue'));
+      await tester.pump();
+      expect(shown.calls.asked, [
+        'securityKey remember',
+        'securityKeyPin 25 remember lastTry',
+        'securityKeyPin 2580 remember lastTry',
+      ]);
+      expect(shown.heard, ['signedIn']);
+    },
+  );
+
+  testWidgets(
+    'a wrong PIN down to the last try shows the warning; the core\'s own stop shows it once',
+    (tester) async {
+      await show(
+        tester,
+        {
+          'providers': [7],
+          'securityKey': 'usb',
+        },
+        answers: [
+          _pinAnswer('asks', 2, _asks),
+          _pinAnswer('wrong', 1, 'That PIN isn\'t right. 1 try left.'),
+          _pinAnswer('lastTry', 1, lastTryWarning),
+        ],
+      );
+      await tester.tap(find.text('Use security key'));
+      await tester.pump();
+      expect(find.text('2 tries left'), findsOneWidget);
+      expect(find.text(lastTryWarning), findsNothing);
+      await tester.enterText(pinField(), '1111');
+      await tester.tap(find.text('Continue'));
+      await tester.pump();
+      expect(find.text('That PIN isn\'t right. 1 try left.'), findsOneWidget);
+      expect(find.text(lastTryWarning), findsOneWidget);
+      // The checkbox starts off again each time the field asks.
+      final box = tester.widget<CheckboxListTile>(
+        find.widgetWithText(CheckboxListTile, 'Use the last try'),
+      );
+      expect(box.value, isFalse);
+      await tester.tap(find.text('Use the last try'));
+      await tester.pump();
+      await tester.enterText(pinField(), '2580');
+      await tester.tap(find.text('Continue'));
+      await tester.pump();
+      expect(find.text(lastTryWarning), findsOneWidget);
+    },
+  );
+
+  testWidgets(
+    'three wrong PINs in a row keep the field; a blocked key goes back to "Use security key"; another way drops the field',
+    (tester) async {
+      const freshStart =
+          'After 3 wrong PINs in a row, a security key needs a fresh start: unplug it and plug it in again (on a phone, take it away first), then enter its PIN.';
+      const blocked =
+          'This security key\'s PIN is blocked after too many wrong tries. Only resetting the key with the app from its maker makes it usable again, and that erases it. Use another way to sign in.';
+      final shown = await show(
+        tester,
+        {
+          'providers': [7, 0],
+          'securityKey': 'usb',
+        },
+        answers: [
+          _pinAnswer('asks', 6, _asks),
+          _pinAnswer('freshStart', null, freshStart),
+          {'ok': false, 'error': blocked},
+          _pinAnswer('asks', 6, _asks),
+        ],
+      );
+      await tester.tap(find.text('Use security key'));
+      await tester.pump();
+      await tester.enterText(pinField(), '1113');
+      await tester.tap(find.text('Continue'));
+      await tester.pump();
+      expect(find.text(freshStart), findsOneWidget);
+      expect(pinField(), findsOneWidget);
+      // The key didn't say its count this time.
+      expect(find.textContaining('tries left'), findsNothing);
+      await tester.enterText(pinField(), '2580');
+      await tester.tap(find.text('Continue'));
+      await tester.pump();
+      expect(pinField(), findsNothing);
+      expect(find.text(blocked), findsOneWidget);
+      expect(find.text('Use security key'), findsOneWidget);
+      // Asked again, then another way: no field, nothing typed kept.
+      await tester.tap(find.text('Use security key'));
+      await tester.pump();
+      expect(pinField(), findsOneWidget);
+      await tester.enterText(pinField(), '25');
+      await otherWay(tester, 'Authenticator app');
+      expect(pinField(), findsNothing);
+      expect(
+        find.text('Enter the code from your authenticator app.'),
+        findsOneWidget,
+      );
+      expect(shown.calls.asked, [
+        'securityKey',
+        'securityKeyPin 1113',
+        'securityKeyPin 2580',
+        'securityKey',
+      ]);
+    },
+  );
+
+  testWidgets('a PIN that the key never asked for is never asked for', (
+    tester,
+  ) async {
+    final shown = await show(tester, {
+      'providers': [7],
+      'securityKey': 'usb',
+    });
+    await tester.tap(find.text('Use security key'));
+    await tester.pump();
+    expect(pinField(), findsNothing);
+    expect(shown.calls.asked, ['securityKey']);
     expect(shown.heard, ['signedIn']);
   });
 }
