@@ -137,6 +137,21 @@ pub enum Error {
     /// account's keys changed, the organization doesn't allow one, the
     /// device no longer opens what it kept).
     NoPin,
+    /// Single sign-on couldn't go on, in a sentence the app shows as it is:
+    /// an identifier that isn't an organization's, a canceled browser, an
+    /// answer for another sign-in (sso.rs).
+    Sso(&'static str),
+    /// A password sign-in that an organization's "Require single sign-on"
+    /// answered: sign in with its single sign-on instead, whose SSO
+    /// identifier this is (DESIGN.md, "Require single sign-on").
+    UseSso { identifier: String },
+    /// The same, for someone not linked to it yet: the web vault links them
+    /// first (its address), and the core never uses the linking session.
+    LinkSsoFirst { web_vault: String },
+    /// A single sign-on for an account with no master password yet (someone
+    /// invited, at their first single sign-on): the web vault sets one first
+    /// (its address). Nothing was kept.
+    SsoNoMasterPassword { web_vault: String },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -333,6 +348,16 @@ impl fmt::Display for Error {
                 crate::pin::MAX_WRONG_TRIES
             ),
             Error::NoPin => write!(f, "Unlocking with a PIN is off on this device. Use your master password."),
+            Error::Sso(sentence) => write!(f, "{sentence}"),
+            Error::UseSso { .. } => write!(f, "Your organization requires you to sign in with single sign-on."),
+            Error::LinkSsoFirst { web_vault } => write!(
+                f,
+                "Your organization requires single sign-on, and your account isn't linked to it yet. Sign in to the web vault at {web_vault} with your master password, which links it, then use single sign-on here."
+            ),
+            Error::SsoNoMasterPassword { web_vault } => write!(
+                f,
+                "Your account doesn't have a master password yet. Use single sign-on once in the web vault at {web_vault}, which asks you to set one, then sign in here."
+            ),
         }
     }
 }
@@ -429,6 +454,17 @@ mod tests {
             Error::NoNewAccounts(NoNewAccounts::Address),
             Error::Canceled,
             Error::Refused("this device doesn't have the memory free for a file that large"),
+            Error::Sso(crate::sso::NO_SUCH_ORGANIZATION),
+            Error::Sso(crate::sso::CANCELED),
+            Error::UseSso {
+                identifier: "acme".into(),
+            },
+            Error::LinkSsoFirst {
+                web_vault: "https://vault.example.test".into(),
+            },
+            Error::SsoNoMasterPassword {
+                web_vault: "https://vault.example.test".into(),
+            },
         ]
         .map(|e| e.to_string());
         for w in &words {

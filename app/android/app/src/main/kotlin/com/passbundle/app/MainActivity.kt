@@ -164,6 +164,30 @@ class MainActivity : FlutterActivity() {
                                 },
                         )
                     }
+                    // Single sign-on in a Custom Tab of the default browser (sso.dart), never a web
+                    // view: a plain link to open with Custom Tabs' session extra, which a browser
+                    // without them ignores, opening a normal tab. Its own task, as the browser's
+                    // would be, so the way back (LinkActivity.kt) brings PassBundle to the front.
+                    "openAuthTab" -> {
+                        val uri = call.argument<String>("url")?.let { android.net.Uri.parse(it) }
+                        val web = uri != null && (uri.scheme == "https" || uri.scheme == "http")
+                        result.success(
+                            web &&
+                                try {
+                                    startActivity(
+                                        android.content.Intent(android.content.Intent.ACTION_VIEW, uri)
+                                            .addCategory(android.content.Intent.CATEGORY_BROWSABLE)
+                                            .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                                            .putExtras(
+                                                Bundle().apply { putBinder("android.support.customtabs.extra.SESSION", null) },
+                                            ),
+                                    )
+                                    true
+                                } catch (e: android.content.ActivityNotFoundException) {
+                                    false
+                                },
+                        )
+                    }
                     // A YubiKey's code held to the phone, while two-step login shows YubiKey.
                     "yubikeyNfc" -> {
                         val onCode: ((String) -> Unit)? =

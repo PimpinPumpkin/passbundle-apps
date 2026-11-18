@@ -23,7 +23,10 @@ use crate::lock_policy::LockPolicy;
 use crate::new_device;
 use crate::secrets::{Secret, SecretStore};
 use crate::security_key::{KeyAnswer, SecurityKeyRequest};
-use crate::server::{Device, Download, Next, PendingSignIn, Server, Session, SignIn, TwoFactor};
+use crate::server::{
+    Device, Download, Next, PendingSignIn, Server, Session, SignIn, SsoSignedIn, TwoFactor,
+};
+use crate::sso;
 use crate::store::{Settings, Store};
 use crate::synced_settings::{self, Known};
 use crate::two_step::{self, Offer};
@@ -41,6 +44,8 @@ mod sends;
 pub use sends::SavedSend;
 mod transfer;
 pub use transfer::{Destination, Exported, ImportRead, ImportSaved};
+#[cfg(test)]
+mod sso_tests;
 
 /// What `copy` copies for a Send's link, with the Send's id.
 pub const SEND_LINK: &str = "sendLink";
@@ -73,11 +78,12 @@ pub struct Saved {
 }
 
 /// A second step made ready (Duo's address, a security key's request), or
-/// a sign-in that went through without it.
+/// a sign-in that went through without it, and where it got to (`Done`, or
+/// a single sign-on's master password).
 #[derive(Debug, PartialEq, Eq)]
 pub enum Prepared<T> {
     Ready(T),
-    SignedIn,
+    SignedIn(Step),
 }
 
 /// Where signing in got to.
@@ -90,6 +96,44 @@ pub enum Step {
     /// another of the account's devices, and how it stands. Ask how it
     /// stands every few seconds (`new_device_status`).
     NewDevice(new_device::Check),
+    /// A single sign-on went through (sso.rs): the master password for this
+    /// email unlocks next (`unlock_after_sso`).
+    MasterPassword(String),
+}
+
+/// A single sign-on started (`App::start_sso`): the address for the
+/// browser, and whether the answer comes back to this computer's listener
+/// (`App::sso_listener`) or as a phone's link (`App::finish_sso_link`).
+#[derive(Debug, PartialEq, Eq)]
+pub struct SsoStart {
+    pub url: String,
+    pub listens: bool,
+}
+
+/// What `App::fresh_offer` found: what the server offers now, or where a
+/// sign-in that went through meanwhile got to.
+enum Fresh {
+    Offer(Offer),
+    Went(Step),
+}
+
+/// Where a single sign-on goes: the server as it's kept, the email typed
+/// (which account, until the server says, and its device token), and this
+/// device's identifier, which the session is the server's for.
+#[derive(Clone)]
+struct SsoFor {
+    server: String,
+    email: String,
+    device_identifier: String,
+}
+
+/// What the computer's wait for a single sign-on needs, taken from the app
+/// so it waits without it (ffi.rs): the listener, the sign-in's state, and
+/// when the wait ends.
+pub struct SsoWait {
+    pub listener: sso::Listener,
+    pub state: Zeroizing<String>,
+    pub until: Instant,
 }
 
 /// How many of what the generator made its history keeps.
@@ -114,6 +158,13 @@ pub struct App {
     server: Option<Server>,
     session: Option<Session>,
     pending: Option<PendingSignIn>,
+    /// A single sign-on started here, until its answer comes back (sso.rs):
+    /// its verifier and state, in memory only.
+    sso: Option<sso::Started>,
+    /// Where that single sign-on goes.
+    sso_for: Option<SsoFor>,
+    /// A single sign-on that went through, waiting for the master password.
+    sso_signed_in: Option<SsoSignedIn>,
     vault: Option<Vault>,
     /// The agent's address and program, when not the ones installed next to this app (tests).
     agent: Option<(PathBuf, PathBuf)>,
@@ -296,6 +347,9 @@ impl App {
             server,
             session: None,
             pending: None,
+            sso: None,
+            sso_for: None,
+            sso_signed_in: None,
             vault: None,
             agent: None,
             preferences,
@@ -362,16 +416,18 @@ impl App {
         self.install_identifier = Some(identifier.to_owned());
     }
 
-    /// Whether a sign-in waits for its second step (`finish_sign_in`), or
-    /// for the new-device check (`new_device_status`).
+    /// Whether a sign-in waits for its second step (`finish_sign_in`), for
+    /// the new-device check (`new_device_status`), or for a single sign-on's
+    /// answer or the master password after it.
     pub fn signing_in(&self) -> bool {
-        self.pending.is_some()
+        self.pending.is_some() || self.sso.is_some() || self.sso_signed_in.is_some()
     }
 
     /// Gives up on a sign-in waiting for its second step: the account is
     /// as it was kept (its server and email as on this device).
     pub fn cancel_sign_in(&mut self) {
         self.pending = None;
+        self.forget_sso();
         self.settings = self.store.settings();
         self.server = self
             .settings
@@ -527,9 +583,16 @@ impl App {
     fn waiting_step(&mut self) -> Result<Step> {
         let pending = self.pending.as_mut().ok_or(Error::SignedOut)?;
         if std::mem::take(&mut pending.forget_remembered) {
-            if let Some(s) = &self.settings {
+            let kept = if pending.is_sso() {
+                self.sso_for.clone().map(|f| (f.server, f.email))
+            } else {
+                self.settings
+                    .as_ref()
+                    .map(|s| (s.server.clone(), s.email.clone()))
+            };
+            if let Some((server, email)) = kept {
                 self.secrets
-                    .forget_secret(Secret::DeviceToken, &s.server, &s.email);
+                    .forget_secret(Secret::DeviceToken, &server, &email);
             }
         }
         Ok(match pending.check() {
@@ -540,13 +603,174 @@ impl App {
 
     /// Where a waiting sign-in got to after the server's answer.
     fn next_step(&mut self, next: Result<Next>) -> Result<Step> {
-        match next? {
+        let next = match next {
+            Ok(next) => next,
+            // A single sign-on's code is never sent again once the server
+            // refused it, other than as a wrong second step: it's used up.
+            Err(e) => {
+                if self.pending.as_ref().is_some_and(PendingSignIn::is_sso)
+                    && e != Error::WrongCode
+                    && !matches!(e, Error::Network { .. })
+                {
+                    self.pending = None;
+                    self.forget_sso();
+                }
+                return Err(e);
+            }
+        };
+        match next {
             Next::Done(session) => {
                 self.pending = None;
                 self.signed_in(session)
             }
+            Next::Sso(signed_in) => {
+                self.pending = None;
+                let email = signed_in.email().to_owned();
+                self.sso_signed_in = Some(signed_in);
+                Ok(Step::MasterPassword(email))
+            }
             Next::TwoFactor | Next::NewDevice => self.waiting_step(),
         }
+    }
+
+    /// Forgets a single sign-on: started, or waiting for the master password.
+    fn forget_sso(&mut self) {
+        self.sso = None;
+        self.sso_for = None;
+        self.sso_signed_in = None;
+    }
+
+    /// Starts a single sign-on with an organization's SSO identifier
+    /// (sso.rs; DESIGN.md in the meta repo, "In the desktop and phone
+    /// apps"): the identifier is checked on the device and by the server,
+    /// then the sign-in's verifier, state, and (on a computer) listener are
+    /// made, and the address for the browser comes back. `email` is the one
+    /// typed: which account this is, until the server says.
+    pub fn start_sso(
+        &mut self,
+        server_url: &str,
+        email: &str,
+        identifier: &str,
+    ) -> Result<SsoStart> {
+        if email.trim().is_empty() {
+            return Err(Error::Sso(sso::EMAIL_FIRST));
+        }
+        let identifier = sso::identifier(identifier)?;
+        let device_identifier = self.device_identifier();
+        let server = Server::new(server_url, Device::this_one(&device_identifier))?;
+        server.sso_prevalidate(&identifier)?;
+        let started = sso::Started::here(&identifier)?;
+        self.start_sso_with(server_url, server, device_identifier, email, started)
+    }
+
+    /// `start_sso` with a sign-in made already, on a server for this
+    /// device's identifier: for tests, which choose a phone's sign-in on a
+    /// computer (`sso::Started::on_a_phone`).
+    pub fn start_sso_with(
+        &mut self,
+        server_url: &str,
+        server: Server,
+        device_identifier: String,
+        email: &str,
+        started: sso::Started,
+    ) -> Result<SsoStart> {
+        self.lock();
+        self.forget_sso();
+        let start = SsoStart {
+            url: started.authorize_url(server.base(), server.client_id()),
+            listens: started.listens(),
+        };
+        self.server = Some(server);
+        self.sso_for = Some(SsoFor {
+            server: server_url.trim().trim_end_matches('/').to_owned(),
+            email: normalize_email(email),
+            device_identifier,
+        });
+        self.sso = Some(started);
+        Ok(start)
+    }
+
+    /// The computer's listener for the single sign-on started here, for its
+    /// wait, which happens without the app (ffi.rs), once.
+    pub fn sso_wait(&mut self) -> Result<SsoWait> {
+        let started = self.sso.as_mut().ok_or(Error::Sso(sso::NOT_STARTED))?;
+        let listener = started
+            .take_listener()
+            .ok_or(Error::Sso(sso::NOT_STARTED))?;
+        Ok(SsoWait {
+            listener,
+            state: Zeroizing::new(started.state().to_owned()),
+            until: started.until,
+        })
+    }
+
+    /// The single sign-on's answer, as the computer's wait got it: its code,
+    /// redeemed, or why there's none (Cancel, the time up), which ends it.
+    pub fn finish_sso(&mut self, waited: Result<Zeroizing<String>>) -> Result<Step> {
+        match waited {
+            Ok(code) => self.redeem_sso(code),
+            Err(e) => {
+                self.forget_sso();
+                Err(e)
+            }
+        }
+    }
+
+    /// The single sign-on's answer as a phone hands it back: the link,
+    /// checked to be this sign-in's (sso.rs), then redeemed. An empty link
+    /// is a browser closed without one, which ends it.
+    pub fn finish_sso_link(&mut self, link: &str) -> Result<Step> {
+        if link.trim().is_empty() {
+            self.forget_sso();
+            return Err(Error::Sso(sso::CANCELED));
+        }
+        let started = self.sso.as_ref().ok_or(Error::Sso(sso::NOT_STARTED))?;
+        // A computer's sign-in comes back to its listener, never as a link.
+        if started.listens() {
+            return Err(Error::Sso(sso::ANOTHER_SIGN_IN));
+        }
+        let code = started.code_from_link(link)?;
+        self.redeem_sso(code)
+    }
+
+    /// Redeems the single sign-on's code, once: the sign-in is used up
+    /// whatever the server says, though two-step login may follow with it.
+    fn redeem_sso(&mut self, code: Zeroizing<String>) -> Result<Step> {
+        let started = self.sso.take().ok_or(Error::Sso(sso::NOT_STARTED))?;
+        let to = self.sso_for.clone().ok_or(Error::Sso(sso::NOT_STARTED))?;
+        let server = self.server.as_ref().ok_or(Error::SignedOut)?;
+        let remembered = self
+            .secrets
+            .get_secret(Secret::DeviceToken, &to.server, &to.email);
+        let mut pending = server.sso_sign_in(&to.email, started.redeem(code), remembered);
+        let next = server.send_sign_in(&mut pending, None, None);
+        self.pending = Some(pending);
+        self.next_step(next)
+    }
+
+    /// The master password after a single sign-on: it opens the account key
+    /// on this device, and then it's an ordinary sign-in (the session and
+    /// refresh token kept, the vault synced and opened). A wrong one can be
+    /// tried again.
+    pub fn unlock_after_sso(&mut self, password: &str) -> Result<Step> {
+        let signed_in = self
+            .sso_signed_in
+            .as_ref()
+            .ok_or(Error::Sso(sso::NOT_STARTED))?;
+        let session = signed_in.unlock(password)?;
+        let to = self.sso_for.take().ok_or(Error::Sso(sso::NOT_STARTED))?;
+        let signed_in = self.sso_signed_in.take().expect("checked above");
+        let prelogin = signed_in.prelogin();
+        self.settings = Some(Settings {
+            server: to.server,
+            email: signed_in.email().to_owned(),
+            kdf: prelogin.kdf,
+            kdf_iterations: prelogin.kdf_iterations,
+            kdf_memory: prelogin.kdf_memory,
+            kdf_parallelism: prelogin.kdf_parallelism,
+            device_identifier: to.device_identifier,
+        });
+        self.signed_in(session)
     }
 
     /// How the new-device check holding this sign-in stands now (asked
@@ -656,19 +880,24 @@ impl App {
 
     /// What the server offers now, new from it when what this sign-in has
     /// is spent or old (`fresh_for`). A sign-in that went through meanwhile
-    /// (two-step login turned off elsewhere) finishes.
-    fn fresh_offer(&mut self, fresh_for: Duration) -> Result<Option<Offer>> {
+    /// (two-step login turned off elsewhere) finishes, and where it got to
+    /// comes back instead.
+    fn fresh_offer(&mut self, fresh_for: Duration) -> Result<Fresh> {
         let (Some(server), Some(pending)) = (&self.server, &mut self.pending) else {
             return Err(Error::SignedOut);
         };
         if pending.spent || pending.offered_at.elapsed() > fresh_for {
-            if let Some(session) = server.renew_offer(pending)? {
-                self.pending = None;
-                self.signed_in(session)?;
-                return Ok(None);
+            let renewed = server.renew_offer(pending);
+            match renewed {
+                Ok(Some(next)) => return self.next_step(Ok(next)).map(Fresh::Went),
+                Ok(None) => {}
+                Err(e) => return self.next_step(Err(e)).map(Fresh::Went),
             }
         }
-        Ok(self.pending.as_ref().map(|p| p.offer.clone()))
+        self.pending
+            .as_ref()
+            .map(|p| Fresh::Offer(p.offer.clone()))
+            .ok_or(Error::SignedOut)
     }
 
     /// Duo's Universal Prompt address for this sign-in, for the browser:
@@ -676,8 +905,9 @@ impl App {
     /// gives a sign-in five minutes), or `SignedIn` if the sign-in went
     /// through without it.
     pub fn duo_address(&mut self) -> Result<Prepared<String>> {
-        let Some(offer) = self.fresh_offer(Duration::from_secs(60))? else {
-            return Ok(Prepared::SignedIn);
+        let offer = match self.fresh_offer(Duration::from_secs(60))? {
+            Fresh::Offer(offer) => offer,
+            Fresh::Went(step) => return Ok(Prepared::SignedIn(step)),
         };
         let duo = offer.duo.ok_or(Error::TwoStep(
             "The server doesn't offer Duo for this account now. Use another way to sign in.",
@@ -708,8 +938,9 @@ impl App {
     /// challenge if the last was tried or is a few minutes old, or
     /// `SignedIn` if the sign-in went through without it.
     pub fn security_key_request(&mut self) -> Result<Prepared<SecurityKeyRequest>> {
-        let Some(offer) = self.fresh_offer(Duration::from_secs(240))? else {
-            return Ok(Prepared::SignedIn);
+        let offer = match self.fresh_offer(Duration::from_secs(240))? {
+            Fresh::Offer(offer) => offer,
+            Fresh::Went(step) => return Ok(Prepared::SignedIn(step)),
         };
         let server = self.server.as_ref().ok_or(Error::SignedOut)?;
         let options = offer.security_key.ok_or(Error::TwoStep(
@@ -1355,6 +1586,7 @@ impl App {
         self.vault = None;
         self.session = None;
         self.pending = None;
+        self.forget_sso();
         self.opened_with_pin = false;
         self.export_confirmed = None;
         self.pending_import = None;

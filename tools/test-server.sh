@@ -17,13 +17,17 @@
 # plans (PLANS_ENFORCED=true, passed on the same way; DESIGN.md in the meta
 # repo, "Plans and billing"), where a new account is on Free.
 #
+# Single sign-on goes to Microsoft unless SSO_ENTRA_AUTHORITY (passed on
+# as it is) points it at a stand-in on this computer: the meta repo's
+# e2e/entra-standin.mjs, for the core's single sign-on tests.
+#
 # It takes new accounts from anyone, as the tests need. For the tests of a
 # server that doesn't: SIGNUPS_ALLOWED=false INVITATIONS_ALLOWED=false makes
 # one that takes none and says so, and SIGNUPS_DOMAINS_WHITELIST=<domain>
 # one that takes them only from addresses at that domain.
 #
 #   [NEW_DEVICE_CHECK=true] [IP_LOCATION_DATABASE=<file>] [USER_ATTACHMENT_LIMIT=<KB>] \
-#     [USER_SEND_LIMIT=<KB>] [PLANS_ENFORCED=true] \
+#     [USER_SEND_LIMIT=<KB>] [PLANS_ENFORCED=true] [SSO_ENTRA_AUTHORITY=<stand-in>] \
 #     [SIGNUPS_ALLOWED=false INVITATIONS_ALLOWED=false] [SIGNUPS_DOMAINS_WHITELIST=<domain>] \
 #     tools/test-server.sh <passbundle-server binary> <port> <data folder> [host name]
 set -euo pipefail

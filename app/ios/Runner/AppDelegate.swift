@@ -76,6 +76,16 @@ import UniformTypeIdentifiers
       case "duoCancel":
         DuoSession.shared.cancel()
         result(nil)
+      // Single sign-on (app/lib/sso.dart): the link the server's answer
+      // comes back with to the app's own scheme, or nil if the person
+      // canceled.
+      case "ssoSignIn":
+        SsoSession.shared.start((call.arguments as? [String: Any])?["url"] as? String ?? "") { link in
+          result(link)
+        }
+      case "ssoCancel":
+        SsoSession.shared.cancel()
+        result(nil)
       // Unlocking with Face ID or Touch ID (Biometric, below), each account its own.
       case "biometricStatus":
         result(["status": Biometric.status(account: Platform.account(call)), "method": Shared.biometricMethod()])
@@ -358,6 +368,52 @@ final class DuoSession: NSObject, ASWebAuthenticationPresentationContextProvidin
     session.presentationContextProvider = self
     // Nothing kept from Safari, nor shared with it, and no "wants to use" alert.
     session.prefersEphemeralWebBrowserSession = true
+    self.session = session
+    if !session.start() {
+      self.session = nil
+      done(nil)
+    }
+  }
+
+  func cancel() {
+    session?.cancel()
+  }
+
+  func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
+    let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+    if let key = scenes.flatMap(\.windows).first(where: \.isKeyWindow) { return key }
+    if let scene = scenes.first { return UIWindow(windowScene: scene) }
+    return ASPresentationAnchor()
+  }
+}
+
+/// Single sign-on's sign-in sheet (DESIGN.md in the meta repo, "In the
+/// desktop and phone apps"): the system's own browser session, never a web
+/// view, whose callback scheme is the app's private-use scheme. The sheet
+/// takes the answer itself, so no other app that claims the scheme sees it.
+/// Unlike Duo's, it shares Safari's cookies, so the organization's Microsoft
+/// sign-in (and Conditional Access's view of the device) carries over; iOS
+/// asks the person first.
+final class SsoSession: NSObject, ASWebAuthenticationPresentationContextProviding {
+  static let shared = SsoSession()
+  /// The phones' redirect is `com.passbundle.app:/sso` (core/src/sso.rs).
+  static let scheme = "com.passbundle.app"
+  private var session: ASWebAuthenticationSession?
+
+  func start(_ text: String, done: @escaping (String?) -> Void) {
+    guard let url = URL(string: text), url.scheme == "https" || url.scheme == "http" else {
+      done(nil)
+      return
+    }
+    session?.cancel()
+    let session = ASWebAuthenticationSession(url: url, callbackURLScheme: SsoSession.scheme) { [weak self] link, _ in
+      DispatchQueue.main.async {
+        self?.session = nil
+        done(link?.absoluteString)
+      }
+    }
+    session.presentationContextProvider = self
+    session.prefersEphemeralWebBrowserSession = false
     self.session = session
     if !session.start() {
       self.session = nil

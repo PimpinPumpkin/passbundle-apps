@@ -61,7 +61,7 @@
             android:excludeFromRecents="true"
             android:taskAffinity=""
             android:theme="@android:style/Theme.Translucent.NoTitleBar" />
-        <!-- Duo's way back from the browser at sign-in; no screen of its own (LinkActivity.kt). -->
+        <!-- Duo's and single sign-on's way back from the browser at sign-in; no screen of its own (LinkActivity.kt). -->
         <activity
             android:name=".LinkActivity"
             android:exported="true"
@@ -74,6 +74,13 @@
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="passbundle" android:host="duo-callback" />
+            </intent-filter>
+            <!-- Single sign-on's redirect, com.passbundle.app:/sso: the app's private-use scheme (core/src/sso.rs). -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="com.passbundle.app" />
             </intent-filter>
         </activity>
         <!-- PassBundle as Android's passkey provider, Android 14 and later (PasskeyProvider.kt). -->
