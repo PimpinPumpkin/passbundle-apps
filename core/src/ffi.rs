@@ -2891,14 +2891,25 @@ pub unsafe extern "C" fn pb_test_fields(given: *const c_char) -> *mut c_char {
 /// standing: {soon, expired}}`. `title` is what to say ("2 items expire
 /// soon"), null when nothing is due; `standing` is every item at one of its
 /// steps, shown before or not, which a computer's desktop agent is told for
-/// its tray.
+/// its tray. On a phone, `delivered` is the days whose reminder the phone
+/// said while PassBundle was closed (`["YYYY-MM-DD"]`; null, or anything
+/// else, for none): what they covered counts as shown first
+/// (`App::reminders`).
 ///
 /// # Safety
-/// `account` is null or a NUL-terminated UTF-8 string, valid for the call.
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
 #[no_mangle]
-pub unsafe extern "C" fn pb_reminders(account: *const c_char) -> *mut c_char {
+pub unsafe extern "C" fn pb_reminders(
+    account: *const c_char,
+    delivered: *const c_char,
+) -> *mut c_char {
     let account = text(account);
-    with_app(&account, |app| match app.reminders() {
+    let delivered: Vec<expiration::Date> = serde_json::from_str::<Vec<String>>(&text(delivered))
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|day| expiration::Date::parse_iso(day))
+        .collect();
+    with_app(&account, |app| match app.reminders(&delivered) {
         Ok(found) => json!({
             "ok": true,
             "title": expiration::words(found.due),
@@ -2906,6 +2917,26 @@ pub unsafe extern "C" fn pb_reminders(account: *const c_char) -> *mut c_char {
             "standing": found.standing,
         }),
         Err(e) => failed(e),
+    })
+}
+
+/// What a phone says while PassBundle is closed (docs/phones.md), for every
+/// account on it: `{ok, days: [{date, soon, expired}]}`, the days from today
+/// with reminders ("YYYY-MM-DD"), soonest first, at most 30, each with how
+/// many items expire soon and how many have expired, never which. Each
+/// unlocked account's are worked out again first (`Accounts::reminder_plan`).
+/// The phone makes its own words from the two numbers.
+#[no_mangle]
+pub extern "C" fn pb_reminder_plan() -> *mut c_char {
+    with_accounts(|accounts| {
+        let days: Vec<Value> = accounts
+            .reminder_plan()
+            .into_iter()
+            .map(|(date, counts)| {
+                json!({ "date": date.iso(), "soon": counts.soon, "expired": counts.expired })
+            })
+            .collect();
+        json!({ "ok": true, "days": days })
     })
 }
 

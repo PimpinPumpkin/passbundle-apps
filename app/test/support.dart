@@ -305,9 +305,11 @@ Future<void> pumpUntilGone(
 /// the stand-in gives it unless [biometricAnswers] says no. With [android],
 /// it's an Android phone, which helps turn on autofill (autofill_offer.dart);
 /// with [iphone], an iPhone, which helps turn on AutoFill and is given what
-/// iOS may suggest above the keyboard. With [mac], it's the Mac app instead,
-/// a computer whose Touch ID is its own (MainFlutterWindow.swift,
-/// TouchID.swift), answering the same calls.
+/// iOS may suggest above the keyboard. With [notifications], it answers
+/// about PassBundle's notifications and takes the expiration reminders it's
+/// handed (closed_reminders.dart); without, it doesn't answer, as before.
+/// With [mac], it's the Mac app instead, a computer whose Touch ID is its
+/// own (MainFlutterWindow.swift, TouchID.swift), answering the same calls.
 class PhoneStandIn {
   PhoneStandIn(
     WidgetTester tester, {
@@ -315,6 +317,7 @@ class PhoneStandIn {
     String? method,
     this.android,
     this.iphone,
+    this.notifications,
     bool mac = false,
   }) : method = method ?? (mac ? 'Touch ID' : 'fingerprint') {
     if (mac) {
@@ -372,6 +375,18 @@ class PhoneStandIn {
           return iphone?.suggest();
         case 'openPasskeySettings':
           return android?.openPasskeySettings();
+        case 'notificationAccess':
+          return notifications?.access;
+        case 'askNotifications':
+          return notifications?.ask();
+        case 'openNotificationSettings':
+          return notifications?.openSettings();
+        case 'scheduleReminders':
+          return notifications?.schedule(call.arguments);
+        case 'remindersDelivered':
+          return notifications?.delivered;
+        case 'remindersOpened':
+          return notifications?.takeOpened();
         default:
           return null;
       }
@@ -408,6 +423,63 @@ class PhoneStandIn {
 
   /// iOS's AutoFill, on an iPhone.
   final IPhoneStandIn? iphone;
+
+  /// The phone's notifications, for expiration reminders while closed.
+  final NotificationsStandIn? notifications;
+}
+
+/// What the phone says about PassBundle's notifications (Reminders.kt,
+/// Reminders.swift): [access] is `allowed`, `refused`, or `notAsked`; asked,
+/// the person allows them unless [allow] is false. It keeps each plan of
+/// reminders it's handed ([scheduled], each a list of `{date, soon,
+/// expired}`), says which days it said a reminder on ([delivered]), and
+/// whether one was tapped ([opened], once).
+class NotificationsStandIn {
+  NotificationsStandIn({
+    this.access = 'notAsked',
+    this.allow = true,
+    List<String> delivered = const [],
+  }) : delivered = [...delivered];
+
+  String access;
+  bool allow;
+  final List<String> delivered;
+  bool opened = false;
+
+  /// How many times the phone asked the person, and opened its settings.
+  var asked = 0;
+  var settingsOpened = 0;
+
+  /// Each plan handed to the phone, in order; the last is what's waiting.
+  final scheduled = <List<Map<String, dynamic>>>[];
+
+  List<Map<String, dynamic>>? get waiting =>
+      scheduled.isEmpty ? null : scheduled.last;
+
+  String ask() {
+    asked++;
+    if (access == 'notAsked') access = allow ? 'allowed' : 'refused';
+    return access;
+  }
+
+  bool openSettings() {
+    settingsOpened++;
+    return true;
+  }
+
+  bool schedule(Object? arguments) {
+    scheduled.add([
+      for (final day in (arguments as Map)['days'] as List)
+        Map<String, dynamic>.from(day as Map),
+    ]);
+    return true;
+  }
+
+  bool takeOpened() {
+    final was = opened;
+    opened = false;
+    return was;
+  }
 }
 
 /// What iOS says about PassBundle's AutoFill (AppDelegate.swift,

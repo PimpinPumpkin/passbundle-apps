@@ -10,7 +10,8 @@
 // archived, or put in the trash together, and the trash restores them or
 // deletes them for good (selection.dart). Above the list, someone no rule
 // requires two-step login of is nudged to set it up, or to add something
-// stronger than email codes (two_step_nudge.dart).
+// stronger than email codes (two_step_nudge.dart). On a phone, the phone says
+// expiration reminders while PassBundle is closed too (closed_reminders.dart).
 import 'dart:async';
 import 'dart:math' as math;
 
@@ -21,6 +22,7 @@ import 'accounts.dart';
 import 'attaching.dart';
 import 'autofill_offer.dart';
 import 'browser_import.dart';
+import 'closed_reminders.dart';
 import 'core.dart';
 import 'editor.dart';
 import 'generator.dart';
@@ -90,6 +92,11 @@ EdgeInsets noticeInsets(double window) {
 /// Settings asked for from outside the vault's screens (the Mac's PassBundle
 /// menu, Settings…): the vault shown opens them.
 final settingsAsked = ValueNotifier<int>(0);
+
+/// A phone's reminder was tapped while PassBundle was open
+/// (closed_reminders.dart): the vault shown, if it's unlocked, shows
+/// Expiring soon. Locked, it does once it's unlocked.
+final expiringAsked = ValueNotifier<int>(0);
 
 bool isWide(BuildContext context) =>
     MediaQuery.sizeOf(context).width >= wideWidth;
@@ -261,17 +268,31 @@ class VaultScreenState extends State<VaultScreen> {
 
   /// What's due to be said about items expiring ("2 items expire soon",
   /// core/src/expiration.rs), at the top of the vault until it's shown or
-  /// dismissed. Asked for after unlocking and every six hours after.
+  /// dismissed. Asked for after unlocking and every six hours after. On a
+  /// phone, what the phone said while PassBundle was closed isn't said again
+  /// (closed_reminders.dart), and the phone's coming days are worked out again
+  /// from what was said now.
   String? reminder;
   Timer? reminding;
 
   Future<void> remind() async {
     if (!mounted) return;
-    final answer = await Core.reminders();
+    final delivered = await remindersDelivered();
+    if (!mounted) return;
+    final answer = await Core.reminders(delivered);
     if (!mounted || !answer.ok) return;
     if (answer.body['title'] case final String title) {
       setState(() => reminder = title);
     }
+    unawaited(scheduleClosedReminders());
+  }
+
+  /// Opened from a phone's reminder, or one tapped while open: Expiring
+  /// soon, on the items' tab.
+  Future<void> showExpiringIfAsked() async {
+    if (!mounted || !await openedFromReminder() || !mounted) return;
+    setState(() => tab = 0);
+    choose(Filter.expiring);
   }
 
   /// A sign-in waiting for this account's answer prompts over the vault:
@@ -300,6 +321,7 @@ class VaultScreenState extends State<VaultScreen> {
     lifecycle;
     updates?.addListener(updateFound);
     settingsAsked.addListener(openSettings);
+    expiringAsked.addListener(showExpiringIfAsked);
     vaultChanged.addListener(reload);
     // Read now, before the first sync has the core.
     final offer = widget.offerBiometric && mayOfferBiometric(widget.core);
@@ -307,10 +329,12 @@ class VaultScreenState extends State<VaultScreen> {
       if (widget.syncOnOpen) sync();
       updateFound();
       // Expiration reminders, each said once (and on a computer, the
-      // desktop agent's tray told how many).
+      // desktop agent's tray told how many); and opened from a phone's
+      // reminder, Expiring soon.
       if (mounted) {
         unawaited(remind());
         reminding = Timer.periodic(const Duration(hours: 6), (_) => remind());
+        unawaited(showExpiringIfAsked());
       }
       // What it was opened to show, from another account's vault.
       if (widget.start case final start?) {
@@ -348,6 +372,9 @@ class VaultScreenState extends State<VaultScreen> {
           showMessage(context, said);
         }
       }
+      // Then, on a phone, the first time there's a reminder to schedule,
+      // asking about reminders while PassBundle is closed.
+      if (!saving && mounted) await offerClosedReminders(context);
       // Then, on a computer, importing from its browsers: offered once per
       // account here, when there's a browser profile to import from.
       if (!saving && !isPhone && widget.syncOnOpen && mounted) {
@@ -385,6 +412,7 @@ class VaultScreenState extends State<VaultScreen> {
     signInRequests.stop();
     updates?.removeListener(updateFound);
     settingsAsked.removeListener(openSettings);
+    expiringAsked.removeListener(showExpiringIfAsked);
     vaultChanged.removeListener(reload);
     lifecycle.dispose();
     search.dispose();
@@ -468,6 +496,9 @@ class VaultScreenState extends State<VaultScreen> {
       keepChecked();
     });
     judge();
+    // On a phone, the reminders it says while PassBundle is closed, from the
+    // items as they are now.
+    unawaited(scheduleClosedReminders());
   }
 
   /// Health, once the vault changes: on its own isolate, as zxcvbn takes a
