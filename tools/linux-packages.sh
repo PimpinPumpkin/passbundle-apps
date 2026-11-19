@@ -28,6 +28,19 @@
 # a Fedora container). The libraries the folder has itself (its lib folder)
 # are neither depended on nor offered to other packages. Make each on the
 # chip it's for.
+#
+# And two that nothing in the folder links to, so neither tool can find
+# them: Flutter's engine opens EGL and OpenGL ES (libEGL.so.1 and
+# libGLESv2.so.2, through libepoxy) as the app starts, and the app stops
+# without them. The .deb depends on the Debian and Ubuntu packages that have
+# them, libegl1 and libgles2; the .rpm on the libraries by name, as rpmbuild
+# writes the rest, which Fedora's libglvnd-egl and libglvnd-gles provide.
+#
+# The packages hold the folder's files as they are, as the release's
+# tarball has them (the updater's checks and the package tests rely on it):
+# dpkg-deb packs what's staged, and the .rpm is made with none of
+# rpmbuild's steps that strip, compress, or link files after they're
+# staged, which this script checks by unpacking the .rpm and comparing.
 set -euo pipefail
 umask 022
 
@@ -129,6 +142,8 @@ EOF
   substvars=$(cd "$work/source" && dpkg-shlibdeps -O --ignore-missing-info -l"$root$app/lib" "${elves[@]}")
   depends=$(printf '%s\n' "$substvars" | sed -n 's/^shlibs:Depends=//p')
   [ -n "$depends" ] || fail "dpkg-shlibdeps found nothing the app depends on: $substvars"
+  # What the engine opens as it starts (above).
+  depends="$depends, libegl1, libgles2"
   size=$(du -sk "$root/opt" "$root/usr" | awk '{ total += $1 } END { print total }')
 
   {
@@ -175,6 +190,9 @@ EOF
 
 make_rpm() {
   command -v rpmbuild > /dev/null || fail "Making the .rpm takes rpmbuild (rpm-build)."
+  for tool in rpm2cpio cpio diff; do
+    command -v "$tool" > /dev/null || fail "Checking the .rpm takes $tool."
+  done
   # The folder's own libraries, by name up to .so: whatever links to them
   # finds them there (RUNPATH), so no other package is asked for them.
   private=""
@@ -204,6 +222,10 @@ URL: https://passbundle.com
 Vendor: PassBundle
 Packager: PassBundle <hello@passbundle.com>
 ExclusiveArch: $rpm_arch
+# What Flutter's engine opens as it starts, which nothing links to, by
+# library name as rpmbuild writes the rest. Both chips are 64-bit.
+Requires: libEGL.so.1()(64bit)
+Requires: libGLESv2.so.2()(64bit)
 
 %global __requires_exclude ^($private)
 %global __provides_exclude_from ^$app/
@@ -243,6 +265,11 @@ EOF
     --define "_build_name_fmt %%{NAME}-%%{VERSION}-%%{RELEASE}.%%{ARCH}.rpm" \
     --define "pb_root $root"
   rpm="$out/passbundle-$version-1.$rpm_arch.rpm"
+  # It holds exactly what was staged, byte for byte: the folder as it is,
+  # the desktop entry, and the icon.
+  mkdir "$work/payload"
+  rpm2cpio "$rpm" | (cd "$work/payload" && cpio -idm --quiet)
+  diff -r "$root" "$work/payload" || fail "The .rpm doesn't hold what was staged as it was (what differs is above)."
   rpm -qpi "$rpm"
   echo "Requires:"
   rpm -qpR "$rpm"

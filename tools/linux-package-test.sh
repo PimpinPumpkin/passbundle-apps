@@ -7,17 +7,21 @@
 #
 # It installs the package with apt or dnf, which brings in only what the
 # package depends on, and checks every program and library in it finds the
-# libraries it links to. Then, with the tools for the rest, it installs it
-# again (so its scripts run with the menus' tools there) and checks what the
-# meta repo's tests check the install script installs: every file, owner,
-# and mode, the desktop entry, the icon, that passbundle:// links open the
-# app (the system's cache, and xdg-mime's answer for a person), and that
-# the package manager says the app is its own, as the install script and
-# the app ask it. The app opens on a virtual display and stays open, and a
+# libraries it links to, and that the ones the app opens as it starts (EGL
+# and OpenGL ES, which nothing links to) came with it. Then, with the tools
+# for the rest, it installs it again (so its scripts run with the menus'
+# tools there) and checks what the meta repo's tests check the install
+# script installs: every file, owner, and mode, the desktop entry, the
+# icon, that passbundle:// links open the app (the system's cache, and
+# xdg-mime's answer for a person), and that the package manager says the
+# app is its own, as the install script and the app ask it. The app opens
+# on a virtual display and stays open, and the test lists what it has open
+# from packages that came with the tools rather than with the package; a
 # link opened with xdg-open reaches it. Removing it leaves nothing of ours
 # but the policy file the install script would have written. Last, it
 # refuses to install over a PassBundle no package put in /opt/passbundle,
-# saying how to switch, and leaves that one as it was.
+# saying how to switch, and leaves that one as it was. A check that fails
+# shows what its command said: what differs, or what's missing.
 #
 # It installs and removes packages and adds a user: it runs only as root
 # in a container, never on a computer of yours.
@@ -47,13 +51,16 @@ person_home=/home/$person
 failures=0
 export DEBIAN_FRONTEND=noninteractive
 
+# A check passes when its command does; when it fails, what the command
+# said is shown under it.
 check() {
   name=$1
   shift
-  if "$@" > /dev/null 2>&1; then
+  if said=$("$@" 2>&1); then
     echo "ok    $name"
   else
     echo "FAIL  $name"
+    [ -z "$said" ] || printf '%s\n' "$said" | sed 's/^/      /'
     failures=$((failures + 1))
   fi
 }
@@ -109,11 +116,72 @@ only_ours() {
   done < <(package_paths)
 }
 
-# What the app's folder holds is exactly what its release.json lists.
+# What the app's folder holds is exactly what its release.json lists; if
+# not, what differs.
 as_released() {
   [ -f "$app/release.json" ] || return 0
   diff <(jq -r '.files[]' "$app/release.json" | LC_ALL=C sort) \
-    <(cd "$app" && find . -mindepth 1 | sed 's|^\./||' | LC_ALL=C sort)
+    <(cd "$app" && find . -mindepth 1 | sed 's|^\./||' | LC_ALL=C sort) && return 0
+  echo "(< only in release.json, > only in $app)"
+  return 1
+}
+
+# The menu's icon is the one the app carries; if not, both, by size and
+# SHA-256.
+same_icon() {
+  cmp "$icon" "$app/data/com.passbundle.app.png" && return 0
+  ls -l "$icon" "$app/data/com.passbundle.app.png"
+  sha256sum "$icon" "$app/data/com.passbundle.app.png"
+  return 1
+}
+
+# Every package installed, by name.
+installed() {
+  if [ "$kind" = deb ]; then
+    # dpkg-query's own fields, not the shell's.
+    # shellcheck disable=SC2016
+    dpkg-query -W -f '${Package}\n'
+  else
+    rpm -qa --queryformat '%{NAME}\n'
+  fi
+}
+
+# What Flutter's engine opens as the app starts (through libepoxy), which
+# nothing in the package links to, so ldd can't see it: where the dynamic
+# linker finds each, and the package that has it.
+start_libraries() {
+  missing_one=0
+  for lib in libEGL.so.1 libGLESv2.so.2; do
+    path=$(ldconfig -p | awk -v lib="$lib" '$1 == lib { print $NF; exit }')
+    if [ -n "$path" ]; then
+      echo "$lib: $path, from $(owner "$(readlink -f "$path")")"
+    else
+      echo "$lib: not found"
+      missing_one=1
+    fi
+  done
+  return "$missing_one"
+}
+
+# The libraries the running app has open (not only what it links to) that
+# came with this test's tools rather than with the package: the display's
+# drivers are the tools'; anything else, the package should depend on.
+opened_from_tools() {
+  pid=$(pgrep -x passbundle | head -n 1)
+  [ -n "$pid" ] || return 0
+  # Read as the person: root in a container may not read another user's.
+  if ! maps=$(runuser -u "$person" -- cat "/proc/$pid/maps" 2>&1); then
+    echo "(couldn't read what it has open: $maps)"
+    return 0
+  fi
+  awk '$6 ~ /\.so/ { print $6 }' <<< "$maps" | LC_ALL=C sort -u |
+    while IFS= read -r lib; do
+      case "$lib" in "$app"/*) continue ;; esac
+      from=$(owner "$lib")
+      # A package that lists it under /lib rather than /usr/lib.
+      [ -n "$from" ] || from=$(owner "${lib#/usr}")
+      grep -qxF -- "$from" <<< "$with_package" || echo "$lib (${from:-in no package})"
+    done
 }
 
 # shellcheck disable=SC1091 # the system's own
@@ -143,16 +211,30 @@ while IFS= read -r -d '' file; do
 done < <(find "$app" -type f -print0)
 printf '%s' "$missing"
 check "every program and library in it finds what it links to" test -z "$missing"
+starts_with=$(start_libraries)
+starts_status=$?
+echo "What the app opens as it starts:"
+printf '%s\n' "$starts_with" | sed 's/^/      /'
+check "it brings what the app opens as it starts (EGL and OpenGL ES)" test "$starts_status" -eq 0
+# What's here now: the system's own, and what came with the package.
+with_package=$(installed)
 
-# A desktop has these; a container doesn't. Mesa is the display's OpenGL,
-# which GTK loads when it draws (not something the app links to).
-echo "The tools for the rest: a virtual display with Mesa, xdg-utils, and the menus' tools"
+# A desktop has these; a container doesn't. Mesa is the display's OpenGL:
+# its drivers, which the GL libraries load when the app draws. On Ubuntu
+# that's Mesa's own packages only (Xvfb brings libgl1), so libEGL and
+# libGLESv2 are there only if the package brought them; Fedora's Mesa
+# packages bring libglvnd's libraries with them. diffutils is for the checks
+# (Ubuntu always has it; Fedora's image doesn't).
+echo "The tools for the rest: a virtual display with Mesa, xdg-utils, the menus' tools, and diffutils"
 if [ "$kind" = deb ]; then
-  add xvfb libgl1-mesa-dri libegl1 libgl1 xdg-utils desktop-file-utils procps jq || exit 1
+  add xvfb libgl1-mesa-dri libegl-mesa0 xdg-utils desktop-file-utils procps jq || exit 1
 else
   add xorg-x11-server-Xvfb mesa-dri-drivers mesa-libEGL mesa-libGL xdg-utils desktop-file-utils procps-ng \
-    util-linux shadow-utils jq || exit 1
+    util-linux shadow-utils jq diffutils || exit 1
 fi
+for tool in diff cmp jq; do
+  command -v "$tool" > /dev/null || { echo "This needs $tool." >&2; exit 1; }
+done
 # Installing the tools made the menus' cache; installing the package again
 # has to make it anew.
 rm -f "$mime_cache"
@@ -177,7 +259,7 @@ check "it's in the applications menu" grep -qx "Exec=$app/passbundle %u" "$entry
 check "under its name" grep -qx "Name=PassBundle" "$entry"
 check "the desktop entry is valid" desktop-file-validate "$entry"
 check "the desktop entry is root's and read-only" sh -c "[ \"\$(stat -c '%U:%G %a' '$entry')\" = 'root:root 644' ]"
-check "with its icon" cmp -s "$icon" "$app/data/com.passbundle.app.png"
+check "with its icon" same_icon
 check "the icon is root's and read-only" sh -c "[ \"\$(stat -c '%U:%G %a' '$icon')\" = 'root:root 644' ]"
 if [ "$kind" = deb ]; then
   check "its copyright file says GPL-3.0" grep -q 'GPL-3.0-only' "$copyright"
@@ -194,7 +276,11 @@ sleep 2
 as_person "$app/passbundle" > /tmp/passbundle.log 2>&1 &
 sleep 5
 check "opens and stays open" pgrep -x passbundle
-if ! pgrep -x passbundle > /dev/null; then
+if pgrep -x passbundle > /dev/null; then
+  echo "What it has open that came with the tools, not the package (the display's drivers belong here):"
+  from_tools=$(opened_from_tools)
+  printf '%s\n' "${from_tools:-nothing}" | sed 's/^/      /'
+else
   echo "What the app said:"
   sed 's/^/      /' /tmp/passbundle.log
 fi

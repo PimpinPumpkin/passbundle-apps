@@ -320,7 +320,9 @@ jobs:
       PLATFORM: ${{ matrix.platform }}
     steps:
       - name: rpmbuild, and what the script uses
-        run: dnf install -y rpm-build tar gzip findutils
+        # cpio and diffutils: the script unpacks the .rpm and compares it
+        # with the folder.
+        run: dnf install -y rpm-build tar gzip findutils cpio diffutils
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.plan.outputs.sha }}
