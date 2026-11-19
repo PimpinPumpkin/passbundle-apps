@@ -8,7 +8,8 @@ import 'glyphs.dart';
 import 'theme.dart';
 
 /// What the vault's list shows: everything, favorites, what's expired or
-/// expires within 30 days (Expiring soon), the items with something to fix
+/// expires within 30 days (Expiring soon), the person's own templates and
+/// their organizations' (Item templates), the items with something to fix
 /// (Health), a kind, Personal, Personal's items in no folder, one of the
 /// person's folders, an organization, or one of its shared folders.
 enum Filter {
@@ -19,6 +20,11 @@ enum Filter {
   everyAccount,
   favorites,
   expiring,
+
+  /// Custom templates, not an MSP's copies (the meta repo's DESIGN.md, "The
+  /// Item templates view"): templates are in no other list but their own
+  /// folder's or shared folder's, the archive, and the trash.
+  templates,
   health,
   kind,
   personal,
@@ -214,8 +220,10 @@ bool hasExpired(Map<String, dynamic> item) =>
 
 /// Whether an item shows under a filter. A template an MSP keeps up to date
 /// in a client's Templates shared folder shows only there, and in the
-/// trash, which lists everything in it. Health shows the items in [health]
-/// (core/src/health.rs and expiration.rs).
+/// trash, which lists everything in it. The person's own templates and
+/// their organizations' show under Item templates, in their own folder or
+/// shared folder, and in the archive and the trash. Health shows the items
+/// in [health] (core/src/health.rs and expiration.rs).
 bool shows(
   Map<String, dynamic> item,
   Filter filter,
@@ -227,7 +235,19 @@ bool shows(
       filter != Filter.trash) {
     return false;
   }
+  final template = isOwnTemplate(item);
+  if (template &&
+      !const {
+        Filter.templates,
+        Filter.folder,
+        Filter.collection,
+        Filter.archive,
+        Filter.trash,
+      }.contains(filter)) {
+    return false;
+  }
   return switch (filter) {
+    Filter.templates => template,
     Filter.all || Filter.everyAccount => true,
     Filter.favorites => item['favorite'] == true,
     Filter.expiring => expiringLabel(item) != null,
@@ -244,6 +264,13 @@ bool shows(
     Filter.trash => item['deleted'] == true,
   };
 }
+
+/// One of the person's own templates or their organizations', not a copy
+/// an MSP keeps up to date (core/src/templates.rs, `is_own_template`).
+bool isOwnTemplate(Map<String, dynamic> item) =>
+    item['isTemplate'] == true &&
+    item['mspCopy'] != true &&
+    item['kind'] == 'note';
 
 /// Where an item is, said as the item's page says it: "Personal › Work",
 /// "Contoso › IT".

@@ -278,6 +278,9 @@ class Core {
   late final _left = _lib.lookupFunction<_Str0, _Str0>('pb_left');
   late final _places = _lib.lookupFunction<_Str1, _Str1>('pb_places');
   late final _templates = _lib.lookupFunction<_Str1, _Str1>('pb_templates');
+  late final _templateFromItem = _lib.lookupFunction<_Str2, _Str2>(
+    'pb_template_from_item',
+  );
   late final _restrictedKinds = _lib.lookupFunction<_Str1, _Str1>('pb_restricted_kinds');
   late final _icon = _lib.lookupFunction<_Str2, _Str2>('pb_icon');
   late final _testIcons = _lib.lookupFunction<_Str1, _Str1>('pb_test_icons');
@@ -308,6 +311,7 @@ class Core {
   late final _testExpiration = _lib.lookupFunction<_Str1, _Str1>(
     'pb_test_expiration',
   );
+  late final _testFields = _lib.lookupFunction<_Str1, _Str1>('pb_test_fields');
   late final _browserProfiles = _lib.lookupFunction<_Str1, _Str1>(
     'pb_browser_profiles',
   );
@@ -345,6 +349,7 @@ class Core {
   late final _reveal = _lib.lookupFunction<_Str3, _Str3>('pb_reveal');
   late final _copy = _lib.lookupFunction<_Str3, _Str3>('pb_copy');
   late final _totp = _lib.lookupFunction<_Str2, _Str2>('pb_totp');
+  late final _fieldCode = _lib.lookupFunction<_Str3, _Str3>('pb_field_code');
   late final _save = _lib.lookupFunction<_Str3, _Str3>('pb_save');
   late final _trash = _lib.lookupFunction<_Str2, _Str2>('pb_trash');
   late final _bulkPlan = _lib.lookupFunction<_Str3, _Str3>('pb_bulk_plan');
@@ -1489,6 +1494,15 @@ class Core {
   void testExpiration(Map<String, Map<String, String>> items) =>
       _with([jsonEncode(items)], (p) => _answer(_testExpiration(p[0])));
 
+  /// Items given more fields (`{name, value, type}`, upstream's type: 0
+  /// text, 1 hidden, 2 yes or no), by id, after their own, whenever a vault
+  /// opens: for tests, with a core built with its test hooks, as the web
+  /// vault would leave a template or an item from one. Unlock after giving
+  /// them.
+  @visibleForTesting
+  void testFields(Map<String, List<Map<String, dynamic>>> items) =>
+      _with([jsonEncode(items)], (p) => _answer(_testFields(p[0])));
+
   // Importing from this computer's browsers (browser_import.dart; the
   // core's browser_import.rs). Computers only.
 
@@ -1840,10 +1854,21 @@ class Core {
 
   /// Templates for New item, grouped as the web vault groups them
   /// (core/src/templates.rs): `[{name, templates: [{id, name, base,
-  /// category, fields: [{label, kind, value}]}]}]`.
+  /// category, fields: [{label, kind, value, expires}]}]}]`. A field's
+  /// `kind` is text, hidden, boolean, or a template's own (date, url,
+  /// email, phone, number, totp); `expires` marks the date that's a new
+  /// item's expiration date.
   List<Map<String, dynamic>> templates() =>
       (_with([account], (p) => _answer(_templates(p[0]))) as List)
           .cast<Map<String, dynamic>>();
+
+  /// "Save as template": a new template's start from a login or a note,
+  /// `{base, name, fields: [{label, kind, expires}]}`, its custom fields by
+  /// label and kind, never their values (core/src/templates.rs,
+  /// `from_item`); null for a template, or a kind templates don't cover.
+  Map<String, dynamic>? templateFromItem(String id) =>
+      _with([account, id], (p) => _answer(_templateFromItem(p[0], p[1])))
+          as Map<String, dynamic>?;
 
   /// The kinds of item New doesn't offer (`card`, as [list] names kinds):
   /// those an organization's "Remove card item type" policy removes
@@ -1890,6 +1915,17 @@ class Core {
 
   Map<String, dynamic>? totp(String id) =>
       _with([account, id], (p) => _answer(_totp(p[0], p[1])))
+          as Map<String, dynamic>?;
+
+  /// A template's one-time code field's current code, as [totp] gives a
+  /// login's: [index] is the field's place among the item's fields. Null
+  /// where codes don't show (core/src/codes.rs).
+  Map<String, dynamic>? fieldCode(String id, int index) =>
+      _with([
+            account,
+            id,
+            '$index',
+          ], (p) => _answer(_fieldCode(p[0], p[1], p[2])))
           as Map<String, dynamic>?;
 
   /// The generator's last choices on this device (core/src/generator.rs):

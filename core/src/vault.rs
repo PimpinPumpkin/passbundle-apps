@@ -1068,6 +1068,15 @@ pub struct ItemDraft {
     /// with the item as the web vault records them. An edit keeps whatever
     /// template the item came from.
     pub template: Option<(String, String)>,
+    /// The editor's kinds for the fields (templates.rs, `Typing`), written
+    /// into the item's template marker, or into its definition for a custom
+    /// template, as the web vault's editor writes them, so a renamed field
+    /// keeps its kind; None keeps them as they are. An item from no template
+    /// has nowhere to keep them.
+    pub typing: Option<crate::templates::Typing>,
+    /// "Create template" and "Save as template": this new note is a custom
+    /// template whose new items are logins or notes, with a fresh id.
+    pub new_template: Option<crate::templates::Base>,
     /// The editor's "Expires" and "Remind me" (expiration.rs), replacing
     /// the item's; None keeps the item's as they are.
     pub expiration: Option<Expiration>,
@@ -1148,6 +1157,8 @@ impl ItemDraft {
             organization_id: item.organization_id.clone(),
             favorite: item.favorite,
             template: None,
+            typing: None,
+            new_template: None,
             expiration: None,
             reprompt: None,
         }
@@ -1155,8 +1166,9 @@ impl ItemDraft {
 }
 
 /// For the app's tests (the test-hooks feature, never in a release): items
-/// given expiration dates and reminder days as if the web vault had set
-/// them, whenever a vault opens, since a test's sample vault is encrypted.
+/// given expiration dates and reminder days, and more fields, as if the web
+/// vault had set them, whenever a vault opens, since a test's sample vault
+/// is encrypted.
 #[cfg(feature = "test-hooks")]
 pub mod test_hooks {
     use std::collections::BTreeMap;
@@ -1170,6 +1182,28 @@ pub mod test_hooks {
     /// By item id: the date ("YYYY-MM-DD"), and the reminder days, if any.
     pub static EXPIRING: Mutex<BTreeMap<String, (String, Option<String>)>> =
         Mutex::new(BTreeMap::new());
+
+    /// A field to add: its name, value, and upstream type.
+    pub type Given = (String, String, u8);
+
+    /// By item id: fields to add after its own, such as a template's
+    /// definition or marker and its typed fields.
+    pub static FIELDS: Mutex<BTreeMap<String, Vec<Given>>> = Mutex::new(BTreeMap::new());
+
+    pub(super) fn add_fields(items: &mut [Item]) {
+        let given = FIELDS.lock().unwrap_or_else(|p| p.into_inner());
+        for item in items.iter_mut() {
+            for (name, value, kind) in given.get(&item.id).into_iter().flatten() {
+                item.fields.push(Field {
+                    name: name.clone(),
+                    value: Zeroizing::new(value.clone()),
+                    hidden: *kind == 1,
+                    boolean: *kind == 2,
+                });
+                item.kept.field_kinds.push((*kind, None));
+            }
+        }
+    }
 
     pub(super) fn expire(items: &mut [Item]) {
         let given = EXPIRING.lock().unwrap_or_else(|p| p.into_inner());
@@ -1409,7 +1443,10 @@ impl Vault {
         }
         items.sort_by_key(|i| i.name.to_lowercase());
         #[cfg(feature = "test-hooks")]
-        test_hooks::expire(&mut items);
+        {
+            test_hooks::add_fields(&mut items);
+            test_hooks::expire(&mut items);
+        }
 
         Ok(Vault {
             user_id: sync.profile.id.clone(),
@@ -1838,34 +1875,99 @@ impl Vault {
             })
             .collect();
         // A new item from a template records it, as the web vault does
-        // (passbundle-clients, templates.ts): a text field after the rest.
+        // (passbundle-clients, templates.ts): a text field after the rest,
+        // with the template's typed fields.
+        let typing = draft.typing.clone().unwrap_or_default();
         if let (None, Some((id, name))) = (editing, &draft.template) {
             fields.push(json!({
                 "name": enc(crate::templates::TEMPLATE_FIELD),
-                "value": enc(&crate::templates::marker(id, name)),
+                "value": enc(&crate::templates::marker(id, name, &typing)),
                 "type": 0,
                 "linkedId": null,
             }));
+        }
+        // A new custom template: a note with a definition (DESIGN.md, "Item
+        // templates"), never an item from another template too.
+        if let (None, Some(base), true) = (editing, draft.new_template, draft.note) {
+            if draft.template.is_none() {
+                fields.push(json!({
+                    "name": enc(crate::templates::DEFINITION_FIELD),
+                    "value": enc(&crate::templates::new_definition(base, &typing)),
+                    "type": 0,
+                    "linkedId": null,
+                }));
+            }
         }
         // Linked fields and nameless ones, which the editor doesn't edit, stay,
         // each where it was among the item's fields (the version's, when
         // restoring one). Our own data (`keykeeper.*`: fill rules, template
         // markers, expiration dates) is the item's as it is now: restoring a
         // version never brings back a rule or a marker taken off since.
+        // The template's expiration date field, while it holds a date, is
+        // the item's date too (DESIGN.md, "A date field that sets Expires"):
+        // the editor keeps the two the same, and this keeps them so whatever
+        // it sends. A template's own date is a default for new items.
+        let linked = (draft.new_template.is_none()
+            && editing.is_none_or(|item| crate::templates::definition_of(item).is_none()))
+        .then(|| {
+            draft
+                .typing
+                .as_ref()
+                .and_then(|t| t.expires.clone())
+                .or_else(|| editing.and_then(|item| crate::templates::typing_of(item).expires))
+        })
+        .flatten()
+        .and_then(|label| {
+            draft
+                .fields
+                .iter()
+                .find(|f| f.name == label && !f.hidden && !f.boolean)
+                .and_then(|f| crate::expiration::Date::parse_iso(f.value.trim()))
+        });
+        let expiration = match (linked, &draft.expiration) {
+            (Some(date), Some(set)) => Some(Expiration {
+                date: Some(date),
+                remind: set.remind.clone(),
+            }),
+            (Some(date), None) => Some(Expiration {
+                date: Some(date),
+                remind: editing
+                    .map(crate::expiration::Remind::of)
+                    .unwrap_or_default(),
+            }),
+            (None, set) => set.clone(),
+        };
         let replaced = |field: &Field| {
-            draft.expiration.is_some()
+            expiration.is_some()
                 && (field.name == EXPIRES_FIELD || field.name == crate::expiration::REMIND_FIELD)
+        };
+        // The editor's kinds for the fields go into the item's definition, if
+        // it's a custom template, or else its template's marker; the rest of
+        // either stays as it is.
+        let carrier = editing.map(|item| {
+            if crate::templates::definition_of(item).is_some() {
+                crate::templates::DEFINITION_FIELD
+            } else {
+                crate::templates::TEMPLATE_FIELD
+            }
+        });
+        let typed = |field: &Field| -> Option<String> {
+            let typing = draft.typing.as_ref()?;
+            (Some(field.name.as_str()) == carrier)
+                .then(|| crate::templates::with_typing(field.value.as_str(), typing))
+                .flatten()
         };
         for (item, ours) in [(source, false), (editing.or(source), true)] {
             let Some(item) = item else { continue };
             let kinds = &item.kept.field_kinds;
             for (at, (field, (kind, linked))) in item.fields.iter().zip(kinds).enumerate() {
                 if !field.edited_by_the_app(*kind) && field.reserved() == ours && !replaced(field) {
+                    let value = if ours { typed(field) } else { None };
                     fields.insert(
                         at.min(fields.len()),
                         json!({
                             "name": enc_opt(Some(field.name.as_str())),
-                            "value": enc_opt(Some(field.value.as_str())),
+                            "value": enc_opt(Some(value.as_deref().unwrap_or(field.value.as_str()))),
                             "type": kind,
                             "linkedId": linked,
                         }),
@@ -1876,7 +1978,7 @@ impl Vault {
 
         // The editor's expiration date and reminder days, after the rest,
         // as the web vault adds them.
-        for (name, value) in draft.expiration.iter().flat_map(Expiration::fields) {
+        for (name, value) in expiration.iter().flat_map(Expiration::fields) {
             fields.push(json!({
                 "name": enc(name),
                 "value": enc(&value),

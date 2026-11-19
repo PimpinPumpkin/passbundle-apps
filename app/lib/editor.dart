@@ -9,7 +9,12 @@
 // starts where the core starts one (places.dart, `newItemStart`); with none,
 // the vault opens no editor (vault.dart). Closing it with anything changed
 // (Cancel, Escape, or Android's Back) asks first, as the web vault does; a
-// click outside it never closes it.
+// click outside it never closes it. A template's fields have kinds beyond
+// upstream's (a date, a website, an email address, a phone number, a
+// number, a one-time code), which the editor uses and keeps in the
+// template's definition or an item's marker (core/src/templates.rs; the meta
+// repo's DESIGN.md, "Item templates"); a date can be the item's expiration
+// date, which keeps "Expires" the same as it.
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
@@ -80,20 +85,116 @@ Future<EditorSaved?> openEditor(
 }
 
 /// A custom field as the editor has it: upstream's type (0 text, 1 hidden,
-/// 2 yes or no), its name, and its value ("true" or "false" for yes or no).
+/// 2 yes or no), its name, and its value ("true" or "false" for yes or no);
+/// and the kind its template gives it, if any (a date, a website, and so
+/// on), and whether it's the expiration date.
 class _Field {
-  _Field(String name, String value, this.kind)
-    : name = TextEditingController(text: name),
+  _Field(
+    String name,
+    String value,
+    this.kind, {
+    this.typed,
+    this.expires = false,
+  }) : name = TextEditingController(text: name),
       value = TextEditingController(text: value),
       yes = value == 'true';
+
+  /// A field of a template's kind: its type kept as that kind is.
+  _Field.of(String name, String value, String kind, {bool expires = false})
+    : this(
+        name,
+        value,
+        storedType(kind),
+        typed: typedKinds.contains(kind) ? kind : null,
+        expires: kind == 'date' && expires,
+      );
 
   final TextEditingController name;
   final TextEditingController value;
   int kind;
   bool yes;
 
+  /// date, url, email, phone, number, or totp: a template's kind for it.
+  String? typed;
+
+  /// A date that's the item's expiration date (a template's: new items').
+  bool expires;
+
   bool get hidden => kind == 1;
   bool get boolean => kind == 2;
+
+  /// Its kind, as templates name them.
+  String get kindName =>
+      typed ??
+      switch (kind) {
+        1 => 'hidden',
+        2 => 'boolean',
+        _ => 'text',
+      };
+}
+
+/// The kinds a template gives a field beyond upstream's text, hidden, and
+/// yes or no (core/src/templates.rs, `FieldKind`).
+const typedKinds = {'date', 'url', 'email', 'phone', 'number', 'totp'};
+
+/// Upstream's field type a kind is kept as: a one-time code's key is hidden.
+int storedType(String kind) => switch (kind) {
+  'hidden' || 'totp' => 1,
+  'boolean' => 2,
+  _ => 0,
+};
+
+/// "YYYY-MM-DD", a real day, as the core reads a date.
+bool isIsoDate(String text) {
+  final match = RegExp(r'^(\d{4})-(\d{2})-(\d{2})$').firstMatch(text);
+  if (match == null) return false;
+  final year = int.parse(match[1]!);
+  final month = int.parse(match[2]!);
+  final day = int.parse(match[3]!);
+  final date = DateTime(year, month, day);
+  return date.year == year && date.month == month && date.day == day;
+}
+
+/// What's wrong with a typed field's value, said plainly, or null: the
+/// editor shows it under the field, and it never stops the item saving. An
+/// empty field is fine. The web vault's words (templates.ts,
+/// `typedFieldProblem`).
+String? typedFieldProblem(String? kind, String value) {
+  final v = value.trim();
+  if (v.isEmpty) return null;
+  switch (kind) {
+    case 'date':
+      return isIsoDate(v)
+          ? null
+          : 'Write the date as year, month, and day, such as 2027-03-31.';
+    case 'url':
+      final uri = Uri.tryParse(v);
+      final web =
+          !v.contains(RegExp(r'\s')) &&
+          ((uri != null &&
+                  (uri.scheme == 'https' || uri.scheme == 'http') &&
+                  uri.host.contains('.')) ||
+              RegExp(
+                r'^[^/:@]+\.[a-z]{2,}(:\d+)?(/.*)?$',
+                caseSensitive: false,
+              ).hasMatch(v));
+      return web ? null : "This doesn't look like a web address.";
+    case 'email':
+      return RegExp(r'^[^\s@]+@[^\s@]+\.[^\s@]+$').hasMatch(v)
+          ? null
+          : "This doesn't look like an email address.";
+    case 'phone':
+      return RegExp(r'^\+?[\d\s().\-/]+$').hasMatch(v) &&
+              RegExp(r'\d').allMatches(v).length >= 3
+          ? null
+          : "This doesn't look like a phone number.";
+    case 'number':
+      return RegExp(r'^[+-]?(\d+|\d{1,3}(,\d{3})+)(\.\d+)?$').hasMatch(v)
+          ? null
+          : "This isn't a number.";
+    default:
+      return null;
+  }
 }
 
 class ItemEditor extends StatefulWidget {
@@ -123,6 +224,11 @@ class ItemEditor extends StatefulWidget {
   /// "card" or "identity"), from a payment or address form Android's
   /// autofill offered to save.
   final Map<String, dynamic>? prefill;
+
+  /// Tests only: what Save sends the core, as it sends it (the tests' vault
+  /// has no server to save to).
+  @visibleForTesting
+  static void Function(Map<String, dynamic> draft)? debugSaving;
 
   @override
   State<ItemEditor> createState() => _ItemEditorState();
@@ -184,6 +290,27 @@ class _ItemEditorState extends State<ItemEditor> {
   /// The template an item being edited came from, to name it.
   String? templateName;
 
+  /// A custom template being made ("login" or "note", what its new items
+  /// will be), or being edited (its definition's base).
+  String? templateBase;
+
+  /// It's a custom template: its fields' kinds go in its definition, and a
+  /// date in it is a default for new items, never its own expiration.
+  bool get isTemplate => templateBase != null;
+
+  /// It keeps its fields' kinds: a template, or an item from one (in its
+  /// marker). An item from no template has nowhere to keep them.
+  bool get keepsKinds =>
+      isTemplate || template != null || templateName != null;
+
+  /// The field that's the item's expiration date, as its template marks it:
+  /// "Expires" and it stay the same. A template's is a default instead.
+  _Field? get expirationField => isTemplate
+      ? null
+      : fields
+            .where((f) => f.expires && f.typed == 'date' && f.kind == 0)
+            .firstOrNull;
+
   /// An organization's item being edited: the shared folders it's in, the
   /// first of which the Folder picker shows.
   List<String> held = const [];
@@ -205,6 +332,7 @@ class _ItemEditorState extends State<ItemEditor> {
       final reveal = widget.core.reveal;
       kind = item['kind'] as String;
       templateName = (item['template'] as Map?)?['name'] as String?;
+      templateBase = (item['definition'] as Map?)?['base'] as String?;
       permissions = Map<String, dynamic>.from(
         (item['permissions'] as Map?) ?? const {},
       );
@@ -244,17 +372,25 @@ class _ItemEditorState extends State<ItemEditor> {
         // custom field; saving keeps them (core/src/vault.rs, Kept).
         if (f['editable'] == false) continue;
         final hidden = f['hidden'] == true;
+        // Its kind, from the item's template (core/src/templates.rs).
+        final typed = f['kind'] as String?;
         fields.add(
           _Field(
             f['name'] as String,
             (hidden ? reveal(id, 'field:$i') : f['value'] as String?) ?? '',
             (f['type'] as int?) ?? (hidden ? 1 : 0),
+            typed: typedKinds.contains(typed) ? typed : null,
+            expires: f['expires'] == true,
           ),
         );
       }
       favorite = item['favorite'] == true;
       reprompt = item['reprompt'] == true;
       expires.text = (item['expires'] ?? '') as String;
+      // The template's expiration date wins while it holds a date, as the
+      // core reads it (core/src/expiration.rs, `stored`).
+      final linked = expirationField?.value.text.trim() ?? '';
+      if (isIsoDate(linked)) expires.text = linked;
       final itemRemind = item['remind'] as Map?;
       remind = (itemRemind?['value'] as String?) ?? '';
       remindWords = itemRemind?['words'] as String?;
@@ -269,22 +405,28 @@ class _ItemEditorState extends State<ItemEditor> {
     if (id == null && choice != null) {
       kind = choice.kind;
       template = choice.template;
-      for (final f
-          in ((template?['fields'] as List?) ?? const [])
-              .cast<Map<String, dynamic>>()) {
-        final kind = switch (f['kind']) {
-          'hidden' => 1,
-          'boolean' => 2,
-          _ => 0,
-        };
+      templateBase = choice.newTemplate;
+      if (choice.name != null) name.text = choice.name!;
+      // A template's fields with their kinds and defaults; a new template's
+      // ("Save as template") with their kinds only.
+      for (final f in [
+        ...((template?['fields'] as List?) ?? const [])
+            .cast<Map<String, dynamic>>(),
+        ...choice.fields,
+      ]) {
+        final kind = (f['kind'] as String?) ?? 'text';
         fields.add(
-          _Field(
+          _Field.of(
             f['label'] as String,
-            (f['value'] as String?) ?? (kind == 2 ? 'false' : ''),
+            (f['value'] as String?) ?? (kind == 'boolean' ? 'false' : ''),
             kind,
+            expires: f['expires'] == true,
           ),
         );
       }
+      // Its template's expiration date, when the template gives one.
+      final linked = expirationField?.value.text.trim() ?? '';
+      if (isIsoDate(linked)) expires.text = linked;
     }
     if (id == null) pickPlace(startPlace);
     final prefill = widget.prefill;
@@ -486,7 +628,28 @@ class _ItemEditorState extends State<ItemEditor> {
     'grant': ?grant,
     if (template != null)
       'template': {'id': template!['id'], 'name': template!['name']},
+    // The fields' kinds, for the template's definition or the item's
+    // marker (core/src/templates.rs, `Typing`).
+    if (keepsKinds) 'typing': typing,
+    // "Create template" and "Save as template": a new custom template.
+    if (!editing && isTemplate) 'newTemplate': templateBase,
   };
+
+  /// The fields' kinds beyond upstream's, by name, and which date is the
+  /// expiration date: `{types, expires}`.
+  Map<String, dynamic> get typing {
+    final named = [
+      for (final f in fields)
+        if (f.typed != null && f.name.text.trim().isNotEmpty) f,
+    ];
+    final expiring = named
+        .where((f) => f.typed == 'date' && f.expires)
+        .firstOrNull;
+    return {
+      'types': {for (final f in named) f.name.text: f.typed},
+      'expires': ?expiring?.name.text,
+    };
+  }
 
   /// The draft as the editor opened, as a fingerprint rather than a copy,
   /// so its secrets aren't kept twice: whether anything changed since.
@@ -507,6 +670,7 @@ class _ItemEditorState extends State<ItemEditor> {
       error = null;
     });
     final draft = this.draft;
+    ItemEditor.debugSaving?.call(draft);
     final answer = await whileBusy(() => Core.save(widget.id, draft));
     if (!mounted) return;
     if (answer.ok) {
@@ -534,24 +698,50 @@ class _ItemEditorState extends State<ItemEditor> {
 
   /// The calendar, for the expiration date.
   Future<void> pickExpiry() async {
+    final picked = await pickDate(expires.text);
+    if (picked == null || !mounted) return;
+    setState(() {
+      expires.text = picked;
+      expiresChanged();
+    });
+  }
+
+  /// The calendar, from the date [shown] if it's one: the day picked, as
+  /// "YYYY-MM-DD", or null.
+  Future<String?> pickDate(String shown) async {
     final now = DateTime.now();
     final first = DateTime(now.year - 20);
     final last = DateTime(now.year + 50, 12, 31);
-    final shown = DateTime.tryParse(expires.text.trim());
+    final from = isIsoDate(shown.trim()) ? DateTime.parse(shown.trim()) : null;
     final picked = await showDatePicker(
       context: context,
-      initialDate: shown != null && !shown.isBefore(first) && !shown.isAfter(last)
-          ? shown
+      initialDate: from != null && !from.isBefore(first) && !from.isAfter(last)
+          ? from
           : now,
       firstDate: first,
       lastDate: last,
     );
-    if (picked == null || !mounted) return;
+    if (picked == null) return null;
     String two(int n) => n.toString().padLeft(2, '0');
-    setState(
-      () => expires.text =
-          '${picked.year}-${two(picked.month)}-${two(picked.day)}',
-    );
+    return '${picked.year}-${two(picked.month)}-${two(picked.day)}';
+  }
+
+  /// "Expires" changed: the template's expiration date field follows.
+  void expiresChanged() {
+    final field = expirationField;
+    final date = expires.text.trim();
+    if (field != null && field.value.text != date) field.value.text = date;
+  }
+
+  /// The template's expiration date field changed: "Expires" follows, with
+  /// a date or none (not with anything else, which the field's warning is
+  /// about).
+  void expirationFieldChanged(_Field f) {
+    if (f != expirationField) return;
+    final date = f.value.text.trim();
+    if ((date.isEmpty || isIsoDate(date)) && expires.text.trim() != date) {
+      expires.text = date;
+    }
   }
 
   /// What a field or a picker holds, in the same type either way (a picker's
@@ -700,6 +890,7 @@ class _ItemEditorState extends State<ItemEditor> {
 
   /// What the editor's title calls the item: "New Wi-Fi network", "Edit login".
   String get title {
+    if (isTemplate) return editing ? 'Edit template' : 'New template';
     final what =
         (template?['name'] as String?) ??
         templateName ??
@@ -720,6 +911,11 @@ class _ItemEditorState extends State<ItemEditor> {
   /// kind, or remove it.
   Widget customField(int i) {
     final f = fields[i];
+    // A template's fields take any kind; an item's, upstream's three (a
+    // kind its template gave it stays while its type does).
+    final kinds = isTemplate
+        ? _templateKinds
+        : {for (final e in _fieldKinds.entries) _kindNames[e.key]!: e.value};
     final menu = PopupMenuButton<String>(
       tooltip: 'More for ${f.name.text}',
       icon: Icon(
@@ -738,24 +934,47 @@ class _ItemEditorState extends State<ItemEditor> {
             if (named != null && mounted) setState(() => f.name.text = named);
           case 'remove':
             setState(() => fields.removeAt(i));
+          case 'expires':
+            setState(() {
+              final on = !f.expires;
+              for (final other in fields) {
+                other.expires = false;
+              }
+              f.expires = on;
+            });
           default:
-            final k = int.parse(action);
+            final kind = action.substring('kind:'.length);
+            final k = storedType(kind);
             setState(() {
               if (k == 2 && f.kind != 2) f.yes = f.value.text == 'true';
               if (k != 2 && f.kind == 2) {
                 f.value.text = f.yes ? 'true' : 'false';
               }
+              // An item's field keeps its template's kind while its type
+              // stays the same.
+              if (isTemplate || k != f.kind) {
+                f.typed = typedKinds.contains(kind) ? kind : null;
+              }
+              if (f.typed != 'date') f.expires = false;
               f.kind = k;
             });
         }
       },
       itemBuilder: (_) => [
         const PopupMenuItem(value: 'rename', child: Text('Rename')),
-        for (final e in _fieldKinds.entries)
+        for (final e in kinds.entries)
           CheckedPopupMenuItem(
-            value: '${e.key}',
-            checked: f.kind == e.key,
+            value: 'kind:${e.key}',
+            checked: isTemplate
+                ? f.kindName == e.key
+                : storedType(f.kindName) == storedType(e.key),
             child: Text(e.value),
+          ),
+        if (isTemplate && f.typed == 'date')
+          CheckedPopupMenuItem(
+            value: 'expires',
+            checked: f.expires,
+            child: const Text('New items expire on this date'),
           ),
         const PopupMenuItem(value: 'remove', child: Text('Remove')),
       ],
@@ -780,25 +999,79 @@ class _ItemEditorState extends State<ItemEditor> {
         ),
       );
     }
+    // A typed field's keyboard, its date picker, and under it a warning
+    // that never stops a save, or what it is.
+    final problem = typedFieldProblem(f.typed, f.value.text);
+    final expiring = f.expires && f.typed == 'date';
+    final String? note;
+    if (isTemplate && f.typed != null) {
+      final kindName = _templateKinds[f.typed];
+      note = expiring
+          ? '$kindName. New items expire on this date.'
+          : '$kindName.';
+    } else if (expiring) {
+      note = 'Also when this item expires.';
+    } else if (f.typed == 'totp') {
+      note = 'A one-time code\'s key. The item shows its current code.';
+    } else {
+      note = null;
+    }
     return TextField(
       controller: f.value,
       obscureText: f.hidden && hidden,
-      enableSuggestions: !f.hidden,
-      autocorrect: !f.hidden,
+      enableSuggestions: !f.hidden && f.typed == null,
+      autocorrect: !f.hidden && f.typed == null,
       enableIMEPersonalizedLearning: !f.hidden,
+      keyboardType: switch (f.typed) {
+        'date' => TextInputType.datetime,
+        'url' => TextInputType.url,
+        'email' => TextInputType.emailAddress,
+        'phone' => TextInputType.phone,
+        'number' => const TextInputType.numberWithOptions(
+          signed: true,
+          decimal: true,
+        ),
+        _ => null,
+      },
+      onChanged: (_) => setState(() => expirationFieldChanged(f)),
       decoration: labeledField(
         context,
         f.name.text,
-        suffix: _trailing([if (f.hidden) _showOrHide(), menu]),
-      ),
+        hint: f.typed == 'date' ? 'Such as 2027-03-31' : null,
+        suffix: _trailing([
+          if (f.hidden) _showOrHide(),
+          if (f.typed == 'date')
+            IconButton(
+              tooltip: 'Pick a date for ${f.name.text}',
+              icon: Icon(
+                Icons.event_outlined,
+                size: 20,
+                color: context.colors.muted,
+              ),
+              onPressed: () async {
+                final picked = await pickDate(f.value.text);
+                if (picked == null || !mounted) return;
+                setState(() {
+                  f.value.text = picked;
+                  expirationFieldChanged(f);
+                });
+              },
+            ),
+          menu,
+        ]),
+      ).copyWith(helperText: problem ?? note, helperMaxLines: 3),
     );
   }
 
-  /// Adds a field of a kind, once it has a name.
-  Future<void> addField(int kind) async {
+  /// Adds a field of a kind (as templates name kinds), once it has a name.
+  Future<void> addField(String kind) async {
     final named = await askFieldName(context, 'Add a field');
     if (named == null || !mounted) return;
-    setState(() => fields.add(_Field(named, kind == 2 ? 'false' : '', kind)));
+    setState(
+      () => fields.add(
+        _Field.of(named, kind == 'boolean' ? 'false' : '', kind),
+      ),
+    );
   }
 
   /// A new item that can't go in Personal, as an organization keeps items
@@ -930,6 +1203,18 @@ class _ItemEditorState extends State<ItemEditor> {
             child: ListView(
               padding: const EdgeInsets.fromLTRB(_gutter, 4, _gutter, 28),
               children: [
+                // A custom template says so, as the web vault's editor does.
+                if (isTemplate)
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(4, 4, 4, 14),
+                    child: Text(
+                      'This is a template for new ${templateBase == 'login' ? 'logins' : 'notes'}. '
+                      'Its name is the template\'s name, and new items start with its fields. '
+                      'Values you enter here become defaults.',
+                      key: const ValueKey('template-hint'),
+                      style: TextStyle(color: c.muted, height: 1.35),
+                    ),
+                  ),
                 TextField(
                   controller: name,
                   autofocus: !editing,
@@ -1038,7 +1323,9 @@ class _ItemEditorState extends State<ItemEditor> {
                 ],
                 // A template's fields, under its name, as in the web vault.
                 SectionHeading(
-                  template != null || templateName != null
+                  isTemplate
+                      ? 'Fields for new items'
+                      : template != null || templateName != null
                       ? '${template?['name'] ?? templateName} details'
                       : 'Custom fields',
                   padding: _heading,
@@ -1049,11 +1336,19 @@ class _ItemEditorState extends State<ItemEditor> {
                 ],
                 Align(
                   alignment: Alignment.centerLeft,
-                  child: PopupMenuButton<int>(
+                  child: PopupMenuButton<String>(
                     tooltip: 'Add a field',
                     onSelected: addField,
                     itemBuilder: (_) => [
-                      for (final e in _fieldKinds.entries)
+                      // A template's fields take any kind.
+                      for (final e
+                          in (isTemplate
+                                  ? _templateKinds
+                                  : {
+                                      for (final e in _fieldKinds.entries)
+                                        _kindNames[e.key]!: e.value,
+                                    })
+                              .entries)
                         PopupMenuItem(value: e.key, child: Text(e.value)),
                     ],
                     child: const _AddRow('Add a field'),
@@ -1068,7 +1363,7 @@ class _ItemEditorState extends State<ItemEditor> {
                   TextField(
                     controller: expires,
                     keyboardType: TextInputType.datetime,
-                    onChanged: (_) => setState(() {}),
+                    onChanged: (_) => setState(expiresChanged),
                     decoration: labeledField(
                       context,
                       'Expires (optional)',
@@ -1082,7 +1377,10 @@ class _ItemEditorState extends State<ItemEditor> {
                               size: 20,
                               color: c.muted,
                             ),
-                            onPressed: () => setState(expires.clear),
+                            onPressed: () => setState(() {
+                              expires.clear();
+                              expiresChanged();
+                            }),
                           ),
                         IconButton(
                           tooltip: 'Pick a date',
@@ -1259,6 +1557,23 @@ class _Footnote extends StatelessWidget {
 
 /// The kinds of custom field, as the editor offers them.
 const _fieldKinds = {0: 'Text', 1: 'Hidden', 2: 'Yes or no'};
+
+/// Upstream's three kinds, as templates name them.
+const _kindNames = {0: 'text', 1: 'hidden', 2: 'boolean'};
+
+/// The kinds a template's field can be, as the editor offers them (the web
+/// vault's, templates.ts).
+const _templateKinds = {
+  'text': 'Text',
+  'hidden': 'Hidden',
+  'boolean': 'Yes or no',
+  'date': 'Date',
+  'url': 'Website',
+  'email': 'Email',
+  'phone': 'Phone',
+  'number': 'Number',
+  'totp': 'One-time code',
+};
 
 /// "Remind me": the default (stored as no field), earlier, later, or never,
 /// as `keykeeper.remind` holds them (core/src/expiration.rs).
