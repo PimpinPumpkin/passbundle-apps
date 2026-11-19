@@ -782,6 +782,14 @@ class Jewel {
     Color(0xFFC3C9D6),
   );
 
+  /// Onyx, and a note, which a template is: Item templates, as the web
+  /// vault's menu has it.
+  static const templates = Jewel(
+    Glyphs.note,
+    Color(0xFF353B4A),
+    Color(0xFFC3C9D6),
+  );
+
   /// The logo's emerald, as All items, with two people: every account
   /// signed in here, together ("All accounts"), on a computer and a phone.
   static const allAccounts = Jewel(

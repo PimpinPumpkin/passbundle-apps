@@ -1308,7 +1308,9 @@ fn well_formed(field: &Field, seen: &[String]) -> Option<String> {
                 let marker: Value = serde_json::from_str(value).ok()?;
                 let id = marker["id"].as_str().filter(|id| template_id(id))?;
                 let name = page_text(&marker["name"]).filter(|n| !n.is_empty())?;
-                Some(crate::templates::marker(id, name))
+                // Its typed fields too, only the well-formed ones.
+                let typing = crate::templates::Typing::of_json(marker.as_object()?);
+                Some(crate::templates::marker(id, name, &typing))
             })
             .flatten(),
         crate::templates::DEFINITION_FIELD => once
@@ -1318,15 +1320,15 @@ fn well_formed(field: &Field, seen: &[String]) -> Option<String> {
                     return None;
                 }
                 let id = d["id"].as_str().filter(|id| template_id(id))?;
-                let base = d["base"]
-                    .as_str()
-                    .filter(|b| *b == "login" || *b == "note")?;
-                // Never as an MSP's copy: that comes only from the MSP.
-                Some(format!(
-                    "{{\"id\":{},\"base\":{},\"v\":1}}",
-                    Value::from(id),
-                    Value::from(base)
-                ))
+                let base = match d["base"].as_str()? {
+                    "login" => crate::templates::Base::Login,
+                    "note" => crate::templates::Base::Note,
+                    _ => return None,
+                };
+                // Never as an MSP's copy: that comes only from the MSP. Its
+                // typed fields, only the well-formed ones.
+                let typing = crate::templates::Typing::of_json(d.as_object()?);
+                Some(crate::templates::definition(id, base, &typing))
             })
             .flatten(),
         _ => None,

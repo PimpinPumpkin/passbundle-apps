@@ -2939,6 +2939,24 @@ impl App {
                     .unwrap_or(0);
                 Some(totp.code_at(now))
             }
+            // A template's one-time code field's current code
+            // (templates.rs), by the same rule as a login's.
+            other if other.starts_with("fieldCode:") => {
+                if !self.vault.as_ref().is_some_and(|v| v.shows_code(item)) {
+                    return Err(Error::Refused(crate::codes::NEEDS_PREMIUM));
+                }
+                let key = other
+                    .strip_prefix("fieldCode:")
+                    .and_then(|i| i.parse::<usize>().ok())
+                    .and_then(|i| crate::templates::field_code_key(item, i))
+                    .ok_or(Error::Damaged("no one-time code"))?;
+                let totp = crate::totp::Totp::parse(key)?;
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                Some(totp.code_at(now))
+            }
             other => other
                 .strip_prefix("field:")
                 .and_then(|i| i.parse::<usize>().ok())
