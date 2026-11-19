@@ -224,7 +224,7 @@ void setSize(WidgetTester tester, Size size) {
 /// Pumps until something shows, with the app's clock going on too: an
 /// upload's progress is asked on a timer (attaching.dart).
 /// Pumps, letting real I/O run, until [done] says so.
-Future<void> pumpUntil(
+Future<void> pumpUntilTrue(
   WidgetTester tester,
   bool Function() done, {
   Duration timeout = const Duration(seconds: 20),
@@ -661,7 +661,7 @@ void main() {
       expect(find.byKey(const ValueKey('send-choose-file')), findsNothing);
       // The progress shows before the request leaves: wait until the server
       // has it, so it makes a Send that Cancel then has to delete.
-      await pumpUntil(
+      await pumpUntilTrue(
         tester,
         () => standIn.asked.contains('POST /api/sends/file/v2'),
       );
