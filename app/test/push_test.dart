@@ -26,10 +26,15 @@ Future<PushStandIn> unlockOnAndroid(
   addTearDown(tester.view.reset);
   openSample();
   forgetPushTold();
-  // No biometrics here, so the vault doesn't offer them first.
-  PhoneStandIn(tester, status: 'unavailable', push: push);
-  debugAndroid = true;
-  addTearDown(() => debugAndroid = null);
+  // No biometrics here, so the vault doesn't offer them first; autofill is
+  // on already, so the vault doesn't offer that either, and Settings' autofill
+  // card has the phone's answer rather than waiting for one.
+  PhoneStandIn(
+    tester,
+    status: 'unavailable',
+    push: push,
+    android: AndroidStandIn(autofillOn: true),
+  );
   await tester.pumpWidget(const PassBundleApp());
   await tester.enterText(find.byType(TextField), samplePassword);
   await tester.tap(find.text('Unlock'));
@@ -57,6 +62,10 @@ Future<String?> pushRowSays(WidgetTester tester) async {
 }
 
 void main() {
+  // The app's own font, as on a phone: the test font's wider letters don't
+  // fit the logo on a phone's screen.
+  setUpAll(loadFonts);
+
   testWidgets(
     'unlocking and locking tell the phone which accounts are signed in and unlocked',
     (tester) async {
