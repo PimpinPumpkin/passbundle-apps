@@ -37,7 +37,9 @@ jobs:
       matrix:
         os: [ubuntu-24.04, macos-15, windows-2025]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    # Windows' runs take about 15 minutes with a warm cache and go past 20
+    # without one (lints 3 minutes instead of 34 seconds); twice so far.
+    timeout-minutes: ${{ startsWith(matrix.os, 'windows') && 30 || 20 }}
     defaults:
       run:
         shell: bash
@@ -447,6 +449,16 @@ jobs:
             exit 1
           fi
           grep -q "release builds can't include it" refused.txt
+          if cargo build --locked --release --features test-update 2> refused.txt; then
+            echo "A release build included the update test's key and site." >&2
+            exit 1
+          fi
+          grep -q "release builds can't include them" refused.txt
+      - name: The agent and its host need no C or C++ runtime installed
+        # They link it in (.cargo/config.toml), so the update task, which runs
+        # as SYSTEM, loads no runtime library that could come from PATH.
+        if: runner.os == 'Windows'
+        run: cargo run --locked --example imports -- target/release/passbundle-agent.exe target/release/passbundle-agent-host.exe
       - name: Size, version, and a run in the tray
         if: runner.os != 'Linux'
         run: |
