@@ -430,35 +430,25 @@ fn a_yubikeys_code_and_duo_need_what_the_account_has() {
     assert!(app.signing_in());
 }
 
-/// Signing in with a security key, as a key plugged in would: the core
-/// reads the server's request, makes the client data for the server's
-/// origin, asks a key in software over CTAPHID (core/src/security_key/soft.rs),
-/// and sends its answer, which the server checks with webauthn-rs.
+/// Adds a software key (core/src/security_key/soft.rs) to the account as
+/// the web vault adds one: the master password gets a user verification
+/// token, which gets the challenge and adds the key. The server checks it
+/// with webauthn-rs.
 #[cfg(feature = "test-hooks")]
-#[test]
-fn two_step_login_with_a_security_key() {
+fn add_soft_key(
+    server: &Server,
+    session: &mut Session,
+    email: &str,
+    url: &str,
+    key: &passbundle_core::security_key::soft::SoftKey,
+) {
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    use passbundle_core::app::Prepared;
     use passbundle_core::passkey::{attestation_object, authenticator_data, flags, Attested};
-    use passbundle_core::security_key::ctap::{ask_hid, Wait};
-    use passbundle_core::security_key::soft::SoftKey;
-    use std::sync::atomic::AtomicBool;
 
-    let Ok(url) = std::env::var("PB_TEST_SERVER_LOCALHOST") else {
-        eprintln!("PB_TEST_SERVER_LOCALHOST isn't set; skipping the security key test (tools/test-server.sh <bin> <port> <dir> localhost starts one).");
-        return;
-    };
-    let server = Server::new(&url, Device::this_one(&Device::new_identifier())).unwrap();
-    let email = new_email("security-key");
-    sign_up(&server, &email);
-    let mut session = sign_in(&server, &email);
-    let hash = master_hash(&email);
-
-    // The key is added as the web vault adds one: the master password gets a
-    // user verification token, which gets the challenge and adds the key.
+    let hash = master_hash(email);
     let verified = server
         .raw(
-            &mut session,
+            session,
             "POST",
             "/api/two-factor/get-webauthn",
             Some(json!({ "masterPasswordHash": hash })),
@@ -470,7 +460,7 @@ fn two_step_login_with_a_security_key() {
         .to_owned();
     let challenge = server
         .raw(
-            &mut session,
+            session,
             "POST",
             "/api/two-factor/get-webauthn-challenge",
             Some(json!({ "userVerificationToken": token })),
@@ -479,7 +469,7 @@ fn two_step_login_with_a_security_key() {
     let options = &challenge["options"];
     let rp_id = options["rp"]["id"].as_str().unwrap().to_owned();
     assert_eq!(rp_id, "localhost");
-    let mut key = SoftKey::new(&rp_id);
+    assert_eq!(key.site, rp_id);
     let client_data = format!(
         r#"{{"type":"webauthn.create","challenge":"{}","origin":"{url}","crossOrigin":false}}"#,
         options["challenge"].as_str().unwrap()
@@ -496,7 +486,7 @@ fn two_step_login_with_a_security_key() {
     let id = URL_SAFE_NO_PAD.encode(&key.credential_id);
     server
         .raw(
-            &mut session,
+            session,
             "POST",
             "/api/two-factor/webauthn",
             Some(json!({
@@ -515,6 +505,48 @@ fn two_step_login_with_a_security_key() {
             })),
         )
         .unwrap();
+}
+
+#[cfg(feature = "test-hooks")]
+fn localhost_server() -> Option<(Server, String)> {
+    let Ok(url) = std::env::var("PB_TEST_SERVER_LOCALHOST") else {
+        eprintln!("PB_TEST_SERVER_LOCALHOST isn't set; skipping the security key test (tools/test-server.sh <bin> <port> <dir> localhost starts one).");
+        return None;
+    };
+    let server = Server::new(&url, Device::this_one(&Device::new_identifier())).unwrap();
+    Some((server, url))
+}
+
+#[cfg(feature = "test-hooks")]
+fn ten_seconds(
+    canceled: &std::sync::atomic::AtomicBool,
+) -> passbundle_core::security_key::Wait<'_> {
+    passbundle_core::security_key::Wait {
+        until: std::time::Instant::now() + std::time::Duration::from_secs(10),
+        canceled,
+    }
+}
+
+/// Signing in with a security key, as a key plugged in would: the core
+/// reads the server's request, makes the client data for the server's
+/// origin, asks a key in software over CTAPHID (core/src/security_key/soft.rs),
+/// and sends its answer, which the server checks with webauthn-rs.
+#[cfg(feature = "test-hooks")]
+#[test]
+fn two_step_login_with_a_security_key() {
+    use passbundle_core::app::Prepared;
+    use passbundle_core::security_key::ctap::ask_hid;
+    use passbundle_core::security_key::soft::SoftKey;
+    use std::sync::atomic::AtomicBool;
+
+    let Some((server, url)) = localhost_server() else {
+        return;
+    };
+    let email = new_email("security-key");
+    sign_up(&server, &email);
+    let mut session = sign_in(&server, &email);
+    let mut key = SoftKey::new("localhost");
+    add_soft_key(&server, &mut session, &email, &url, &key);
 
     let mut app = new_app();
     let Step::TwoFactor(offer) = app.sign_in(&url, &email, PASSWORD).unwrap() else {
@@ -527,10 +559,6 @@ fn two_step_login_with_a_security_key() {
     assert_eq!(request.origin, url);
     assert_eq!(request.allow, vec![key.credential_id.clone()]);
     let canceled = AtomicBool::new(false);
-    let wait = || Wait {
-        until: std::time::Instant::now() + std::time::Duration::from_secs(10),
-        canceled: &canceled,
-    };
 
     // An answer made for another origin, as on a phishing page, is refused
     // by the server, and that challenge is spent.
@@ -539,7 +567,13 @@ fn two_step_login_with_a_security_key() {
         .unwrap()
         .replace(&url, "http://localhost:1")
         .into_bytes();
-    let answer = ask_hid(&mut key, &elsewhere.key_request(), &wait()).unwrap();
+    let answer = ask_hid(
+        &mut key,
+        &elsewhere.key_request(),
+        None,
+        &ten_seconds(&canceled),
+    )
+    .unwrap();
     assert!(app.finish_with_key(&elsewhere, &answer, false).is_err());
     assert!(app.signing_in());
 
@@ -548,9 +582,81 @@ fn two_step_login_with_a_security_key() {
         panic!("a security key request");
     };
     assert_ne!(again.client_data_json, request.client_data_json);
-    let answer = ask_hid(&mut key, &again.key_request(), &wait()).unwrap();
+    let answer = ask_hid(
+        &mut key,
+        &again.key_request(),
+        None,
+        &ten_seconds(&canceled),
+    )
+    .unwrap();
     assert_eq!(
         app.finish_with_key(&again, &answer, false).unwrap(),
+        Step::Done
+    );
+    assert!(app.vault().is_some());
+}
+
+/// A security key that wants its PIN for every signature (DESIGN.md in the
+/// meta repo, "A security key's PIN"): asked without it, it says so with
+/// its tries left; a wrong PIN costs a try and sends nothing to the
+/// server; the right one gets a token over the real CTAPHID path, and the
+/// key's answer, with the person verified, signs in.
+#[cfg(feature = "test-hooks")]
+#[test]
+fn two_step_login_with_a_security_key_and_its_pin() {
+    use passbundle_core::app::Prepared;
+    use passbundle_core::error::KeyPin;
+    use passbundle_core::security_key::ctap::ask_hid;
+    use passbundle_core::security_key::soft::{SoftKey, PIN_TRIES};
+    use passbundle_core::security_key::Pin;
+    use std::sync::atomic::AtomicBool;
+
+    let Some((server, url)) = localhost_server() else {
+        return;
+    };
+    let email = new_email("security-key-pin");
+    sign_up(&server, &email);
+    let mut session = sign_in(&server, &email);
+    let mut key = SoftKey::with_pin("localhost", "Grüße 2580");
+    add_soft_key(&server, &mut session, &email, &url, &key);
+
+    let mut app = new_app();
+    let Step::TwoFactor(_) = app.sign_in(&url, &email, PASSWORD).unwrap() else {
+        panic!("two-step login should be asked for");
+    };
+    let Prepared::Ready(request) = app.security_key_request().unwrap() else {
+        panic!("a security key request");
+    };
+    // The server's choice for two-step login: the core asks for a touch.
+    assert_eq!(request.user_verification, "discouraged");
+    let canceled = AtomicBool::new(false);
+    let wait = || ten_seconds(&canceled);
+
+    assert_eq!(
+        ask_hid(&mut key, &request.key_request(), None, &wait()),
+        Err(Error::KeyPin(KeyPin::Asks {
+            left: Some(PIN_TRIES)
+        }))
+    );
+    let wrong = Pin::new("2580", false).unwrap();
+    assert_eq!(
+        ask_hid(&mut key, &request.key_request(), Some(&wrong), &wait()),
+        Err(Error::KeyPin(KeyPin::Wrong {
+            left: Some(PIN_TRIES - 1)
+        }))
+    );
+    // Typed with a combining diaeresis: the key gets it precomposed.
+    let right = Pin::new("Gru\u{308}ße 2580", false).unwrap();
+    let answer = ask_hid(&mut key, &request.key_request(), Some(&right), &wait()).unwrap();
+    assert_ne!(
+        answer.authenticator_data[32] & 0x04,
+        0,
+        "the person verified"
+    );
+    assert_eq!(key.pin_tries, PIN_TRIES);
+    // Nothing went to the server until now: the same challenge signs in.
+    assert_eq!(
+        app.finish_with_key(&request, &answer, false).unwrap(),
         Step::Done
     );
     assert!(app.vault().is_some());

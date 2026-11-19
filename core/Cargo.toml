@@ -56,8 +56,13 @@ ed25519-dalek = "2"
 hkdf = "0.12"
 hmac = "0.12"
 pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
-# Passkeys: ES256 keys, signed with RFC 6979's nonces (src/passkey.rs).
-p256 = { version = "0.13", default-features = false, features = ["ecdsa", "pkcs8", "pem", "std"] }
+# Passkeys: ES256 keys, signed with RFC 6979's nonces (src/passkey.rs); and
+# ECDH with a security key, to send it its PIN (src/security_key/client_pin.rs).
+p256 = { version = "0.13", default-features = false, features = ["ecdh", "ecdsa", "pkcs8", "pem", "std"] }
+# Unicode Normalization Form C, for a security key's PIN, as CTAP 2.1 has it
+# sent (src/security_key/client_pin.rs). ICU4X's, with its own data: the
+# standard library has none.
+icu_normalizer = { version = "2", default-features = false, features = ["compiled_data"] }
 # The Public Suffix List, for which logins fill on a website (src/matching.rs).
 psl = "2"
 rand = "0.8"

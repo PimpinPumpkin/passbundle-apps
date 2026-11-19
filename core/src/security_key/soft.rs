@@ -2,20 +2,32 @@
 //! the test-hooks feature, which the core's server tests use; never a
 //! release): CTAP2's getAssertion and U2F's authenticate over CTAPHID's
 //! reports or NFC's APDUs, with one P-256 credential for one site ID, as a
-//! real key keeps it. It can be slow to be touched, insist on a PIN, take
-//! one credential at a time, speak only U2F, and talk over other channels'
-//! traffic, so the core's side is tested against each.
+//! real key keeps it. It can be slow to be touched, take one credential at a
+//! time, speak only U2F, and talk over other channels' traffic, so the
+//! core's side is tested against each. It can have a PIN (CTAP 2.1's
+//! authenticatorClientPIN, as an authenticator does it, written apart from
+//! the core's side in client_pin.rs): set or not, wanted for every
+//! signature (`alwaysUv`) or not, CTAP 2.0's tokens or 2.1's with
+//! permissions, PIN/UV auth protocols 1, 2, or both, with its tries, three
+//! wrong in a row wanting a fresh start, and blocked at none left.
 
 use std::collections::VecDeque;
 use std::time::Duration;
 
+use aes::cipher::{block_padding::NoPadding, BlockDecryptMut, BlockEncryptMut, KeyIvInit};
+use hmac::{Hmac, Mac};
 use p256::ecdsa::signature::{Signer, Verifier};
 use p256::ecdsa::{Signature, SigningKey, VerifyingKey};
+use p256::elliptic_curve::sec1::ToEncodedPoint;
+use p256::{PublicKey, SecretKey};
 use sha2::{Digest, Sha256};
 
 use super::cbor::{self, Value};
 use super::ctap::{Hid, Nfc};
 use crate::error::Result;
+
+/// The tries a PIN starts with, and gets back after a right one.
+pub const PIN_TRIES: u32 = 8;
 
 pub struct SoftKey {
     /// The site ID (or AppID) its one credential was made for.
@@ -25,8 +37,32 @@ pub struct SoftKey {
     counter: u32,
     /// Speaks CTAP2 (else only U2F).
     pub ctap2: bool,
-    /// Refuses to sign without its PIN.
-    pub wants_pin: bool,
+    /// Its PIN, if one is set.
+    pub pin: Option<String>,
+    /// It takes a PIN at all (getInfo's `clientPin` is there).
+    pub takes_pin: bool,
+    /// Wants its PIN for every signature (`alwaysUv`).
+    pub always_uv: bool,
+    /// CTAP 2.1: tokens with permissions (getPinUvAuthTokenUsingPinWithPermissions),
+    /// tied to the first site ID they're used with. Else CTAP 2.0's getPinToken.
+    pub ctap21: bool,
+    /// The PIN/UV auth protocols it lists; none, as a CTAP 2.0 key lists, means 1.
+    pub protocols: Vec<u64>,
+    /// Its PIN's tries left.
+    pub pin_tries: u32,
+    /// Wants its PIN changed first (forcePINChange).
+    pub force_pin_change: bool,
+    /// The clientPIN subcommands it heard, in order.
+    pub heard: Vec<u64>,
+    /// How many PIN hashes reached it.
+    pub pin_hashes: u32,
+    /// The protocol of the last token it gave.
+    pub token_protocol: Option<u64>,
+    wrong_in_a_row: u32,
+    key_agreement: SecretKey,
+    /// Its token: the bytes, its protocol, the site ID it's tied to, and its
+    /// permissions.
+    token: Option<(Vec<u8>, u64, Option<String>, u8)>,
     /// How many of the core's reads (or U2F asks) pass before it's touched.
     pub touch_after: u32,
     /// The most credentials it takes in one request.
@@ -57,7 +93,19 @@ impl SoftKey {
             key: SigningKey::random(&mut rand::rngs::OsRng),
             counter: 0,
             ctap2: true,
-            wants_pin: false,
+            pin: None,
+            takes_pin: true,
+            always_uv: false,
+            ctap21: true,
+            protocols: vec![2, 1],
+            pin_tries: PIN_TRIES,
+            force_pin_change: false,
+            heard: Vec::new(),
+            pin_hashes: 0,
+            token_protocol: None,
+            wrong_in_a_row: 0,
+            key_agreement: SecretKey::random(&mut rand::rngs::OsRng),
+            token: None,
             touch_after: 2,
             most_in_list: 8,
             noise: false,
@@ -69,6 +117,22 @@ impl SoftKey {
             waiting: None,
             u2f_asks: 0,
         }
+    }
+
+    /// A key with this PIN set, that wants it for every signature.
+    pub fn with_pin(site: &str, pin: &str) -> SoftKey {
+        let mut key = SoftKey::new(site);
+        key.pin = Some(pin.to_owned());
+        key.always_uv = true;
+        key
+    }
+
+    /// Unplugged and plugged in again (or held to the phone again): a new
+    /// key agreement, no token, and the count of wrong PINs in a row gone.
+    pub fn replug(&mut self) {
+        self.wrong_in_a_row = 0;
+        self.key_agreement = SecretKey::random(&mut rand::rngs::OsRng);
+        self.token = None;
     }
 
     /// The credential's public key, as its x and y.
@@ -96,10 +160,10 @@ impl SoftKey {
             .is_ok()
     }
 
-    fn sign(&mut self, app: [u8; 32], client_data_hash: &[u8]) -> (Vec<u8>, Vec<u8>) {
+    fn sign(&mut self, app: [u8; 32], client_data_hash: &[u8], flags: u8) -> (Vec<u8>, Vec<u8>) {
         self.counter += 1;
         let mut data = app.to_vec();
-        data.push(0x01);
+        data.push(flags);
         data.extend(self.counter.to_be_bytes());
         let signature: Signature = self.key.sign(&[&data[..], client_data_hash].concat());
         (data, signature.to_der().as_bytes().to_vec())
@@ -131,8 +195,29 @@ impl SoftKey {
                 .collect(),
             _ => Vec::new(),
         };
-        if self.wants_pin {
-            return (vec![0x36], false);
+        // The person verified with the PIN's token, checked as CTAP 2.1's
+        // getAssertion checks it; or none, for a key that always wants it.
+        let mut flags = 0x01;
+        match request.get(6).and_then(Value::as_bytes) {
+            Some(param) => {
+                let protocol = request.get(7).and_then(Value::as_unsigned);
+                let Some((token, made_for, tied_to, permissions)) = &mut self.token else {
+                    return (vec![0x33], false);
+                };
+                if protocol != Some(*made_for)
+                    || param != authenticate(*made_for, token, &hash)
+                    || *permissions & 0x02 == 0
+                    || tied_to.as_ref().is_some_and(|id| *id != rp_id)
+                {
+                    return (vec![0x33], false);
+                }
+                if self.ctap21 {
+                    *tied_to = Some(rp_id.clone());
+                }
+                flags |= 0x04;
+            }
+            None if self.always_uv => return (vec![0x36], false),
+            None => {}
         }
         if allow.len() > self.most_in_list {
             return (vec![0x15], false);
@@ -140,7 +225,13 @@ impl SoftKey {
         if rp_id != self.site || !allow.contains(&self.credential_id) {
             return (vec![0x2e], false);
         }
-        let (data, signature) = self.sign(sha256(rp_id.as_bytes()), &hash);
+        // Used: a CTAP 2.1 key's token keeps no permissions.
+        if flags & 0x04 != 0 && self.ctap21 {
+            if let Some(token) = &mut self.token {
+                token.3 = 0;
+            }
+        }
+        let (data, signature) = self.sign(sha256(rp_id.as_bytes()), &hash, flags);
         let answer = Value::Map(vec![
             (
                 Value::Unsigned(1),
@@ -173,8 +264,161 @@ impl SoftKey {
         if apdu[2] == 0x07 || !touched {
             return vec![0x69, 0x85];
         }
-        let (data, signature) = self.sign(app.try_into().unwrap(), challenge);
+        let (data, signature) = self.sign(app.try_into().unwrap(), challenge, 0x01);
         [&data[32..], &signature[..], &[0x90, 0x00]].concat()
+    }
+
+    /// authenticatorGetInfo: the versions it speaks, and its PIN's options.
+    fn get_info(&self) -> Vec<u8> {
+        let mut versions = vec![Value::text("U2F_V2"), Value::text("FIDO_2_0")];
+        let mut options = vec![
+            (Value::text("rk"), Value::Bool(false)),
+            (Value::text("up"), Value::Bool(true)),
+        ];
+        if self.takes_pin {
+            options.push((Value::text("clientPin"), Value::Bool(self.pin.is_some())));
+        }
+        if self.ctap21 {
+            versions.push(Value::text("FIDO_2_1"));
+            options.push((Value::text("alwaysUv"), Value::Bool(self.always_uv)));
+            options.push((Value::text("pinUvAuthToken"), Value::Bool(true)));
+        }
+        let mut info = vec![
+            (Value::Unsigned(1), Value::Array(versions)),
+            (Value::Unsigned(3), Value::Bytes(vec![0x5a; 16])),
+            (Value::Unsigned(4), Value::Map(options)),
+        ];
+        if !self.protocols.is_empty() {
+            info.push((
+                Value::Unsigned(6),
+                Value::Array(
+                    self.protocols
+                        .iter()
+                        .copied()
+                        .map(Value::Unsigned)
+                        .collect(),
+                ),
+            ));
+        }
+        if self.ctap21 && self.force_pin_change {
+            info.push((Value::Unsigned(0x0c), Value::Bool(true)));
+        }
+        [vec![0x00], cbor::encode(&Value::Map(info))].concat()
+    }
+
+    fn speaks(&self, protocol: u64) -> bool {
+        if self.protocols.is_empty() {
+            protocol == 1
+        } else {
+            self.protocols.contains(&protocol)
+        }
+    }
+
+    /// authenticatorClientPIN, as CTAP 2.1 has an authenticator answer it.
+    fn client_pin(&mut self, body: &[u8]) -> Vec<u8> {
+        let Ok(request) = cbor::decode(body) else {
+            return vec![0x12];
+        };
+        let Some(sub) = request.get(2).and_then(Value::as_unsigned) else {
+            return vec![0x14];
+        };
+        self.heard.push(sub);
+        if !self.takes_pin {
+            return vec![0x01];
+        }
+        let Some(protocol) = request.get(1).and_then(Value::as_unsigned) else {
+            return vec![0x14];
+        };
+        if !self.speaks(protocol) {
+            return vec![0x02];
+        }
+        let ok = |members: Vec<(Value, Value)>| {
+            [vec![0x00], cbor::encode(&Value::Map(members))].concat()
+        };
+        match sub {
+            // getPINRetries
+            0x01 => {
+                let mut members =
+                    vec![(Value::Unsigned(3), Value::Unsigned(self.pin_tries as u64))];
+                if self.ctap21 {
+                    members.push((Value::Unsigned(4), Value::Bool(self.wrong_in_a_row >= 3)));
+                }
+                ok(members)
+            }
+            // getKeyAgreement
+            0x02 => ok(vec![(
+                Value::Unsigned(1),
+                cose(&self.key_agreement.public_key()),
+            )]),
+            // getPinToken, getPinUvAuthTokenUsingPinWithPermissions
+            0x05 | 0x09 => {
+                if sub == 0x09 && !self.ctap21 {
+                    return vec![0x3e];
+                }
+                let (permissions, tied_to) = if sub == 0x09 {
+                    let Some(permissions) = request.get(9).and_then(Value::as_unsigned) else {
+                        return vec![0x14];
+                    };
+                    let rp_id = request.get(10).and_then(Value::as_text).map(str::to_owned);
+                    (permissions as u8, rp_id)
+                } else {
+                    if request.get(9).is_some() || request.get(10).is_some() {
+                        return vec![0x02];
+                    }
+                    // mc and ga.
+                    (0x03, None)
+                };
+                let Some(pin) = self.pin.clone() else {
+                    return vec![0x35];
+                };
+                if self.pin_tries == 0 {
+                    return vec![0x32];
+                }
+                if self.wrong_in_a_row >= 3 {
+                    return vec![0x34];
+                }
+                if self.force_pin_change {
+                    return vec![0x37];
+                }
+                let Some(platform) = request.get(3).and_then(read_cose) else {
+                    return vec![0x02];
+                };
+                let shared = p256::ecdh::diffie_hellman(
+                    self.key_agreement.to_nonzero_scalar(),
+                    platform.as_affine(),
+                );
+                let secret = kdf(protocol, shared.raw_secret_bytes());
+                let Some(hash) = request
+                    .get(6)
+                    .and_then(Value::as_bytes)
+                    .and_then(|sealed| decrypt(protocol, &secret, sealed))
+                else {
+                    return vec![0x02];
+                };
+                self.pin_hashes += 1;
+                // Counted before it's checked, as the specification has it.
+                self.pin_tries -= 1;
+                if hash[..] != sha256(pin.as_bytes())[..16] {
+                    self.key_agreement = SecretKey::random(&mut rand::rngs::OsRng);
+                    self.wrong_in_a_row += 1;
+                    return if self.pin_tries == 0 {
+                        vec![0x32]
+                    } else if self.wrong_in_a_row >= 3 {
+                        vec![0x34]
+                    } else {
+                        vec![0x31]
+                    };
+                }
+                self.pin_tries = PIN_TRIES;
+                self.wrong_in_a_row = 0;
+                let token: Vec<u8> = (0..32).map(|_| rand::random::<u8>()).collect();
+                let sealed = encrypt(protocol, &secret, &token);
+                self.token = Some((token, protocol, tied_to, permissions));
+                self.token_protocol = Some(protocol);
+                ok(vec![(Value::Unsigned(2), Value::Bytes(sealed))])
+            }
+            _ => vec![0x3e],
+        }
     }
 
     fn queue(&mut self, cid: u32, command: u8, data: &[u8]) {
@@ -207,6 +451,14 @@ impl SoftKey {
                 } else {
                     self.queue(self.cid, 0x90, &answer);
                 }
+            }
+            0x90 if self.ctap2 && data.first() == Some(&0x04) => {
+                let info = self.get_info();
+                self.queue(self.cid, 0x90, &info);
+            }
+            0x90 if self.ctap2 && data.first() == Some(&0x06) => {
+                let answer = self.client_pin(&data[1..]);
+                self.queue(self.cid, 0x90, &answer);
             }
             0x90 if self.ctap2 => self.queue(self.cid, 0x90, &[0x01]),
             0x83 => {
@@ -350,12 +602,12 @@ impl Nfc for SoftNfc {
                 return Ok(vec![0x6d, 0x00]);
             }
             if command == [0x04] {
-                // authenticatorGetInfo: the versions it speaks.
-                let info = Value::Map(vec![(
-                    Value::Unsigned(1),
-                    Value::Array(vec![Value::text("U2F_V2"), Value::text("FIDO_2_0")]),
-                )]);
-                return Ok(self.give([vec![0x00], cbor::encode(&info)].concat()));
+                let info = self.key.get_info();
+                return Ok(self.give(info));
+            }
+            if command.first() == Some(&0x06) {
+                let answer = self.key.client_pin(&command[1..]);
+                return Ok(self.give(answer));
             }
             // Held to the phone: touched already.
             let (answer, _) = self.key.get_assertion(&command[1..]);
@@ -370,5 +622,83 @@ impl Nfc for SoftNfc {
             return Ok(self.give(answer));
         }
         Ok(vec![0x6d, 0x00])
+    }
+}
+
+/// A P-256 public key as a COSE_Key for key agreement (EC2, alg -25, P-256).
+fn cose(public: &PublicKey) -> Value {
+    let point = public.to_encoded_point(false);
+    Value::Map(vec![
+        (Value::Unsigned(1), Value::Unsigned(2)),
+        (Value::Unsigned(3), Value::Negative(24)),
+        (Value::Negative(0), Value::Unsigned(1)),
+        (
+            Value::Negative(1),
+            Value::Bytes(point.x().unwrap().to_vec()),
+        ),
+        (
+            Value::Negative(2),
+            Value::Bytes(point.y().unwrap().to_vec()),
+        ),
+    ])
+}
+
+/// The platform's key agreement key, if it's one.
+fn read_cose(value: &Value) -> Option<PublicKey> {
+    let x = value.get_int(-2).and_then(Value::as_bytes)?;
+    let y = value.get_int(-3).and_then(Value::as_bytes)?;
+    PublicKey::from_sec1_bytes(&[&[0x04][..], x, y].concat()).ok()
+}
+
+/// The shared secret, as the key works it out: protocol 1, SHA-256(Z);
+/// protocol 2, HKDF-SHA-256 for "CTAP2 HMAC key", then "CTAP2 AES key".
+fn kdf(protocol: u64, z: &[u8]) -> Vec<u8> {
+    if protocol == 1 {
+        return sha256(z).to_vec();
+    }
+    let kdf = hkdf::Hkdf::<Sha256>::new(Some(&[0u8; 32]), z);
+    let mut out = vec![0u8; 64];
+    kdf.expand(b"CTAP2 HMAC key", &mut out[..32]).unwrap();
+    kdf.expand(b"CTAP2 AES key", &mut out[32..]).unwrap();
+    out
+}
+
+fn decrypt(protocol: u64, secret: &[u8], data: &[u8]) -> Option<Vec<u8>> {
+    let (key, iv, body) = if protocol == 1 {
+        (secret, [0u8; 16], data)
+    } else {
+        if data.len() < 16 {
+            return None;
+        }
+        (&secret[32..], data[..16].try_into().unwrap(), &data[16..])
+    };
+    cbc::Decryptor::<aes::Aes256>::new_from_slices(key, &iv)
+        .ok()?
+        .decrypt_padded_vec_mut::<NoPadding>(body)
+        .ok()
+}
+
+fn encrypt(protocol: u64, secret: &[u8], plain: &[u8]) -> Vec<u8> {
+    if protocol == 1 {
+        return cbc::Encryptor::<aes::Aes256>::new_from_slices(secret, &[0u8; 16])
+            .unwrap()
+            .encrypt_padded_vec_mut::<NoPadding>(plain);
+    }
+    let iv: [u8; 16] = rand::random();
+    let body = cbc::Encryptor::<aes::Aes256>::new_from_slices(&secret[32..], &iv)
+        .unwrap()
+        .encrypt_padded_vec_mut::<NoPadding>(plain);
+    [&iv[..], &body].concat()
+}
+
+/// authenticate(token, message): 16 bytes for protocol 1, 32 for 2.
+fn authenticate(protocol: u64, key: &[u8], message: &[u8]) -> Vec<u8> {
+    let mut mac = Hmac::<Sha256>::new_from_slice(key).unwrap();
+    mac.update(message);
+    let tag = mac.finalize().into_bytes();
+    if protocol == 1 {
+        tag[..16].to_vec()
+    } else {
+        tag.to_vec()
     }
 }

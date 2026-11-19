@@ -185,6 +185,7 @@ impl SecurityKeyRequest {
             app_id: self.app_id.clone(),
             client_data_hash: Sha256::digest(&self.client_data_json).into(),
             allow: self.allow.clone(),
+            uv_required: self.user_verification == "required",
         }
     }
 
