@@ -585,7 +585,9 @@ void main() {
       await tester.pump();
       expect(find.text(freshStart), findsOneWidget);
       expect(pinField(), findsOneWidget);
-      // The key didn't say its count this time.
+      // The key didn't say its count this time. The field fades the old
+      // count out as the error comes in, so let that finish first.
+      await tester.pump(const Duration(milliseconds: 300));
       expect(find.textContaining('tries left'), findsNothing);
       await tester.enterText(pinField(), '2580');
       await tester.tap(find.text('Continue'));
