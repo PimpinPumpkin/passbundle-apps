@@ -187,7 +187,13 @@ Future<int> browserAnswers(String authorize, {String? state}) async {
       'state': state ?? query['state']!,
     },
   );
-  final client = HttpClient();
+  // A real client: flutter_test's binding answers every HttpClient made in a
+  // test with 400 and sends nothing, and the browser has to reach the core's
+  // listener.
+  final client = HttpOverrides.runWithHttpOverrides(
+    HttpClient.new,
+    _RealHttp(),
+  );
   try {
     final response = await (await client.getUrl(back)).close();
     await response.drain<void>();
@@ -196,6 +202,9 @@ Future<int> browserAnswers(String authorize, {String? state}) async {
     client.close(force: true);
   }
 }
+
+/// HttpOverrides' own client: the real one.
+class _RealHttp extends HttpOverrides {}
 
 String identifierTyped(WidgetTester tester) => tester
     .widget<TextField>(find.byKey(const ValueKey('sso-identifier')))
