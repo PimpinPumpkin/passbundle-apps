@@ -160,7 +160,8 @@ class NewDeviceCheck {
   /// doesn't know.
   final String? location;
 
-  /// Who the location is from, to credit beside it, and their address.
+  /// Who the location is from, to credit beside it, and their address: null
+  /// from a server without a location database.
   final String? sourceName;
   final String? sourceUrl;
 
@@ -171,7 +172,12 @@ class NewDeviceCheck {
   final Duration _left;
   final DateTime _listedAt;
 
-  /// Where it's from, with its address: "Berlin, Germany (203.0.113.7)".
+  /// Whether the server says where it is: it has a location database. A
+  /// server without one shows the address alone, with no location line.
+  bool get showsWhere => location != null || sourceName != null;
+
+  /// Where it's from, with its address: "Berlin, Germany (203.0.113.7)", or
+  /// "Unknown location (10.0.0.2)" for an address the database can't place.
   String get where {
     final place = location ?? 'Unknown location';
     return ip.isEmpty ? place : '$place ($ip)';
@@ -736,7 +742,12 @@ class _NewDeviceCheckDialogState extends State<NewDeviceCheckDialog> {
               ),
               const SizedBox(height: 12),
               detail('Device', c.device),
-              detail('Where', c.where),
+              // Where it's from; a server without a location database, the
+              // address alone.
+              if (c.showsWhere)
+                detail('Where', c.where)
+              else if (c.ip.isNotEmpty)
+                detail('Address', c.ip),
               detail('When', askedAgo(c.age)),
               detail('Expires in', timeLeft(c.left)),
               // Who the location is from, credited beside it.
@@ -1233,7 +1244,10 @@ class _SignInRequestsSettingsState extends State<SignInRequestsSettings> {
                 if (c.email case final email? when email != widget.email)
                   email,
                 'New device',
-                c.where,
+                if (c.showsWhere)
+                  c.where
+                else if (c.ip.isNotEmpty)
+                  c.ip,
                 askedAgo(c.age),
               ].join(' · '),
               c.location != null ? c.sourceName : null,
