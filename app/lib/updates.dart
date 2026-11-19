@@ -21,7 +21,9 @@ import 'theme.dart';
 /// What the app's native code does for updates (Android: MainActivity.kt;
 /// the Mac: MainFlutterWindow.swift; Windows and Linux: the core), as maps.
 abstract class UpdatePlatform {
-  /// `version`, `store` (the app store that installed PassBundle, or null),
+  /// `version`, `store` (who keeps PassBundle up to date when it isn't the
+  /// app: the app store that installed it, or on Windows "your
+  /// organization" for a copy installed beside the desktop agent; or null),
   /// `auto` (whether it checks once a day), `restarts` (whether updating
   /// restarts PassBundle, as on computers), `installNote` (why this copy
   /// can't update itself, so an update is only news), and `failed` (an
@@ -161,7 +163,8 @@ class Updates extends ChangeNotifier {
 
   final UpdatePlatform platform;
 
-  /// This build's version, and the store that keeps it up to date, if any.
+  /// This build's version, and the store (or organization) that keeps it up
+  /// to date, if any.
   String? version;
   String? store;
   bool auto = true;
