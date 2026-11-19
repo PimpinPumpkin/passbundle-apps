@@ -37,7 +37,9 @@ jobs:
       matrix:
         os: [ubuntu-24.04, macos-15, windows-2025]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    # Windows' runs take about 15 minutes with a warm cache and go past 20
+    # without one (lints 3 minutes instead of 34 seconds); twice so far.
+    timeout-minutes: ${{ startsWith(matrix.os, 'windows') && 30 || 20 }}
     defaults:
       run:
         shell: bash
