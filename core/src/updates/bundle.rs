@@ -143,6 +143,18 @@ fn key(path: &str) -> String {
     }
 }
 
+/// The desktop agent's program, which the install script puts beside the app.
+const AGENT: &str = "passbundle-agent.exe";
+
+/// Whether this copy is the organization's to keep up to date, not the
+/// app's: on Windows, a copy in one of the OS's own places (Program Files)
+/// with the desktop agent beside it, as the install script puts them. The
+/// agent's update task replaces the two together, or the organization's
+/// RMM does (DESIGN.md, "Installer and agent"), so the app never checks.
+pub fn updated_by_organization(dir: &Path) -> bool {
+    cfg!(windows) && access::system_place(dir) && dir.join(AGENT).is_file()
+}
+
 /// Where an update of the app in `install` is put together: next to it, on
 /// the same disk, so putting it in place is a rename. `.PassBundle-update`
 /// for `PassBundle`.
@@ -461,6 +473,30 @@ mod tests {
         }
         assert_eq!(why(&installed, data), None);
         fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn only_a_copy_beside_the_agent_in_program_files_is_the_organizations() {
+        // The person's own folder, whatever is beside it.
+        let base = temp("org");
+        fs::write(base.join(AGENT), b"").unwrap();
+        assert!(!updated_by_organization(&base));
+        fs::remove_dir_all(&base).unwrap();
+        #[cfg(windows)]
+        {
+            let program_files = PathBuf::from(std::env::var("ProgramFiles").unwrap());
+            assert!(!updated_by_organization(
+                &program_files.join("PassBundle-no-agent")
+            ));
+            // CI's machines run elevated, and can make a folder there.
+            let dir = program_files.join(format!("PassBundle-test-{}", std::process::id()));
+            if fs::create_dir(&dir).is_ok() {
+                fs::write(dir.join(AGENT), b"").unwrap();
+                let organizations = updated_by_organization(&dir);
+                fs::remove_dir_all(&dir).unwrap();
+                assert!(organizations);
+            }
+        }
     }
 
     #[test]

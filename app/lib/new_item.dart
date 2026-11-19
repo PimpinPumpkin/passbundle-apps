@@ -1,24 +1,50 @@
 // New item: what are you saving? As the web vault's picker has it
 // (passbundle-clients, new-item-dialog.component.ts): the kinds people save
 // most as big tiles, then, under More categories, the templates (built in,
-// and the person's, their organizations', and their MSP's), with a search.
-// The editor then opens with that kind, or the template's kind and fields.
+// and the person's, their organizations', and their MSP's), with a search,
+// and Create template. The editor then opens with that kind, the
+// template's kind and fields, or a new template.
 import 'package:flutter/material.dart';
 
 import 'glyphs.dart';
 import 'theme.dart';
 import 'widgets.dart';
 
-/// What the person picked: a kind of item, and the template, if any.
+/// What the person picked: a kind of item, and the template, if any; or a
+/// new template ("Create template", "Save as template").
 class NewItemChoice {
-  const NewItemChoice(this.kind, [this.template]);
+  const NewItemChoice(
+    this.kind, [
+    this.template,
+    this.newTemplate,
+    this.fields = const [],
+    this.name,
+  ]);
+
+  /// A new custom template whose new items are logins or notes (`base`):
+  /// a note, starting with [fields] (`{label, kind, expires}`, never values)
+  /// and [name], from "Save as template".
+  const NewItemChoice.template(
+    String base, {
+    List<Map<String, dynamic>> fields = const [],
+    String? name,
+  }) : this('note', null, base, fields, name);
 
   /// login, note, card, or identity.
   final String kind;
 
-  /// `{id, name, base, category, fields: [{label, kind, value}]}`, from
-  /// the core (core/src/templates.rs).
+  /// `{id, name, base, category, fields: [{label, kind, value, expires}]}`,
+  /// from the core (core/src/templates.rs).
   final Map<String, dynamic>? template;
+
+  /// For a new template: "login" or "note", what its new items will be.
+  final String? newTemplate;
+
+  /// A new template's starting fields: `{label, kind, expires}`.
+  final List<Map<String, dynamic>> fields;
+
+  /// A new template's starting name.
+  final String? name;
 }
 
 /// The kinds people save most, as the web vault's picker has them.
@@ -100,6 +126,9 @@ class _NewItemPickerState extends State<NewItemPicker> {
   bool more = false;
   String query = '';
 
+  /// Choosing what a new template's items will be.
+  bool creating = false;
+
   bool matches(String name) =>
       name.toLowerCase().contains(query.trim().toLowerCase());
 
@@ -107,6 +136,46 @@ class _NewItemPickerState extends State<NewItemPicker> {
 
   void pickTemplate(Map<String, dynamic> t) =>
       pick(NewItemChoice(t['base'] == 'login' ? 'login' : 'note', t));
+
+  /// "Create template": what its new items will be, logins or notes, as the
+  /// web vault asks (template-chooser.component.ts).
+  List<Widget> get creatingChildren {
+    final c = context.colors;
+    Widget base(String value, ItemKind kind, String label) => Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: _MainKind(
+        kind: kind,
+        title: kind.many,
+        subtitle: label,
+        onTap: () => pick(NewItemChoice.template(value)),
+      ),
+    );
+    return [
+      Text(
+        'New items from this template will be:',
+        style: TextStyle(color: c.muted, height: 1.35),
+      ),
+      const SizedBox(height: 12),
+      if (!widget.restricted.contains('login'))
+        base('login', ItemKind.login, 'A username, password, and website'),
+      if (!widget.restricted.contains('note'))
+        base('note', ItemKind.note, 'Text and custom fields'),
+      Padding(
+        padding: const EdgeInsets.fromLTRB(4, 4, 4, 12),
+        child: Text(
+          'Next, name the template and add the fields new items should start with. Values you enter become defaults.',
+          style: TextStyle(color: c.muted, fontSize: 13, height: 1.35),
+        ),
+      ),
+      Align(
+        alignment: Alignment.centerLeft,
+        child: OutlinedButton(
+          onPressed: () => setState(() => creating = false),
+          child: const Text('Back'),
+        ),
+      ),
+    ];
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -227,6 +296,21 @@ class _NewItemPickerState extends State<NewItemPicker> {
               ),
               _Templates(templates: templates, onPick: pickTemplate),
             ],
+            // A new template of the person's own (DESIGN.md, "Making a
+            // template in the apps").
+            if (query.trim().isEmpty)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(0, 16, 0, 4),
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: OutlinedButton.icon(
+                    key: const ValueKey('create-template'),
+                    onPressed: () => setState(() => creating = true),
+                    icon: const Icon(Icons.add_rounded),
+                    label: const Text('Create template'),
+                  ),
+                ),
+              ),
             if (elsewhere.isNotEmpty) ...[
               const SectionHeading(
                 'In the web vault',
@@ -254,16 +338,18 @@ class _NewItemPickerState extends State<NewItemPicker> {
             ],
           ],
     ];
+    final title = creating ? 'New template' : 'What are you saving?';
+    final shown = creating ? creatingChildren : children;
     if (widget.dialog) {
       return DialogPage(
-        title: 'What are you saving?',
+        title: title,
         closeTooltip: 'Cancel',
-        children: children,
+        children: shown,
       );
     }
     return Scaffold(
       appBar: AppBar(
-        title: const Text('What are you saving?'),
+        title: Text(title),
         automaticallyImplyLeading: false,
         leading: IconButton(
           tooltip: 'Cancel',
@@ -273,7 +359,7 @@ class _NewItemPickerState extends State<NewItemPicker> {
       ),
       body: ListView(
         padding: const EdgeInsets.fromLTRB(20, 4, 20, 28),
-        children: children,
+        children: shown,
       ),
     );
   }
@@ -285,16 +371,21 @@ class _MainKind extends StatelessWidget {
     required this.kind,
     required this.subtitle,
     required this.onTap,
+    this.title,
   });
 
   final ItemKind kind;
   final String subtitle;
   final VoidCallback onTap;
 
+  /// What it's called, when not the kind's own name: "Logins" for what a
+  /// new template's items will be.
+  final String? title;
+
   @override
   Widget build(BuildContext context) {
     final c = context.colors;
-    final kindName = kind.one;
+    final kindName = title ?? kind.one;
     return RestingCard(
       radius: 14,
       child: InkWell(

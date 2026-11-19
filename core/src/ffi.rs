@@ -2172,7 +2172,10 @@ fn new_items(app: &App) -> Value {
 
 /// Templates to make new items from, grouped as the web vault's New item
 /// picker groups them (templates.rs): `[{name, templates: [{id, name, base,
-/// category, fields: [{label, kind, value}], source, from}]}]`.
+/// category, fields: [{label, kind, value, expires}], source, from}]}]`. A
+/// field's `kind` is text, hidden, boolean, or a template's own (date, url,
+/// email, phone, number, totp); `expires` marks the date that is a new
+/// item's expiration date.
 ///
 /// # Safety
 /// `account` is null or a NUL-terminated UTF-8 string, valid for the call.
@@ -2182,6 +2185,32 @@ pub unsafe extern "C" fn pb_templates(account: *const c_char) -> *mut c_char {
     with_app(&account, |app| match app.vault() {
         Some(vault) => json!(templates::groups(vault, |item| app.may_use(item))),
         None => json!([{ "name": "Built-in", "templates": templates::built_in() }]),
+    })
+}
+
+/// "Save as template" (templates.rs, `from_item`): a new custom template's
+/// start from a login or a note, `{base, name, fields: [{label, kind,
+/// expires}]}`, its custom fields by label and kind, never their values;
+/// null for an item that's already a template, or a kind templates don't
+/// cover.
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_template_from_item(
+    account: *const c_char,
+    id: *const c_char,
+) -> *mut c_char {
+    let account = text(account);
+    let id = text(id);
+    with_app(&account, |app| {
+        let Some(item) = app.vault().and_then(|v| v.item(&id)) else {
+            return Value::Null;
+        };
+        match templates::from_item(item) {
+            Some((base, fields)) => json!({ "base": base, "name": item.name, "fields": fields }),
+            None => Value::Null,
+        }
     })
 }
 
@@ -2290,13 +2319,22 @@ pub unsafe extern "C" fn pb_item(account: *const c_char, id: *const c_char) -> *
         // has the key.
         view["hasTotp"] = json!(vault.has_code(item));
         view["codeNeedsPremium"] = json!(vault.code_needs_premium(item));
+        // Whether two-step codes show for it at all, for a template's one-time
+        // code fields (`pb_field_code`).
+        view["showsCodes"] = json!(vault.shows_code(item));
         view["hasNotes"] = json!(item.notes.is_some());
-        // Each field's upstream type: 0 text, 1 hidden, 2 yes or no, 3 linked.
+        // Each field's upstream type: 0 text, 1 hidden, 2 yes or no, 3 linked;
+        // and its kind, which its template may give it (templates.rs,
+        // `Typing`): a date, a website, and so on, and whether it's the
+        // expiration date.
+        let typing = templates::typing_of(item);
+        let kinds = templates::field_kinds(item);
         view["fields"] = item
             .fields
             .iter()
             .zip(&item.kept.field_kinds)
-            .map(|(f, (kind, _))| json!({ "name": f.name, "hidden": f.hidden, "type": kind, "reserved": f.reserved(), "editable": f.edited_by_the_app(*kind), "value": if f.hidden || f.reserved() { None } else { Some(f.value.as_str()) } }))
+            .zip(&kinds)
+            .map(|((f, (kind, _)), field_kind)| json!({ "name": f.name, "hidden": f.hidden, "type": kind, "kind": field_kind, "expires": typing.is_expiration(&f.name, *kind) && !f.reserved(), "reserved": f.reserved(), "editable": f.edited_by_the_app(*kind), "value": if f.hidden || f.reserved() { None } else { Some(f.value.as_str()) } }))
             .collect();
         // The expiration date set on it, if any, and when it reminds: `value`
         // as the field holds it (null for the default) and in words.
@@ -2809,6 +2847,40 @@ pub unsafe extern "C" fn pb_test_expiration(given: *const c_char) -> *mut c_char
         .filter_map(|(id, v)| {
             let date = v["expires"].as_str()?.to_owned();
             Some((id, (date, v["remind"].as_str().map(str::to_owned))))
+        })
+        .collect();
+    out(json!({ "ok": true }))
+}
+
+/// Items given more fields whenever a vault opens, for tests (the
+/// test-hooks feature): `{"<item id>": [{"name", "value", "type"}]}`, each
+/// added after the item's own fields with upstream's type (0 text, 1
+/// hidden, 2 yes or no), replacing any given before; `{}` for none. Lock and
+/// unlock for an open vault to take them.
+///
+/// # Safety
+/// `given` is null or a NUL-terminated UTF-8 string, valid for the call.
+#[cfg(feature = "test-hooks")]
+#[no_mangle]
+pub unsafe extern "C" fn pb_test_fields(given: *const c_char) -> *mut c_char {
+    let given: std::collections::BTreeMap<String, Vec<Value>> =
+        serde_json::from_str(&text(given)).unwrap_or_default();
+    *crate::vault::test_hooks::FIELDS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = given
+        .into_iter()
+        .map(|(id, fields)| {
+            let fields = fields
+                .iter()
+                .filter_map(|f| {
+                    Some((
+                        f["name"].as_str()?.to_owned(),
+                        f["value"].as_str().unwrap_or_default().to_owned(),
+                        u8::try_from(f["type"].as_u64().unwrap_or(0)).ok()?,
+                    ))
+                })
+                .collect();
+            (id, fields)
         })
         .collect();
     out(json!({ "ok": true }))
@@ -4169,6 +4241,52 @@ pub unsafe extern "C" fn pb_totp(account: *const c_char, id: *const c_char) -> *
     })
 }
 
+/// A template's one-time code field's current code, as `pb_totp` gives a
+/// login's: `index` is the field's place among the item's fields, in
+/// digits, and only a hidden field whose kind is a one-time code
+/// (templates.rs) has one. The same rule: never for someone whose shared
+/// folder hides the item's passwords, and only with Premium or an
+/// organization that gives codes.
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_field_code(
+    account: *const c_char,
+    id: *const c_char,
+    index: *const c_char,
+) -> *mut c_char {
+    let account = text(account);
+    let id = text(id);
+    let index = text(index).parse::<usize>().ok();
+    with_app(&account, |app| {
+        let Some(index) = index else {
+            return Value::Null;
+        };
+        let Some(secret) = app
+            .vault()
+            .and_then(|v| {
+                v.item(&id)
+                    .filter(|i| v.grid(i).see_passwords && v.shows_code(i))
+            })
+            .filter(|i| app.may_use(i))
+            .and_then(|i| templates::field_code_key(i, index))
+        else {
+            return Value::Null;
+        };
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        match Totp::parse(secret) {
+            Ok(totp) => {
+                json!({ "code": totp.code_at(now), "secondsLeft": totp.seconds_left(now), "period": totp.period() })
+            }
+            Err(e) => json!({ "error": e.to_string() }),
+        }
+    })
+}
+
 /// Saves an item from the editor: `id` empty for a new one. The draft is
 /// `{name, note, username, password, totp, notes, uris, fields: [{name,
 /// value, type}], folderId, organizationId, collectionIds, favorite,
@@ -4176,8 +4294,11 @@ pub unsafe extern "C" fn pb_totp(account: *const c_char, id: *const c_char) -> *
 /// hidden, 2 yes or no), and `template` names the template a new item is
 /// made from. For an organization's item being edited, `collectionIds` are
 /// the shared folders it's to be in. `reprompt` (true or false) sets whether
-/// it asks for the master password; without it, it stays as it is. Answers
-/// `{ok, id, synced}`.
+/// it asks for the master password; without it, it stays as it is.
+/// `typing` (`{types: {label: kind}, expires: label}`) is the fields' kinds
+/// from a template, for its marker or a template's definition; without it,
+/// they stay as they are. `newTemplate` ("login" or "note") makes a new note
+/// a custom template whose new items are those. Answers `{ok, id, synced}`.
 ///
 /// # Safety
 /// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
@@ -4287,6 +4408,13 @@ pub unsafe extern "C" fn pb_save(
                 (Some(id), Some(name)) if !id.is_empty() && !name.trim().is_empty() => {
                     Some((id.to_owned(), name.trim().to_owned()))
                 }
+                _ => None,
+            },
+            // The fields' kinds, only the well-formed ones (templates.rs).
+            typing: d["typing"].as_object().map(templates::Typing::of_json),
+            new_template: match d["newTemplate"].as_str() {
+                Some("login") => Some(templates::Base::Login),
+                Some("note") => Some(templates::Base::Note),
                 _ => None,
             },
             expiration: None,

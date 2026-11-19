@@ -447,6 +447,16 @@ jobs:
             exit 1
           fi
           grep -q "release builds can't include it" refused.txt
+          if cargo build --locked --release --features test-update 2> refused.txt; then
+            echo "A release build included the update test's key and site." >&2
+            exit 1
+          fi
+          grep -q "release builds can't include them" refused.txt
+      - name: The agent and its host need no C or C++ runtime installed
+        # They link it in (.cargo/config.toml), so the update task, which runs
+        # as SYSTEM, loads no runtime library that could come from PATH.
+        if: runner.os == 'Windows'
+        run: cargo run --locked --example imports -- target/release/passbundle-agent.exe target/release/passbundle-agent-host.exe
       - name: Size, version, and a run in the tray
         if: runner.os != 'Linux'
         run: |
