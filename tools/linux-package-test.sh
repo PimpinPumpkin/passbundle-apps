@@ -194,6 +194,10 @@ sleep 2
 as_person "$app/passbundle" > /tmp/passbundle.log 2>&1 &
 sleep 5
 check "opens and stays open" pgrep -x passbundle
+if ! pgrep -x passbundle > /dev/null; then
+  echo "What the app said:"
+  sed 's/^/      /' /tmp/passbundle.log
+fi
 pkill -x passbundle
 sleep 1
 
@@ -203,13 +207,17 @@ echo "A passbundle:// link"
 # ends (core/src/two_step.rs, hand_over).
 link="passbundle://duo-callback?code=c0de&state=PackageTest"
 handed="$person_home/.local/share/PassBundle/duo-callback.txt"
-as_person xdg-open "$link" > /dev/null 2>&1 &
+as_person xdg-open "$link" > /tmp/passbundle-link.log 2>&1 &
 waited=0
 while [ ! -s "$handed" ] && [ "$waited" -lt 30 ]; do
   sleep 1
   waited=$((waited + 1))
 done
 check "a passbundle:// link reaches the installed app" sh -c "[ \"\$(cat '$handed')\" = '$link' ]"
+if [ "$(cat "$handed" 2>/dev/null)" != "$link" ]; then
+  echo "What the app said:"
+  sed 's/^/      /' /tmp/passbundle-link.log 2>/dev/null
+fi
 pkill -x passbundle
 
 echo "Removing"
@@ -241,7 +249,9 @@ leftovers=$(find / -xdev \( -path /proc -o -path /sys -o -path /dev -o -path /ho
   -o -path /var/cache -o -path /var/log -o -path /__w -o -path /__t -o -path /__e -o -path /github \) -prune \
   -o -iname '*passbundle*' -print | LC_ALL=C sort)
 printf '%s\n' "$leftovers"
-check "nothing of ours is left but the policy file" sh -c "[ \"\$1\" = \"\$(printf '/etc/passbundle\n/etc/passbundle/policy.json')\" ]" _ "$leftovers"
+# Only names with "passbundle" in them: the policy file's folder, not the
+# policy file itself, which "as it was" above checks.
+check "nothing of ours is left but the policy file" sh -c "[ \"\$1\" = /etc/passbundle ]" _ "$leftovers"
 rm -rf /etc/passbundle
 
 echo "Over a PassBundle no package put there"
