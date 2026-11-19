@@ -228,10 +228,15 @@ fn lookup_failed(io: &std::io::Error) -> bool {
     matches!(io.raw_os_error(), Some(11001..=11004)) || io.to_string().contains("lookup address")
 }
 
-/// A sentence from words that may not end in one.
+/// A sentence from words that may not end in one. Its first letter is made
+/// a capital, unless it starts with an email or web address, which is said
+/// as it was ("ana@elsewhere.test isn't a member of Acme Dental.").
 fn sentence(words: &str) -> String {
     let words = words.trim();
+    let first_word = words.split_whitespace().next().unwrap_or("");
+    let as_written = first_word.contains('@') || first_word.contains("://");
     let mut out: String = match words.chars().next() {
+        Some(_) if as_written => words.to_owned(),
         Some(first) => first.to_uppercase().chain(words.chars().skip(1)).collect(),
         None => return String::new(),
     };
@@ -530,6 +535,22 @@ mod tests {
         assert_eq!(
             Error::Refused("a PIN needs at least 4 characters").to_string(),
             "A PIN needs at least 4 characters."
+        );
+    }
+
+    #[test]
+    fn an_address_that_starts_the_servers_words_is_said_as_written() {
+        assert_eq!(
+            Error::Server("ana@elsewhere.test isn't a member of Acme Dental.".into()).to_string(),
+            "Your server said: ana@elsewhere.test isn't a member of Acme Dental."
+        );
+        assert_eq!(
+            Error::Server("https://vault.example.test can't be reached".into()).to_string(),
+            "Your server said: https://vault.example.test can't be reached."
+        );
+        assert_eq!(
+            Error::Server("username or password is incorrect".into()).to_string(),
+            "Your server said: Username or password is incorrect."
         );
     }
 }
