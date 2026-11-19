@@ -15,6 +15,7 @@ use crate::crypto::{EncString, SymmetricKey};
 use crate::error::{BadAddress, Error, NoNewAccounts, Result};
 use crate::kdf::{normalize_email, Kdf, MasterKey, Prelogin};
 use crate::new_device::{self, Held};
+use crate::sso;
 use crate::two_step::Offer;
 use crate::vault::Sync;
 
@@ -124,11 +125,14 @@ pub struct TwoFactor {
 
 /// A sign-in waiting for its second step, or for the new-device check. It
 /// keeps what the KDF made, so finishing doesn't derive the master key
-/// again.
+/// again, or a single sign-on's code and verifier, which go again with the
+/// second step.
 pub struct PendingSignIn {
+    /// The email typed: the account's for a password, the one single
+    /// sign-on was started with (its device token, an emailed code).
     email: String,
-    /// What it signs in with: the master password, or another device's
-    /// approval.
+    /// What it signs in with: the master password, another device's
+    /// approval, or an organization's single sign-on.
     proof: Proof,
     /// The device token this device was given last time (secrets.rs), sent
     /// as two-step login's "remember" token (provider 5) until the server
@@ -169,9 +173,19 @@ enum Proof {
         access_code: Zeroizing<String>,
         user_key: SymmetricKey,
     },
+    /// An organization's single sign-on (sso.rs): the server's one-time code
+    /// with this sign-in's PKCE verifier and redirect. The master password
+    /// comes after (`SsoSignedIn`).
+    Sso(sso::Redeem),
 }
 
 impl PendingSignIn {
+    /// Whether it's a single sign-on, whose answer waits for the master
+    /// password (`Next::Sso`).
+    pub fn is_sso(&self) -> bool {
+        matches!(self.proof, Proof::Sso(_))
+    }
+
     /// A sign-in with another device's approval of the request `request`
     /// (device_signin.rs): its access code, and the user key it brought.
     /// `remembered` is this device's device token, sent as a password
@@ -213,6 +227,8 @@ impl PendingSignIn {
 
 enum Token {
     Done(Session),
+    /// A single sign-on went through: the master password opens the key.
+    Sso(SsoSignedIn),
     TwoFactor(Offer),
     NewDevice(Held),
 }
@@ -228,6 +244,9 @@ pub enum SignIn {
 /// Where a waiting sign-in got to after another answer from the server.
 pub enum Next {
     Done(Session),
+    /// A single sign-on went through (`SsoSignedIn`): the master password
+    /// unlocks next.
+    Sso(SsoSignedIn),
     /// Two-step login: what's offered is in the sign-in's `offer`.
     TwoFactor,
     /// The new-device check: it's in the sign-in's `check`.
@@ -247,6 +266,128 @@ struct TokenResponse {
     /// another device's approval must open (device_signin.rs).
     #[serde(rename = "PrivateKey")]
     private_key: Option<String>,
+    /// How the account unlocks: for single sign-on, the master password's
+    /// KDF settings and salt.
+    #[serde(rename = "UserDecryptionOptions", default)]
+    decryption: Option<Decryption>,
+}
+
+/// The token answer's `UserDecryptionOptions`, the part the core reads.
+#[derive(Deserialize)]
+struct Decryption {
+    #[serde(rename = "HasMasterPassword", default)]
+    has_master_password: Option<bool>,
+    #[serde(rename = "MasterPasswordUnlock", default)]
+    master_password_unlock: Option<MasterPasswordUnlock>,
+}
+
+#[derive(Deserialize)]
+struct MasterPasswordUnlock {
+    #[serde(rename = "Kdf")]
+    kdf: UnlockKdf,
+    /// The KDF's salt: the account's email.
+    #[serde(rename = "Salt")]
+    salt: String,
+}
+
+#[derive(Deserialize)]
+struct UnlockKdf {
+    #[serde(rename = "KdfType")]
+    kdf: u8,
+    #[serde(rename = "Iterations")]
+    iterations: u32,
+    #[serde(rename = "Memory", default)]
+    memory: Option<u32>,
+    #[serde(rename = "Parallelism", default)]
+    parallelism: Option<u32>,
+}
+
+/// A single sign-on the server took (sso.rs): its session, waiting for the
+/// master password, which opens the account key on this device (DESIGN.md,
+/// "In the desktop and phone apps": single sign-on signs in, the master
+/// password unlocks). In memory only.
+pub struct SsoSignedIn {
+    email: String,
+    prelogin: Prelogin,
+    kdf: Kdf,
+    key: EncString,
+    access_token: Zeroizing<String>,
+    refresh_token: Zeroizing<String>,
+    expires_at: u64,
+    device_token: Option<Zeroizing<String>>,
+}
+
+impl SsoSignedIn {
+    /// The account's email, as the server keeps it (the KDF's salt).
+    pub fn email(&self) -> &str {
+        &self.email
+    }
+
+    /// The account's KDF settings, as a prelogin would say them.
+    pub fn prelogin(&self) -> &Prelogin {
+        &self.prelogin
+    }
+
+    /// The session, once the master password opens the account key. A wrong
+    /// one is `WrongPassword`, and this waits for another try.
+    pub fn unlock(&self, password: &str) -> Result<Session> {
+        let master = MasterKey::derive(password, &self.email, &self.kdf)?;
+        let user_key = match self.key.decrypt_key(&master.stretch()) {
+            Err(Error::Refused(_)) => return Err(Error::WrongPassword),
+            other => other?,
+        };
+        Ok(Session {
+            access_token: self.access_token.clone(),
+            refresh_token: self.refresh_token.clone(),
+            expires_at: self.expires_at,
+            user_key,
+            device_token: self.device_token.clone(),
+        })
+    }
+
+    /// A single sign-on's token answer, read: the account key, its KDF
+    /// settings (held to a prelogin's bounds) and salt. An account without a
+    /// master password (someone invited, at their first single sign-on) is
+    /// sent to the web vault to set one, and nothing is kept.
+    fn read(token: TokenResponse, web_vault: &str) -> Result<SsoSignedIn> {
+        let no_master_password = || Error::SsoNoMasterPassword {
+            web_vault: web_vault.to_owned(),
+        };
+        let decryption = token.decryption.as_ref();
+        if decryption.and_then(|d| d.has_master_password) == Some(false) {
+            return Err(no_master_password());
+        }
+        let (Some(key), Some(unlock)) = (
+            token.key.as_deref().filter(|k| !k.is_empty()),
+            decryption.and_then(|d| d.master_password_unlock.as_ref()),
+        ) else {
+            return Err(no_master_password());
+        };
+        let prelogin = Prelogin {
+            kdf: unlock.kdf.kdf,
+            kdf_iterations: unlock.kdf.iterations,
+            kdf_memory: unlock.kdf.memory,
+            kdf_parallelism: unlock.kdf.parallelism,
+        };
+        let kdf = Kdf::from_prelogin(&prelogin)?;
+        let email = normalize_email(&unlock.salt);
+        if email.is_empty() {
+            return Err(Error::Malformed("a sign-in answer with no salt".into()));
+        }
+        Ok(SsoSignedIn {
+            email,
+            prelogin,
+            kdf,
+            key: EncString::parse(key)?,
+            access_token: Zeroizing::new(token.access_token),
+            refresh_token: Zeroizing::new(token.refresh_token.unwrap_or_default()),
+            expires_at: now() + token.expires_in,
+            device_token: token
+                .two_factor_token
+                .filter(|t| !t.trim().is_empty())
+                .map(Zeroizing::new),
+        })
+    }
 }
 
 /// The largest attachment file upstream's servers take: 500 MB before
@@ -829,7 +970,74 @@ impl Server {
             Next::Done(session) => SignIn::Done(session),
             Next::TwoFactor => SignIn::NeedsTwoFactor(pending),
             Next::NewDevice => SignIn::NeedsApproval(pending),
+            Next::Sso(_) => return Err(Error::Malformed("a single sign-on's answer".into())),
         })
+    }
+
+    /// A single sign-on's code to redeem (sso.rs), as a sign-in that may wait
+    /// for two-step login like any other: `send_sign_in` sends it. `email`
+    /// is the one typed; `remembered` is this device's token for it, sent as
+    /// two-step login's remembered token.
+    pub fn sso_sign_in(
+        &self,
+        email: &str,
+        redeem: sso::Redeem,
+        remembered: Option<Zeroizing<String>>,
+    ) -> PendingSignIn {
+        PendingSignIn {
+            email: normalize_email(email),
+            proof: Proof::Sso(redeem),
+            remembered: remembered.filter(|t| !t.trim().is_empty()),
+            forget_remembered: false,
+            check: None,
+            offer: Offer::default(),
+            offered_at: Instant::now(),
+            spent: false,
+        }
+    }
+
+    /// The SSO identifier of the organization whose verified domain the
+    /// email is at, as the web vault finds it (`POST
+    /// /api/organizations/domain/sso/verified`): None when there's none, or
+    /// the server doesn't say.
+    pub fn sso_identifier_for(&self, email: &str) -> Result<Option<String>> {
+        let (status, body) = self.answer(
+            self.agent
+                .post(self.url("/api/organizations/domain/sso/verified"))
+                .send_json(json!({ "email": normalize_email(email) })),
+        )?;
+        if status == 429 {
+            return Err(Error::TooManyTries);
+        }
+        if !(200..=299).contains(&status) {
+            return Ok(None);
+        }
+        Ok(body["data"]
+            .as_array()
+            .and_then(|found| found.first())
+            .and_then(|first| first["organizationIdentifier"].as_str())
+            .and_then(|id| sso::identifier(id).ok()))
+    }
+
+    /// Whether an organization uses this SSO identifier with its single
+    /// sign-on on (`GET /identity/sso/prevalidate`), before the browser opens.
+    pub fn sso_prevalidate(&self, identifier: &str) -> Result<()> {
+        let (status, body) = self.answer(
+            self.agent
+                .get(self.url("/identity/sso/prevalidate"))
+                .query("domainHint", identifier)
+                .call(),
+        )?;
+        match status {
+            200..=299 => Ok(()),
+            400 | 404 => Err(Error::Sso(sso::NO_SUCH_ORGANIZATION)),
+            _ => Self::checked(status, body).map(|_| ()),
+        }
+    }
+
+    /// This app's client, as the server names it: `desktop` or `mobile`.
+    pub fn client_id(&self) -> &'static str {
+        self.device.client_id()
     }
 
     /// Finishes a sign-in with its second step. A wrong code leaves `pending`
@@ -848,6 +1056,7 @@ impl Server {
             Next::NewDevice => Err(Error::TwoStep(
                 "This sign-in waits for approval from another of your devices now. Start over to see its number.",
             )),
+            Next::Sso(_) => Err(Error::Malformed("a single sign-on's answer".into())),
         }
     }
 
@@ -873,6 +1082,10 @@ impl Server {
             Token::Done(session) => {
                 pending.check = None;
                 Ok(Next::Done(session))
+            }
+            Token::Sso(signed_in) => {
+                pending.check = None;
+                Ok(Next::Sso(signed_in))
             }
             Token::TwoFactor(offer) => {
                 pending.renew(offer);
@@ -948,11 +1161,11 @@ impl Server {
 
     /// Asks the server what it offers again, for a new Duo address or
     /// security key challenge: the same request as signing in, without a
-    /// second step. If two-step login went off meanwhile, that's the
-    /// session.
-    pub fn renew_offer(&self, pending: &mut PendingSignIn) -> Result<Option<Session>> {
+    /// second step. If two-step login went off meanwhile, that's where the
+    /// sign-in got to: the session, or a single sign-on's answer.
+    pub fn renew_offer(&self, pending: &mut PendingSignIn) -> Result<Option<Next>> {
         match self.send_sign_in(pending, None, None)? {
-            Next::Done(session) => Ok(Some(session)),
+            next @ (Next::Done(_) | Next::Sso(_)) => Ok(Some(next)),
             Next::TwoFactor | Next::NewDevice => Ok(None),
         }
     }
@@ -963,9 +1176,10 @@ impl Server {
     }
 
     /// Asks the server to email a sign-in code (provider 1): with the
-    /// master password's hash, or for a sign-in with another device's
-    /// approval, the request's id and access code (upstream's fields), never
-    /// a password.
+    /// master password's hash; for a sign-in with another device's approval,
+    /// the request's id and access code (upstream's fields), never a
+    /// password; or for a single sign-on, with this device, which the server
+    /// knows is waiting for its second step.
     pub fn send_email_code(&self, pending: &PendingSignIn) -> Result<()> {
         let body = match &pending.proof {
             Proof::Password { login_hash, .. } => json!({
@@ -980,6 +1194,10 @@ impl Server {
                 "email": pending.email,
                 "authRequestId": request,
                 "authRequestAccessCode": access_code.as_str(),
+            }),
+            Proof::Sso(_) => json!({
+                "email": pending.email,
+                "deviceIdentifier": self.device.identifier,
             }),
         };
         let (status, body) = self.answer(
@@ -997,26 +1215,42 @@ impl Server {
         new_device: Option<&str>,
     ) -> Result<Token> {
         let kind = self.device.kind.to_string();
-        // The master password's hash, or an approval's access code with its
-        // request (upstream's `authRequest`).
-        let (password, request) = match &pending.proof {
-            Proof::Password { login_hash, .. } => (login_hash.as_str(), None),
-            Proof::Approval {
-                request,
-                access_code,
-                ..
-            } => (access_code.as_str(), Some(request.as_str())),
+        // An approval's request (upstream's `authRequest`), sent after the
+        // device, as upstream sends it.
+        let request = match &pending.proof {
+            Proof::Approval { request, .. } => Some(request.as_str()),
+            Proof::Password { .. } | Proof::Sso(_) => None,
         };
-        let mut form: Vec<(&str, &str)> = vec![
-            ("grant_type", "password"),
-            ("username", pending.email.as_str()),
-            ("password", password),
+        let mut form: Vec<(&str, &str)> = match &pending.proof {
+            // The master password's hash.
+            Proof::Password { login_hash, .. } => vec![
+                ("grant_type", "password"),
+                ("username", pending.email.as_str()),
+                ("password", login_hash.as_str()),
+            ],
+            // An approval's access code, as the password, with its request
+            // (below).
+            Proof::Approval { access_code, .. } => vec![
+                ("grant_type", "password"),
+                ("username", pending.email.as_str()),
+                ("password", access_code.as_str()),
+            ],
+            // A single sign-on's code, with the verifier for the challenge
+            // it started with and the same redirect (sso.rs).
+            Proof::Sso(redeem) => vec![
+                ("grant_type", "authorization_code"),
+                ("code", redeem.code.as_str()),
+                ("code_verifier", redeem.verifier.as_str()),
+                ("redirect_uri", redeem.redirect_uri.as_str()),
+            ],
+        };
+        form.extend([
             ("scope", "api offline_access"),
             ("client_id", self.device.client_id()),
             ("deviceType", kind.as_str()),
             ("deviceIdentifier", self.device.identifier.as_str()),
             ("deviceName", self.device.name.as_str()),
-        ];
+        ]);
         if let Some(request) = request {
             form.push(("authRequest", request));
         }
@@ -1061,6 +1295,26 @@ impl Server {
                     required_by,
                     web_vault: self.base.clone(),
                 });
+            }
+            // The password checked out, and an organization requires its
+            // single sign-on: that sign-in instead, with its identifier
+            // (sso.rs), or, for someone not linked to it yet, linking in the
+            // web vault first. The core never uses the linking session. A
+            // sign-in with another device's approval keeps the server's
+            // sentence (below), said under the master password
+            // (device_signin.rs).
+            if let Some(identifier) = body["SsoOrganizationIdentifier"]
+                .as_str()
+                .filter(|_| request.is_none())
+            {
+                if body["KeykeeperSsoLinkSession"].is_string() {
+                    return Err(Error::LinkSsoFirst {
+                        web_vault: self.base.clone(),
+                    });
+                }
+                if let Ok(identifier) = sso::identifier(identifier) {
+                    return Err(Error::UseSso { identifier });
+                }
             }
             if let Some(offer) = Offer::read(&body, &self.base) {
                 // The device token was sent, and the server asks for two-step
@@ -1117,6 +1371,8 @@ impl Server {
                 crate::device_signin::opens_account(user_key, token.private_key.as_deref())?;
                 user_key.clone()
             }
+            // The code is used: the core never sends it again (app.rs).
+            Proof::Sso(_) => return Ok(Token::Sso(SsoSignedIn::read(token, &self.base)?)),
         };
         Ok(Token::Done(Session {
             access_token: Zeroizing::new(token.access_token),
@@ -2283,6 +2539,73 @@ mod tests {
             kdf_memory: None,
             kdf_parallelism: None,
         }
+    }
+
+    #[test]
+    fn require_single_sign_on_hands_its_identifier_to_single_sign_on() {
+        let json = "Content-Type: application/json\r\n";
+        // As the server answers a password that checked out
+        // (passbundle-server, password_login).
+        let required = br#"{"error":"invalid_grant","error_description":"Your organization requires you to sign in with single sign-on.","SsoOrganizationIdentifier":"acme-dental","ErrorModel":{"Message":"Your organization requires you to sign in with single sign-on.","Object":"error"}}"#;
+        let (url, _) = answering(vec![answer("400 Bad Request", json, required)]);
+        let server = Server::new(&url, Device::this_one("")).unwrap();
+        assert_eq!(
+            server
+                .sign_in_with(&test_prelogin(), "ana@acme.test", "correct horse battery")
+                .err(),
+            Some(Error::UseSso {
+                identifier: "acme-dental".into()
+            })
+        );
+        // Not linked yet: a linking session, which only the web vault uses.
+        let link_first = br#"{"error":"invalid_grant","error_description":"Your organization requires single sign-on. Link your Microsoft account to continue.","SsoOrganizationIdentifier":"acme-dental","KeykeeperSsoLinkSession":"AbCdEfGhIjKlMnOpQrStUvWxYz0123456789-_abcde","ErrorModel":{"Message":"x","Object":"error"}}"#;
+        let (url, _) = answering(vec![answer("400 Bad Request", json, link_first)]);
+        let server = Server::new(&url, Device::this_one("")).unwrap();
+        let refused = server
+            .sign_in_with(&test_prelogin(), "ana@acme.test", "correct horse battery")
+            .err();
+        assert_eq!(
+            refused,
+            Some(Error::LinkSsoFirst {
+                web_vault: url.clone()
+            })
+        );
+        assert!(refused
+            .unwrap()
+            .to_string()
+            .contains(&format!("the web vault at {url} with your master password")));
+        // An identifier that isn't one is said as the server put it.
+        let odd = br#"{"error":"invalid_grant","error_description":"Your organization requires you to sign in with single sign-on.","SsoOrganizationIdentifier":"a b"}"#;
+        let (url, _) = answering(vec![answer("400 Bad Request", json, odd)]);
+        let server = Server::new(&url, Device::this_one("")).unwrap();
+        assert_eq!(
+            server
+                .sign_in_with(&test_prelogin(), "ana@acme.test", "correct horse battery")
+                .err(),
+            Some(Error::Server(
+                "Your organization requires you to sign in with single sign-on.".into()
+            ))
+        );
+    }
+
+    #[test]
+    fn a_single_sign_ons_answer_is_held_to_the_kdf_bounds() {
+        let json = "Content-Type: application/json\r\n";
+        let weak = br#"{"access_token":"a","expires_in":3600,"refresh_token":"r","Key":"2.AAAAAAAAAAAAAAAAAAAAAA==|AAAAAAAAAAAAAAAAAAAAAA==|AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","UserDecryptionOptions":{"HasMasterPassword":true,"MasterPasswordUnlock":{"Kdf":{"KdfType":0,"Iterations":5000},"Salt":"ana@acme.test"}}}"#;
+        let (url, served) = answering_with_bodies(vec![answer("200 OK", json, weak)]);
+        let server = Server::new(&url, Device::this_one("")).unwrap();
+        let redeem = crate::sso::Started::on_a_phone("acme").redeem(Zeroizing::new("c".into()));
+        let mut pending = server.sso_sign_in("ana@acme.test", redeem, None);
+        assert!(pending.is_sso());
+        assert!(matches!(
+            server.send_sign_in(&mut pending, None, None),
+            Err(Error::WeakKdf(_))
+        ));
+        let (path, body) = served.join().unwrap().remove(0);
+        assert_eq!(path, "/identity/connect/token");
+        assert!(body.contains("grant_type=authorization_code"));
+        assert!(body.contains("redirect_uri=com.passbundle.app%3A%2Fsso"));
+        assert!(!body.contains("password="));
     }
 
     #[test]

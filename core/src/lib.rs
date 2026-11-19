@@ -40,6 +40,7 @@ pub mod security_key;
 pub mod send;
 pub mod server;
 pub mod signup;
+pub mod sso;
 pub mod store;
 pub mod synced_settings;
 pub mod templates;

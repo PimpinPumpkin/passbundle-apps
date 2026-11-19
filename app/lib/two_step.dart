@@ -187,6 +187,7 @@ class TwoStepScreen extends StatefulWidget {
     required this.onSignedIn,
     required this.onStartOver,
     this.onNewDevice,
+    this.onMasterPassword,
     this.calls = const TwoStepCalls(),
   });
 
@@ -199,6 +200,10 @@ class TwoStepScreen extends StatefulWidget {
   /// The new-device check holds the sign-in after its second step instead
   /// (two-step login was turned off meanwhile): its answer.
   final ValueChanged<Map<String, dynamic>>? onNewDevice;
+
+  /// A single sign-on passed its second step: the master password unlocks
+  /// next (sso.dart). The core's answer, with the account's `email`.
+  final ValueChanged<Map<String, dynamic>>? onMasterPassword;
   final TwoStepCalls calls;
 
   @override
@@ -274,6 +279,11 @@ class _TwoStepScreenState extends State<TwoStepScreen> {
     if (!mounted) return;
     if (answer.ok && answer.body['step'] == 'newDevice') {
       widget.onNewDevice?.call(answer.body);
+      return;
+    }
+    if (answer.ok && answer.body['step'] == 'masterPassword') {
+      if (method == Method.recoveryCode) await _recovered();
+      if (mounted) widget.onMasterPassword?.call(answer.body);
       return;
     }
     if (answer.ok) {
@@ -387,7 +397,8 @@ class _TwoStepScreenState extends State<TwoStepScreen> {
     });
     final start = await whileBusy(widget.calls.duoStart);
     if (!mounted) return;
-    if (!start.ok || start.body['step'] == 'done') return _after(start);
+    // A sign-in that went through without it: where it got to.
+    if (!start.ok || start.body['step'] is String) return _after(start);
     setState(() => waiting = true);
     final link = await widget.calls.duoBrowse(start.body['url'] as String);
     if (!mounted) return;

@@ -13,13 +13,16 @@
 // A server that says it takes no new accounts isn't offered the form for
 // making one: the screen says so where "Create account" would be, in the web
 // vault's words, and on PassBundle's server links to the website's contact
-// page.
+// page. "Use single sign-on" signs in with the organization's single sign-on
+// instead (sso.dart), as does a password sign-in an organization requires it
+// for; the master password unlocks after it.
 import 'package:flutter/material.dart';
 
 import 'accounts.dart';
 import 'core.dart';
 import 'device_sign_in.dart';
 import 'new_device.dart';
+import 'sso.dart';
 import 'theme.dart';
 import 'two_step.dart';
 import 'widgets.dart';
@@ -324,6 +327,33 @@ class _SignInScreenState extends State<SignInScreen> {
   /// (new_device.dart).
   Map<String, dynamic>? newDevice;
 
+  /// Single sign-on, chosen (sso.dart): its screen, with the SSO identifier
+  /// when a password sign-in's answer gave it (`mustUse`: an organization
+  /// requires single sign-on of this account).
+  ({String? identifier, bool mustUse})? sso;
+
+  /// Single sign-on signed in: the master password unlocks, for this email.
+  String? ssoUnlock;
+
+  /// "Use single sign-on": for the email typed, whose domain may find the
+  /// organization.
+  void useSso() {
+    if (email.text.trim().isEmpty) {
+      setState(
+        () => emailError =
+            'Enter your email first, then choose Use single sign-on.',
+      );
+      return;
+    }
+    password.clear();
+    setState(() {
+      error = null;
+      emailError = null;
+      serverError = null;
+      sso = (identifier: null, mustUse: false);
+    });
+  }
+
   /// Signing in with a device: the core's answer with the request
   /// (device_sign_in.dart), and the server it went to.
   Map<String, dynamic>? deviceRequest;
@@ -395,13 +425,14 @@ class _SignInScreenState extends State<SignInScreen> {
   }
 
   /// Where signing in got to: the vault, two-step login, the new-device
-  /// check, or why not.
+  /// check, single sign-on's master password, or why not.
   void signedIn(Answer answer) {
     if (answer.ok && answer.body['step'] == 'twoFactor') {
       setState(() {
         working = false;
         twoStep = answer.body;
         newDevice = null;
+        sso = null;
         error = null;
       });
     } else if (answer.ok && answer.body['step'] == 'newDevice') {
@@ -411,8 +442,25 @@ class _SignInScreenState extends State<SignInScreen> {
         twoStep = null;
         error = null;
       });
+    } else if (answer.ok && answer.body['step'] == 'masterPassword') {
+      setState(() {
+        working = false;
+        ssoUnlock = answer.body['email'] as String? ?? email.text.trim();
+        sso = null;
+        twoStep = null;
+        newDevice = null;
+        error = null;
+      });
     } else if (answer.ok) {
       widget.onSignedIn();
+    } else if (answer.body['sso'] case final String identifier) {
+      // The password checked out, and an organization requires its single
+      // sign-on: that sign-in, with its identifier filled in.
+      setState(() {
+        working = false;
+        error = null;
+        sso = (identifier: identifier, mustUse: true);
+      });
     } else {
       setState(() {
         working = false;
@@ -500,15 +548,28 @@ class _SignInScreenState extends State<SignInScreen> {
     signedIn(answer);
   }
 
+  /// Gives up single sign-on's master password step: the core forgets the
+  /// session it holds for it, and the screen is back to signing in.
+  void startOverAfterSso() {
+    Core().cancelSignIn();
+    setState(() {
+      ssoUnlock = null;
+      error = null;
+    });
+  }
+
   /// Android's Back goes back a step: from two-step login, the new-device
-  /// check, or making an account to signing in, and from adding an account
-  /// to the one shown, before it leaves the app. Not while a call is out.
+  /// check, single sign-on, or making an account to signing in, and from
+  /// adding an account to the one shown, before it leaves the app. Not while
+  /// a call is out.
   @override
   Widget build(BuildContext context) => PopScope(
     canPop:
         twoStep == null &&
         newDevice == null &&
         deviceRequest == null &&
+        sso == null &&
+        ssoUnlock == null &&
         !creating &&
         widget.onCancel == null,
     onPopInvokedWithResult: (popped, _) {
@@ -517,6 +578,11 @@ class _SignInScreenState extends State<SignInScreen> {
         // The request is given up, and its key with it.
         deviceSignInCalls.giveUp();
         backToPassword(null);
+      } else if (ssoUnlock != null) {
+        startOverAfterSso();
+      } else if (sso != null) {
+        // The single sign-on screen stops a browser it was waiting on.
+        setState(() => sso = null);
       } else if (newDevice != null) {
         setState(() {
           newDevice = null;
@@ -559,6 +625,15 @@ class _SignInScreenState extends State<SignInScreen> {
         onPassword: backToPassword,
       );
     }
+    if (ssoUnlock case final account?) {
+      return SsoUnlockScreen(
+        key: ValueKey(account),
+        email: account,
+        server: signInTo,
+        onSignedIn: widget.onSignedIn,
+        onStartOver: startOverAfterSso,
+      );
+    }
     final held = newDevice;
     if (held != null) {
       return NewDeviceScreen(
@@ -584,7 +659,23 @@ class _SignInScreenState extends State<SignInScreen> {
           twoStep = null;
           newDevice = held;
         }),
+        onMasterPassword: (answer) => setState(() {
+          twoStep = null;
+          ssoUnlock = answer['email'] as String? ?? email.text.trim();
+        }),
         onStartOver: () => setState(() => twoStep = null),
+      );
+    }
+    if (sso case final chosen?) {
+      return SsoScreen(
+        // Each choice starts afresh.
+        key: ObjectKey(chosen),
+        server: signInTo,
+        email: email.text.trim(),
+        identifier: chosen.identifier,
+        mustUse: chosen.mustUse,
+        onAnswer: signedIn,
+        onBack: () => setState(() => sso = null),
       );
     }
     if (creating) return _createAccount(context);
@@ -660,6 +751,12 @@ class _SignInScreenState extends State<SignInScreen> {
                 )
               : const Icon(Icons.devices_outlined, size: 20),
           label: const Text('Sign in with a device'),
+        ),
+        // The organization's sign-in instead (sso.dart).
+        TextButton(
+          key: const ValueKey('use-sso'),
+          onPressed: working ? null : useSso,
+          child: const Text('Use single sign-on'),
         ),
         TextButton(
           key: const ValueKey('sign-in-hint'),
