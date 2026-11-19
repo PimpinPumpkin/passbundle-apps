@@ -1,0 +1,14 @@
+# The agent and its host link the C runtime in on Windows, so they need only
+# Windows' own libraries, which come from System32. Otherwise they'd need
+# the Visual C++ runtime installed, and on a computer without it Windows would
+# look for its libraries on PATH, where someone else could plant one for the
+# update task, which runs as SYSTEM (DESIGN.md, "The update task (Windows)").
+# Every workflow builds the agent from this folder, so all of them take it;
+# `src/lib.rs` refuses to build without it, and CI checks the programs'
+# imports (`examples/imports.rs`). Release builds are x86-64 only; ARM is here
+# for when there are some.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

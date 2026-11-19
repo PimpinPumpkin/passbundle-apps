@@ -4,7 +4,8 @@
 //   passbundle-agent             runs in the tray (one per signed-in user) and
 //                                serves the extension
 //   passbundle-agent --serve     serves the extension without a tray (tests)
-//   passbundle-agent --update    installs a newer signed release, if there is one
+//   passbundle-agent --update    installs a newer signed release of the agent,
+//                                its host, and the app, if there is one (Windows)
 //   passbundle-agent --version
 
 // A tray app: no console window on Windows.
@@ -13,7 +14,7 @@
 use std::{process::ExitCode, sync::Arc};
 
 use passbundle_agent::{
-    biometrics, brand, config, instance, ipc, reminders::Reminders, server::Server, update, version,
+    biometrics, brand, config, instance, ipc, reminders::Reminders, server::Server, version,
 };
 
 use config::Config;
@@ -66,7 +67,7 @@ fn run_tray() -> ExitCode {
         return ExitCode::SUCCESS;
     };
     if let Ok(exe) = std::env::current_exe() {
-        update::clean_up(&exe);
+        passbundle_agent::update::clean_up(&exe);
     }
     let reminders = Arc::new(Reminders::default());
     if let Err(code) = start_serving(Arc::clone(&reminders)) {
@@ -96,39 +97,70 @@ fn run_serve() -> ExitCode {
 }
 
 /// On Windows, run by the scheduled task the meta repo's installer makes
-/// (`Install-PassBundle.ps1`: as SYSTEM, daily and at startup), with the
-/// rights to replace the installed agent. Nothing runs it on macOS: the
-/// agent is inside the app there, so it's updated with the app. A build
-/// with no update key compiled in says so and does nothing.
+/// (`Install-PassBundle.ps1`: as SYSTEM, at every start and daily), with the
+/// rights to replace the installed folder: the agent, its host, and the app
+/// (`update.rs`). Nothing runs it on macOS: the agent is inside the app
+/// there, so it's updated with the app. A build with no update key compiled
+/// in says so and does nothing.
 fn run_update() -> ExitCode {
     let config = Config::load();
     if !config.updates {
         println!("Updates are turned off by policy.");
         return ExitCode::SUCCESS;
     }
-    let exe = match std::env::current_exe() {
-        Ok(exe) => exe,
+    if brand::UPDATE_KEY.is_empty() {
+        println!("This build doesn't update itself.");
+        return ExitCode::SUCCESS;
+    }
+    update_installed()
+}
+
+#[cfg(not(windows))]
+fn update_installed() -> ExitCode {
+    println!(
+        "{} agent is updated with the app on this computer.",
+        brand::NAME
+    );
+    ExitCode::SUCCESS
+}
+
+#[cfg(windows)]
+fn update_installed() -> ExitCode {
+    use passbundle_agent::{machine::Windows, update, update::Outcome};
+    Windows::harden();
+    let install = match std::env::current_exe() {
+        Ok(exe) => exe
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or(exe),
         Err(e) => {
             eprintln!("can't find the installed agent: {e}");
             return ExitCode::FAILURE;
         }
     };
-    let base = format!("https://{}/agent", brand::DOMAIN);
-    match update::run(&base, brand::UPDATE_KEY, Version::current(), &exe) {
-        Ok(Some(version)) => {
-            println!("Installed {} agent {version}.", brand::NAME);
+    let name = brand::NAME;
+    match update::run(
+        brand::UPDATE_SOURCE,
+        brand::UPDATE_KEY,
+        &update::target(),
+        &install,
+        &Windows,
+    ) {
+        Ok(Outcome::UpToDate(version)) => {
+            println!("{name} {version} is up to date.");
             ExitCode::SUCCESS
         }
-        Ok(None) => {
+        Ok(Outcome::Waiting(version)) => {
             println!(
-                "{} agent {} is up to date.",
-                brand::NAME,
-                Version::current()
+                "{name} {version} is ready. It goes in when nothing runs from {}, such as when the computer next starts.",
+                install.display()
             );
             ExitCode::SUCCESS
         }
-        Err(update::UpdateError::NoKey) => {
-            println!("This build doesn't update itself.");
+        Ok(Outcome::Installed(version)) => {
+            println!(
+                "Installed {name} {version}: the app, the desktop agent, and its browser helper."
+            );
             ExitCode::SUCCESS
         }
         Err(e) => {

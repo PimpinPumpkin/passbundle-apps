@@ -25,8 +25,25 @@ fn main() {
     };
 
     // The public half of the offline update key, in minisign's format. Without
-    // it the build can't update itself, which is right for local builds.
-    let update_key = fs::read_to_string(&key_path).unwrap_or_default();
+    // it the build can't update itself, which is right for local builds. The
+    // update site is the brand's. A test build (the test-update feature, which
+    // release builds refuse) takes both from its environment instead, for the
+    // update task's end-to-end test: a throwaway key, and a stand-in for the
+    // site on 127.0.0.1.
+    println!("cargo:rerun-if-env-changed=PB_TEST_UPDATE_KEY");
+    println!("cargo:rerun-if-env-changed=PB_TEST_UPDATE_SOURCE");
+    let site = format!("https://{}/agent", text("/domain"));
+    let (update_key, update_source) = if env::var_os("CARGO_FEATURE_TEST_UPDATE").is_some() {
+        (
+            env::var("PB_TEST_UPDATE_KEY").unwrap_or_default(),
+            env::var("PB_TEST_UPDATE_SOURCE")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .unwrap_or(site),
+        )
+    } else {
+        (fs::read_to_string(&key_path).unwrap_or_default(), site)
+    };
 
     let out = Path::new(&env::var("OUT_DIR").unwrap()).join("brand.rs");
     fs::write(
@@ -36,12 +53,14 @@ fn main() {
              pub const DOMAIN: &str = {:?};\n\
              pub const WEB_VAULT_URL: &str = {:?};\n\
              pub const NATIVE_MESSAGING_HOST: &str = {:?};\n\
-             pub const UPDATE_KEY: &str = {:?};\n",
+             pub const UPDATE_KEY: &str = {:?};\n\
+             pub const UPDATE_SOURCE: &str = {:?};\n",
             text("/name"),
             text("/domain"),
             text("/urls/webVault"),
             text("/nativeMessagingHost"),
             update_key.trim(),
+            update_source.trim_end_matches('/'),
         ),
     )
     .unwrap();

@@ -302,15 +302,21 @@ fn failed_note(ctx: &Context) -> Option<swap::Failed> {
     kept.clone()
 }
 
+/// Who keeps a copy the organization installed up to date, as Settings
+/// says it ("Updates come from your organization.").
+const ORGANIZATION: &str = "your organization";
+
 /// This copy's version (a release's, or none), whether it checks once a
-/// day, that updating restarts it, why it can't update itself if it can't
-/// (`installNote`), and the last update that didn't happen (`failed`).
+/// day, that updating restarts it, who keeps it up to date when that isn't
+/// the app (`store`: the organization, for a copy installed beside the
+/// desktop agent), why it can't update itself if it can't (`installNote`),
+/// and the last update that didn't happen (`failed`).
 pub fn status(ctx: &Context) -> Value {
     let mut answer = json!({
         "version": ctx.running_version(),
         "auto": read_prefs(ctx).auto,
         "restarts": true,
-        "store": null,
+        "store": bundle::updated_by_organization(&ctx.installed.dir).then_some(ORGANIZATION),
     });
     if let Some(note) = install_note(ctx) {
         answer["installNote"] = json!(note);
@@ -336,9 +342,14 @@ pub fn progress() -> Value {
 /// Looks for a newer release (slow): `{ok, available, version, notes}`, or
 /// `{ok: false, error}`. `quiet` is the check as the app opens, at most
 /// once a day, and only for a release's copy with the daily check on:
-/// otherwise `{ok, available: false, skipped: true}`.
+/// otherwise `{ok, available: false, skipped: true}`, as always for a copy
+/// the organization keeps up to date.
 pub fn check(ctx: &Context, quiet: bool) -> Value {
     let skipped = json!({ "ok": true, "available": false, "skipped": true });
+    // The agent's update task, or the RMM, updates it: never GitHub's.
+    if bundle::updated_by_organization(&ctx.installed.dir) {
+        return skipped;
+    }
     let mut prefs = read_prefs(ctx);
     let time = now();
     if quiet {
