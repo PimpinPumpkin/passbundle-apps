@@ -3,12 +3,12 @@
 # only (linux-release.yml, tools/flatpak-check.sh): it isn't attached to the
 # releases or published anywhere. Putting it on Flathub is the owner's call.
 #
-# It's a release's PassBundle folder as it is, from the release's tarball
-# (PassBundle.tar.gz, which tools/flatpak-check.sh puts next to this file;
-# for Flathub, the release's address and SHA-256 instead), in
-# /app/passbundle, with the app's desktop entry and icon. Flatpak exports
-# both to the desktop, and the entry takes passbundle:// links, Duo's way
-# back at sign-in.
+# It's a release's PassBundle folder as it is, nothing stripped, from the
+# release's tarball (PassBundle.tar.gz, which tools/flatpak-check.sh puts
+# next to this file; for Flathub, the release's address and SHA-256
+# instead), in /app/passbundle, with the app's desktop entry and icon.
+# Flatpak exports both to the desktop, and the entry takes passbundle://
+# links, Duo's way back at sign-in.
 #
 # Its permissions are what the app uses, and nothing more:
 #   network                      its server, and GitHub's releases to say
@@ -48,6 +48,11 @@ finish-args:
 modules:
   - name: passbundle
     buildsystem: simple
+    # The release's files as they are: by default flatpak-builder moves the
+    # debug info out of every program and library (with eu-strip) into a
+    # separate extension, which changes them.
+    build-options:
+      no-debuginfo: true
     build-commands:
       - cp -R bundle /app/passbundle
       - mkdir -p /app/bin

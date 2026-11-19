@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # Builds the Flatpak (app/linux/flatpak/com.passbundle.app.yml) from a Linux
 # release's tarball, as a check only (README, "Linux packages"), installs it
-# for this person from the build, and checks it: its permissions are no
-# wider than the manifest's, its desktop entry takes passbundle:// links and
-# opens them for the person, the app opens in its sandbox on a virtual
-# display and stays open, and a link opened with xdg-open reaches it there.
+# for this person from the build, and checks it: it holds the release's
+# folder as it is, its permissions are no wider than the manifest's, its
+# desktop entry takes passbundle:// links and opens them for the person,
+# the app opens in its sandbox on a virtual display and stays open, and a
+# link opened with xdg-open reaches it there. A check that fails shows what
+# its command said.
 #
 #   tools/flatpak-check.sh <PassBundle-<version>-linux-x64.tar.gz>
 #
@@ -25,13 +27,16 @@ app_id=com.passbundle.app
 flathub_sha256=3371dd250e61d9e1633630073fefda153cd4426f72f4afa0c3373ae2e8fea03a
 failures=0
 
+# A check passes when its command does; when it fails, what the command
+# said is shown under it.
 check() {
   name=$1
   shift
-  if "$@" > /dev/null 2>&1; then
+  if said=$("$@" 2>&1); then
     echo "ok    $name"
   else
     echo "FAIL  $name"
+    [ -z "$said" ] || printf '%s\n' "$said" | sed 's/^/      /'
     failures=$((failures + 1))
   fi
 }
@@ -53,6 +58,14 @@ flatpak-builder --user --install-deps-from=flathub --disable-rofiles-fuse --forc
 flatpak remote-add --user --no-gpg-verify passbundle-check "$work/repo"
 flatpak install --user -y --noninteractive passbundle-check "$app_id"
 flatpak info --user "$app_id"
+
+echo "Its files"
+# The release's folder as the tarball has it, nothing stripped or changed on
+# the way in (the manifest's no-debuginfo).
+mkdir "$work/release"
+tar -xzf "$tarball" -C "$work/release"
+installed="$(flatpak info --user --show-location "$app_id")/files/passbundle"
+check "it holds the release's folder as it is" diff -r "$work/release/PassBundle" "$installed"
 
 echo "Its permissions"
 permissions=$(flatpak info --user --show-permissions "$app_id")
