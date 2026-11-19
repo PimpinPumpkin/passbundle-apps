@@ -609,6 +609,7 @@ class VaultScreenState extends State<VaultScreen> {
     Filter.everyAccount => 'All accounts',
     Filter.favorites => 'Favorites',
     Filter.expiring => 'Expiring soon',
+    Filter.templates => 'Item templates',
     Filter.health => 'Health',
     Filter.kind => ItemKind.of(filterId ?? '').many,
     Filter.personal => 'Personal',
@@ -646,6 +647,8 @@ class VaultScreenState extends State<VaultScreen> {
     return switch (filter) {
       Filter.health => 'Nothing to fix: no weak, reused, or unsecured passwords.',
       Filter.favorites => 'No favorites yet. Star an item to add it here.',
+      Filter.templates =>
+        'No templates yet. New item has Create template, and a login or a note has Save as template.',
       Filter.all || Filter.everyAccount => 'No items yet. New adds one.',
       Filter.folder || Filter.collection => 'Nothing in this folder yet.',
       Filter.archive =>
@@ -1044,6 +1047,25 @@ class VaultScreenState extends State<VaultScreen> {
     await edit(null, null, choice);
   }
 
+  /// "Save as template" on a login or a note: a new template for logins or
+  /// notes, named as the item is, with its custom fields' labels and kinds,
+  /// never their values (core/src/templates.rs, `from_item`), unsaved until
+  /// the person saves it.
+  Future<void> saveAsTemplate(String id) async {
+    final start = widget.core.templateFromItem(id);
+    if (start == null || !mounted || nowhereToAdd()) return;
+    await edit(
+      null,
+      null,
+      NewItemChoice.template(
+        start['base'] as String,
+        fields: ((start['fields'] as List?) ?? const [])
+            .cast<Map<String, dynamic>>(),
+        name: start['name'] as String?,
+      ),
+    );
+  }
+
   /// Where an organization keeps items out of Personal and the person has
   /// no shared folder they can add to, a new item has nowhere to go
   /// (core/src/app.rs, `new_item_places`): the vault says so, in the
@@ -1413,6 +1435,7 @@ class VaultScreenState extends State<VaultScreen> {
         phone: true,
         atRisk: atRisk(health[id]),
         onEdit: () => edit(id),
+        onSaveAsTemplate: () => saveAsTemplate(id),
         onChanged: reload,
         onTrash: (name) async {
           if (await trash(id, name) && mounted) Navigator.of(context).pop();
@@ -1538,6 +1561,7 @@ class VaultScreenState extends State<VaultScreen> {
             server: widget.server,
             atRisk: atRisk(health[selected]),
             onEdit: () => edit(selected),
+            onSaveAsTemplate: () => saveAsTemplate(selected!),
             onChanged: reload,
             onTrash: (name) => trash(selected!, name),
             onArchive: (name, on) => archive(selected!, name, on),
@@ -2017,6 +2041,12 @@ class VaultScreenState extends State<VaultScreen> {
         const SliverToBoxAdapter(child: SizedBox(height: 12)),
         expiringCard(count(Filter.expiring)),
       ],
+      // The person's own templates and their organizations', while there
+      // are any: out of All items, here.
+      if (count(Filter.templates) > 0) ...[
+        const SliverToBoxAdapter(child: SizedBox(height: 12)),
+        templatesCard(count(Filter.templates)),
+      ],
       // Health, as a computer's menu has it: what to fix, by report.
       if (all.isNotEmpty) ...[
         const SliverToBoxAdapter(child: SizedBox(height: 12)),
@@ -2219,6 +2249,39 @@ class VaultScreenState extends State<VaultScreen> {
               const Expanded(
                 child: Text(
                   'Expiring soon',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+                ),
+              ),
+              Text('$count', style: TextStyle(color: c.muted, fontSize: 14)),
+              const SizedBox(width: 6),
+              Glyph(Glyphs.chevron, size: 18, color: c.muted, strokeWidth: 2),
+            ],
+          ),
+        ),
+      ),
+    );
+  });
+
+  /// "Item templates", on a phone: a card of its own, under Expiring soon.
+  Widget templatesCard(int count) => card(1, (context, i, radius) {
+    final c = context.colors;
+    return InkWell(
+      key: const ValueKey('item-templates'),
+      borderRadius: radius,
+      onTap: () => choose(Filter.templates),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: 56),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 8, 12, 8),
+          child: Row(
+            children: [
+              const JewelTile(jewel: Jewel.templates, size: 40),
+              const SizedBox(width: 12),
+              const Expanded(
+                child: Text(
+                  'Item templates',
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
@@ -2976,6 +3039,16 @@ class Sidebar extends StatelessWidget {
                     on: filter == Filter.expiring,
                     tap: () => onChoose(Filter.expiring),
                     count: count(Filter.expiring),
+                  ),
+                // The person's own templates and their organizations', out
+                // of All items, while there are any (or while it's shown).
+                if (count(Filter.templates) > 0 || filter == Filter.templates)
+                  entry(
+                    tile: const JewelTile(jewel: Jewel.templates, size: 24),
+                    label: 'Item templates',
+                    on: filter == Filter.templates,
+                    tap: () => onChoose(Filter.templates),
+                    count: count(Filter.templates),
                   ),
                 // Weak, reused, and unsecured passwords, and what expires,
                 // as the web vault's Health.
@@ -3880,10 +3953,14 @@ class ItemPane extends StatefulWidget {
     this.onRestore,
     this.onDeleteForever,
     this.onChanged,
+    this.onSaveAsTemplate,
     this.server,
     this.phone = false,
     this.atRisk = false,
   });
+
+  /// "Save as template", on a login or a note that isn't a template itself.
+  final VoidCallback? onSaveAsTemplate;
 
   /// Health has something to fix with its password (a weak or reused one,
   /// or a website without https): "Change password" opens the site's page.
@@ -3923,6 +4000,9 @@ class _ItemPaneState extends State<ItemPane> {
   final revealed = <String, String>{};
   Map<String, dynamic>? item;
   Map<String, dynamic>? totp;
+
+  /// A template's one-time code fields' current codes, by the field's place.
+  final fieldCodes = <int, Map<String, dynamic>?>{};
   Timer? ticker;
 
   @override
@@ -3936,8 +4016,19 @@ class _ItemPaneState extends State<ItemPane> {
   }
 
   void tick() {
-    if (busy.value || item?['hasTotp'] != true) return;
-    setState(() => totp = widget.core.totp(widget.id));
+    final fields = ((item?['fields'] as List?) ?? const [])
+        .cast<Map<String, dynamic>>();
+    final codeFields = [
+      for (var i = 0; i < fields.length; i++)
+        if (fields[i]['kind'] == 'totp') i,
+    ];
+    if (busy.value || (item?['hasTotp'] != true && codeFields.isEmpty)) return;
+    setState(() {
+      if (item?['hasTotp'] == true) totp = widget.core.totp(widget.id);
+      for (final i in codeFields) {
+        fieldCodes[i] = widget.core.fieldCode(widget.id, i);
+      }
+    });
   }
 
   @override
@@ -3971,6 +4062,7 @@ class _ItemPaneState extends State<ItemPane> {
     setState(() {
       item = widget.core.item(widget.id);
       revealed.clear();
+      fieldCodes.clear();
     });
   }
 
@@ -4387,6 +4479,20 @@ class _ItemPaneState extends State<ItemPane> {
         padding: const EdgeInsets.symmetric(horizontal: 4),
         child: webVaultButton(),
       ),
+    // A new template from a login or a note: its fields' labels and kinds.
+    if (widget.onSaveAsTemplate case final saveAsTemplate?
+        when (item['kind'] == 'login' || item['kind'] == 'note') &&
+            item['isTemplate'] != true &&
+            item['mayUse'] != false)
+      IconButton(
+        key: const ValueKey('save-as-template'),
+        tooltip: 'Save as template',
+        icon: Icon(
+          Icons.note_add_outlined,
+          color: Theme.of(context).colorScheme.onSurfaceVariant,
+        ),
+        onPressed: saveAsTemplate,
+      ),
     // The person's own mark, as a favorite is: any item they see takes it.
     if (widget.onArchive case final archive?)
       IconButton(
@@ -4522,6 +4628,59 @@ class _ItemPaneState extends State<ItemPane> {
     if (item['hasPassword'] == true) {
       rows.add(secretRow('Password', 'password'));
     }
+    // A current code, as big digits, with the seconds left inside a ring
+    // that runs down with them, and Copy: a login's, and a template's one-
+    // time code field's (`fieldCode:<index>`).
+    Widget codeRow(String label, Map<String, dynamic> now, String what) {
+      final digits = now['code'] as String;
+      final left = (now['secondsLeft'] as num).toInt();
+      final period = (now['period'] as num).toInt();
+      return row(
+        label,
+        Text(
+          '${digits.substring(0, digits.length ~/ 2)} ${digits.substring(digits.length ~/ 2)}',
+          style: TextStyle(
+            fontSize: valueSize + 2,
+            fontWeight: FontWeight.w600,
+            letterSpacing: 1.5,
+          ),
+        ),
+        actions: [
+          Semantics(
+            label: '$left seconds left',
+            excludeSemantics: true,
+            child: SizedBox(
+              width: 30,
+              height: 30,
+              child: Stack(
+                alignment: Alignment.center,
+                children: [
+                  Positioned.fill(
+                    child: CircularProgressIndicator(
+                      value: left / period,
+                      strokeWidth: 3,
+                      backgroundColor: c.line,
+                    ),
+                  ),
+                  Text(
+                    '$left',
+                    textScaler: TextScaler.noScaling,
+                    style: TextStyle(
+                      color: scheme.primary,
+                      fontSize: 11,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(width: 4),
+          copyButton(label == 'One-time code' ? 'one-time code' : label, what),
+        ],
+      );
+    }
+
     final code = totp?['code'] as String?;
     if (item['codeNeedsPremium'] == true) {
       // A key whose code needs Premium (core/src/codes.rs): no code, no
@@ -4539,55 +4698,7 @@ class _ItemPaneState extends State<ItemPane> {
     } else if (item['hasTotp'] == true && !sees) {
       rows.add(secretRow('One-time code', 'totp'));
     } else if (item['hasTotp'] == true && code != null) {
-      final left = (totp!['secondsLeft'] as num).toInt();
-      final period = (totp!['period'] as num).toInt();
-      rows.add(
-        row(
-          'One-time code',
-          Text(
-            '${code.substring(0, code.length ~/ 2)} ${code.substring(code.length ~/ 2)}',
-            style: TextStyle(
-              fontSize: valueSize + 2,
-              fontWeight: FontWeight.w600,
-              letterSpacing: 1.5,
-            ),
-          ),
-          actions: [
-            // The seconds left, inside a ring that runs down with them.
-            Semantics(
-              label: '$left seconds left',
-              excludeSemantics: true,
-              child: SizedBox(
-                width: 30,
-                height: 30,
-                child: Stack(
-                  alignment: Alignment.center,
-                  children: [
-                    Positioned.fill(
-                      child: CircularProgressIndicator(
-                        value: left / period,
-                        strokeWidth: 3,
-                        backgroundColor: c.line,
-                      ),
-                    ),
-                    Text(
-                      '$left',
-                      textScaler: TextScaler.noScaling,
-                      style: TextStyle(
-                        color: scheme.primary,
-                        fontSize: 11,
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-            const SizedBox(width: 4),
-            copyButton('one-time code', 'totp'),
-          ],
-        ),
-      );
+      rows.add(codeRow('One-time code', totp!, 'totp'));
     }
     for (final uri in (item['uris'] as List).cast<String>()) {
       rows.add(
@@ -4717,6 +4828,29 @@ class _ItemPaneState extends State<ItemPane> {
         continue;
       }
       if (f['type'] == 3) continue;
+      // A template's one-time code field: its current code, as a login's
+      // shows, by the same rule (Premium, or an organization that gives
+      // codes; never for someone who can't see the item's passwords).
+      if (f['kind'] == 'totp' && f['hidden'] == true && sees) {
+        final now = fieldCodes[i];
+        if (item['showsCodes'] != true) {
+          rows.add(
+            row(
+              f['name'] as String,
+              Text(
+                'Two-step login codes are part of Premium.',
+                key: ValueKey('field-code-needs-premium-$i'),
+                style: TextStyle(fontSize: valueSize),
+              ),
+            ),
+          );
+          continue;
+        }
+        if (now != null && now['code'] is String) {
+          rows.add(codeRow(f['name'] as String, now, 'fieldCode:$i'));
+          continue;
+        }
+      }
       rows.add(
         f['hidden'] == true
             ? secretRow(f['name'] as String, 'field:$i')
