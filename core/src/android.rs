@@ -703,9 +703,12 @@ pub(crate) fn open_pin(context: &[u8], sealed: &[u8]) -> Option<Zeroizing<Vec<u8
 /// Kotlin (`com.passbundle.app.SecurityKeys`): it looks for a key held to
 /// the phone (NFC) or plugged in (USB, asking Android's permission for it),
 /// and passes the core's APDUs or HID reports to it; the CTAP itself is the
-/// core's (security_key/ctap.rs), as on computers.
+/// core's (security_key/ctap.rs), as on computers, and so is sending the
+/// key's PIN when it asks for one (security_key/client_pin.rs): Kotlin only
+/// carries the bytes.
 pub(crate) fn ask_security_key(
     request: &crate::security_key::KeyRequest,
+    pin: Option<&crate::security_key::Pin>,
     wait: &crate::security_key::Wait,
 ) -> crate::Result<crate::security_key::KeyAnswer> {
     use crate::error::Error;
@@ -738,8 +741,8 @@ pub(crate) fn ask_security_key(
                 )?
                 .i()?;
             let asked = match found {
-                1 => ctap::ask_nfc(&mut KeyOnPhone { env, class: &class }, request, wait),
-                2 => ctap::ask_hid(&mut KeyOnPhone { env, class: &class }, request, wait),
+                1 => ctap::ask_nfc(&mut KeyOnPhone { env, class: &class }, request, pin, wait),
+                2 => ctap::ask_hid(&mut KeyOnPhone { env, class: &class }, request, pin, wait),
                 _ => continue,
             };
             env.call_static_method(&class, jni_str!("release"), jni_sig!(() -> void), &[])?

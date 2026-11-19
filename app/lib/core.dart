@@ -223,6 +223,11 @@ class Core {
   late final _securityKey = _lib.lookupFunction<_FlagNative, _Flag>(
     'pb_security_key_sign_in',
   );
+  late final _securityKeyWithPin = _lib
+      .lookupFunction<
+        Pointer<Utf8> Function(Pointer<Utf8>, Bool, Bool),
+        Pointer<Utf8> Function(Pointer<Utf8>, bool, bool)
+      >('pb_security_key_sign_in_with_pin');
   late final _securityKeyCancel = _lib.lookupFunction<_Str0, _Str0>(
     'pb_security_key_cancel',
   );
@@ -716,6 +721,23 @@ class Core {
   /// server's request says or until [securityKeyCancel].
   static Future<Answer> securityKeySignIn(bool remember) =>
       _signedIn(_background((c, _) => c._answer(c._securityKey(remember))));
+
+  /// [securityKeySignIn] again with the PIN the person typed, after a key
+  /// asked for it (the answer's `securityKeyPin`): the core sends it to the
+  /// key only if the key asks again, and on its last try only with
+  /// [lastTry]. It passes through here once, as the master password does,
+  /// and [_with] overwrites the copy made for the core.
+  static Future<Answer> securityKeySignInWithPin(
+    String pin,
+    bool remember,
+    bool lastTry,
+  ) => _signedIn(
+    _background(
+      (c, _) => c._with([
+        pin,
+      ], (p) => c._answer(c._securityKeyWithPin(p[0], remember, lastTry))),
+    ),
+  );
 
   /// Stops a security key's wait ([securityKeySignIn]).
   void securityKeyCancel() => _answer(_securityKeyCancel());
