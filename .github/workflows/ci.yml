@@ -500,9 +500,11 @@ jobs:
     # signing up, signing in, two-step login (an authenticator app, a
     # recovery code, and a security key in software), sync, saving,
     # organizations, approving a sign-in from another device, and the
-    # new-device check, on a server of its own with it on. On a pull request, the
-    # server's branch of the same name if it has one (a change that spans
-    # the two), else its keykeeper branch.
+    # new-device check, on a server of its own with it on; and single
+    # sign-on, on a server of its own that signs in at the meta repo's
+    # stand-in for Microsoft Entra ID (its e2e/entra-standin.mjs). On a pull
+    # request, the server's and the meta repo's branches of the same name if
+    # they have one (a change that spans them), else their keykeeper and main.
     name: Core against a real server
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -530,6 +532,24 @@ jobs:
           ref: ${{ steps.server.outputs.ref }}
           path: server
           persist-credentials: false
+      - name: The meta repo's branch, for its stand-in for Entra
+        id: meta
+        env:
+          BRANCH: ${{ github.head_ref }}
+        run: |
+          ref=main
+          if [ -n "$BRANCH" ] && git ls-remote --exit-code --heads https://github.com/PimpinPumpkin/Passbundle.git "refs/heads/$BRANCH" > /dev/null; then
+            ref=$BRANCH
+          fi
+          echo "The stand-in for Entra from the meta repo's $ref."
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: PimpinPumpkin/Passbundle
+          ref: ${{ steps.meta.outputs.ref }}
+          path: meta
+          sparse-checkout: e2e
+          persist-credentials: false
       - name: Server build dependencies
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential libssl-dev libdbus-1-dev pkg-config
       - name: Install the pinned Rust toolchains
@@ -553,6 +573,19 @@ jobs:
           echo "PB_TEST_SERVER_SOME_ADDRESSES=$(SIGNUPS_DOMAINS_WHITELIST=core.example.test tools/test-server.sh server/target/debug/vaultwarden 8596 "$RUNNER_TEMP/server-some-addresses")" >> "$GITHUB_ENV"
           echo "PB_TEST_SERVER_LITTLE_ROOM=$(USER_ATTACHMENT_LIMIT=64 USER_SEND_LIMIT=64 tools/test-server.sh server/target/debug/vaultwarden 8597 "$RUNNER_TEMP/server-little-room")" >> "$GITHUB_ENV"
           echo "PB_TEST_SERVER_PLANS=$(PLANS_ENFORCED=true tools/test-server.sh server/target/debug/vaultwarden 8598 "$RUNNER_TEMP/server-plans")" >> "$GITHUB_ENV"
+      - name: The stand-in for Entra (the meta repo's e2e/entra-standin.mjs, Node's own modules only), and a server whose single sign-on goes to it
+        run: |
+          # The stand-in reads the e2e harness's paths, which want a brand.
+          echo '{"urls":{"webVault":"https://vault.passbundle.test"}}' > "$RUNNER_TEMP/brand.json"
+          KK_BRAND="$RUNNER_TEMP/brand.json" KK_ENTRA_PORT=8590 KK_DNS_PORT=8589 \
+            nohup node meta/e2e/entra-standin.mjs > "$RUNNER_TEMP/entra.log" 2>&1 &
+          for _ in $(seq 1 60); do
+            curl -fsS http://127.0.0.1:8590/alive > /dev/null 2>&1 && break
+            sleep 0.5
+          done
+          curl -fsS http://127.0.0.1:8590/alive > /dev/null
+          echo "PB_TEST_ENTRA=http://127.0.0.1:8590" >> "$GITHUB_ENV"
+          echo "PB_TEST_SERVER_SSO=$(SSO_ENTRA_AUTHORITY=http://127.0.0.1:8590 tools/test-server.sh server/target/debug/vaultwarden 8599 "$RUNNER_TEMP/server-sso")" >> "$GITHUB_ENV"
       - name: The core against it (test-hooks for the software security key, core/src/security_key/soft.rs)
         working-directory: core
         run: cargo test --locked --features test-hooks --test server
@@ -566,6 +599,8 @@ jobs:
           cat "$RUNNER_TEMP/server-some-addresses/server.log" || true
           cat "$RUNNER_TEMP/server-little-room/server.log" || true
           cat "$RUNNER_TEMP/server-plans/server.log" || true
+          cat "$RUNNER_TEMP/server-sso/server.log" || true
+          cat "$RUNNER_TEMP/entra.log" || true
 
   app:
     if: ${{ !inputs.ios_only }}

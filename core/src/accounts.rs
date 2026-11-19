@@ -32,7 +32,7 @@ use std::time::{Instant, SystemTime};
 
 use serde::{Deserialize, Serialize};
 
-use crate::app::{App, Prepared, State, Step};
+use crate::app::{App, Prepared, SsoStart, SsoWait, State, Step};
 use crate::autolock::{Readings, Reason};
 use crate::error::{Error, Result};
 use crate::expiration::{Counts, Date, Schedule};
@@ -841,7 +841,7 @@ impl Accounts {
         let id = self.signing_in.clone().ok_or(Error::SignedOut)?;
         let asked = self.app_kept(&id).ok_or(Error::SignedOut)?.duo_address();
         match asked {
-            Ok(Prepared::SignedIn) => self.after(&id, Ok(Step::Done)).map(|_| Prepared::SignedIn),
+            Ok(Prepared::SignedIn(step)) => self.after(&id, Ok(step)).map(Prepared::SignedIn),
             other => other,
         }
     }
@@ -866,7 +866,7 @@ impl Accounts {
             .security_key_request();
         match asked {
             Ok(Prepared::Ready(request)) => Ok(Prepared::Ready((id, request))),
-            Ok(Prepared::SignedIn) => self.after(&id, Ok(Step::Done)).map(|_| Prepared::SignedIn),
+            Ok(Prepared::SignedIn(step)) => self.after(&id, Ok(step)).map(Prepared::SignedIn),
             Err(e) => Err(e),
         }
     }
@@ -888,6 +888,79 @@ impl Accounts {
             .ok_or(Error::SignedOut)?
             .finish_with_key(request, answer, remember);
         self.after(id, finished)
+    }
+
+    /// Starts a single sign-on (`App::start_sso`) for the account with the
+    /// email typed: the one here already with the same server and email
+    /// (signing in again), or a new one. The address for the browser.
+    pub fn start_sso(&mut self, server: &str, email: &str, identifier: &str) -> Result<SsoStart> {
+        let id = self.route(server, email)?;
+        self.give_up_others(&id);
+        let started = self
+            .app(&id)
+            .expect("routed to one")
+            .start_sso(server, email, identifier);
+        let waiting = self.get(&id).is_some_and(App::signing_in);
+        self.signing_in = waiting.then(|| id.clone());
+        started
+    }
+
+    /// The computer's listener for the single sign-on under way, and which
+    /// sign-in it's for (`App::sso_wait`): the wait happens without the
+    /// accounts (ffi.rs).
+    pub fn sso_wait(&mut self) -> Result<(String, SsoWait)> {
+        let id = self
+            .signing_in
+            .clone()
+            .ok_or(Error::Sso(crate::sso::NOT_STARTED))?;
+        let wait = self
+            .app_kept(&id)
+            .ok_or(Error::Sso(crate::sso::NOT_STARTED))?
+            .sso_wait()?;
+        Ok((id, wait))
+    }
+
+    /// The computer's wait came back (`App::finish_sso`), for the sign-in
+    /// `sso_wait` was for, if it's still the one under way.
+    pub fn finish_sso(
+        &mut self,
+        id: &str,
+        waited: Result<zeroize::Zeroizing<String>>,
+    ) -> Result<Step> {
+        if self.signing_in.as_deref() != Some(id) {
+            return Err(Error::Sso(crate::sso::NOT_STARTED));
+        }
+        let finished = self
+            .app_kept(id)
+            .ok_or(Error::Sso(crate::sso::NOT_STARTED))?
+            .finish_sso(waited);
+        self.after(id, finished)
+    }
+
+    /// A phone's link back from single sign-on (`App::finish_sso_link`).
+    pub fn finish_sso_link(&mut self, link: &str) -> Result<Step> {
+        let id = self
+            .signing_in
+            .clone()
+            .ok_or(Error::Sso(crate::sso::NOT_STARTED))?;
+        let finished = self
+            .app_kept(&id)
+            .ok_or(Error::Sso(crate::sso::NOT_STARTED))?
+            .finish_sso_link(link);
+        self.after(&id, finished)
+    }
+
+    /// The master password after a single sign-on (`App::unlock_after_sso`).
+    pub fn unlock_after_sso(&mut self, password: &str) -> Result<Step> {
+        let id = self
+            .signing_in
+            .clone()
+            .ok_or(Error::Sso(crate::sso::NOT_STARTED))?;
+        let unlocked = self
+            .app_kept(&id)
+            .ok_or(Error::Sso(crate::sso::NOT_STARTED))?
+            .unlock_after_sso(password);
+        self.after(&id, unlocked)
     }
 
     /// Where a sign-in got to.

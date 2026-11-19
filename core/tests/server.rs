@@ -20,7 +20,11 @@
 //! (`USER_ATTACHMENT_LIMIT=64 USER_SEND_LIMIT=64 tools/test-server.sh ...`),
 //! and the tests of what a Free account hears and sees where plans are
 //! enforced one that enforces them, PB_TEST_SERVER_PLANS
-//! (`PLANS_ENFORCED=true tools/test-server.sh ...`).
+//! (`PLANS_ENFORCED=true tools/test-server.sh ...`). Single sign-on's tests
+//! (`sso_`) need the stand-in for Microsoft Entra ID from the meta repo's
+//! API tests (e2e/entra-standin.mjs), PB_TEST_ENTRA, and a server whose
+//! single sign-on goes to it, PB_TEST_SERVER_SSO
+//! (`SSO_ENTRA_AUTHORITY=<PB_TEST_ENTRA> tools/test-server.sh ...`).
 
 use base64::{engine::general_purpose::STANDARD, Engine};
 use passbundle_core::app::{App, State, Step};
@@ -5038,5 +5042,454 @@ fn an_export_comes_into_another_account_and_a_browsers_file_into_a_shared_folder
         name.decrypt_string(&org_key).unwrap().as_str(),
         "wiki.example.test"
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// Single sign-on (core/src/sso.rs; DESIGN.md in the meta repo, "In the
+// desktop and phone apps"), against the API tests' stand-in for Entra.
+
+/// The stand-in for Entra and the server that uses it, or None (the tests
+/// say so and pass).
+fn sso_servers() -> Option<(Server, String, String)> {
+    let (Ok(url), Ok(entra)) = (
+        std::env::var("PB_TEST_SERVER_SSO"),
+        std::env::var("PB_TEST_ENTRA"),
+    ) else {
+        eprintln!("PB_TEST_SERVER_SSO or PB_TEST_ENTRA isn't set; skipping the single sign-on tests (the meta repo's e2e/entra-standin.mjs, and SSO_ENTRA_AUTHORITY=<it> tools/test-server.sh, start them).");
+        return None;
+    };
+    let server = Server::new(&url, Device::this_one(&Device::new_identifier())).unwrap();
+    Some((server, url, entra))
+}
+
+/// The stand-in's own controls (e2e/entra-standin.mjs, `/control/...`).
+fn entra(entra: &str, control: &str, body: serde_json::Value) {
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .build()
+        .into();
+    let answer = agent
+        .post(format!("{entra}/control/{control}"))
+        .send_json(body)
+        .unwrap();
+    assert_eq!(answer.status().as_u16(), 200, "{control}");
+}
+
+/// A browser, by hand: it follows no redirect itself, and sends back every
+/// cookie the server set.
+struct Browser {
+    agent: ureq::Agent,
+    cookies: std::collections::BTreeMap<String, String>,
+}
+
+/// An answer: its status, where it redirects to, and its body.
+type Page = (u16, Option<String>, String);
+
+impl Browser {
+    fn new() -> Browser {
+        Browser {
+            agent: ureq::Agent::config_builder()
+                .max_redirects(0)
+                .http_status_as_error(false)
+                .build()
+                .into(),
+            cookies: Default::default(),
+        }
+    }
+
+    fn cookie_header(&self) -> String {
+        self.cookies
+            .iter()
+            .map(|(name, value)| format!("{name}={value}"))
+            .collect::<Vec<_>>()
+            .join("; ")
+    }
+
+    fn read(&mut self, answer: Result<ureq::http::Response<ureq::Body>, ureq::Error>) -> Page {
+        let mut answer = answer.unwrap();
+        for set in answer.headers().get_all("set-cookie") {
+            let set = set.to_str().unwrap();
+            let (pair, attributes) = set.split_once(';').unwrap_or((set, ""));
+            let (name, value) = pair.split_once('=').unwrap();
+            if value.is_empty() || attributes.to_lowercase().contains("max-age=0") {
+                self.cookies.remove(name.trim());
+            } else {
+                self.cookies
+                    .insert(name.trim().to_owned(), value.to_owned());
+            }
+        }
+        let location = answer
+            .headers()
+            .get("location")
+            .map(|l| l.to_str().unwrap().to_owned());
+        let status = answer.status().as_u16();
+        let body = answer.body_mut().read_to_string().unwrap_or_default();
+        (status, location, body)
+    }
+
+    fn get(&mut self, url: &str) -> Page {
+        let answer = self
+            .agent
+            .get(url)
+            .header("Cookie", self.cookie_header())
+            .call();
+        self.read(answer)
+    }
+
+    /// A form's POST from a page of `origin`'s.
+    fn post_form(&mut self, url: &str, form: &[(&str, &str)], origin: &str) -> Page {
+        let answer = self
+            .agent
+            .post(url)
+            .header("Cookie", self.cookie_header())
+            .header("Origin", origin)
+            .header("Sec-Fetch-Site", "same-origin")
+            .send_form(form.iter().copied());
+        self.read(answer)
+    }
+
+    /// A call of the web vault's, with a session's token.
+    fn post_json(&mut self, url: &str, token: &str, body: serde_json::Value) -> Page {
+        let answer = self
+            .agent
+            .post(url)
+            .header("Cookie", self.cookie_header())
+            .header("Authorization", format!("Bearer {token}"))
+            .send_json(body);
+        self.read(answer)
+    }
+}
+
+/// A query parameter of an address.
+fn query_param(url: &str, name: &str) -> String {
+    let query = url.split_once('?').map_or("", |(_, q)| q);
+    query
+        .split('&')
+        .find_map(|pair| {
+            let (key, value) = pair.split_once('=')?;
+            (key == name).then(|| {
+                let mut out = Vec::new();
+                let bytes = value.as_bytes();
+                let mut i = 0;
+                while i < bytes.len() {
+                    if bytes[i] == b'%' {
+                        out.push(u8::from_str_radix(&value[i + 1..i + 3], 16).unwrap());
+                        i += 3;
+                    } else {
+                        out.push(bytes[i]);
+                        i += 1;
+                    }
+                }
+                String::from_utf8(out).unwrap()
+            })
+        })
+        .unwrap()
+}
+
+/// An organization with its single sign-on on, owned by `owner`'s account:
+/// a tenant at the stand-in, the owner's settings, and the SSO identifier.
+struct SsoOrg {
+    org_id: String,
+    org_key: SymmetricKey,
+    tenant: String,
+    identifier: String,
+}
+
+fn sso_org(server: &Server, owner: &mut Session, email: &str, entra_url: &str) -> SsoOrg {
+    let (org_id, org_key) = new_organization(server, owner, email);
+    let tenant = uuid::Uuid::new_v4().to_string();
+    let client = uuid::Uuid::new_v4().to_string();
+    let secret = format!("abc~{}", uuid::Uuid::new_v4().simple());
+    entra(
+        entra_url,
+        "tenant",
+        json!({ "tenantId": tenant, "clientId": client, "clientSecret": secret }),
+    );
+    let identifier = format!("core-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
+    server
+        .raw(
+            owner,
+            "PUT",
+            &format!("/api/keykeeper/organizations/{org_id}/sso"),
+            Some(json!({
+                "enabled": true,
+                "identifier": identifier,
+                "tenantId": tenant,
+                "clientId": client,
+                "clientSecret": secret,
+                "masterPasswordHash": master_hash(email),
+            })),
+        )
+        .unwrap();
+    SsoOrg {
+        org_id,
+        org_key,
+        tenant,
+        identifier,
+    }
+}
+
+/// Links an account to the organization's single sign-on as the web
+/// vault's Link SSO does: a ticket with its master password, the stand-in
+/// signing in a new person in the tenant (`oid`), and the session's
+/// confirmation. The person's object id at the stand-in.
+fn link_from_session(
+    url: &str,
+    session: &Session,
+    email: &str,
+    entra_url: &str,
+    org: &SsoOrg,
+) -> String {
+    let oid = uuid::Uuid::new_v4().to_string();
+    entra(
+        entra_url,
+        "user",
+        json!({ "tenantId": org.tenant, "oid": oid, "email": email }),
+    );
+    entra(
+        entra_url,
+        "next",
+        json!({ "tenantId": org.tenant, "oid": oid }),
+    );
+    let token = session.access_token.as_str();
+    let mut browser = Browser::new();
+    let (status, _, ticket) = browser.post_json(
+        &format!("{url}/api/accounts/sso/user-identifier"),
+        token,
+        json!({ "masterPasswordHash": master_hash(email) }),
+    );
+    assert_eq!(status, 200, "{ticket}");
+    let ticket: String = serde_json::from_str(&ticket).unwrap();
+    let identifier = &org.identifier;
+    let connector = format!("{url}/sso-connector.html");
+    let authorize = format!(
+        "{url}/identity/connect/authorize?client_id=web&redirect_uri={}&response_type=code&scope=api%20offline_access&state=s_identifier={identifier}&code_challenge={}&code_challenge_method=S256&response_mode=query&domain_hint={identifier}&user_identifier={}",
+        connector.replace(':', "%3A").replace('/', "%2F"),
+        "c".repeat(43),
+        ticket.replace('+', "%2B").replace('/', "%2F").replace('=', "%3D"),
+    );
+    let (status, to_entra, page) = browser.get(&authorize);
+    assert_eq!(status, 307, "{page}");
+    let (status, callback, page) = browser.get(&to_entra.unwrap());
+    assert_eq!(status, 302, "{page}");
+    let (status, back, page) = browser.get(&callback.unwrap());
+    assert_eq!(status, 307, "{page}");
+    let back = back.unwrap();
+    let code = back.rsplit_once("code=").unwrap().1.to_owned();
+    for step in ["pending", "confirm"] {
+        let (status, _, page) = browser.post_json(
+            &format!("{url}/api/accounts/sso/link/{step}"),
+            token,
+            json!({ "code": code }),
+        );
+        assert_eq!(status, 200, "{step}: {page}");
+    }
+    oid
+}
+
+/// The browser's part of a sign-in the app opened at `authorize`, for the
+/// person the stand-in signs in next: the server's page that asks, its
+/// Continue, Microsoft, and the server's callback. Where the callback sends
+/// the browser back to: the app's listener or scheme, with the server's
+/// code and the app's state.
+fn browse(url: &str, authorize: &str) -> String {
+    let mut browser = Browser::new();
+    let (status, location, page) = browser.get(authorize);
+    assert_eq!(status, 200, "{page}");
+    // Never Microsoft from a link alone: the server's own page asks first.
+    assert!(location.is_none());
+    assert!(page.contains("Sign in to the PassBundle app?"), "{page}");
+    let token = page
+        .split("name=\"token\" value=\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .unwrap()
+        .to_owned();
+    let (status, to_entra, page) = browser.post_form(
+        &format!("{url}/identity/connect/authorize/confirm"),
+        &[("token", token.as_str())],
+        url,
+    );
+    assert_eq!(status, 303, "{page}");
+    let (status, callback, page) = browser.get(&to_entra.unwrap());
+    assert_eq!(status, 302, "{page}");
+    let (status, back, page) = browser.get(&callback.unwrap());
+    assert_eq!(status, 307, "{page}");
+    back.unwrap()
+}
+
+/// Signs in with single sign-on as the desktop app does, on this computer:
+/// the core's listener takes the browser's answer (after a made-up one it
+/// refuses), and the code is redeemed. Where the sign-in got to.
+fn sso_on_this_computer(
+    app: &mut App,
+    url: &str,
+    email: &str,
+    identifier: &str,
+) -> passbundle_core::Result<Step> {
+    let start = app.start_sso(url, email, identifier).unwrap();
+    assert!(start.listens);
+    assert!(start.url.contains("client_id=desktop&"));
+    let redirect = query_param(&start.url, "redirect_uri");
+    assert!(redirect.starts_with("http://127.0.0.1:") && redirect.ends_with("/sso"));
+    let wait = app.sso_wait().unwrap();
+    let never = std::sync::atomic::AtomicBool::new(false);
+    let waited = std::thread::scope(|scope| {
+        let waiting = scope.spawn(|| wait.listener.wait(&wait.state, &never, wait.until));
+        let back = browse(url, &start.url);
+        assert!(back.starts_with(&format!("{redirect}?")), "{back}");
+        let mut browser = Browser::new();
+        let (forged, _, _) = browser.get(&format!("{redirect}?code=forged&state=guessed"));
+        assert_eq!(forged, 400);
+        let (status, _, _) = browser.get(&back);
+        assert_eq!(status, 200);
+        waiting.join().unwrap()
+    });
+    app.finish_sso(waited)
+}
+
+#[test]
+fn sso_signs_in_as_the_desktop_app_and_as_a_phone_then_the_master_password_unlocks() {
+    let Some((server, url, entra_url)) = sso_servers() else {
+        return;
+    };
+    let email = new_email("sso-owner");
+    sign_up(&server, &email);
+    let mut session = sign_in(&server, &email);
+    let org = sso_org(&server, &mut session, &email, &entra_url);
+    let oid = link_from_session(&url, &session, &email, &entra_url, &org);
+
+    // An identifier no organization uses: refused before any browser.
+    let dir = std::env::temp_dir().join(format!("pb-core-sso-{}", uuid::Uuid::new_v4().simple()));
+    let mut app = App::open(Store::new(&dir), Box::new(MemorySecretStore::default()));
+    assert_eq!(
+        app.start_sso(&url, &email, "no-such-organization").err(),
+        Some(Error::Sso(
+            "No organization uses that SSO identifier, or its single sign-on is turned off. Check it with your administrator."
+        ))
+    );
+
+    // On this computer: the server's page, its Continue, the stand-in, and
+    // the callback to the core's listener; then the master password.
+    entra(
+        &entra_url,
+        "next",
+        json!({ "tenantId": org.tenant, "oid": oid }),
+    );
+    assert_eq!(
+        sso_on_this_computer(&mut app, &url, &email, &org.identifier),
+        Ok(Step::MasterPassword(email.clone()))
+    );
+    assert_eq!(
+        app.unlock_after_sso("not the password"),
+        Err(Error::WrongPassword)
+    );
+    assert_eq!(app.unlock_after_sso(PASSWORD), Ok(Step::Done));
+    assert_eq!(
+        app.state(),
+        State::Unlocked {
+            server: url.clone(),
+            email: email.clone()
+        }
+    );
+    // A session of the server's like any other: it syncs.
+    app.sync().unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // As a phone: the callback sends the browser to the app's scheme, and
+    // the phone hands the link to the core.
+    entra(
+        &entra_url,
+        "next",
+        json!({ "tenantId": org.tenant, "oid": oid }),
+    );
+    let dir = std::env::temp_dir().join(format!("pb-core-sso-{}", uuid::Uuid::new_v4().simple()));
+    let mut phone = App::open(Store::new(&dir), Box::new(MemorySecretStore::default()));
+    let device = Device::new_identifier();
+    let mut on_phone = Device::this_one(&device);
+    on_phone.kind = 0;
+    let start = phone
+        .start_sso_with(
+            &url,
+            Server::new(&url, on_phone).unwrap(),
+            device,
+            &email,
+            passbundle_core::sso::Started::on_a_phone(&org.identifier),
+        )
+        .unwrap();
+    assert!(start.url.contains("client_id=mobile&"));
+    let back = browse(&url, &start.url);
+    assert!(back.starts_with("com.passbundle.app:/sso?"), "{back}");
+    assert_eq!(
+        phone.finish_sso_link(&back),
+        Ok(Step::MasterPassword(email.clone()))
+    );
+    assert_eq!(phone.unlock_after_sso(PASSWORD), Ok(Step::Done));
+    assert!(matches!(phone.state(), State::Unlocked { .. }));
+    // The server's code went once: the same link again is no sign-in.
+    assert!(phone.finish_sso_link(&back).is_err());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn sso_required_hands_a_password_sign_in_its_identifier_or_says_to_link_first() {
+    let Some((server, url, entra_url)) = sso_servers() else {
+        return;
+    };
+    let owner_email = new_email("sso-req-owner");
+    sign_up(&server, &owner_email);
+    let mut owner = sign_in(&server, &owner_email);
+    let org = sso_org(&server, &mut owner, &owner_email, &entra_url);
+    let member = new_email("sso-req-member");
+    sign_up(&server, &member);
+    join(
+        &server,
+        &mut owner,
+        &org.org_id,
+        &org.org_key,
+        &member,
+        json!([]),
+    );
+    let member_session = sign_in(&server, &member);
+    // Single organization, then Require single sign-on.
+    for policy in [3, 4] {
+        server
+            .raw(
+                &mut owner,
+                "PUT",
+                &format!("/api/organizations/{}/policies/{policy}", org.org_id),
+                Some(json!({ "policy": { "enabled": true, "data": null } })),
+            )
+            .unwrap();
+    }
+
+    // Not linked yet: the web vault links the account first.
+    assert_eq!(
+        server.sign_in(&member, PASSWORD).err(),
+        Some(Error::LinkSsoFirst {
+            web_vault: url.clone()
+        })
+    );
+    // Linked: the password sign-in says which single sign-on to use, and it signs in.
+    let oid = link_from_session(&url, &member_session, &member, &entra_url, &org);
+    assert_eq!(
+        server.sign_in(&member, PASSWORD).err(),
+        Some(Error::UseSso {
+            identifier: org.identifier.clone()
+        })
+    );
+    entra(
+        &entra_url,
+        "next",
+        json!({ "tenantId": org.tenant, "oid": oid }),
+    );
+    let dir = std::env::temp_dir().join(format!("pb-core-sso-{}", uuid::Uuid::new_v4().simple()));
+    let mut app = App::open(Store::new(&dir), Box::new(MemorySecretStore::default()));
+    assert_eq!(
+        sso_on_this_computer(&mut app, &url, &member, &org.identifier),
+        Ok(Step::MasterPassword(member.clone()))
+    );
+    assert_eq!(app.unlock_after_sso(PASSWORD), Ok(Step::Done));
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -229,6 +229,14 @@ class Core {
   late final _handOverLink = _lib.lookupFunction<_Str1, _Str1>(
     'pb_hand_over_link',
   );
+  late final _ssoIdentifier = _lib.lookupFunction<_Str2, _Str2>(
+    'pb_sso_identifier',
+  );
+  late final _ssoStart = _lib.lookupFunction<_Str3, _Str3>('pb_sso_start');
+  late final _ssoWait = _lib.lookupFunction<_Str0, _Str0>('pb_sso_wait');
+  late final _ssoCancel = _lib.lookupFunction<_Str0, _Str0>('pb_sso_cancel');
+  late final _ssoFinish = _lib.lookupFunction<_Str1, _Str1>('pb_sso_finish');
+  late final _ssoUnlock = _lib.lookupFunction<_Str1, _Str1>('pb_sso_unlock');
   late final _handedOverLink = _lib.lookupFunction<_Str0, _Str0>(
     'pb_handed_over_link',
   );
@@ -711,6 +719,58 @@ class Core {
 
   /// Stops a security key's wait ([securityKeySignIn]).
   void securityKeyCancel() => _answer(_securityKeyCancel());
+
+  /// Single sign-on (sso.dart; core/src/sso.rs): the SSO identifier of the
+  /// organization whose verified domain [email] is at (`identifier`, null
+  /// when there's none), as the web vault finds it.
+  static Future<Answer> ssoIdentifier(String server, String email) =>
+      _background(
+        (c, _) => c._with([
+          server,
+          email,
+        ], (p) => c._answer(c._ssoIdentifier(p[0], p[1]))),
+      );
+
+  /// Starts a single sign-on with an organization's SSO identifier, for the
+  /// account with [email]: `url`, the address to open in the browser, and
+  /// `listens`, whether the answer comes back to this computer ([ssoWait])
+  /// or as a phone's link ([ssoFinish]).
+  static Future<Answer> ssoStart(
+    String server,
+    String email,
+    String identifier,
+  ) => _background(
+    (c, _) => c._with([
+      server,
+      email,
+      identifier,
+    ], (p) => c._answer(c._ssoStart(p[0], p[1], p[2]))),
+  );
+
+  /// On a computer, waits for the browser's answer at the core's listener,
+  /// without holding up the other calls, until it comes, [ssoCancel], or ten
+  /// minutes: as [signIn] answers (`masterPassword` next, or two-step login).
+  static Future<Answer> ssoWait() =>
+      _signedIn(_background((c, _) => c._answer(c._ssoWait())));
+
+  /// Stops [ssoWait]: it answers that single sign-on wasn't finished.
+  void ssoCancel() => _answer(_ssoCancel());
+
+  /// On a phone, the link the browser came back with, or '' when it was
+  /// closed without one: as [signIn] answers.
+  static Future<Answer> ssoFinish(String link) => _signedIn(
+    _background(
+      (c, _) => c._with([link], (p) => c._answer(c._ssoFinish(p[0]))),
+    ),
+  );
+
+  /// The master password after single sign-on: it unlocks, and the vault
+  /// syncs and opens. As [signIn] answers; a wrong one can be tried again.
+  static Future<Answer> ssoUnlock(String password) => _signedIn(
+    _background(
+      (c, _) => c._with([password], (p) => c._answer(c._ssoUnlock(p[0]))),
+    ),
+  );
 
   /// A second copy of the app that the OS opened with Duo's link (Windows
   /// and Linux) leaves it for the copy that's signing in: whether it was one.
