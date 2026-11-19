@@ -15,6 +15,9 @@ publish = false
 [lib]
 name = "passbundle_agent"
 path = "src/lib.rs"
+# No doctests: rustdoc builds them without .cargo/config.toml's Windows flags
+# (+crt-static), which src/lib.rs requires of every program.
+doctest = false
 
 # The tray app, one per signed-in user.
 [[bin]]

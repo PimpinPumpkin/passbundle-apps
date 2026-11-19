@@ -4,8 +4,17 @@
 
 // Both programs link the C runtime in on Windows, so the update task (as
 // SYSTEM) loads no runtime library that could come from PATH
-// (`.cargo/config.toml`, which a build from this folder takes).
-#[cfg(all(windows, target_env = "msvc", not(target_feature = "crt-static")))]
+// (`.cargo/config.toml`, which a build from this folder takes). Rustdoc
+// doesn't get those flags, and its builds make no program: `cfg(doc)` and
+// `cfg(doctest)` are left out, and the library has no doctests to run
+// (`doctest = false` in Cargo.toml).
+#[cfg(all(
+    windows,
+    target_env = "msvc",
+    not(target_feature = "crt-static"),
+    not(doc),
+    not(doctest)
+))]
 compile_error!("build the agent from its own folder, so it takes .cargo/config.toml: on Windows it links the C runtime in (+crt-static)");
 
 pub mod brand {
