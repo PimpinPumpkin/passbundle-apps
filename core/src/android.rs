@@ -390,6 +390,86 @@ pub fn unlock_with_master_password<'caller>(
         .resolve::<ThrowRuntimeExAndDefault>()
 }
 
+/// Push to phones (Push.kt; DESIGN.md in the meta repo, "Push to phones"):
+/// the account's server's push for this device, as JSON (`{ok, enabled,
+/// vapidPublicKey, registered}`), asked with the account's session whether
+/// or not it's unlocked. Slow (the network): call it off the main thread.
+#[cfg(feature = "ffi")]
+#[jni_mangle("com.passbundle.app.Core")]
+pub fn push_settings<'caller>(
+    mut unowned_env: EnvUnowned<'caller>,
+    _class: JClass<'caller>,
+    account: JString<'caller>,
+) -> jstring {
+    unowned_env
+        .with_env(|env| -> JniResult<jstring> {
+            let answer = crate::ffi::push_settings(&account.try_to_string(env)?);
+            Ok(env.new_string(answer.to_string())?.into_raw())
+        })
+        .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+/// Keeps this device's push endpoint on the account's server, with the keys
+/// the distributor's library made (base64url): JSON, as `push_settings`.
+/// Slow: off the main thread.
+#[cfg(feature = "ffi")]
+#[jni_mangle("com.passbundle.app.Core")]
+pub fn push_register<'caller>(
+    mut unowned_env: EnvUnowned<'caller>,
+    _class: JClass<'caller>,
+    account: JString<'caller>,
+    endpoint: JString<'caller>,
+    public_key: JString<'caller>,
+    auth: JString<'caller>,
+) -> jstring {
+    unowned_env
+        .with_env(|env| -> JniResult<jstring> {
+            let answer = crate::ffi::push_register(
+                &account.try_to_string(env)?,
+                &endpoint.try_to_string(env)?,
+                &public_key.try_to_string(env)?,
+                &auth.try_to_string(env)?,
+            );
+            Ok(env.new_string(answer.to_string())?.into_raw())
+        })
+        .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+/// Removes this device's push endpoint from the account's server: `{ok}`,
+/// as JSON. Slow: off the main thread.
+#[cfg(feature = "ffi")]
+#[jni_mangle("com.passbundle.app.Core")]
+pub fn push_unregister<'caller>(
+    mut unowned_env: EnvUnowned<'caller>,
+    _class: JClass<'caller>,
+    account: JString<'caller>,
+) -> jstring {
+    unowned_env
+        .with_env(|env| -> JniResult<jstring> {
+            let answer = crate::ffi::push_unregister(&account.try_to_string(env)?);
+            Ok(env.new_string(answer.to_string())?.into_raw())
+        })
+        .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+/// How many sign-ins wait for the account's answer, for a push message
+/// that says one does: `{ok, requests, checks}` as JSON, numbers only.
+/// Slow: off the main thread.
+#[cfg(feature = "ffi")]
+#[jni_mangle("com.passbundle.app.Core")]
+pub fn waiting_sign_ins<'caller>(
+    mut unowned_env: EnvUnowned<'caller>,
+    _class: JClass<'caller>,
+    account: JString<'caller>,
+) -> jstring {
+    unowned_env
+        .with_env(|env| -> JniResult<jstring> {
+            let answer = crate::ffi::waiting_sign_ins(&account.try_to_string(env)?);
+            Ok(env.new_string(answer.to_string())?.into_raw())
+        })
+        .resolve::<ThrowRuntimeExAndDefault>()
+}
+
 /// The logins with a passkey for a site (its ID), as JSON: names and IDs,
 /// each with its account, never a key (docs/phones.md, "Passkeys").
 #[cfg(feature = "ffi")]

@@ -34,6 +34,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'core.dart';
+import 'push.dart';
 import 'theme.dart';
 import 'widgets.dart';
 
@@ -1225,6 +1226,9 @@ class _SignInRequestsSettingsState extends State<SignInRequestsSettings> {
                 : 'With your master password',
           ),
         ),
+        // On Android: whether requests reach PassBundle while it's closed
+        // (push.dart).
+        if (isAndroid) PushSetting(account: Core.account),
       ],
     );
   }

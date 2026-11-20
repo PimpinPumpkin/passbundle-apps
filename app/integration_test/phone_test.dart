@@ -5,6 +5,7 @@
 // checks certificates with the OS's own verifier. Run it with
 // tools/android-app-test.sh or tools/ios-app-test.sh, which make
 // fixtures.g.dart (the sample vault and a throwaway self-signed certificate).
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -132,6 +133,20 @@ Future<void> shot(WidgetTester tester, String name) async {
 const server = String.fromEnvironment('PB_TEST_SERVER');
 const email = String.fromEnvironment('PB_TEST_EMAIL');
 const password = String.fromEnvironment('PB_TEST_PASSWORD');
+// A device of that account's that has signed in (this computer, as
+// tools/android-app-test.sh made the account), which may ask to sign in
+// with a device: the push test's request comes from it.
+const knownDevice = String.fromEnvironment('PB_TEST_KNOWN_DEVICE');
+const knownDeviceType = String.fromEnvironment('PB_TEST_KNOWN_DEVICE_TYPE');
+
+/// A request's public key as upstream's clients make one (the core's
+/// vectors, docs/vectors/device-approval-v1.json in the meta repo).
+const requestPublicKey =
+    'MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA4ZKYM/3HYqM+n+qSaEURa176dZ8bh+TlEwjUf3'
+    'jUDCrrFhPeSF7fFeGJoX4YDvsAr8fCXfueqVR86OanMP/tYGOpLkaA9KJG2TVejlyr5rfhHdeYmmm0SxtuhE'
+    'WXFWmlO2wQ1ktmQNBMKN+vb+LP9EemBiIg9RHUWA0p/OXyphrftggRbF+9+1ot/KACLgdziXH+sYP9IlJP47'
+    'WgPpk0QZUn4UycnUgyp0HlzAKSwYuRmKeQiCX1bPN5vOdebzzAvPDnzOLGAXvbF80SIWhpBCG7Cj2mcFTzdBLK'
+    '91hKHzivFmC1vCjnyQ8+S+OTvFJZ9x5OM3yoN8gs9Uu6wzjLVwIDAQAB';
 
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
@@ -714,5 +729,90 @@ void main() {
       await unlockWhenStill(tester);
       await pumpUntil(tester, find.text('Logins'));
     },
+  );
+
+  // Push for sign-in requests while PassBundle is closed (Push.kt; DESIGN.md
+  // in the meta repo, "Push to phones"). A message as the distributor's
+  // library hands one over: the phone asks the account's real server, with
+  // the vault locked, and shows the notification only for a sign-in that
+  // waits. Last: the request it makes waits 15 minutes on the server.
+  testWidgets(
+    'a push message makes the phone ask the server while locked, and show the notification for a waiting sign-in',
+    (tester) async {
+      final dir = (await Core.platform.invokeMethod<String>('filesDir'))!;
+      for (final kept in Directory(dir).listSync()) {
+        kept.deleteSync(recursive: true);
+      }
+      await Core.openOnThisDevice();
+      final signedIn = await Core.signIn(server, email, password);
+      expect(signedIn.ok, isTrue, reason: signedIn.error);
+      final core = Core();
+      final account = core.accounts()['active'] as String;
+      core.lock(account);
+      expect(core.state(account)['state'], 'locked');
+      // Whether Android shows PassBundle's notifications: Android 13 and
+      // later ask first, and nothing has asked on a new emulator.
+      final shows =
+          await Core.platform.invokeMethod<String>('notificationAccess') ==
+          'allowed';
+
+      Future<Map<Object?, Object?>> message(
+        String content, {
+        bool decrypted = true,
+      }) async =>
+          (await Core.platform.invokeMethod<Map>('pushStandInMessage', {
+            'account': account,
+            'content': content,
+            'decrypted': decrypted,
+          }))!;
+
+      // Nothing waits yet: it asks, and shows nothing.
+      var handled = await message('{"kind":"sign-in"}');
+      expect(handled['asked'], isTrue);
+      expect(handled['requests'], 0);
+      expect(handled['checks'], 0);
+      expect(handled['notify'], isFalse);
+      expect(handled['shown'], isFalse);
+
+      // Another of the account's devices asks to sign in with a device.
+      final client = HttpClient();
+      try {
+        final request = await client.postUrl(
+          Uri.parse('$server/api/auth-requests'),
+        );
+        request.headers
+          ..contentType = ContentType.json
+          ..set('Device-Type', knownDeviceType);
+        request.write(
+          jsonEncode({
+            'email': email,
+            'deviceIdentifier': knownDevice,
+            'publicKey': requestPublicKey,
+            'accessCode': 'ABCDEFGHJKLMNPQRSTUVWXYZa',
+            'type': 0,
+          }),
+        );
+        final response = await request.close();
+        final body = await response.transform(utf8.decoder).join();
+        expect(response.statusCode, 200, reason: body);
+      } finally {
+        client.close();
+      }
+
+      // Now the phone hears of it, shows the notification, and stays locked.
+      handled = await message('{"kind":"sign-in"}');
+      expect(handled['asked'], isTrue);
+      expect(handled['requests'], 1);
+      expect(handled['notify'], isTrue);
+      expect(handled['shown'], shows);
+      expect(core.state(account)['state'], 'locked');
+
+      // A message that isn't PassBundle's, or that didn't open, asks nothing.
+      handled = await message('{"kind":"something-else"}');
+      expect(handled['asked'], isFalse);
+      handled = await message('{"kind":"sign-in"}', decrypted: false);
+      expect(handled['asked'], isFalse);
+    },
+    skip: server.isEmpty || knownDevice.isEmpty || !Platform.isAndroid,
   );
 }
