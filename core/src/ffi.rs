@@ -2002,6 +2002,25 @@ pub(crate) fn cards_and_identities() -> Value {
     })
 }
 
+/// Android's autofill on a website in a browser (android.rs, `fill_rules`;
+/// docs/phones.md, "Autofill"): which of an item's values its fill rules put
+/// into which of the page's fields, and which fields they and the account's
+/// "Never fill this field on this site" list keep empty
+/// (`App::fill_plan`), as `{fills, never}`, each field by its place in the
+/// page's `fields`. Names of values only, never a value: those come from
+/// `value_for_fill` once they're filled. `{"locked": true}` while that
+/// account is locked or busy, or for an item it hasn't in use; `{"error"}`
+/// for a page that isn't one.
+#[cfg(target_os = "android")]
+pub(crate) fn fill_rules(account: &str, id: &str, page: &str) -> Value {
+    let Ok(page) = serde_json::from_str::<crate::fill_rules::Page>(page) else {
+        return json!({ "error": "not a page" });
+    };
+    on_phone(account, |app| app.fill_plan(id, &page).ok())
+        .and_then(|plan| serde_json::to_value(plan).ok())
+        .unwrap_or_else(|| json!({ "locked": true }))
+}
+
 /// What Android's autofill needs before it offers to save a card or an
 /// address someone typed (Saving.kt; docs/phones.md, "Autofill"), from
 /// every unlocked account: whether any of them may make one (`mayAdd`: no

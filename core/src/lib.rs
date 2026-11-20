@@ -19,6 +19,7 @@ pub mod device_signin;
 pub mod error;
 pub mod expiration;
 pub mod export;
+pub mod fill_rules;
 pub mod generator;
 pub mod generator_policy;
 pub mod health;
