@@ -17,7 +17,8 @@ import io.flutter.plugin.common.MethodChannel
  * does (docs/phones.md, "Talking to the OS"): the app's own folder,
  * copying straight from the core to the clipboard, turning on autofill and
  * passkeys, security keys and Duo for two-step login, expiration reminders
- * while the app is closed (Reminders.kt), and updates from GitHub.
+ * while the app is closed (Reminders.kt), push for sign-in requests while
+ * it's closed (Push.kt), and updates from GitHub.
  */
 class MainActivity : FlutterActivity() {
     private var screenOff: BroadcastReceiver? = null
@@ -34,6 +35,19 @@ class MainActivity : FlutterActivity() {
         ExportFile.forget(this)
         // Opened by a tapped expiration reminder: Expiring soon, once unlocked.
         Reminders.openedBy(intent)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // In front: the vault's own prompt shows a sign-in request, so a
+        // notification for one goes (Push.kt).
+        Push.inFront = true
+        Push.clear(this)
+    }
+
+    override fun onPause() {
+        Push.inFront = false
+        super.onPause()
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -250,6 +264,33 @@ class MainActivity : FlutterActivity() {
                         result.success(Reminders.schedule(this, ReminderPlan.read(call.argument<List<*>>("days"))))
                     "remindersDelivered" -> result.success(Reminders.said(this))
                     "remindersOpened" -> result.success(Reminders.takeOpened())
+                    // Push to phones over UnifiedPush (Push.kt; push.dart): registering the
+                    // accounts after signing in or unlocking, dropping one at sign-out, and
+                    // what Settings says.
+                    "pushSync" -> {
+                        val signedIn = call.argument<List<String>>("signedIn") ?: emptyList()
+                        val unlocked = call.argument<List<String>>("unlocked") ?: emptyList()
+                        Push.sync(this, signedIn, unlocked)
+                        result.success(true)
+                    }
+                    "pushForget" -> {
+                        val account = call.argument<String>("account") ?: ""
+                        Thread {
+                            Push.forget(applicationContext, account)
+                            runOnUiThread { result.success(true) }
+                        }.start()
+                    }
+                    "pushStatus" -> result.success(Push.status(this, call.argument<String>("account") ?: ""))
+                    // Tests only: a message as the distributor would hand it over (null in a release build).
+                    "pushStandInMessage" -> {
+                        val account = call.argument<String>("account") ?: ""
+                        val content = call.argument<String>("content") ?: ""
+                        val decrypted = call.argument<Boolean>("decrypted") != false
+                        Thread {
+                            val answer = Push.standInMessage(applicationContext, account, content, decrypted)
+                            runOnUiThread { result.success(answer) }
+                        }.start()
+                    }
                     // Updates from PassBundle's GitHub releases (update/Updater.kt).
                     "updateStatus" -> result.success(Updater.status(this))
                     "updateCheck" -> {

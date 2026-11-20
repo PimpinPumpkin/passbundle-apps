@@ -1953,6 +1953,51 @@ impl App {
         })
     }
 
+    /// What asking the server about push to phones needs (push.rs), whether
+    /// or not the vault is unlocked: the server, and a session token. With
+    /// the vault open, the session's (refreshed first if it's about to end).
+    /// Locked, one from the refresh token the OS's secret store keeps beside
+    /// the vault (on Android, sealed with a Keystore key that needs no
+    /// unlocking), which never needs a key from the vault; where the store
+    /// doesn't keep refresh tokens (the Mac's seals them under the user
+    /// key), only while unlocked. A refresh token the server no longer takes
+    /// is a session that's over (`SignedOut`).
+    pub fn push_call(&mut self) -> Result<crate::push::PushCall> {
+        let settings = self.settings.as_ref().ok_or(Error::SignedOut)?;
+        let server = self.server.as_ref().ok_or(Error::SignedOut)?;
+        if let Some(session) = self.session.as_mut() {
+            let now = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            if session.expires_at <= now + 60 {
+                server.refresh(session)?;
+            }
+            return Ok(crate::push::PushCall::new(
+                server.clone(),
+                session.access_token.clone(),
+                settings.email.clone(),
+            ));
+        }
+        if !self.secrets.keeps_refresh_tokens() || !self.store.has_sync() {
+            return Err(Error::SignedOut);
+        }
+        let refresh = self
+            .secrets
+            .get(&settings.server, &settings.email)
+            .ok_or(Error::SignedOut)?;
+        let (access_token, renewed) = server.access_token_from(&refresh)?;
+        if let Some(renewed) = renewed.filter(|r| **r != *refresh) {
+            self.secrets
+                .keep(&settings.server, &settings.email, &renewed);
+        }
+        Ok(crate::push::PushCall::new(
+            server.clone(),
+            access_token,
+            settings.email.clone(),
+        ))
+    }
+
     /// Keeps what the server listed (`SignInRequestsCall::fetch`), for the
     /// account it was asked for, if its vault is still the one open.
     pub fn keep_sign_in_requests(

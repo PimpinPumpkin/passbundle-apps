@@ -12,7 +12,7 @@
     <uses-feature android:name="android.hardware.nfc" android:required="false" />
     <!-- Security keys plugged in, for two-step login (SecurityKeys.kt); Android asks the person each time. -->
     <uses-feature android:name="android.hardware.usb.host" android:required="false" />
-    <!-- Expiration reminders while PassBundle is closed (Reminders.kt): its notifications, which Android 13 and later ask the person about once, and its alarms set again after the phone restarts. No exact alarms: each is inexact, at 9:00. -->
+    <!-- Expiration reminders while PassBundle is closed (Reminders.kt): its notifications, which Android 13 and later ask the person about once, and its alarms set again after the phone restarts. No exact alarms: each is inexact, at 9:00. Push for sign-in requests (Push.kt) shows its notification with the same permission. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <application
@@ -124,6 +124,14 @@
                 <action android:name="android.intent.action.TIMEZONE_CHANGED" />
             </intent-filter>
         </receiver>
+        <!-- Push for sign-in requests while PassBundle is closed, from a UnifiedPush distributor app such as ntfy (Push.kt). Only the distributor's library reaches it, through the app's own receiver. -->
+        <service
+            android:name=".PassBundlePush"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="org.unifiedpush.android.connector.PUSH_EVENT" />
+            </intent-filter>
+        </service>
         <!-- What an organization's MDM can set: the server (app_restrictions.xml). -->
         <meta-data
             android:name="android.content.APP_RESTRICTIONS"
