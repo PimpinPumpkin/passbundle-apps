@@ -12,3 +12,13 @@
 -keep class com.passbundle.app.Keystore { *; }
 -keep class com.passbundle.app.Biometric { *; }
 -keep class com.passbundle.app.SecurityKeys { *; }
+
+# UnifiedPush's connector (Push.kt) opens push messages with Google's Tink,
+# whose keysets are protocol buffers read by reflection, and whose key
+# downloader (never used here) needs Google's HTTP client, which isn't in the
+# app: keep the first, and don't stop at the missing classes of the second.
+-keep class com.google.crypto.tink.proto.** { *; }
+-keepclassmembers class * extends com.google.protobuf.GeneratedMessageLite { <fields>; }
+-keepclassmembers class * extends com.google.protobuf.GeneratedMessage { <fields>; }
+-dontwarn com.google.api.client.http.**
+-dontwarn org.joda.time.**

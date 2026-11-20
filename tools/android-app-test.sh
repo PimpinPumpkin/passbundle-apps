@@ -23,8 +23,11 @@ if [ -n "${PB_TEST_SERVER:-}" ]; then
   adb -s "$serial" reverse "tcp:$port" "tcp:$port" > /dev/null
   email="phone-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')@core.example.test"
   password="correct horse battery staple phone"
-  (cd core && cargo run --locked --quiet --example test_account -- "$PB_TEST_SERVER" "$email" "$password") > /dev/null
-  defines=(--dart-define="PB_TEST_SERVER=$PB_TEST_SERVER" --dart-define="PB_TEST_EMAIL=$email" --dart-define="PB_TEST_PASSWORD=$password")
+  # Its last line: a device of the account's that has signed in, which the
+  # push test asks to sign in from (phone_test.dart).
+  known=$(cd core && cargo run --locked --quiet --example test_account -- "$PB_TEST_SERVER" "$email" "$password" | tail -1)
+  defines=(--dart-define="PB_TEST_SERVER=$PB_TEST_SERVER" --dart-define="PB_TEST_EMAIL=$email" --dart-define="PB_TEST_PASSWORD=$password"
+    --dart-define="PB_TEST_KNOWN_DEVICE=${known% *}" --dart-define="PB_TEST_KNOWN_DEVICE_TYPE=${known#* }")
 fi
 
 # Android's log while the tests run, kept on this computer when

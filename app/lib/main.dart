@@ -15,6 +15,7 @@ import 'package:flutter/services.dart';
 import 'accounts.dart';
 import 'closed_reminders.dart';
 import 'core.dart';
+import 'push.dart';
 import 'sign_in.dart';
 import 'theme.dart';
 import 'updates.dart';
@@ -172,6 +173,7 @@ class _PassBundleAppState extends State<PassBundleApp> {
     // prompt waits for a later lock.
     if (state['state'] != 'locked') biometricAsksTaken = biometricAsks;
     computer.setMethodCallHandler(fromComputer);
+    tellPush();
     HardwareKeyboard.instance.addHandler(keyPressed);
     // An account's name or color changed (Settings): the menus show it.
     accountsChanged.addListener(refresh);
@@ -236,7 +238,23 @@ class _PassBundleAppState extends State<PassBundleApp> {
       Core.suggest();
       unawaited(scheduleClosedReminders());
     }
+    tellPush();
     watch();
+  }
+
+  /// Android's push for sign-in requests while closed (push.dart): which
+  /// accounts are signed in and unlocked, when that changes.
+  void tellPush() {
+    final all = (accounts['accounts'] as List? ?? const []).cast<Map>();
+    unawaited(
+      syncPush(
+        signedIn: [for (final a in all) a['id'] as String],
+        unlocked: [
+          for (final a in all)
+            if (a['state'] == 'unlocked') a['id'] as String,
+        ],
+      ),
+    );
   }
 
   /// The accounts signed in here, by id.
@@ -291,6 +309,9 @@ class _PassBundleAppState extends State<PassBundleApp> {
       others: several,
     );
     if (!sure) return;
+    // Its push endpoint goes from its server first, while its session works.
+    await forgetPush(Core.account);
+    if (!mounted) return;
     core.signOut();
     refresh();
   }
@@ -390,7 +411,9 @@ class _PassBundleAppState extends State<PassBundleApp> {
           }
           refresh(withPassword: ms != null);
         },
-        onSignOut: () {
+        onSignOut: () async {
+          await forgetPush(Core.account);
+          if (!mounted) return;
           core.signOut();
           refresh();
         },

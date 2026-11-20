@@ -99,6 +99,27 @@ object Core {
     /** The same key, given back to confirm it's the person approving a sign-in to that account, never to unlock: "" if it's its open vault's. */
     @JvmStatic external fun confirmApprovalWithKey(account: String, key: ByteArray): String?
 
+    /**
+     * Push to phones (Push.kt): the account's server's push for this device,
+     * as JSON (`{ok, enabled, vapidPublicKey, registered}`), asked with the
+     * account's kept session whether or not it's unlocked. Slow: off the main
+     * thread.
+     */
+    @JvmStatic external fun pushSettings(account: String): String?
+
+    /** Keeps this device's push endpoint on the account's server, with the keys the distributor's library made (base64url): JSON, as [pushSettings]. Slow. */
+    @JvmStatic external fun pushRegister(account: String, endpoint: String, publicKey: String, auth: String): String?
+
+    /** Removes this device's push endpoint from the account's server: `{ok}` as JSON. Slow. */
+    @JvmStatic external fun pushUnregister(account: String): String?
+
+    /**
+     * How many sign-ins wait for the account's answer, for a push message
+     * that says one does: `{ok, requests, checks}` as JSON, numbers only,
+     * never which; `signedOut` when its session is over. Locked or not. Slow.
+     */
+    @JvmStatic external fun waitingSignIns(account: String): String?
+
     /** Opens the core on the app's own folder unless it's open (autofill can start the app without its screens). */
     @JvmStatic external fun openIfClosed(dir: String)
 

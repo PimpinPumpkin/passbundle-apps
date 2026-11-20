@@ -318,6 +318,7 @@ class PhoneStandIn {
     this.android,
     this.iphone,
     this.notifications,
+    this.push,
     bool mac = false,
   }) : method = method ?? (mac ? 'Touch ID' : 'fingerprint') {
     if (mac) {
@@ -387,6 +388,14 @@ class PhoneStandIn {
           return notifications?.delivered;
         case 'remindersOpened':
           return notifications?.takeOpened();
+        case 'pushSync':
+          push?.synced.add(Map<String, dynamic>.from(call.arguments as Map));
+          return push == null ? null : true;
+        case 'pushForget':
+          push?.forgotten.add((call.arguments as Map)['account'] as String);
+          return push == null ? null : true;
+        case 'pushStatus':
+          return push?.status();
         default:
           return null;
       }
@@ -426,6 +435,35 @@ class PhoneStandIn {
 
   /// The phone's notifications, for expiration reminders while closed.
   final NotificationsStandIn? notifications;
+
+  /// Android's push for sign-in requests while closed (Push.kt).
+  final PushStandIn? push;
+}
+
+/// What Android's push for sign-in requests says (Push.kt, push.dart):
+/// whether a UnifiedPush distributor is installed, its name, and whether the
+/// account shown is registered. It keeps what it's told: the accounts signed
+/// in and unlocked ([synced], `{signedIn, unlocked}`), and the accounts
+/// signed out of ([forgotten]).
+class PushStandIn {
+  PushStandIn({
+    this.installed = true,
+    this.distributor = 'ntfy',
+    this.registered = true,
+  });
+
+  bool installed;
+  String? distributor;
+  bool registered;
+
+  final synced = <Map<String, dynamic>>[];
+  final forgotten = <String>[];
+
+  Map<String, Object?> status() => {
+    'installed': installed,
+    'distributor': distributor,
+    'registered': registered,
+  };
 }
 
 /// What the phone says about PassBundle's notifications (Reminders.kt,
