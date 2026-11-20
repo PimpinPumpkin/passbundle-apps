@@ -4164,6 +4164,134 @@ pub unsafe extern "C" fn pb_sign_in_requests(account: *const c_char) -> *mut c_c
     }))
 }
 
+/// Push to phones (push.rs; DESIGN.md in the meta repo, "Push to phones"):
+/// an account's push call, made with the app held (locking the account
+/// first if its time is up), then `then` without holding it, on a thread of
+/// the core's own, as the sign-in requests are asked. Locked or not: the
+/// phone's own code asks when a message comes, with PassBundle closed.
+fn push_value(account: &str, then: impl FnOnce(&crate::push::PushCall) -> Value + Send) -> Value {
+    std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                let mut call = None;
+                let asked = accounts_value(|accounts| {
+                    lock_if_due(accounts);
+                    if account.is_empty() {
+                        return failed(Error::SignedOut);
+                    }
+                    on_account(accounts, account, |app| match app.push_call() {
+                        Ok(c) => {
+                            call = Some(c);
+                            json!({ "ok": true })
+                        }
+                        Err(e) => failed(e),
+                    })
+                });
+                match call {
+                    Some(call) => catch_unwind(AssertUnwindSafe(|| then(&call)))
+                        .unwrap_or_else(|_| json!({ "ok": false, "error": STOPPED })),
+                    None => asked,
+                }
+            })
+            .join()
+            .unwrap_or_else(|_| json!({ "ok": false, "error": STOPPED }))
+    })
+}
+
+fn push_settings_json(settings: crate::push::Settings) -> Value {
+    json!({
+        "ok": true,
+        "enabled": settings.enabled,
+        "vapidPublicKey": settings.vapid_public_key,
+        "registered": settings.registered,
+    })
+}
+
+/// The account's server's push to phones, for this device: `{ok, enabled,
+/// vapidPublicKey, registered}`, or why not (`signedOut` when its session
+/// is over). Locked or not.
+pub(crate) fn push_settings(account: &str) -> Value {
+    push_value(account, |call| match call.settings() {
+        Ok(settings) => push_settings_json(settings),
+        Err(e) => failed(e),
+    })
+}
+
+/// Keeps this device's push endpoint on the account's server, with the
+/// keys the distributor's library made (base64url): the settings after, as
+/// `push_settings` answers them. Locked or not.
+pub(crate) fn push_register(account: &str, endpoint: &str, public_key: &str, auth: &str) -> Value {
+    push_value(account, |call| {
+        match call.register(endpoint, public_key, auth) {
+            Ok(settings) => push_settings_json(settings),
+            Err(e) => failed(e),
+        }
+    })
+}
+
+/// Removes this device's push endpoint from the account's server: `{ok}`.
+pub(crate) fn push_unregister(account: &str) -> Value {
+    push_value(account, |call| done(call.unregister()))
+}
+
+/// How many sign-ins wait for the account's answer, for a message that
+/// says one does: `{ok, requests, checks}`, numbers only, never which.
+/// Locked or not.
+pub(crate) fn waiting_sign_ins(account: &str) -> Value {
+    push_value(account, |call| match call.waiting() {
+        Ok(waiting) => {
+            json!({ "ok": true, "requests": waiting.requests, "checks": waiting.checks })
+        }
+        Err(e) => failed(e),
+    })
+}
+
+/// `push_settings`, for the phones' own code (Android's through JNI).
+///
+/// # Safety
+/// `account` is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_push_settings(account: *const c_char) -> *mut c_char {
+    out(push_settings(&text(account)))
+}
+
+/// `push_register`.
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_push_register(
+    account: *const c_char,
+    endpoint: *const c_char,
+    public_key: *const c_char,
+    auth: *const c_char,
+) -> *mut c_char {
+    out(push_register(
+        &text(account),
+        &text(endpoint),
+        &text(public_key),
+        &text(auth),
+    ))
+}
+
+/// `push_unregister`.
+///
+/// # Safety
+/// `account` is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_push_unregister(account: *const c_char) -> *mut c_char {
+    out(push_unregister(&text(account)))
+}
+
+/// `waiting_sign_ins`.
+///
+/// # Safety
+/// `account` is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_waiting_sign_ins(account: *const c_char) -> *mut c_char {
+    out(waiting_sign_ins(&text(account)))
+}
+
 fn sign_in_requests(requests: &[crate::device_approval::SignInRequest]) -> Vec<Value> {
     requests
         .iter()

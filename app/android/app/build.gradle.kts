@@ -114,6 +114,13 @@ dependencies {
     // Autofill's suggestions on the keyboard, drawn as Android 11's keyboards
     // expect them (Inline.kt). Apache 2.0.
     implementation("androidx.autofill:autofill:1.3.0")
+    // UnifiedPush's connector, for push to phones while PassBundle is closed
+    // (Push.kt): registers with the phone's distributor app (ntfy, for
+    // example), keeps the phone's Web Push keys, and opens each message.
+    // Apache 2.0. It brings Google's Tink crypto library (Apache 2.0) for
+    // opening messages, and no Firebase or Play services: not the embedded
+    // FCM distributor, which is a separate artifact we don't use.
+    implementation("org.unifiedpush.android:connector:3.3.5")
     // The updater's own logic, tested on the computer (src/test). Eclipse Public License 1.0.
     testImplementation("junit:junit:4.13.2")
 }

@@ -253,6 +253,9 @@ pub enum Next {
     NewDevice,
 }
 
+/// Where a device registers its push endpoint (push.rs).
+const PUSH_PATH: &str = "/api/keykeeper/push/unified-push";
+
 #[derive(Deserialize)]
 struct TokenResponse {
     access_token: String,
@@ -1388,26 +1391,106 @@ impl Server {
 
     /// A new access token from the refresh token.
     pub fn refresh(&self, session: &mut Session) -> Result<()> {
-        let (status, body) = self.answer(
-            self.agent
-                .post(self.url("/identity/connect/token"))
-                .send_form([
-                    ("grant_type", "refresh_token"),
-                    ("client_id", self.device.client_id()),
-                    ("refresh_token", session.refresh_token.as_str()),
-                ]),
-        )?;
-        if status == 400 {
-            return Err(Error::SignedOut);
-        }
-        let token: TokenResponse = serde_json::from_value(Self::checked(status, body)?)
-            .map_err(|_| Error::Malformed("a session answer it doesn't know".into()))?;
+        let token = self.refresh_grant(&session.refresh_token)?;
         session.access_token = Zeroizing::new(token.access_token);
         if let Some(refresh) = token.refresh_token {
             session.refresh_token = Zeroizing::new(refresh);
         }
         session.expires_at = now() + token.expires_in;
         Ok(())
+    }
+
+    /// A new access token for a refresh token (upstream's refresh grant): a
+    /// refused one (400) is a session that's over.
+    fn refresh_grant(&self, refresh_token: &str) -> Result<TokenResponse> {
+        let (status, body) = self.answer(
+            self.agent
+                .post(self.url("/identity/connect/token"))
+                .send_form([
+                    ("grant_type", "refresh_token"),
+                    ("client_id", self.device.client_id()),
+                    ("refresh_token", refresh_token),
+                ]),
+        )?;
+        if status == 400 {
+            return Err(Error::SignedOut);
+        }
+        serde_json::from_value(Self::checked(status, body)?)
+            .map_err(|_| Error::Malformed("a session answer it doesn't know".into()))
+    }
+
+    /// An access token from the refresh token kept for an account, without
+    /// its vault open (push.rs), and the refresh token the server gave back
+    /// with it, if any.
+    pub fn access_token_from(
+        &self,
+        refresh_token: &str,
+    ) -> Result<(Zeroizing<String>, Option<Zeroizing<String>>)> {
+        let token = self.refresh_grant(refresh_token)?;
+        Ok((
+            Zeroizing::new(token.access_token),
+            token.refresh_token.map(Zeroizing::new),
+        ))
+    }
+
+    /// The server's push to phones for this device (push.rs; DESIGN.md in
+    /// the meta repo, "Push to phones"): whether it pushes, its VAPID key,
+    /// and whether this device's endpoint is there. A server without it (an
+    /// older one) pushes nothing. At most 10 seconds.
+    pub fn push_settings(&self, access_token: &str) -> Result<Value> {
+        let response = self
+            .agent
+            .get(self.url(PUSH_PATH))
+            .header("Authorization", &format!("Bearer {access_token}"))
+            .config()
+            .timeout_global(Some(Duration::from_secs(10)))
+            .build()
+            .call();
+        let (status, body) = self.answer(response)?;
+        if matches!(status, 404 | 405) {
+            return Ok(json!({ "enabled": false, "vapidPublicKey": null, "registered": false }));
+        }
+        Self::checked(status, body)
+    }
+
+    /// Keeps this device's push endpoint on the server, with the keys
+    /// messages to it are encrypted to (base64url, as the distributor's
+    /// library gives them): the server's settings for it afterwards.
+    pub fn register_push(
+        &self,
+        access_token: &str,
+        endpoint: &str,
+        public_key: &str,
+        auth: &str,
+    ) -> Result<Value> {
+        let response = self
+            .agent
+            .put(self.url(PUSH_PATH))
+            .header("Authorization", &format!("Bearer {access_token}"))
+            .config()
+            .timeout_global(Some(Duration::from_secs(10)))
+            .build()
+            .send_json(json!({ "endpoint": endpoint, "publicKey": public_key, "auth": auth }));
+        let (status, body) = self.answer(response)?;
+        Self::checked(status, body)
+    }
+
+    /// Removes this device's push endpoint from the server.
+    pub fn unregister_push(&self, access_token: &str) -> Result<()> {
+        let response = self
+            .agent
+            .delete(self.url(PUSH_PATH))
+            .header("Authorization", &format!("Bearer {access_token}"))
+            .config()
+            .timeout_global(Some(Duration::from_secs(10)))
+            .build()
+            .call();
+        let (status, body) = self.answer(response)?;
+        // A server without push to phones has nothing to remove.
+        if matches!(status, 404 | 405) {
+            return Ok(());
+        }
+        Self::checked(status, body).map(|_| ())
     }
 
     /// Calls the API with the session, refreshing it first when it's about to expire.

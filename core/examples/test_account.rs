@@ -2,7 +2,10 @@
 //! first with an attachment), for
 //! tests that sign in from elsewhere (the phone app's test,
 //! tools/android-app-test.sh). Signs up as an app would, then saves the item
-//! through the core.
+//! through the core. Prints the email, then the identifier and type of a
+//! device of the account's that has signed in (this computer, as the test
+//! made it), which may ask to sign in with a device: the phone's push test
+//! makes such a request for the phone to hear of.
 //!
 //!   cargo run --example test_account -- <server> <email> <password>
 
@@ -24,8 +27,9 @@ fn main() {
         eprintln!("test_account <server> <email> <password>");
         std::process::exit(2);
     };
-    let server =
-        Server::new(server_url, Device::this_one(&Device::new_identifier())).expect("the server");
+    let device = Device::this_one(&Device::new_identifier());
+    let (known_device, known_type) = (device.identifier.clone(), device.kind);
+    let server = Server::new(server_url, device).expect("the server");
     support::sign_up(&server, email, password);
 
     let dir =
@@ -131,4 +135,5 @@ fn main() {
     );
     let _ = std::fs::remove_dir_all(dir);
     println!("{email}");
+    println!("{known_device} {known_type}");
 }
