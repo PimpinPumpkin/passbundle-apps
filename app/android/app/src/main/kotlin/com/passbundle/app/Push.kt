@@ -30,7 +30,9 @@ object PushPlan {
     const val TITLE = "Approve sign-in?"
     const val TEXT = "Open PassBundle to review it."
 
-    private val KIND = Regex("""^\s*\{\s*"kind"\s*:\s*"([a-z-]{1,32})"\s*}\s*$""")
+    // Both braces escaped: Android's regex engine (ICU) refuses a bare `}`,
+    // though the JVM's, which the unit tests run on, takes it.
+    private val KIND = Regex("""^\s*\{\s*"kind"\s*:\s*"([a-z-]{1,32})"\s*\}\s*$""")
 
     /**
      * What a message says: its kind, from exactly `{"kind":"..."}` (what the
