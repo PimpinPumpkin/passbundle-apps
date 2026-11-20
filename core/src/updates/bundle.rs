@@ -10,6 +10,7 @@ use serde::Deserialize;
 
 use super::access;
 use super::manifest::{Version, APP};
+use super::package;
 
 /// What a release's build writes into the app's folder: which release this
 /// is, and every path in the folder (`/` between names), the only ones an
@@ -180,7 +181,9 @@ pub fn suggested_place() -> &'static str {
 /// - it's a release for this platform;
 /// - PassBundle isn't running as an administrator or root (`trust_admin`,
 ///   for tests with test hooks on CI's machines, which run elevated, lets it);
-/// - it isn't in one of the OS's own places (Program Files, /opt, ...);
+/// - it isn't in one of the OS's own places (Program Files, /opt, ...),
+///   where a package manager put it (then the note says how to update it
+///   with that one: `package`) or an administrator did;
 /// - its folder holds exactly what its release put there, every path
 ///   `release.json` lists and nothing else (so not the person's own files,
 ///   nor the folder PassBundle keeps the vault in, `data_dir`), with no
@@ -212,7 +215,11 @@ pub fn why_not(
         );
     }
     if access::system_place(dir) {
-        return Some(installed_way);
+        return Some(
+            package::installed_by(&dir.join(program_name()))
+                .map(|p| p.note(platform))
+                .unwrap_or(installed_way),
+        );
     }
     let own_folder = format!(
         "PassBundle's folder ({shown}) has other files in it, so it can't update itself. Put PassBundle in a folder of its own, such as {}, and open it from there.",
