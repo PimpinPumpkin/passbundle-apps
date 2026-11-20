@@ -42,20 +42,31 @@ Future<PushStandIn> unlockOnAndroid(
   return push;
 }
 
-Future<void> tab(WidgetTester tester, String name) async {
+/// Settings. These wait for what they read rather than for the screen to
+/// settle: on Android, Settings never settled in the test's fake time, as
+/// autofill_offer_test.dart's Android cases wait for their rows too.
+Future<void> settings(WidgetTester tester) async {
   await tester.tap(
-    find.descendant(of: find.byType(NavigationBar), matching: find.text(name)),
+    find.descendant(
+      of: find.byType(NavigationBar),
+      matching: find.text('Settings'),
+    ),
   );
-  await tester.pumpAndSettle();
+  await pumpUntil(tester, find.text('Lock after'));
+}
+
+/// [finder] scrolled into view, with the scroll's frames drawn.
+Future<void> inView(WidgetTester tester, Finder finder) async {
+  await tester.ensureVisible(finder);
+  await tester.pump(const Duration(milliseconds: 500));
 }
 
 /// Settings, scrolled to the push row: what it says.
 Future<String?> pushRowSays(WidgetTester tester) async {
-  await tab(tester, 'Settings');
+  await settings(tester);
   final row = find.byKey(const ValueKey('push-to-phone'));
   await pumpUntil(tester, row);
-  await tester.ensureVisible(row);
-  await tester.pumpAndSettle();
+  await inView(tester, row);
   return tester.widget<Text>(
     find.descendant(of: row, matching: find.byType(Text)).last,
   ).data;
@@ -123,13 +134,14 @@ void main() {
     (tester) async {
       final push = await unlockOnAndroid(tester, PushStandIn());
       final account = Core.account;
-      await tab(tester, 'Settings');
+      await settings(tester);
       final signOut = find.byKey(const ValueKey('sign-out-account'));
-      await tester.ensureVisible(signOut);
-      await tester.pumpAndSettle();
+      await pumpUntil(tester, signOut);
+      await inView(tester, signOut);
       await tester.tap(signOut);
       await pumpUntil(tester, find.text('Sign out?'));
-      await tester.pumpAndSettle();
+      // The dialog's way in, to the end, before its button is tapped.
+      await tester.pump(const Duration(milliseconds: 500));
       await tester.tap(find.widgetWithText(FilledButton, 'Sign out'));
       await pumpUntil(tester, find.text('Sign in to PassBundle'));
       expect(push.forgotten, [account]);
