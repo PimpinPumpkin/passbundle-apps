@@ -268,6 +268,9 @@ class Core {
   late final _approvals = _lib.lookupFunction<_Str1, _Str1>('pb_approvals');
   late final _setApprovals = _lib.lookupFunction<_Str2, _Str2>('pb_set_approvals');
   late final _sync = _lib.lookupFunction<_Str1, _Str1>('pb_sync');
+  late final _recoveryAtUnlock = _lib.lookupFunction<_Str2, _Str2>(
+    'pb_recovery_at_unlock',
+  );
   late final _dismissTwoStepNudge = _lib.lookupFunction<_Str1, _Str1>(
     'pb_dismiss_two_step_nudge',
   );
@@ -984,6 +987,39 @@ class Core {
   /// `keptSecondsAgo`.
   static Future<Answer> sync() =>
       _background((c, a) => c._with([a], (p) => c._answer(c._sync(p[0]))));
+
+  /// Account recovery at unlock (DESIGN.md in the meta repo, "Enrolling at
+  /// unlock", "Our apps"): once the unlock's own sync is done, the core
+  /// enrolls [id]'s account where an organization enrolls everyone, once
+  /// per unlock, silently, and only to the organization key an
+  /// administrator pinned. On a phone that's the MDM's managed
+  /// configuration (`org_key_fingerprint`), which only the app's Kotlin or
+  /// Swift can read, handed on as it is; on a computer the core reads its
+  /// own and ignores this. Nothing is shown.
+  static Future<void> recoveryAtUnlock(String id) async =>
+      _recoveryAtUnlockWith(id, await _managedOrgKey());
+
+  /// On a phone, the organization key fingerprint the MDM set, as it is;
+  /// '' for none, and on a computer.
+  static Future<String> _managedOrgKey() async {
+    if (!Platform.isAndroid && !Platform.isIOS) return '';
+    try {
+      return await platform.invokeMethod<String>('managedOrgKey') ?? '';
+    } on PlatformException {
+      return '';
+    } on MissingPluginException {
+      return '';
+    }
+  }
+
+  static Future<void> _recoveryAtUnlockWith(String id, String pin) =>
+      Isolate.run(() {
+        final c = Core();
+        c._with(
+          [id, pin],
+          (p) => c._answer(c._recoveryAtUnlock(p[0], p[1])),
+        );
+      });
 
   /// "Not now", to either nudge about two-step login: the server hides both
   /// for 90 days, on every device.

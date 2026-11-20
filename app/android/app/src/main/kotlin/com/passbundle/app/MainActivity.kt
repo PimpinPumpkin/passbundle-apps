@@ -101,6 +101,16 @@ class MainActivity : FlutterActivity() {
                                 ?.getString("server_url")
                                 ?.takeIf { it.isNotBlank() },
                         )
+                    // The organization key fingerprint the MDM set next to it,
+                    // for account recovery at unlock, as it is: the core
+                    // decides whether it's one (core.dart, recoveryAtUnlock).
+                    "managedOrgKey" ->
+                        result.success(
+                            getSystemService(android.content.RestrictionsManager::class.java)
+                                ?.applicationRestrictions
+                                ?.getString("org_key_fingerprint")
+                                ?.takeIf { it.isNotBlank() },
+                        )
                     // Each call about an account names it (core.dart, Core.account).
                     "copy" -> {
                         val account = call.argument<String>("account") ?: ""
