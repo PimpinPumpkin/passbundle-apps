@@ -317,6 +317,20 @@ fn failed(e: Error) -> Value {
         "confirmFirst": e == Error::ConfirmFirst,
         // The person stopped an upload: nothing to say.
         "canceled": e == Error::Canceled,
+        // Require single sign-on answered a password sign-in: its SSO
+        // identifier, for the screen's single sign-on (sso.rs).
+        "sso": match &e {
+            Error::UseSso { identifier } => json!(identifier),
+            _ => Value::Null,
+        },
+        // A security key asks for its PIN, or didn't take the one sent: the
+        // two-step screen shows the PIN's field (`why`: asks, wrong,
+        // lastTry, freshStart, notAPin), with the key's tries left when it
+        // said. Never the PIN.
+        "securityKeyPin": match &e {
+            Error::KeyPin(pin) => json!({ "why": pin.why(), "left": pin.left() }),
+            _ => Value::Null,
+        },
     })
 }
 
@@ -350,6 +364,13 @@ fn step(result: crate::Result<Step>) -> Value {
             "ok": true,
             "step": "deviceSignIn",
             "request": device_sign_in(&request),
+        }),
+        // A single sign-on went through: the master password for the
+        // account's email unlocks next (`pb_sso_unlock`).
+        Ok(Step::MasterPassword(email)) => json!({
+            "ok": true,
+            "step": "masterPassword",
+            "email": email,
         }),
         Err(e) => failed(e),
     }
@@ -1163,7 +1184,7 @@ pub extern "C" fn pb_duo_start() -> *mut c_char {
             Ok(()) => json!({ "ok": true, "url": url }),
             Err(e) => failed(e),
         },
-        Ok(Prepared::SignedIn) => signed_in(accounts, Ok(Step::Done)),
+        Ok(Prepared::SignedIn(step)) => signed_in(accounts, Ok(step)),
         Err(e) => failed(e),
     })
 }
@@ -1185,9 +1206,38 @@ pub unsafe extern "C" fn pb_duo_finish(link: *const c_char, remember: bool) -> *
 /// Two-step login's second step with a security key (security_key): the
 /// server's request, then the key asked (which waits for the person, so
 /// the other calls don't wait on it), then the answer sent. The same answer
-/// as `pb_sign_in`.
+/// as `pb_sign_in`; a key that asks for its PIN answers with
+/// `securityKeyPin` (`failed`), and the app tries again with
+/// `pb_security_key_sign_in_with_pin`.
 #[no_mangle]
 pub extern "C" fn pb_security_key_sign_in(remember: bool) -> *mut c_char {
+    security_key_sign_in(None, remember)
+}
+
+/// `pb_security_key_sign_in` with the PIN the person typed after a key
+/// asked for it (security_key/client_pin.rs): sent to the key only if it
+/// asks for it again, and on its last try only with `last_try`. It's in
+/// memory for this call only, and overwritten after; what can't be a key's
+/// PIN is refused before any key is asked.
+///
+/// # Safety
+/// `pin` is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_security_key_sign_in_with_pin(
+    pin: *const c_char,
+    remember: bool,
+    last_try: bool,
+) -> *mut c_char {
+    let typed = Zeroizing::new(text(pin));
+    let pin = match crate::security_key::Pin::new(&typed, last_try) {
+        Ok(pin) => pin,
+        Err(e) => return out(failed(e)),
+    };
+    drop(typed);
+    security_key_sign_in(Some(&pin), remember)
+}
+
+fn security_key_sign_in(pin: Option<&crate::security_key::Pin>, remember: bool) -> *mut c_char {
     out(std::thread::scope(|scope| {
         scope
             .spawn(|| {
@@ -1197,18 +1247,19 @@ pub extern "C" fn pb_security_key_sign_in(remember: bool) -> *mut c_char {
                         prepared = Some(request);
                         json!({ "ok": true })
                     }
-                    Ok(Prepared::SignedIn) => signed_in(accounts, Ok(Step::Done)),
+                    Ok(Prepared::SignedIn(step)) => signed_in(accounts, Ok(step)),
                     Err(e) => failed(e),
                 });
                 let Some((id, request)) = prepared else {
                     return asked;
                 };
-                let answer =
-                    match catch_unwind(AssertUnwindSafe(|| crate::security_key::ask(&request))) {
-                        Ok(Ok(answer)) => answer,
-                        Ok(Err(e)) => return failed(e),
-                        Err(_) => return json!({ "ok": false, "error": STOPPED }),
-                    };
+                let answer = match catch_unwind(AssertUnwindSafe(|| {
+                    crate::security_key::ask(&request, pin)
+                })) {
+                    Ok(Ok(answer)) => answer,
+                    Ok(Err(e)) => return failed(e),
+                    Err(_) => return json!({ "ok": false, "error": STOPPED }),
+                };
                 accounts_value(|accounts| {
                     let result = accounts.finish_with_key(&id, &request, &answer, remember);
                     signed_in(accounts, result)
@@ -1224,6 +1275,140 @@ pub extern "C" fn pb_security_key_sign_in(remember: bool) -> *mut c_char {
 pub extern "C" fn pb_security_key_cancel() -> *mut c_char {
     crate::security_key::cancel();
     out(json!({ "ok": true }))
+}
+
+/// Single sign-on (sso.rs; DESIGN.md in the meta repo, "In the desktop and
+/// phone apps"): the SSO identifier of the organization whose verified
+/// domain the email is at, as the web vault finds it: `{ok, identifier}`,
+/// null when there's none, or the words to show (about the server's address
+/// with `field`).
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_sso_identifier(
+    server: *const c_char,
+    email: *const c_char,
+) -> *mut c_char {
+    let (server, email) = (text(server), text(email));
+    if email.trim().is_empty() {
+        return out(failed(Error::Sso(crate::sso::EMAIL_FIRST)));
+    }
+    // Its own thread, as the other calls that wait on the network.
+    out(std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                catch_unwind(AssertUnwindSafe(|| {
+                    match crate::server::Server::new(&server, crate::server::Device::this_one(""))
+                        .and_then(|s| s.sso_identifier_for(&email))
+                    {
+                        Ok(identifier) => json!({ "ok": true, "identifier": identifier }),
+                        Err(e) => failed(e),
+                    }
+                }))
+                .unwrap_or_else(|_| json!({ "ok": false, "error": STOPPED }))
+            })
+            .join()
+            .unwrap_or_else(|_| json!({ "ok": false, "error": STOPPED }))
+    }))
+}
+
+/// Starts a single sign-on with an organization's SSO identifier, for the
+/// account with this email (`Accounts::start_sso`): `{ok, url, listens}`,
+/// the address to open in the browser, and whether the answer comes back
+/// to this computer (`pb_sso_wait`) or as a phone's link (`pb_sso_finish`).
+///
+/// # Safety
+/// Every pointer is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_sso_start(
+    server: *const c_char,
+    email: *const c_char,
+    identifier: *const c_char,
+) -> *mut c_char {
+    let (server, email, identifier) = (text(server), text(email), text(identifier));
+    with_accounts_waiting(
+        |accounts| match accounts.start_sso(&server, &email, &identifier) {
+            Ok(start) => json!({ "ok": true, "url": start.url, "listens": start.listens }),
+            Err(e) => failed(e),
+        },
+    )
+}
+
+/// On a computer, waits for the browser's answer to the single sign-on
+/// under way, at its listener, without the accounts (so the other calls
+/// don't wait on it), until it comes, `pb_sso_cancel`, or ten minutes; then
+/// redeems it: the same answer as `pb_sign_in` (`masterPassword` next, or
+/// two-step login).
+#[no_mangle]
+pub extern "C" fn pb_sso_wait() -> *mut c_char {
+    out(std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                let mut taken = None;
+                let asked = accounts_value(|accounts| match accounts.sso_wait() {
+                    Ok(wait) => {
+                        taken = Some(wait);
+                        json!({ "ok": true })
+                    }
+                    Err(e) => failed(e),
+                });
+                let Some((id, wait)) = taken else {
+                    return asked;
+                };
+                let waited = catch_unwind(AssertUnwindSafe(|| {
+                    wait.listener
+                        .wait(&wait.state, crate::sso::cancel_flag(), wait.until)
+                }))
+                .unwrap_or(Err(Error::Sso(crate::sso::CANCELED)));
+                // The listener closes here, whatever came.
+                drop(wait);
+                accounts_value(|accounts| {
+                    let result = accounts.finish_sso(&id, waited);
+                    signed_in(accounts, result)
+                })
+            })
+            .join()
+            .unwrap_or_else(|_| json!({ "ok": false, "error": STOPPED }))
+    }))
+}
+
+/// Stops the computer's wait for single sign-on (`pb_sso_wait`), from any
+/// thread: it answers that the sign-in wasn't finished.
+#[no_mangle]
+pub extern "C" fn pb_sso_cancel() -> *mut c_char {
+    crate::sso::cancel();
+    out(json!({ "ok": true }))
+}
+
+/// On a phone, the link the browser came back with (empty when it was
+/// closed without one), for the single sign-on under way: checked to be
+/// its, then redeemed. The same answer as `pb_sign_in`.
+///
+/// # Safety
+/// `link` is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_sso_finish(link: *const c_char) -> *mut c_char {
+    let link = text(link);
+    with_accounts_waiting(|accounts| {
+        let result = accounts.finish_sso_link(&link);
+        signed_in(accounts, result)
+    })
+}
+
+/// The master password after a single sign-on: it opens the account key on
+/// this device, then the vault syncs and opens. The same answer as
+/// `pb_sign_in`; a wrong one can be tried again.
+///
+/// # Safety
+/// `password` is null or a NUL-terminated UTF-8 string, valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_sso_unlock(password: *const c_char) -> *mut c_char {
+    let password = Zeroizing::new(text(password));
+    with_accounts_waiting(|accounts| {
+        let result = accounts.unlock_after_sso(&password);
+        signed_in(accounts, result)
+    })
 }
 
 /// A second copy of the app, opened by the OS with Duo's link (Windows and

@@ -7,12 +7,15 @@
 //!   client data made for the server's own origin, the answer checked and
 //!   put in the server's shape.
 //! - ctap.rs: talking to a key over USB (CTAPHID) or NFC, in CTAP2 or U2F.
+//! - client_pin.rs: a key's PIN, sent with CTAP2's clientPIN only when the
+//!   key asks for it (Linux, the Mac, Android; Windows asks itself).
 //! - Where: Windows asks through its own WebAuthn API (windows.rs); Linux
 //!   (hid_linux.rs) and the Mac (hid_mac.rs) reach keys on USB directly, as
 //!   browsers do; Android holds keys to the phone or on USB through the
 //!   app's Kotlin (android.rs); iPhones can't yet (`here`).
 
 pub mod cbor;
+pub mod client_pin;
 pub mod ctap;
 pub mod webauthn;
 
@@ -30,6 +33,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use std::time::Instant;
 
+pub use client_pin::Pin;
 pub use ctap::{KeyAnswer, KeyRequest, Wait};
 pub use webauthn::SecurityKeyRequest;
 
@@ -101,34 +105,35 @@ pub fn is_fido(descriptor: &[u8]) -> bool {
 /// on Linux and the Mac, the keys plugged in (waiting for one, then asking
 /// each in turn until one holds a credential the account has); on Android,
 /// the app's Kotlin. It waits as long as the server's request says, or
-/// until `cancel`.
-pub fn ask(request: &SecurityKeyRequest) -> Result<KeyAnswer> {
+/// until `cancel`. `pin` is what the person typed after a key asked for its
+/// PIN (`Error::KeyPin`), sent to a key only if it asks for it again, and
+/// never on Windows, which asks for it itself.
+pub fn ask(request: &SecurityKeyRequest, pin: Option<&Pin>) -> Result<KeyAnswer> {
     CANCELED.store(false, Ordering::SeqCst);
     let wait = Wait {
         until: Instant::now() + request.timeout,
         canceled: &CANCELED,
     };
-    ask_here(request, &wait)
+    ask_here(request, pin, &wait)
 }
 
 #[cfg(windows)]
-fn ask_here(request: &SecurityKeyRequest, wait: &Wait) -> Result<KeyAnswer> {
+fn ask_here(request: &SecurityKeyRequest, _pin: Option<&Pin>, wait: &Wait) -> Result<KeyAnswer> {
     windows::ask(request, wait.canceled)
 }
 
 #[cfg(target_os = "android")]
-fn ask_here(request: &SecurityKeyRequest, wait: &Wait) -> Result<KeyAnswer> {
-    crate::android::ask_security_key(&request.key_request(), wait)
+fn ask_here(request: &SecurityKeyRequest, pin: Option<&Pin>, wait: &Wait) -> Result<KeyAnswer> {
+    crate::android::ask_security_key(&request.key_request(), pin, wait)
 }
 
 #[cfg(target_os = "ios")]
-fn ask_here(_request: &SecurityKeyRequest, _wait: &Wait) -> Result<KeyAnswer> {
+fn ask_here(_request: &SecurityKeyRequest, _pin: Option<&Pin>, _wait: &Wait) -> Result<KeyAnswer> {
     Err(crate::Error::TwoStep(NOT_HERE))
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn ask_here(request: &SecurityKeyRequest, wait: &Wait) -> Result<KeyAnswer> {
-    use crate::error::Error;
+fn ask_here(request: &SecurityKeyRequest, pin: Option<&Pin>, wait: &Wait) -> Result<KeyAnswer> {
     #[cfg(target_os = "linux")]
     use hid_linux::{devices, Device};
     #[cfg(target_os = "macos")]
@@ -138,19 +143,10 @@ fn ask_here(request: &SecurityKeyRequest, wait: &Wait) -> Result<KeyAnswer> {
     loop {
         let found = devices();
         if !found.is_empty() {
-            let mut last = Error::TwoStep(ctap::NOT_THIS_KEY);
-            for one in found {
-                let asked =
-                    Device::open(one).and_then(|mut device| ctap::ask_hid(&mut device, &key, wait));
-                match asked {
-                    Ok(answer) => return Ok(answer),
-                    // Another key plugged in may hold it.
-                    Err(Error::TwoStep(ctap::NOT_THIS_KEY)) => {}
-                    Err(e @ Error::TwoStep(ctap::CANCELED | ctap::TIMED_OUT)) => return Err(e),
-                    Err(e) => last = e,
-                }
-            }
-            return Err(last);
+            return ask_each(found, |one, alone| {
+                let pin = pin.filter(|_| alone);
+                Device::open(one).and_then(|mut device| ctap::ask_hid(&mut device, &key, pin, wait))
+            });
         }
         // None plugged in yet.
         if let Some(stop) = wait.over() {
@@ -160,6 +156,40 @@ fn ask_here(request: &SecurityKeyRequest, wait: &Wait) -> Result<KeyAnswer> {
     }
 }
 
+/// The keys plugged in, asked in turn until one holds a credential the
+/// account has. A PIN goes to a key only when it's the only one plugged in
+/// (`ask` gets no PIN to send otherwise), so a PIN typed for one key is
+/// never tried on another, where a wrong one costs a try; with several, a
+/// key that asks for its PIN says to leave only that one plugged in.
+#[cfg_attr(
+    not(any(test, target_os = "linux", target_os = "macos")),
+    allow(dead_code)
+)]
+fn ask_each<D>(
+    found: Vec<D>,
+    mut ask: impl FnMut(D, bool) -> Result<KeyAnswer>,
+) -> Result<KeyAnswer> {
+    use crate::error::Error;
+    let several = found.len() > 1;
+    let mut last = Error::TwoStep(ctap::NOT_THIS_KEY);
+    let mut wants_pin = false;
+    for one in found {
+        match ask(one, !several) {
+            Ok(answer) => return Ok(answer),
+            // Another key plugged in may hold it.
+            Err(Error::TwoStep(ctap::NOT_THIS_KEY)) => {}
+            Err(e @ Error::TwoStep(ctap::CANCELED | ctap::TIMED_OUT)) => return Err(e),
+            Err(Error::KeyPin(_)) if several => wants_pin = true,
+            Err(e @ Error::KeyPin(_)) => return Err(e),
+            Err(e) => last = e,
+        }
+    }
+    if wants_pin {
+        return Err(Error::TwoStep(client_pin::SEVERAL));
+    }
+    Err(last)
+}
+
 #[cfg(not(any(
     windows,
     target_os = "android",
@@ -167,7 +197,7 @@ fn ask_here(request: &SecurityKeyRequest, wait: &Wait) -> Result<KeyAnswer> {
     target_os = "linux",
     target_os = "macos"
 )))]
-fn ask_here(_request: &SecurityKeyRequest, _wait: &Wait) -> Result<KeyAnswer> {
+fn ask_here(_request: &SecurityKeyRequest, _pin: Option<&Pin>, _wait: &Wait) -> Result<KeyAnswer> {
     Err(crate::Error::TwoStep(NOT_HERE))
 }
 
@@ -194,6 +224,57 @@ mod tests {
         assert!(!is_fido(&[0x06, 0xd0]));
         assert!(!is_fido(&[0xfe, 0x10, 0x00]));
         assert!(is_fido(&[0xfe, 0x01, 0x00, 0xaa, 0x06, 0xd0, 0xf1]));
+    }
+
+    #[test]
+    fn a_pin_goes_to_a_key_only_when_its_the_only_one_plugged_in() {
+        use crate::error::{Error, KeyPin};
+        use soft::SoftKey;
+        let no = AtomicBool::new(false);
+        let wait = Wait {
+            until: Instant::now() + std::time::Duration::from_secs(10),
+            canceled: &no,
+        };
+        let pin = Pin::new("2580", false).unwrap();
+        let mut wants = SoftKey::with_pin("vault.example.test", "2580");
+        let mut other = SoftKey::new("vault.example.test");
+        let request = |allow: &[&SoftKey]| KeyRequest {
+            rp_id: "vault.example.test".into(),
+            app_id: None,
+            client_data_hash: [7; 32],
+            allow: allow.iter().map(|k| k.credential_id.clone()).collect(),
+            uv_required: false,
+        };
+        let ask = |keys: Vec<&mut SoftKey>, request: &KeyRequest| {
+            ask_each(keys, |key, alone| {
+                ctap::ask_hid(key, request, alone.then_some(&pin), &wait)
+            })
+        };
+        // The account's key wants its PIN, and another is plugged in too:
+        // the PIN goes to neither.
+        let only_wants = request(&[&wants]);
+        assert_eq!(
+            ask(vec![&mut other, &mut wants], &only_wants),
+            Err(Error::TwoStep(client_pin::SEVERAL))
+        );
+        assert_eq!((wants.pin_hashes, other.pin_hashes), (0, 0));
+        // Unless the other one is the account's, and needs none.
+        let both = request(&[&wants, &other]);
+        assert!(ask(vec![&mut wants, &mut other], &both).is_ok());
+        assert_eq!(wants.pin_hashes, 0);
+        // On its own, it gets the PIN.
+        assert!(ask(vec![&mut wants], &only_wants).is_ok());
+        assert_eq!(wants.pin_hashes, 1);
+        // And without one, says it wants it.
+        assert_eq!(
+            ask_each(vec![&mut wants], |key, _| ctap::ask_hid(
+                key,
+                &only_wants,
+                None,
+                &wait
+            )),
+            Err(Error::KeyPin(KeyPin::Asks { left: Some(8) }))
+        );
     }
 
     #[test]

@@ -1,0 +1,168 @@
+{
+  "about": "Sending a security key its PIN: CTAP 2.1's authenticatorClientPIN with PIN/UV auth protocols 1 and 2, and getAssertion's pinUvAuthParam (DESIGN.md, \"A security key's PIN\"). Made by make-security-key-pin-v1.mjs with Node's own crypto. All binary values are base64; keys are uncompressed SEC1 points (04 || x || y).",
+  "protocol1": {
+    "about": "z is the x-coordinate of ECDH(platformPrivateKey, keyPublicKey). sharedSecret = SHA-256(z). pinHash is the first 16 bytes of SHA-256(pinUtf8); pinHashEnc = AES-256-CBC(sharedSecret, all-zero IV, no padding) of it. The key sends its token encrypted the same way (tokenEnc). pinUvAuthParam = the first 16 bytes of HMAC-SHA-256(token, clientDataHash). requests are what the core sends (the command byte, then canonical CBOR), and answers what a key sends back (status 00, then CBOR). token16 is a CTAP 2.0 key's 16-byte token, with its own pinUvAuthParam16.",
+    "protocol": 1,
+    "keyPrivateKey": "ERITFBUWFxgZGhscHR4fICEiIyQlJicoKSorLC0uLzA=",
+    "keyPublicKey": "BExjNuO4s953G2E6HHoXNINM1pwaT1/+yyQMY7wN2xV09olsXRTKROADd5HCMAMzJZpxuQHlJYV10QfluKxItCQ=",
+    "platformPrivateKey": "MTIzNDU2Nzg5Ojs8PT4/QEFCQ0RFRkdISUpLTE1OT1A=",
+    "platformPublicKey": "BAx/zDIcdxGSA9vnmGSQfk8KAZF3id6i1HMVMaUqIuK6wXZtIeRhfXL7vvh9bt8tj4C1JpVuPCwXAfFrfzEVAMY=",
+    "platformCoseKey": "pQECAzgYIAEhWCAMf8wyHHcRkgPb55hkkH5PCgGRd4neotRzFTGlKiLiuiJYIMF2bSHkYX1y+774fW7fLY+AtSaVbjwsFwHxa38xFQDG",
+    "z": "YLhAuoPgJUz9nzUHbfz9D+Z7KIUiWgQlhT0YWgKfVX4=",
+    "sharedSecret": "bGfeqvWBFRk7SSfCFEq+ahgwhQtvkQpBknYIKbzeniY=",
+    "pinTyped": "2580",
+    "pin": "2580",
+    "pinUtf8": "MjU4MA==",
+    "pinHash": "7ZRvZdLHhdkOgnxf/Yec4w==",
+    "pinHashEnc": "qrBVa7VEm7yYPp0O2HjX3A==",
+    "token": "UVJTVFVWV1hZWltcXV5fYGFiY2RlZmdoaWprbG1ub3A=",
+    "tokenEnc": "jwUGC0K/W8oULQAj3R22kFWOCUz/w7ttk5ng5jxATkY=",
+    "rpId": "vault.example.test",
+    "clientDataHash": "RqE0FMmsCbn635J991BFHsevwhfo7ely59tKPO75y0c=",
+    "credentialId": "cHFyc3R1dnd4eXp7fH1+f4CBgoOEhYaHiImKi4yNjo+QkZKTlJWWl5iZmpucnZ6f",
+    "pinUvAuthParam": "R+5Tp+bG6zEF3JjM+nbB5g==",
+    "requests": {
+      "getPinRetries": "BqIBAQIB",
+      "getKeyAgreement": "BqIBAQIC",
+      "getPinToken": "BqQBAQIFA6UBAgM4GCABIVggDH/MMhx3EZID2+eYZJB+TwoBkXeJ3qLUcxUxpSoi4roiWCDBdm0h5GF9cvu++H1u3y2PgLUmlW48LBcB8Wt/MRUAxgZQqrBVa7VEm7yYPp0O2HjX3A==",
+      "getPinUvAuthTokenUsingPinWithPermissions": "BqYBAQIJA6UBAgM4GCABIVggDH/MMhx3EZID2+eYZJB+TwoBkXeJ3qLUcxUxpSoi4roiWCDBdm0h5GF9cvu++H1u3y2PgLUmlW48LBcB8Wt/MRUAxgZQqrBVa7VEm7yYPp0O2HjX3AkCCnJ2YXVsdC5leGFtcGxlLnRlc3Q=",
+      "getAssertion": "AqYBcnZhdWx0LmV4YW1wbGUudGVzdAJYIEahNBTJrAm5+t+SffdQRR7Hr8IX6O3pcufbSjzu+ctHA4GiYmlkWDBwcXJzdHV2d3h5ent8fX5/gIGCg4SFhoeIiYqLjI2Oj5CRkpOUlZaXmJmam5ydnp9kdHlwZWpwdWJsaWMta2V5BaFidXD1BlBH7lOn5sbrMQXcmMz6dsHmBwE="
+    },
+    "answers": {
+      "getPinRetries": "AKIDBwT0",
+      "getKeyAgreement": "AKEBpQECAzgYIAEhWCBMYzbjuLPedxthOhx6FzSDTNacGk9f/sskDGO8DdsVdCJYIPaJbF0UykTgA3eRwjADMyWacbkB5SWFddEH5bisSLQk",
+      "token": "AKECWCCPBQYLQr9byhQtACPdHbaQVY4JTP/Du22TmeDmPEBORg=="
+    },
+    "token16": "sbKztLW2t7i5uru8vb6/wA==",
+    "token16Enc": "CgE+smLORQsaNTYxq2gywA==",
+    "pinUvAuthParam16": "EfxwicPLJk2rvpqCntdEfw=="
+  },
+  "protocol2": {
+    "about": "z as for protocol 1. sharedSecret = HKDF-SHA-256(z, salt 32 zero bytes, info \"CTAP2 HMAC key\", 32) || HKDF-SHA-256(z, the same salt, info \"CTAP2 AES key\", 32): the HMAC key, then the AES key. pinHashEnc = pinHashIv || AES-256-CBC(the AES key, pinHashIv, no padding) of pinHash; the key's tokenEnc = tokenIv || the same of the token. pinUvAuthParam = HMAC-SHA-256(token, clientDataHash), all 32 bytes. The PIN was typed with a combining diaeresis (pinTyped) and is sent in Normalization Form C (pin).",
+    "protocol": 2,
+    "keyPrivateKey": "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVpbXF1eX2A=",
+    "keyPublicKey": "BCYe+9NVDPBo7wE+1zZroy9db+VXtLKrzoreWMuhaKVeF4igsppWpqvsQITAyWvT3LymtQfzXb6p6YVwhHnYvck=",
+    "platformPrivateKey": "YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXp7fH1+f4A=",
+    "platformPublicKey": "BL1XFLnCBABBHx5R2/9jZH8F0dcLVfwgDGytEML0YU3B5QSFYvcx9UVzwEIk2XOpFqWfUmqCaAdvwc+pKl8UPxk=",
+    "platformCoseKey": "pQECAzgYIAEhWCC9VxS5wgQAQR8eUdv/Y2R/BdHXC1X8IAxsrRDC9GFNwSJYIOUEhWL3MfVFc8BCJNlzqRaln1JqgmgHb8HPqSpfFD8Z",
+    "z": "SkGLGV7n/tbnN4A6tTy4dQtxwJM1pwsDDHCSGyIWZLc=",
+    "sharedSecret": "2GebztfQQC28R7IKxUMifsSi1vpmQVjsm67qod4hyNuWQConQX1mVkStAqBwKamQIZ/ZybVts+4aRq1jiL06rg==",
+    "pinTyped": "Grüße 2580",
+    "pin": "Grüße 2580",
+    "pinUtf8": "R3LDvMOfZSAyNTgw",
+    "pinHash": "B/UODcwAusbPvRSwr35rXw==",
+    "pinHashEnc": "wcLDxMXGx8jJysvMzc7P0FtwXbrNL98u2VtyuuK3jUg=",
+    "token": "gYKDhIWGh4iJiouMjY6PkJGSk5SVlpeYmZqbnJ2en6A=",
+    "tokenEnc": "0dLT1NXW19jZ2tvc3d7f4C5k6M5xZdpv73DYhiDWjui+GgaW13a2PHS5qeE/Lf3W",
+    "rpId": "vault.example.test",
+    "clientDataHash": "RqE0FMmsCbn635J991BFHsevwhfo7ely59tKPO75y0c=",
+    "credentialId": "cHFyc3R1dnd4eXp7fH1+f4CBgoOEhYaHiImKi4yNjo+QkZKTlJWWl5iZmpucnZ6f",
+    "pinUvAuthParam": "wnDLBGuMyHhwBbNM8xKAqft75BeaYY9BumEzmgfEqYE=",
+    "requests": {
+      "getPinRetries": "BqIBAgIB",
+      "getKeyAgreement": "BqIBAgIC",
+      "getPinToken": "BqQBAgIFA6UBAgM4GCABIVggvVcUucIEAEEfHlHb/2NkfwXR1wtV/CAMbK0QwvRhTcEiWCDlBIVi9zH1RXPAQiTZc6kWpZ9SaoJoB2/Bz6kqXxQ/GQZYIMHCw8TFxsfIycrLzM3Oz9BbcF26zS/fLtlbcrrit41I",
+      "getPinUvAuthTokenUsingPinWithPermissions": "BqYBAgIJA6UBAgM4GCABIVggvVcUucIEAEEfHlHb/2NkfwXR1wtV/CAMbK0QwvRhTcEiWCDlBIVi9zH1RXPAQiTZc6kWpZ9SaoJoB2/Bz6kqXxQ/GQZYIMHCw8TFxsfIycrLzM3Oz9BbcF26zS/fLtlbcrrit41ICQIKcnZhdWx0LmV4YW1wbGUudGVzdA==",
+      "getAssertion": "AqYBcnZhdWx0LmV4YW1wbGUudGVzdAJYIEahNBTJrAm5+t+SffdQRR7Hr8IX6O3pcufbSjzu+ctHA4GiYmlkWDBwcXJzdHV2d3h5ent8fX5/gIGCg4SFhoeIiYqLjI2Oj5CRkpOUlZaXmJmam5ydnp9kdHlwZWpwdWJsaWMta2V5BaFidXD1BlggwnDLBGuMyHhwBbNM8xKAqft75BeaYY9BumEzmgfEqYEHAg=="
+    },
+    "answers": {
+      "getPinRetries": "AKIDBwT0",
+      "getKeyAgreement": "AKEBpQECAzgYIAEhWCAmHvvTVQzwaO8BPtc2a6MvXW/lV7Syq86K3ljLoWilXiJYIBeIoLKaVqar7ECEwMlr09y8prUH812+qemFcIR52L3J",
+      "token": "AKECWDDR0tPU1dbX2Nna29zd3t/gLmToznFl2m/vcNiGINaO6L4aBpbXdrY8dLmp4T8t/dY="
+    },
+    "pinHashIv": "wcLDxMXGx8jJysvMzc7P0A==",
+    "tokenIv": "0dLT1NXW19jZ2tvc3d7f4A=="
+  },
+  "pins": {
+    "about": "PINs as typed. Each that's ok is sent as utf8: Unicode Normalization Form C, as UTF-8. The others are refused before a key is asked: tooShort (fewer than 4 characters, counted once normalized), tooLong (more than 63 bytes once normalized), notAPin (ends in a zero byte).",
+    "pins": [
+      {
+        "about": "digits",
+        "typed": "1234",
+        "ok": true,
+        "utf8": "MTIzNA=="
+      },
+      {
+        "about": "spaces kept, nothing trimmed",
+        "typed": " 12 34 ",
+        "ok": true,
+        "utf8": "IDEyIDM0IA=="
+      },
+      {
+        "about": "u and a combining diaeresis become one character, U+00FC; the sharp s stays",
+        "typed": "Grüße",
+        "ok": true,
+        "utf8": "R3LDvMOfZQ=="
+      },
+      {
+        "about": "the ohm sign becomes the Greek capital omega, U+03A9",
+        "typed": "Ω123",
+        "ok": true,
+        "utf8": "zqkxMjM="
+      },
+      {
+        "about": "Hangul jamo become two syllables, so 4 characters",
+        "typed": "한글12",
+        "ok": true,
+        "utf8": "7ZWc6riAMTI="
+      },
+      {
+        "about": "94 bytes typed, 63 once normalized: taken",
+        "typed": "éééééééééééééééééééééééééééééééa",
+        "ok": true,
+        "utf8": "w6nDqcOpw6nDqcOpw6nDqcOpw6nDqcOpw6nDqcOpw6nDqcOpw6nDqcOpw6nDqcOpw6nDqcOpw6nDqcOpw6lh"
+      },
+      {
+        "about": "63 bytes: the most",
+        "typed": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "ok": true,
+        "utf8": "YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFh"
+      },
+      {
+        "about": "63 bytes, the e's precomposed",
+        "typed": "éééééééééééééééééééééééééééééééa",
+        "ok": true,
+        "utf8": "w6nDqcOpw6nDqcOpw6nDqcOpw6nDqcOpw6nDqcOpw6nDqcOpw6nDqcOpw6nDqcOpw6nDqcOpw6nDqcOpw6lh"
+      },
+      {
+        "about": "3 characters",
+        "typed": "123",
+        "ok": false,
+        "why": "tooShort"
+      },
+      {
+        "about": "4 code points typed, 3 once normalized (the first accent joins the e)",
+        "typed": "é́́",
+        "ok": false,
+        "why": "tooShort"
+      },
+      {
+        "about": "64 bytes",
+        "typed": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "ok": false,
+        "why": "tooLong"
+      },
+      {
+        "about": "64 bytes",
+        "typed": "éééééééééééééééééééééééééééééééé",
+        "ok": false,
+        "why": "tooLong"
+      },
+      {
+        "about": "ends in a zero byte",
+        "typed": "1234\u0000",
+        "ok": false,
+        "why": "notAPin"
+      }
+    ]
+  },
+  "refused": {
+    "about": "Each must be refused. offCurveKey is protocol 1's keyPublicKey with its last byte changed, so it's no point on P-256 (as a COSE key: offCurveCoseKey, in a getKeyAgreement answer: offCurveAnswer). The tokens are protocol 1's 48 bytes (only 16 or 32 are a token), protocol 2's 16 bytes (only 32 are), and protocol 2's 15 bytes (shorter than its IV), each under that protocol's sharedSecret as tokenEnc is.",
+    "offCurveKey": "BExjNuO4s953G2E6HHoXNINM1pwaT1/+yyQMY7wN2xV09olsXRTKROADd5HCMAMzJZpxuQHlJYV10QfluKxItCU=",
+    "offCurveCoseKey": "pQECAzgYIAEhWCBMYzbjuLPedxthOhx6FzSDTNacGk9f/sskDGO8DdsVdCJYIPaJbF0UykTgA3eRwjADMyWacbkB5SWFddEH5bisSLQl",
+    "offCurveAnswer": "AKEBpQECAzgYIAEhWCBMYzbjuLPedxthOhx6FzSDTNacGk9f/sskDGO8DdsVdCJYIPaJbF0UykTgA3eRwjADMyWacbkB5SWFddEH5bisSLQl",
+    "protocol1Token48Enc": "OSbXwkdlxM0jydvlpovh/0bVwKK6bCdQgx012uNbb0vFFG+F6ctc1uxrbqe+5SnL",
+    "protocol2Token16Enc": "8fLz9PX29/j5+vv8/f7/AEfILsi8RAHTE0zze1MU2ak=",
+    "protocol2Short": "8fLz9PX29/j5+vv8/f7/"
+  }
+}

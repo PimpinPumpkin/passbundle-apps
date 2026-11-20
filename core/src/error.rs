@@ -39,6 +39,55 @@ pub enum NoNewAccounts {
     Address,
 }
 
+/// A security key that asks for its PIN (`Error::KeyPin`;
+/// security_key/client_pin.rs): the app shows the PIN's field, with the
+/// tries left when the key said, and sends what's typed with the next try.
+/// Never the PIN itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyPin {
+    /// It asks for its PIN: the first time, nothing wrong yet.
+    Asks { left: Option<u32> },
+    /// That wasn't its PIN.
+    Wrong { left: Option<u32> },
+    /// One try left, and the person didn't say to use it: nothing was sent.
+    LastTry,
+    /// After 3 wrong PINs in a row, the key wants unplugging (or taking away
+    /// from the phone) before the next.
+    FreshStart,
+    /// Fewer than 4 characters: no key's PIN. Nothing was sent.
+    TooShort,
+    /// More than 63 bytes: no key's PIN. Nothing was sent.
+    TooLong,
+    /// Ends in a zero byte: no key's PIN. Nothing was sent.
+    NotAPin,
+}
+
+impl KeyPin {
+    /// What it is, for the app: `asks`, `wrong`, `lastTry`, `freshStart`, or
+    /// `notAPin` (anything that can't be a PIN).
+    pub fn why(&self) -> &'static str {
+        match self {
+            KeyPin::Asks { .. } => "asks",
+            KeyPin::Wrong { .. } => "wrong",
+            KeyPin::LastTry => "lastTry",
+            KeyPin::FreshStart => "freshStart",
+            KeyPin::TooShort | KeyPin::TooLong | KeyPin::NotAPin => "notAPin",
+        }
+    }
+
+    /// The tries the key has left, when it said.
+    pub fn left(&self) -> Option<u32> {
+        match self {
+            KeyPin::Asks { left } | KeyPin::Wrong { left } => *left,
+            KeyPin::LastTry => Some(1),
+            _ => None,
+        }
+    }
+}
+
+/// What the app says before the key's last PIN try (`KeyPin::LastTry`).
+pub const LAST_TRY: &str = "This security key has 1 PIN try left. If the next PIN is wrong too, the key locks, and only resetting it with the app from its maker unlocks it, which erases everything on it.";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
     /// The master password didn't open the user key.
@@ -125,6 +174,9 @@ pub enum Error {
     /// the account's credentials, a Duo answer for another sign-in, a code
     /// that isn't a YubiKey's (two_step.rs, security_key).
     TwoStep(&'static str),
+    /// Two-step login with a security key: the key asks for its PIN, or
+    /// didn't take the one sent (security_key/client_pin.rs).
+    KeyPin(KeyPin),
     /// The person stopped a file's upload. The apps show nothing for it.
     Canceled,
     /// Unlocking with a PIN: that wasn't the PIN, and how many tries are
@@ -137,6 +189,21 @@ pub enum Error {
     /// account's keys changed, the organization doesn't allow one, the
     /// device no longer opens what it kept).
     NoPin,
+    /// Single sign-on couldn't go on, in a sentence the app shows as it is:
+    /// an identifier that isn't an organization's, a canceled browser, an
+    /// answer for another sign-in (sso.rs).
+    Sso(&'static str),
+    /// A password sign-in that an organization's "Require single sign-on"
+    /// answered: sign in with its single sign-on instead, whose SSO
+    /// identifier this is (DESIGN.md, "Require single sign-on").
+    UseSso { identifier: String },
+    /// The same, for someone not linked to it yet: the web vault links them
+    /// first (its address), and the core never uses the linking session.
+    LinkSsoFirst { web_vault: String },
+    /// A single sign-on for an account with no master password yet (someone
+    /// invited, at their first single sign-on): the web vault sets one first
+    /// (its address). Nothing was kept.
+    SsoNoMasterPassword { web_vault: String },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -213,10 +280,15 @@ fn lookup_failed(io: &std::io::Error) -> bool {
     matches!(io.raw_os_error(), Some(11001..=11004)) || io.to_string().contains("lookup address")
 }
 
-/// A sentence from words that may not end in one.
+/// A sentence from words that may not end in one. Its first letter is made
+/// a capital, unless it starts with an email or web address, which is said
+/// as it was ("ana@elsewhere.test isn't a member of Acme Dental.").
 fn sentence(words: &str) -> String {
     let words = words.trim();
+    let first_word = words.split_whitespace().next().unwrap_or("");
+    let as_written = first_word.contains('@') || first_word.contains("://");
     let mut out: String = match words.chars().next() {
+        Some(_) if as_written => words.to_owned(),
         Some(first) => first.to_uppercase().chain(words.chars().skip(1)).collect(),
         None => return String::new(),
     };
@@ -324,6 +396,18 @@ impl fmt::Display for Error {
             Error::TooManyAccounts => write!(f, "PassBundle keeps up to {} accounts on this device. Sign out of one to add another.", crate::accounts::MOST),
             Error::AlreadyHere => write!(f, "That account is in PassBundle on this device already, under another email or server. Sign out of it there first."),
             Error::TwoStep(sentence) => write!(f, "{sentence}"),
+            Error::KeyPin(KeyPin::Asks { .. }) => write!(f, "This security key asks for its PIN."),
+            Error::KeyPin(KeyPin::Wrong { left: Some(1) }) => write!(f, "That PIN isn't right. 1 try left."),
+            Error::KeyPin(KeyPin::Wrong { left: Some(left) }) => write!(f, "That PIN isn't right. {left} tries left."),
+            Error::KeyPin(KeyPin::Wrong { left: None }) => write!(f, "That PIN isn't right."),
+            Error::KeyPin(KeyPin::LastTry) => write!(f, "{LAST_TRY}"),
+            Error::KeyPin(KeyPin::FreshStart) => write!(
+                f,
+                "After 3 wrong PINs in a row, a security key needs a fresh start: unplug it and plug it in again (on a phone, take it away first), then enter its PIN."
+            ),
+            Error::KeyPin(KeyPin::TooShort) => write!(f, "A security key's PIN has at least 4 characters."),
+            Error::KeyPin(KeyPin::TooLong) => write!(f, "That's longer than a security key's PIN can be."),
+            Error::KeyPin(KeyPin::NotAPin) => write!(f, "That can't be a security key's PIN. Check what you typed."),
             Error::Canceled => write!(f, "The upload was canceled."),
             Error::WrongPin { left: 1 } => write!(f, "That PIN isn't right. 1 try left."),
             Error::WrongPin { left } => write!(f, "That PIN isn't right. {left} tries left."),
@@ -333,6 +417,16 @@ impl fmt::Display for Error {
                 crate::pin::MAX_WRONG_TRIES
             ),
             Error::NoPin => write!(f, "Unlocking with a PIN is off on this device. Use your master password."),
+            Error::Sso(sentence) => write!(f, "{sentence}"),
+            Error::UseSso { .. } => write!(f, "Your organization requires you to sign in with single sign-on."),
+            Error::LinkSsoFirst { web_vault } => write!(
+                f,
+                "Your organization requires single sign-on, and your account isn't linked to it yet. Sign in to the web vault at {web_vault} with your master password, which links it, then use single sign-on here."
+            ),
+            Error::SsoNoMasterPassword { web_vault } => write!(
+                f,
+                "Your account doesn't have a master password yet. Use single sign-on once in the web vault at {web_vault}, which asks you to set one, then sign in here."
+            ),
         }
     }
 }
@@ -429,6 +523,17 @@ mod tests {
             Error::NoNewAccounts(NoNewAccounts::Address),
             Error::Canceled,
             Error::Refused("this device doesn't have the memory free for a file that large"),
+            Error::Sso(crate::sso::NO_SUCH_ORGANIZATION),
+            Error::Sso(crate::sso::CANCELED),
+            Error::UseSso {
+                identifier: "acme".into(),
+            },
+            Error::LinkSsoFirst {
+                web_vault: "https://vault.example.test".into(),
+            },
+            Error::SsoNoMasterPassword {
+                web_vault: "https://vault.example.test".into(),
+            },
         ]
         .map(|e| e.to_string());
         for w in &words {
@@ -494,6 +599,22 @@ mod tests {
         assert_eq!(
             Error::Refused("a PIN needs at least 4 characters").to_string(),
             "A PIN needs at least 4 characters."
+        );
+    }
+
+    #[test]
+    fn an_address_that_starts_the_servers_words_is_said_as_written() {
+        assert_eq!(
+            Error::Server("ana@elsewhere.test isn't a member of Acme Dental.".into()).to_string(),
+            "Your server said: ana@elsewhere.test isn't a member of Acme Dental."
+        );
+        assert_eq!(
+            Error::Server("https://vault.example.test can't be reached".into()).to_string(),
+            "Your server said: https://vault.example.test can't be reached."
+        );
+        assert_eq!(
+            Error::Server("username or password is incorrect".into()).to_string(),
+            "Your server said: Username or password is incorrect."
         );
     }
 }

@@ -32,6 +32,16 @@ impl Value {
         self.get_by(&Value::Unsigned(key))
     }
 
+    /// A map's value for an integer key that may be negative (a COSE key's
+    /// -1, -2, -3).
+    pub fn get_int(&self, key: i64) -> Option<&Value> {
+        if key < 0 {
+            self.get_by(&Value::Negative((-1 - key) as u64))
+        } else {
+            self.get_by(&Value::Unsigned(key as u64))
+        }
+    }
+
     /// A map's value for a text key ("id", "type", "up").
     pub fn get_text(&self, key: &str) -> Option<&Value> {
         self.get_by(&Value::text(key))

@@ -3,7 +3,10 @@
 // apps"): a security key, Duo, a YubiKey's code, an authenticator app's code,
 // an emailed code, and a recovery code. The core checks and sends each
 // (core/src/two_step.rs, core/src/security_key); this screen picks the
-// strongest one offered, lists the others, and says what happened.
+// strongest one offered, lists the others, and says what happened. A
+// security key that asks for its PIN (on Linux, the Mac, and Android; Windows
+// asks for it itself) gets a field for it ("A security key's PIN" in the meta
+// repo's DESIGN.md).
 import 'dart:async';
 import 'dart:io';
 
@@ -50,6 +53,9 @@ class TwoStepCalls {
   Future<Answer> sendEmail() => Core.sendEmailCode();
 
   Future<Answer> securityKey(bool remember) => Core.securityKeySignIn(remember);
+
+  Future<Answer> securityKeyWithPin(String pin, bool remember, bool lastTry) =>
+      Core.securityKeySignInWithPin(pin, remember, lastTry);
 
   void cancelSecurityKey() => Core().securityKeyCancel();
 
@@ -162,6 +168,18 @@ String _keyWords(String? here) => switch (here) {
 const notHere =
     'This device can\'t use a security key with PassBundle yet. Use another way to sign in, or the web vault.';
 
+/// What the screen says when a key has one PIN try left (the core's
+/// `LAST_TRY`, core/src/error.rs): the core uses it only once the person
+/// checks "Use the last try".
+const lastTryWarning =
+    'This security key has 1 PIN try left. If the next PIN is wrong too, the key locks, and only resetting it with the app from its maker unlocks it, which erases everything on it.';
+
+/// Continue on the last try without "Use the last try" checked.
+const checkLastTryFirst =
+    'To use the last try, check "Use the last try" first.';
+
+String _triesLeft(int left) => left == 1 ? '1 try left' : '$left tries left';
+
 class TwoStepScreen extends StatefulWidget {
   const TwoStepScreen({
     super.key,
@@ -169,6 +187,7 @@ class TwoStepScreen extends StatefulWidget {
     required this.onSignedIn,
     required this.onStartOver,
     this.onNewDevice,
+    this.onMasterPassword,
     this.calls = const TwoStepCalls(),
   });
 
@@ -181,6 +200,10 @@ class TwoStepScreen extends StatefulWidget {
   /// The new-device check holds the sign-in after its second step instead
   /// (two-step login was turned off meanwhile): its answer.
   final ValueChanged<Map<String, dynamic>>? onNewDevice;
+
+  /// A single sign-on passed its second step: the master password unlocks
+  /// next (sso.dart). The core's answer, with the account's `email`.
+  final ValueChanged<Map<String, dynamic>>? onMasterPassword;
   final TwoStepCalls calls;
 
   @override
@@ -192,6 +215,17 @@ class _TwoStepScreenState extends State<TwoStepScreen> {
   late final String? keyHere = widget.offer['securityKey'] as String?;
   late Method method = firstMethod(widget.offer);
   final code = TextEditingController();
+
+  /// A security key's PIN, once a key asks for it: cleared as each try
+  /// hands it to the core.
+  final keyPin = TextEditingController();
+
+  /// What the core said when a key asked for its PIN (`securityKeyPin`:
+  /// `why`, and the key's tries `left`), or null while none has.
+  Map<String, dynamic>? pinAsked;
+
+  /// "Use the last try", off each time the field shows.
+  bool useLastTry = false;
   bool remember = false;
   bool working = false;
 
@@ -212,6 +246,7 @@ class _TwoStepScreenState extends State<TwoStepScreen> {
     if (method == Method.yubikey) widget.calls.yubikeyNfc(false, null);
     if (waiting) _cancel();
     code.dispose();
+    keyPin.dispose();
     super.dispose();
   }
 
@@ -232,6 +267,9 @@ class _TwoStepScreenState extends State<TwoStepScreen> {
       choosing = false;
       error = null;
       code.clear();
+      keyPin.clear();
+      pinAsked = null;
+      useLastTry = false;
     });
     if (next == Method.yubikey) _listenForYubikey();
   }
@@ -243,16 +281,34 @@ class _TwoStepScreenState extends State<TwoStepScreen> {
       widget.onNewDevice?.call(answer.body);
       return;
     }
+    if (answer.ok && answer.body['step'] == 'masterPassword') {
+      if (method == Method.recoveryCode) await _recovered();
+      if (mounted) widget.onMasterPassword?.call(answer.body);
+      return;
+    }
     if (answer.ok) {
       if (method == Method.recoveryCode) await _recovered();
       if (mounted) widget.onSignedIn();
       return;
     }
+    final asked = answer.body['securityKeyPin'];
     setState(() {
       working = false;
       waiting = false;
-      // Giving up isn't an error.
-      error = answer.error == 'Canceled.' ? null : answer.error;
+      // A key that asks for its PIN keeps the field up; anything else
+      // (blocked, not touched, canceled) goes back to "Use security key".
+      final before = pinAsked?['left'];
+      pinAsked = asked is Map ? Map<String, dynamic>.from(asked) : null;
+      // Something that can't be a PIN reached no key: its count stands.
+      if (pinAsked?['why'] == 'notAPin') pinAsked!['left'] ??= before;
+      useLastTry = false;
+      // Giving up isn't an error; a key asking for its PIN the first time
+      // is what the subtitle says, and the last try's warning shows under
+      // the field on its own.
+      final why = pinAsked?['why'];
+      error = answer.error == 'Canceled.' || why == 'asks' || why == 'lastTry'
+          ? null
+          : answer.error;
     });
   }
 
@@ -312,6 +368,28 @@ class _TwoStepScreenState extends State<TwoStepScreen> {
     await _after(answer);
   }
 
+  /// The PIN typed, for the key that asked for it: the field lets go of
+  /// it as the core gets it, and the key is asked again.
+  Future<void> _securityKeyWithPin() async {
+    if (working) return;
+    if (pinAsked?['left'] == 1 && !useLastTry) {
+      setState(() => error = checkLastTryFirst);
+      return;
+    }
+    final pin = keyPin.text;
+    final lastTry = useLastTry;
+    keyPin.clear();
+    setState(() {
+      working = true;
+      waiting = true;
+      error = null;
+    });
+    final answer = await whileBusy(
+      () => widget.calls.securityKeyWithPin(pin, remember, lastTry),
+    );
+    await _after(answer);
+  }
+
   Future<void> _duo() async {
     setState(() {
       working = true;
@@ -319,7 +397,8 @@ class _TwoStepScreenState extends State<TwoStepScreen> {
     });
     final start = await whileBusy(widget.calls.duoStart);
     if (!mounted) return;
-    if (!start.ok || start.body['step'] == 'done') return _after(start);
+    // A sign-in that went through without it: where it got to.
+    if (!start.ok || start.body['step'] is String) return _after(start);
     setState(() => waiting = true);
     final link = await widget.calls.duoBrowse(start.body['url'] as String);
     if (!mounted) return;
@@ -343,6 +422,10 @@ class _TwoStepScreenState extends State<TwoStepScreen> {
   }
 
   String _subtitle() => switch (method) {
+    Method.securityKey when pinAsked != null =>
+      keyHere == 'phone'
+          ? 'Enter your security key\'s PIN, then hold the key to the back of your phone again, or keep it plugged in.'
+          : 'Enter your security key\'s PIN, then touch the key when it blinks.',
     Method.securityKey =>
       keyHere == null ? 'Use your security key.' : _keyWords(keyHere),
     Method.duo => 'Approve this sign-in with Duo, in your browser.',
@@ -402,6 +485,54 @@ class _TwoStepScreenState extends State<TwoStepScreen> {
     ];
   }
 
+  /// The PIN's field, once a key asks for it, with its tries left and, on
+  /// the last one, the warning and "Use the last try".
+  List<Widget> _pinField(BuildContext context) {
+    final left = pinAsked?['left'] as int?;
+    return [
+      TextField(
+        key: const ValueKey('security-key-pin'),
+        controller: keyPin,
+        enabled: !working,
+        autofocus: true,
+        obscureText: true,
+        keyboardType: TextInputType.visiblePassword,
+        autocorrect: false,
+        enableSuggestions: false,
+        textCapitalization: TextCapitalization.none,
+        onSubmitted: (_) => _securityKeyWithPin(),
+        decoration: InputDecoration(
+          labelText: 'Security key PIN',
+          helperText: left == null ? null : _triesLeft(left),
+          errorText: error,
+          errorMaxLines: 4,
+        ),
+      ),
+      if (left == 1) ...[
+        const SizedBox(height: 12),
+        Text(
+          lastTryWarning,
+          style: TextStyle(color: Theme.of(context).colorScheme.error),
+        ),
+        CheckboxListTile(
+          value: useLastTry,
+          onChanged: working
+              ? null
+              : (v) => setState(() => useLastTry = v ?? false),
+          title: const Text('Use the last try'),
+          controlAffinity: ListTileControlAffinity.leading,
+          contentPadding: EdgeInsets.zero,
+        ),
+      ],
+      const SizedBox(height: 16),
+      WorkingButton(
+        label: 'Continue',
+        working: working,
+        onPressed: _securityKeyWithPin,
+      ),
+    ];
+  }
+
   List<Widget> _body(BuildContext context) => switch (method) {
     Method.securityKey when keyHere == null => [
       Text(
@@ -410,6 +541,7 @@ class _TwoStepScreenState extends State<TwoStepScreen> {
         style: TextStyle(color: Theme.of(context).colorScheme.error),
       ),
     ],
+    Method.securityKey when pinAsked != null => _pinField(context),
     Method.securityKey => [
       WorkingButton(
         label: 'Use security key',
