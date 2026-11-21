@@ -210,6 +210,22 @@ void main() {
   );
 
   testWidgets(
+    'the Flatpak says why it can\'t use a security key, in the core\'s words',
+    (tester) async {
+      const why =
+          'PassBundle from Flatpak can\'t reach security keys. Use another way to sign in, or install PassBundle\'s .deb or .rpm.';
+      await show(tester, {
+        'providers': [7],
+        'securityKey': null,
+        'securityKeyWhyNot': why,
+      });
+      expect(find.text(why), findsOneWidget);
+      expect(find.text(notHere), findsNothing);
+      expect(find.text('Use security key'), findsNothing);
+    },
+  );
+
+  testWidgets(
     'a device that can\'t use a security key says so, and offers the other ways',
     (tester) async {
       await show(tester, {

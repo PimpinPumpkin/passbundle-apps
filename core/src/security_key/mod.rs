@@ -60,13 +60,41 @@ pub fn here() -> Option<&'static str> {
         // to an Apple developer account and the server's own domain
         // (Associated Domains), which PassBundle doesn't have yet.
         None
+    } else if in_flatpak() {
+        None
     } else {
         Some("usb")
     }
 }
 
+/// Why this device can't use a security key, where `here` says it can't,
+/// for the app to show in place of the key's button.
+pub fn why_not_here() -> Option<&'static str> {
+    match here() {
+        Some(_) => None,
+        None if in_flatpak() => Some(NOT_IN_FLATPAK),
+        None => Some(NOT_HERE),
+    }
+}
+
 pub const NOT_HERE: &str =
     "This device can't use a security key with PassBundle yet. Use another way to sign in, or the web vault.";
+
+/// PassBundle's Flatpak sees no security keys: reaching them would take
+/// every device (app/linux/flatpak/com.passbundle.app.yml), so it says so
+/// rather than waiting for a key it can't see.
+pub const NOT_IN_FLATPAK: &str =
+    "PassBundle from Flatpak can't reach security keys. Use another way to sign in, or install PassBundle's .deb or .rpm.";
+
+/// Whether this is PassBundle's Flatpak: Flatpak puts this file in every
+/// sandbox (as the updater checks, updates/package.rs).
+fn in_flatpak() -> bool {
+    cfg!(target_os = "linux") && flatpak_info_at(std::path::Path::new("/.flatpak-info"))
+}
+
+fn flatpak_info_at(path: &std::path::Path) -> bool {
+    path.is_file()
+}
 
 /// Whether a HID report descriptor names the FIDO Alliance's usage page
 /// (a Usage Page item, 0x05 or 0x06, of 0xF1D0): a security key.
@@ -139,6 +167,10 @@ fn ask_here(request: &SecurityKeyRequest, pin: Option<&Pin>, wait: &Wait) -> Res
     #[cfg(target_os = "macos")]
     use hid_mac::{devices, Device};
 
+    #[cfg(target_os = "linux")]
+    if in_flatpak() {
+        return Err(crate::Error::TwoStep(NOT_IN_FLATPAK));
+    }
     let key = request.key_request();
     loop {
         let found = devices();
@@ -203,6 +235,26 @@ fn ask_here(_request: &SecurityKeyRequest, _pin: Option<&Pin>, _wait: &Wait) -> 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn flatpak_is_known_by_the_file_it_puts_in_every_sandbox() {
+        let dir = std::env::temp_dir().join(format!("pb-flatpak-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let info = dir.join(".flatpak-info");
+        assert!(!super::flatpak_info_at(&info));
+        std::fs::write(&info, "[Application]\nname=com.passbundle.app\n").unwrap();
+        assert!(super::flatpak_info_at(&info));
+        // A folder by that name isn't Flatpak's file.
+        let folder = dir.join("folder");
+        std::fs::create_dir_all(folder.join(".flatpak-info")).unwrap();
+        assert!(!super::flatpak_info_at(&folder.join(".flatpak-info")));
+        drop(std::fs::remove_dir_all(&dir));
+    }
+
+    #[test]
+    fn a_device_that_reaches_keys_gives_no_reason_and_one_that_cant_gives_one() {
+        assert_eq!(super::here().is_some(), super::why_not_here().is_none());
+    }
+
     use super::*;
 
     #[test]

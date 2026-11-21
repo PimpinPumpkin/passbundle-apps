@@ -213,6 +213,11 @@ class TwoStepScreen extends StatefulWidget {
 class _TwoStepScreenState extends State<TwoStepScreen> {
   late final offered = methodsOffered(widget.offer);
   late final String? keyHere = widget.offer['securityKey'] as String?;
+
+  /// Why this device can't use a security key, as the core says it (the
+  /// Flatpak can't reach them, say), or the words for a device that can't yet.
+  late final String keyNotHere =
+      widget.offer['securityKeyWhyNot'] as String? ?? notHere;
   late Method method = firstMethod(widget.offer);
   final code = TextEditingController();
 
@@ -536,7 +541,7 @@ class _TwoStepScreenState extends State<TwoStepScreen> {
   List<Widget> _body(BuildContext context) => switch (method) {
     Method.securityKey when keyHere == null => [
       Text(
-        notHere,
+        keyNotHere,
         textAlign: TextAlign.center,
         style: TextStyle(color: Theme.of(context).colorScheme.error),
       ),

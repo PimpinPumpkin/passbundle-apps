@@ -354,6 +354,9 @@ fn step(result: crate::Result<Step>) -> Value {
             "yubikeyNfc": offer.yubikey_nfc,
             // How this device reaches a security key, or null where it can't.
             "securityKey": crate::security_key::here(),
+            // And why not, where it can't: the app shows it in place of the
+            // key's button.
+            "securityKeyWhyNot": crate::security_key::why_not_here(),
         }),
         Ok(Step::NewDevice(check)) => json!({
             "ok": true,
