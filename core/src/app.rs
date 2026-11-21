@@ -38,6 +38,7 @@ use crate::vault::{Item, ItemDraft, Sync, Vault};
 mod bulk;
 mod fill_plan;
 mod pin;
+mod recovery;
 pub use bulk::{Bulk, Outcome, Plan, Skip};
 mod files;
 pub use files::{attach, too_large, Adding, Attached, FileUse, Phase, Progress, Reach, MAX_FILE};
@@ -262,6 +263,10 @@ pub struct App {
     /// say where it goes (app/transfer.rs). Forgotten, and its secrets
     /// wiped, when it's saved or given up, or the vault locks.
     pending_import: Option<crate::import::Parsed>,
+    /// This unlock (or sign-in) had its try at account recovery
+    /// (app/recovery.rs): one per unlock, whatever happened. Forgotten when
+    /// the vault locks, and at each sign-in.
+    recovery_tried: bool,
 }
 
 /// Importing from the browsers, when an organization keeps items out of
@@ -407,6 +412,7 @@ impl App {
             opened_with_pin: false,
             export_confirmed: None,
             pending_import: None,
+            recovery_tried: false,
         }
     }
 
@@ -1147,6 +1153,8 @@ impl App {
         self.store.save_settings(settings)?;
         keep_refresh_token(&*self.secrets, &self.store, settings, &session);
         self.session = Some(session);
+        // Signing in is an unlock too: account recovery gets its try.
+        self.recovery_tried = false;
         self.sync()?;
         self.autolock = AutoLock::new(Instant::now(), SystemTime::now());
         Ok(Step::Done)
@@ -1788,6 +1796,7 @@ impl App {
         self.opened_with_pin = false;
         self.export_confirmed = None;
         self.pending_import = None;
+        self.recovery_tried = false;
     }
 
     /// Forgets the vault and the session on this device, unlocking with

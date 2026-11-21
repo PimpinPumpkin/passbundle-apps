@@ -1467,6 +1467,48 @@ pub unsafe extern "C" fn pb_sync(account: *const c_char) -> *mut c_char {
     })
 }
 
+/// Account recovery at unlock (app/recovery.rs; DESIGN.md in the meta repo,
+/// "Enrolling at unlock", "Our apps"), which the app calls once the unlock's
+/// own sync is done: `{ok, tried}`, each organization tried with whether it
+/// was `enrolled`, and `why` not. Nothing is for the screens to show.
+///
+/// The pin is the organization key fingerprint an administrator set. On a
+/// phone, only the app's own Kotlin or Swift can read it (the MDM's managed
+/// configuration), so it's `pin` as the app hands it on; on a computer the
+/// core reads its own (managed.rs) and `pin` is never looked at.
+///
+/// # Safety
+/// `account` and `pin` are each null or a NUL-terminated UTF-8 string,
+/// valid for the call.
+#[no_mangle]
+pub unsafe extern "C" fn pb_recovery_at_unlock(
+    account: *const c_char,
+    pin: *const c_char,
+) -> *mut c_char {
+    let account = text(account);
+    #[cfg(phone)]
+    let pin = Some(text(pin)).filter(|pin| !pin.is_empty());
+    #[cfg(not(phone))]
+    let pin = {
+        let _ = pin;
+        crate::managed::organization_key()
+    };
+    with_app_waiting(&account, move |app| {
+        let tried: Vec<Value> = app
+            .recovery_at_unlock(pin.as_deref())
+            .into_iter()
+            .map(|t| {
+                json!({
+                    "organization": t.organization_id,
+                    "enrolled": t.outcome == crate::recovery::Outcome::Enrolled,
+                    "why": t.outcome.why(),
+                })
+            })
+            .collect();
+        json!({ "ok": true, "tried": tried })
+    })
+}
+
 /// "Not now", to either nudge about two-step login (two_step_nudge.rs): the
 /// server hides both for 90 days, on every device. `{ok}`.
 ///

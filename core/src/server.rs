@@ -1626,6 +1626,46 @@ impl Server {
         .map(|_| ())
     }
 
+    /// An organization's public key as the server serves it to its members
+    /// (`GET /api/organizations/<id>/keys`, which upstream's enrollment
+    /// asks): `{publicKey}`, SPKI in base64. Account recovery at unlock takes
+    /// it only if it's the pinned one (recovery.rs).
+    pub fn organization_keys(&self, session: &mut Session, organization_id: &str) -> Result<Value> {
+        self.call(
+            session,
+            "GET",
+            &format!("/api/organizations/{}/keys", path_id(organization_id)?),
+            None,
+        )
+    }
+
+    /// Enrolls the person in an organization's account recovery with their
+    /// user key wrapped to its pinned public key (recovery.rs): upstream's
+    /// `PUT /api/organizations/<id>/users/<user id>/reset-password-enrollment`
+    /// with `resetPasswordKey` alone, which passbundle-server takes without
+    /// the master password from a confirmed member who isn't enrolled yet
+    /// in an organization that enrolls everyone automatically (DESIGN.md in
+    /// the meta repo, "Enrolling at unlock").
+    pub fn enroll_in_recovery(
+        &self,
+        session: &mut Session,
+        organization_id: &str,
+        user_id: &str,
+        wrapped_user_key: &EncString,
+    ) -> Result<()> {
+        self.call(
+            session,
+            "PUT",
+            &format!(
+                "/api/organizations/{}/users/{}/reset-password-enrollment",
+                path_id(organization_id)?,
+                path_id(user_id)?
+            ),
+            Some(json!({ "resetPasswordKey": wrapped_user_key.to_string() })),
+        )
+        .map(|_| ())
+    }
+
     /// The whole vault, as the server sends it, and its text to keep (still encrypted).
     pub fn sync(&self, session: &mut Session) -> Result<(Sync, String)> {
         let body = self.call(session, "GET", "/api/sync?excludeDomains=true", None)?;

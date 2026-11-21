@@ -36,6 +36,7 @@ pub mod pin;
 pub mod places;
 pub mod plans;
 pub mod push;
+pub mod recovery;
 pub mod restricted_types;
 pub mod secrets;
 pub mod security_key;
