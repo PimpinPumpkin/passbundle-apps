@@ -1,11 +1,20 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- What an organization's MDM can set for the app (Android's managed
      configurations): the server, which the app then uses and shows instead
-     of asking (docs/core.md, "Servers"). -->
+     of asking (docs/core.md, "Servers"), and the install command's
+     organization key fingerprint, the one key the app enrolls people's
+     account recovery to at unlock (DESIGN.md in the meta repo, "Enrolling
+     at unlock", "Our apps"). Only the MDM (the device's or work profile's
+     owner, or an app it lets manage configurations) can set them. -->
 <restrictions xmlns:android="http://schemas.android.com/apk/res/android">
     <restriction
         android:key="server_url"
         android:restrictionType="string"
         android:title="@string/server_url_title"
         android:description="@string/server_url_description" />
+    <restriction
+        android:key="org_key_fingerprint"
+        android:restrictionType="string"
+        android:title="@string/org_key_fingerprint_title"
+        android:description="@string/org_key_fingerprint_description" />
 </restrictions>

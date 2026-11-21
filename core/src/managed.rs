@@ -1,20 +1,33 @@
 //! What an organization set for the app by policy, where only an
 //! administrator can write (docs/core.md, "Servers"): the server, which the
-//! RMM or MDM install sets for the desktop agent too. On Windows it's the
-//! machine's policy key (`HKLM\SOFTWARE\Policies\<Name>\Agent`, `ServerUrl`),
-//! which Install-PassBundle.ps1 writes; on macOS the managed preferences an
-//! MDM profile sets (`com.<domain>.agent`, which make-profile.sh writes); on
-//! Linux a file only root can write (`/etc/passbundle/policy.json`,
-//! `ServerUrl`), which the Linux install script writes. On Android the app's
-//! managed configuration, which an MDM sets, is read by the app itself.
-//! Nothing is read from where a person, or something running as them, could
-//! write, so nobody can point the app at another server this way.
+//! RMM or MDM install sets for the desktop agent too, and the install
+//! command's organization key fingerprint, the one key account recovery at
+//! unlock enrolls to (recovery.rs; DESIGN.md in the meta repo, "Enrolling at
+//! unlock", "Our apps"). On Windows it's the machine's policy key
+//! (`HKLM\SOFTWARE\Policies\<Name>\Agent`, `ServerUrl` and
+//! `OrgKeyFingerprint`), which Install-PassBundle.ps1 writes and only
+//! administrators and SYSTEM can change; on macOS the managed preferences
+//! an MDM profile sets (`com.<domain>.agent`, which make-profile.sh writes),
+//! which macOS keeps in `/Library/Managed Preferences` as root; on Linux a
+//! file only root can write (`/etc/passbundle/policy.json`, the same two
+//! names), which the Linux install script writes. On Android and iOS the
+//! app's managed configuration, which an MDM sets, is read by the app's own
+//! Kotlin or Swift. Nothing is read from where a person, or something
+//! running as them, could write, so nobody can point the app at another
+//! server, or account recovery at another key, this way.
 
 /// The server the organization set, if any.
 pub fn server() -> Option<String> {
-    os::server()
+    os::value("ServerUrl")
         .map(|s| s.trim().trim_end_matches('/').to_owned())
         .filter(|s| !s.is_empty())
+}
+
+/// The organization key fingerprint an administrator set (the install
+/// command's `-OrgKey`), as it's written: `recovery::pin` says whether it's
+/// one.
+pub fn organization_key() -> Option<String> {
+    os::value("OrgKeyFingerprint")
 }
 
 #[cfg(windows)]
@@ -25,9 +38,9 @@ mod os {
         text.encode_utf16().chain(std::iter::once(0)).collect()
     }
 
-    pub fn server() -> Option<String> {
+    pub fn value(name: &str) -> Option<String> {
         let key = wide(&format!(r"SOFTWARE\Policies\{}\Agent", crate::brand::NAME));
-        let value = wide("ServerUrl");
+        let value = wide(name);
         let mut buffer = vec![0u16; 2048];
         let mut bytes = (buffer.len() * 2) as u32;
         // SAFETY: the key and value names are NUL-terminated, and the call
@@ -53,7 +66,7 @@ mod os {
 
 #[cfg(target_os = "macos")]
 mod os {
-    pub fn server() -> Option<String> {
+    pub fn value(name: &str) -> Option<String> {
         let domain: Vec<&str> = crate::brand::DOMAIN.rsplit('.').collect();
         let path = format!(
             "/Library/Managed Preferences/{}.agent.plist",
@@ -62,7 +75,7 @@ mod os {
         let plist::Value::Dictionary(values) = plist::Value::from_file(path).ok()? else {
             return None;
         };
-        values.get("ServerUrl")?.as_string().map(str::to_owned)
+        values.get(name)?.as_string().map(str::to_owned)
     }
 }
 
@@ -70,7 +83,7 @@ mod os {
 mod os {
     use std::os::unix::fs::MetadataExt;
 
-    pub fn server() -> Option<String> {
+    pub fn value(name: &str) -> Option<String> {
         let path = format!("/etc/{}/policy.json", crate::brand::NAME.to_lowercase());
         // Only root's, and only root can change it.
         let meta = std::fs::metadata(&path).ok()?;
@@ -79,13 +92,13 @@ mod os {
         }
         let policy: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
-        policy["ServerUrl"].as_str().map(str::to_owned)
+        policy[name].as_str().map(str::to_owned)
     }
 }
 
 #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 mod os {
-    pub fn server() -> Option<String> {
+    pub fn value(_name: &str) -> Option<String> {
         None
     }
 }
@@ -96,5 +109,9 @@ mod tests {
     fn reads_without_failing() {
         // CI's machines have no policy; a managed one would show here.
         eprintln!("the managed server: {:?}", super::server());
+        eprintln!(
+            "an organization key fingerprint set: {}",
+            super::organization_key().is_some()
+        );
     }
 }

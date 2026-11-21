@@ -53,6 +53,13 @@ import UserNotifications
         let managed = UserDefaults.standard.dictionary(forKey: "com.apple.configuration.managed")
         let server = (managed?["server_url"] as? String)?.trimmingCharacters(in: .whitespaces)
         result(server?.isEmpty == false ? server : nil)
+      // The organization key fingerprint the MDM set next to it
+      // (`org_key_fingerprint`), for account recovery at unlock, as it is:
+      // the core decides whether it's one (core.dart, recoveryAtUnlock).
+      case "managedOrgKey":
+        let managed = UserDefaults.standard.dictionary(forKey: "com.apple.configuration.managed")
+        let pin = managed?["org_key_fingerprint"] as? String
+        result(pin?.isEmpty == false ? pin : nil)
       // Copying straight from the core to the pasteboard: the value never passes through Dart.
       // Each call about an account names it (core.dart, Core.account).
       case "copy":

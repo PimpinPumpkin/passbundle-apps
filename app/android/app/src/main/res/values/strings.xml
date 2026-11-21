@@ -2,4 +2,6 @@
 <resources>
     <string name="server_url_title">Server</string>
     <string name="server_url_description">The organization\'s PassBundle server, such as https://vault.example.com. People sign in to it without typing it.</string>
+    <string name="org_key_fingerprint_title">Organization key fingerprint</string>
+    <string name="org_key_fingerprint_description">The install command\'s -OrgKey value, 43 letters, digits, - or _. Where the organization enrolls everyone in account recovery, PassBundle enrolls people only to this key.</string>
 </resources>

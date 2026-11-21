@@ -326,7 +326,12 @@ class VaultScreenState extends State<VaultScreen> {
     // Read now, before the first sync has the core.
     final offer = widget.offerBiometric && mayOfferBiometric(widget.core);
     WidgetsBinding.instance.addPostFrameCallback((_) async {
-      if (widget.syncOnOpen) sync();
+      // The unlock's sync, then account recovery where an organization
+      // enrolls everyone (core.dart, recoveryAtUnlock), for this account.
+      if (widget.syncOnOpen) {
+        final account = Core.account;
+        unawaited(sync().then((_) => Core.recoveryAtUnlock(account)));
+      }
       updateFound();
       // Expiration reminders, each said once (and on a computer, the
       // desktop agent's tray told how many); and opened from a phone's
