@@ -272,6 +272,33 @@ pub fn cards_and_identities<'caller>(
         .resolve::<ThrowRuntimeExAndDefault>()
 }
 
+/// Which of an item's values its fill rules put into which of a web page's
+/// fields, and which fields they and the account's "Never fill this field
+/// on this site" list keep empty, as JSON (ffi.rs, `fill_rules`;
+/// docs/phones.md, "Autofill"). The page comes as JSON too: its scheme, its
+/// host, and its fields as the browser describes them. Names of values
+/// only, never a value: those come one at a time from `value`.
+#[cfg(feature = "ffi")]
+#[jni_mangle("com.passbundle.app.Core")]
+pub fn fill_rules<'caller>(
+    mut unowned_env: EnvUnowned<'caller>,
+    _class: JClass<'caller>,
+    account: JString<'caller>,
+    id: JString<'caller>,
+    page: JString<'caller>,
+) -> jstring {
+    unowned_env
+        .with_env(|env| -> JniResult<jstring> {
+            let answer = crate::ffi::fill_rules(
+                &account.try_to_string(env)?,
+                &id.try_to_string(env)?,
+                &page.try_to_string(env)?,
+            );
+            Ok(env.new_string(answer.to_string())?.into_raw())
+        })
+        .resolve::<ThrowRuntimeExAndDefault>()
+}
+
 /// What autofill needs before it offers to save a card or an address
 /// someone typed, from every unlocked account, as JSON: whether one may be
 /// made there, and what tells a new one from one they have, never a whole

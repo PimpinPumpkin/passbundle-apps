@@ -145,6 +145,17 @@ object Core {
     @JvmStatic external fun cardsAndIdentities(): String?
 
     /**
+     * Which of an item's values its fill rules put into which of a web
+     * page's fields, and which fields they and its account's "Never fill
+     * this field on this site" list keep empty (FillRules.kt), as JSON:
+     * `fills` (each field by its place in the page's fields, the value by
+     * its name for [value], and how the field takes it) and `never`; never a
+     * value. The page is JSON too (FillRules.json). `locked` while that
+     * account is locked or busy, or for an item it hasn't in use.
+     */
+    @JvmStatic external fun fillRules(account: String, id: String, page: String): String?
+
+    /**
      * What autofill needs before Android offers to save a card or an
      * address someone typed (Saving.kt), from every unlocked account, as
      * JSON: `card` and `identity`, each with whether one may be made in any

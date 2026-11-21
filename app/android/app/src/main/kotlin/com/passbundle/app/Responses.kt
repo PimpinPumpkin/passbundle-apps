@@ -452,12 +452,42 @@ object Responses {
     fun codeSubtitle(username: String?, from: String?, account: String?): String =
         listOfNotNull("One-time code", username, from, account).joinToString(" · ")
 
+    /** What an item's fill rules decide on a page (Core.fillRules): the values they fill, and the fields they keep empty. */
+    private class Ruled(val fills: List<FillRules.Fill>, val never: List<Int>)
+
+    /**
+     * What the item's fill rules decide here (FillRules.kt): nothing on a
+     * screen that isn't a web page in a browser PassBundle trusts, since
+     * rules are for websites; null when the core can't say on a page that
+     * has them to apply (locked, or busy), or the page didn't come through
+     * whole, so nothing fills rather than a field they keep empty.
+     */
+    private fun ruled(context: Context, fields: Fields, account: String, item: String): Ruled? {
+        if (fields.pageLost) return null
+        val page = fields.page ?: return Ruled(emptyList(), emptyList())
+        val host = Browsers.domain(fields.webDomain)?.takeIf { Browsers.trusts(context, fields.packageName) }
+            ?: return Ruled(emptyList(), emptyList())
+        return runCatching {
+            val answer = JSONObject(Core.fillRules(account, item, FillRules.json(page, host)) ?: "{}")
+            val fills = answer.getJSONArray("fills")
+            val never = answer.getJSONArray("never")
+            Ruled(
+                (0 until fills.length()).map { i ->
+                    fills.getJSONObject(i).let { FillRules.Fill(it.getInt("field"), it.getString("what"), it.getString("take")) }
+                },
+                (0 until never.length()).map { never.getInt(it) },
+            )
+        }.getOrNull()
+    }
+
     /**
      * One item's values for the fields its kind fills, from its account,
      * taken from the core only now that it was picked: a login's username
      * and password (and its current one-time code, when the screen asks for
-     * one), a code alone, or a card's or an identity's parts. Null when
-     * there's nothing to fill.
+     * one), a code alone, or a card's or an identity's parts. On a web page,
+     * the item's fill rules come first (`ruled`): the fields they keep
+     * empty stay so, and Roles.kt finds the fields for the rest without
+     * them; what they fill is theirs. Null when there's nothing to fill.
      */
     fun filled(context: Context, fields: Fields, account: String, item: String, kind: Kind): Dataset? {
         fun text(what: String): String? {
@@ -471,24 +501,53 @@ object Responses {
         @Suppress("DEPRECATION")
         val dataset = Dataset.Builder(presentation(context, "PassBundle", null))
         var any = false
+        // The fields the rules decided: kept empty, or filled by them.
+        val taken = HashSet<AutofillId>()
         fun set(id: AutofillId, value: AutofillValue) {
             @Suppress("DEPRECATION")
             dataset.setValue(id, value)
             any = true
         }
+        val ruled = ruled(context, fields, account, item) ?: return null
+        val page = fields.page
+        // Each value once, however many fields take it.
+        val values = HashMap<String, String?>()
+        val part = { what: String -> values.getOrPut(what) { text(what) } }
+        if (page != null) {
+            ruled.never.mapNotNullTo(taken) { page.fields.getOrNull(it)?.let { f -> fields.described.getOrNull(f.at)?.id } }
+            for (fill in ruled.fills) {
+                val field = page.fields.getOrNull(fill.field) ?: continue
+                val id = fields.described.getOrNull(field.at)?.id ?: continue
+                if (id in taken) continue
+                val value = part(fill.what) ?: continue
+                val options = fields.described[field.at].options
+                val filled =
+                    if (options != null) {
+                        FillRules.option(fill.take, options, value)?.let(AutofillValue::forList)
+                    } else {
+                        FillRules.text(fill.take, value)?.let(AutofillValue::forText)
+                    }
+                // A value the field doesn't take leaves it to the rest, as the extension does.
+                filled?.let {
+                    set(id, it)
+                    taken += id
+                }
+            }
+        }
+        val screen =
+            if (page != null && ruled.never.isNotEmpty()) FillRules.left(fields.described, page, ruled.never) else fields.screen
+        fun free(id: AutofillId?) = id?.takeIf { it !in taken }
         when (kind) {
             Kind.LOGIN, Kind.CODE -> {
                 if (kind == Kind.LOGIN) {
-                    fields.username?.let { id -> text("username")?.let { set(id, AutofillValue.forText(it)) } }
-                    fields.password?.let { id -> text("password")?.let { set(id, AutofillValue.forText(it)) } }
+                    free(screen.username)?.let { id -> part("username")?.let { set(id, AutofillValue.forText(it)) } }
+                    free(screen.password)?.let { id -> part("password")?.let { set(id, AutofillValue.forText(it)) } }
                 }
-                fields.code?.let { id -> text("totp")?.let { set(id, AutofillValue.forText(it)) } }
+                free(screen.code)?.let { id -> part("totp")?.let { set(id, AutofillValue.forText(it)) } }
             }
             Kind.CARD, Kind.IDENTITY -> {
-                // Each part once, however many fields take it.
-                val parts = HashMap<String, String?>()
-                val part = { what: String -> parts.getOrPut(what) { text(what) } }
-                for (found in fields.of(kind)) {
+                for (found in screen.of(kind)) {
+                    if (found.id in taken) continue
                     val options = found.options
                     if (options != null) {
                         Values.option(found.role, options, part)?.let { set(found.id, AutofillValue.forList(it)) }

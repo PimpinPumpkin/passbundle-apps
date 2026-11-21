@@ -36,6 +36,7 @@ use crate::two_step::{self, Offer};
 use crate::vault::{Item, ItemDraft, Sync, Vault};
 
 mod bulk;
+mod fill_plan;
 mod pin;
 mod recovery;
 pub use bulk::{Bulk, Outcome, Plan, Skip};
