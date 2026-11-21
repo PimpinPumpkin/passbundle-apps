@@ -381,6 +381,13 @@ fn http(source: &str) -> ureq::Agent {
         .https_only(!allow_http(source))
         // Only what's at the address itself: a redirect could lead anywhere.
         .max_redirects(0)
+        // Each request on a connection of its own, never one kept from the
+        // request before. A server may end a connection once it has answered
+        // (an HTTP/1.0 server does, without saying so, and any server may
+        // end a kept one just as the next request comes), and a request sent
+        // on a connection that has ended fails. The task makes at most three
+        // requests a run, so a new connection for each costs nothing.
+        .max_idle_connections(0)
         .http_status_as_error(false)
         .user_agent("PassBundle agent")
         .build()
