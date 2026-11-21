@@ -24,6 +24,13 @@
 // And a session that began from another device's approval
 // (device_sign_in.dart): Settings says why it can't approve a "Sign in with
 // a device" request, while a new device's check still shows there.
+//
+// And where a "Sign in with a device" request comes from, from the server's
+// location database: in the prompt and Settings, with the database's credit
+// beside it; "Unknown location", without a credit, for an address it can't
+// place; and the address alone, as before, from a server without one. A new
+// device's check from a server without one shows the address alone too, with
+// no location line.
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -54,7 +61,23 @@ Map<String, dynamic> waiting(
   'secondsLeft': left,
 };
 
-/// A sign-in on a new device, as the core lists it for the approving side.
+/// Who the server's location database is from, as the core passes it on.
+const dbIp = {'name': 'IP Geolocation by DB-IP', 'url': 'https://db-ip.com'};
+
+/// A request from a server with a location database: where it is, or null
+/// for an address the database can't place, and the database's credit.
+Map<String, dynamic> located(
+  String id, {
+  String? location = 'Berlin, Germany',
+  String ip = '203.0.113.7',
+}) => {
+  ...waiting(id, ip: ip),
+  'location': location,
+  'locationSource': dbIp,
+};
+
+/// A sign-in on a new device, as the core lists it for the approving side:
+/// from a server with a location database, unless [database] is false.
 Map<String, dynamic> checkWaiting(
   String id, {
   String? location = 'Berlin, Germany',
@@ -62,19 +85,17 @@ Map<String, dynamic> checkWaiting(
   int age = 20,
   int left = 580,
   String? emailAfter,
+  bool database = true,
 }) => {
   'id': id,
   'device': 'Web vault in Firefox',
   'deviceType': 10,
   'ip': ip,
-  'location': location,
+  'location': database ? location : null,
   'ageSeconds': age,
   'secondsLeft': left,
   'emailAfter': emailAfter,
-  'locationSource': {
-    'name': 'IP Geolocation by DB-IP',
-    'url': 'https://db-ip.com',
-  },
+  'locationSource': database ? dbIp : null,
 };
 
 class StandIn implements SignInRequestSource {
@@ -488,7 +509,12 @@ void main() {
         ),
         findsOneWidget,
       );
+      // A server without a location database: the address alone, as before.
+      expect(find.text('Address'), findsOneWidget);
       expect(find.text('203.0.113.7'), findsOneWidget);
+      expect(find.text('Where'), findsNothing);
+      expect(find.textContaining('Unknown location'), findsNothing);
+      expect(find.byKey(const ValueKey('location-source')), findsNothing);
       expect(find.text('Just now'), findsOneWidget);
       expect(find.text('14 minutes'), findsOneWidget);
 
@@ -780,4 +806,176 @@ void main() {
       },
     );
   }
+
+  testWidgets(
+    'a request shows where it comes from, with the location database\'s credit beside it',
+    (tester) async {
+      final source = StandIn();
+      await review(tester, source, located('r1'));
+      expect(find.text('Where'), findsOneWidget);
+      expect(find.text('Berlin, Germany (203.0.113.7)'), findsOneWidget);
+      // The address is in that line, not on its own.
+      expect(find.text('Address'), findsNothing);
+      expect(
+        find.descendant(
+          of: find.byKey(const ValueKey('location-source')),
+          matching: find.text('IP Geolocation by DB-IP'),
+        ),
+        findsOneWidget,
+      );
+      // The phrase still comes first, and approving still asks to confirm.
+      expect(
+        tester.getTopLeft(find.byKey(const ValueKey('sign-in-fingerprint'))).dy,
+        lessThan(tester.getTopLeft(find.text('Where')).dy),
+      );
+      await tester.tap(find.text('Approve'));
+      await tester.pumpAndSettle();
+      expect(source.confirms, 1);
+      expect(source.answered, [('r1', phrase, true)]);
+    },
+  );
+
+  testWidgets(
+    'an address the location database can\'t place says Unknown location, without a credit',
+    (tester) async {
+      final source = StandIn();
+      await review(
+        tester,
+        source,
+        located('r1', location: null, ip: '10.0.0.2'),
+      );
+      expect(find.text('Unknown location (10.0.0.2)'), findsOneWidget);
+      expect(find.byKey(const ValueKey('location-source')), findsNothing);
+      // A hint, never a check: it's approved as any other.
+      await tester.tap(find.text('Approve'));
+      await tester.pumpAndSettle();
+      expect(source.answered, [('r1', phrase, true)]);
+    },
+  );
+
+  testWidgets(
+    'Settings lists where each request comes from, with the credit, and the address alone without a location database',
+    (tester) async {
+      final source = StandIn()
+        ..requests = [
+          located('r1'),
+          waiting('r2', deviceId: 'phone', ip: '198.51.100.9'),
+        ];
+      final list = SignInRequests(source)..start();
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: passBundleTheme(Brightness.light),
+          home: Scaffold(
+            body: SingleChildScrollView(
+              child: SignInRequestsSettings(requests: list),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final withPlace = find.byKey(const ValueKey('sign-in-request-r1'));
+      expect(
+        find.descendant(
+          of: withPlace,
+          matching: find.textContaining('Berlin, Germany (203.0.113.7) · '),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(
+          of: withPlace,
+          matching: find.text('IP Geolocation by DB-IP'),
+        ),
+        findsOneWidget,
+      );
+      final plain = find.byKey(const ValueKey('sign-in-request-r2'));
+      expect(
+        find.descendant(
+          of: plain,
+          matching: find.textContaining('198.51.100.9 · '),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(
+          of: plain,
+          matching: find.textContaining('Unknown location'),
+        ),
+        findsNothing,
+      );
+      expect(
+        find.descendant(
+          of: plain,
+          matching: find.text('IP Geolocation by DB-IP'),
+        ),
+        findsNothing,
+      );
+      list.stop();
+    },
+  );
+
+  testWidgets(
+    'a new device\'s check from a server without a location database shows the address alone, with no location line',
+    (tester) async {
+      final source = StandIn();
+      await reviewCheck(tester, source, checkWaiting('c1', database: false));
+      expect(find.text('Address'), findsOneWidget);
+      expect(find.text('203.0.113.7'), findsOneWidget);
+      expect(find.text('Where'), findsNothing);
+      expect(find.textContaining('Unknown location'), findsNothing);
+      expect(find.byKey(const ValueKey('location-source')), findsNothing);
+      // Approving works the same.
+      await tester.enterText(
+        find.byKey(const ValueKey('new-device-check-number')),
+        '47',
+      );
+      await tester.pump();
+      await tester.tap(find.text('Approve'));
+      await tester.pumpAndSettle();
+      expect(source.checksAnswered, [('c1', '47', null)]);
+    },
+  );
+
+  testWidgets(
+    'Settings lists a new device\'s check from a server without a location database by its address alone',
+    (tester) async {
+      final source = StandIn()
+        ..checks = [checkWaiting('c1', database: false)];
+      final list = SignInRequests(source)..start();
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: passBundleTheme(Brightness.light),
+          home: Scaffold(
+            body: SingleChildScrollView(
+              child: SignInRequestsSettings(requests: list),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final row = find.byKey(const ValueKey('new-device-check-c1'));
+      expect(
+        find.descendant(
+          of: row,
+          matching: find.textContaining('New device · 203.0.113.7 · '),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(
+          of: row,
+          matching: find.textContaining('Unknown location'),
+        ),
+        findsNothing,
+      );
+      expect(
+        find.descendant(
+          of: row,
+          matching: find.text('IP Geolocation by DB-IP'),
+        ),
+        findsNothing,
+      );
+      list.stop();
+    },
+  );
 }

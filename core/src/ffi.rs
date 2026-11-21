@@ -4167,12 +4167,14 @@ fn base64url(bytes: &[u8]) -> String {
 
 /// Sign-in requests waiting for this account's answer (docs/core.md,
 /// "Approving a sign-in"), from the server, newest first: `{ok, requests:
-/// [{id, device, ip, fingerprint, ageSeconds, secondsLeft}], checks: [{id,
+/// [{id, device, ip, location, locationSource, fingerprint, ageSeconds,
+/// secondsLeft}], checks: [{id,
 /// device, deviceType, ip, location, ageSeconds, secondsLeft, emailAfter}],
 /// locationSource: {name, url}}`, `checks` being sign-ins on new devices
 /// waiting for approval with the number they show (new_device.rs), and
 /// `locationSource` who the locations are from (null when the server has
-/// none). Only while unlocked; the app asks every few seconds then.
+/// none; each request carries its own). Only while unlocked; the app asks
+/// every few seconds then.
 ///
 /// The server is asked without holding the app, on a thread of the core's
 /// own, so the screens' reads and locking go on meanwhile. What it lists is
@@ -4361,6 +4363,8 @@ fn sign_in_requests(requests: &[crate::device_approval::SignInRequest]) -> Vec<V
                 "deviceType": r.device_type,
                 "device": r.device,
                 "ip": r.ip,
+                "location": r.location,
+                "locationSource": r.location_source.as_ref().map(|s| json!({ "name": s.name, "url": s.url })),
                 "fingerprint": r.fingerprint,
                 "ageSeconds": r.age,
                 "secondsLeft": r.left,

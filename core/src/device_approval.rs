@@ -49,6 +49,14 @@ pub struct SignInRequest {
     pub device: String,
     /// Its address, as the server saw it.
     pub ip: String,
+    /// Roughly where that is ("Berlin, Germany"), from the server's own
+    /// location database (DESIGN.md in the meta repo, "New-device check",
+    /// "Where a sign-in comes from"): None for an address it can't place,
+    /// and from a server without one. A hint for the person, never a check.
+    pub location: Option<String>,
+    /// Who that database is from, to credit beside the location: None from
+    /// a server without one.
+    pub location_source: Option<crate::new_device::LocationSource>,
     /// When it was made: seconds since 1970, by the server's clock.
     pub created: u64,
     /// How old it was, and how long it had left, when the server listed it
@@ -256,6 +264,11 @@ pub fn parse_request(value: &Value, email: &str, server_now: u64) -> Option<Sign
             .as_str()
             .unwrap_or_default()
             .to_owned(),
+        location: value["location"]
+            .as_str()
+            .filter(|l| !l.is_empty())
+            .map(str::to_owned),
+        location_source: crate::new_device::location_source(&value["locationSource"]),
         created,
         age,
         left,
@@ -410,6 +423,53 @@ mod tests {
             1
         );
         assert!(parse_pending(&body, "dana@example.test", made + 15 * 60).is_empty());
+    }
+
+    /// Where a request comes from, from the server's own location database
+    /// (passbundle-server adds `location` and `locationSource` to each
+    /// request): kept for the prompt, with the database's credit, and
+    /// nothing from a server without one.
+    #[test]
+    fn a_request_says_where_it_comes_from_only_when_the_server_knows() {
+        use crate::new_device::LocationSource;
+        let v = vectors();
+        let made = "2026-10-26T12:00:00.000000Z";
+        let now = parse_date(made).unwrap() + 60;
+        let mut located = request_at(&v, made);
+        located["location"] = json!("Fixture City, Germany");
+        located["locationSource"] =
+            json!({ "name": "IP Geolocation by DB-IP", "url": "https://db-ip.com" });
+        let request = parse_request(&located, "dana@example.test", now).unwrap();
+        assert_eq!(request.location.as_deref(), Some("Fixture City, Germany"));
+        assert_eq!(
+            request.location_source,
+            Some(LocationSource {
+                name: "IP Geolocation by DB-IP".into(),
+                url: Some("https://db-ip.com".into()),
+            })
+        );
+        // It goes with the request as its time runs down.
+        assert_eq!(request.after(30).unwrap().location, request.location);
+
+        // An address the database can't place: no location, still the credit.
+        located["location"] = json!(null);
+        let unknown = parse_request(&located, "dana@example.test", now).unwrap();
+        assert_eq!(unknown.location, None);
+        assert!(unknown.location_source.is_some());
+
+        // A credit's address that isn't https isn't kept.
+        located["locationSource"]["url"] = json!("javascript:alert(1)");
+        let unlinked = parse_request(&located, "dana@example.test", now).unwrap();
+        assert_eq!(unlinked.location_source.unwrap().url, None);
+
+        // A server without a location database (or upstream's): nothing,
+        // and the request is otherwise the same.
+        let plain = parse_request(&request_at(&v, made), "dana@example.test", now).unwrap();
+        assert_eq!((plain.location, plain.location_source), (None, None));
+        assert_eq!(
+            (plain.ip, plain.fingerprint),
+            (request.ip, request.fingerprint)
+        );
     }
 
     #[test]

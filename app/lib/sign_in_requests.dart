@@ -17,6 +17,11 @@
 // unlocked one while a vault is shown, and each request is listed,
 // confirmed, and answered for its own account, which the prompt names.
 //
+// Each shows where it comes from, from the server's own location database
+// (DESIGN.md in the meta repo, "New-device check", "Where a sign-in comes
+// from"), with the database's credit beside it; a server without one shows
+// the address alone.
+//
 // A session that began from another device's approval (device_sign_in.dart)
 // approves no "Sign in with a device" request: the server refuses it, so the
 // core lists none for it, and Settings says why.
@@ -48,6 +53,9 @@ class SignInRequest {
       deviceType = json['deviceType'] as String? ?? '',
       device = json['device'] as String? ?? 'A device',
       ip = json['ip'] as String? ?? '',
+      location = json['location'] as String?,
+      sourceName = (json['locationSource'] as Map?)?['name'] as String?,
+      sourceUrl = (json['locationSource'] as Map?)?['url'] as String?,
       fingerprint = json['fingerprint'] as String,
       _age = Duration(seconds: (json['ageSeconds'] as num?)?.toInt() ?? 0),
       _left = Duration(seconds: (json['secondsLeft'] as num?)?.toInt() ?? 0),
@@ -81,6 +89,27 @@ class SignInRequest {
 
   /// Its address, as the server saw it.
   final String ip;
+
+  /// Roughly where it is ("Berlin, Germany"), from the server's location
+  /// database, or null when the database can't place it, or the server has
+  /// none.
+  final String? location;
+
+  /// Who the location is from, to credit beside it, and their address: null
+  /// from a server without a location database.
+  final String? sourceName;
+  final String? sourceUrl;
+
+  /// Whether the server says where it is: it has a location database. A
+  /// server without one shows the address alone, as before.
+  bool get showsWhere => location != null || sourceName != null;
+
+  /// Where it's from, with its address: "Berlin, Germany (203.0.113.7)", or
+  /// "Unknown location (10.0.0.2)" for an address the database can't place.
+  String get where {
+    final place = location ?? 'Unknown location';
+    return ip.isEmpty ? place : '$place ($ip)';
+  }
 
   /// The phrase both devices show.
   final String fingerprint;
@@ -132,7 +161,8 @@ class NewDeviceCheck {
   /// doesn't know.
   final String? location;
 
-  /// Who the location is from, to credit beside it, and their address.
+  /// Who the location is from, to credit beside it, and their address: null
+  /// from a server without a location database.
   final String? sourceName;
   final String? sourceUrl;
 
@@ -143,7 +173,12 @@ class NewDeviceCheck {
   final Duration _left;
   final DateTime _listedAt;
 
-  /// Where it's from, with its address: "Berlin, Germany (203.0.113.7)".
+  /// Whether the server says where it is: it has a location database. A
+  /// server without one shows the address alone, with no location line.
+  bool get showsWhere => location != null || sourceName != null;
+
+  /// Where it's from, with its address: "Berlin, Germany (203.0.113.7)", or
+  /// "Unknown location (10.0.0.2)" for an address the database can't place.
   String get where {
     final place = location ?? 'Unknown location';
     return ip.isEmpty ? place : '$place ($ip)';
@@ -157,6 +192,34 @@ class NewDeviceCheck {
   }
 
   bool get expired => left == Duration.zero;
+}
+
+/// The location database's credit, next to a location shown (DESIGN.md in
+/// the meta repo, "Where a sign-in comes from"): its name, linked to its
+/// address when there is one.
+class LocationCredit extends StatelessWidget {
+  const LocationCredit({super.key, required this.name, this.url});
+
+  final String name;
+  final String? url;
+
+  @override
+  Widget build(BuildContext context) {
+    final url = this.url;
+    return InkWell(
+      onTap: url == null ? null : () => Core.openWebsite(url),
+      child: Text(
+        name,
+        style: TextStyle(
+          color: url == null
+              ? context.colors.muted
+              : Theme.of(context).colorScheme.primary,
+          fontSize: 12,
+          decoration: url == null ? null : TextDecoration.underline,
+        ),
+      ),
+    );
+  }
 }
 
 /// The clock requests count down by (tests set it).
@@ -665,7 +728,6 @@ class _NewDeviceCheckDialogState extends State<NewDeviceCheckDialog> {
       ),
     );
     final credit = c.sourceName;
-    final url = c.sourceUrl;
     return AlertDialog(
       title: const Text('Approve this sign-in?'),
       content: SizedBox(
@@ -681,26 +743,22 @@ class _NewDeviceCheckDialogState extends State<NewDeviceCheckDialog> {
               ),
               const SizedBox(height: 12),
               detail('Device', c.device),
-              detail('Where', c.where),
+              // Where it's from; a server without a location database, the
+              // address alone.
+              if (c.showsWhere)
+                detail('Where', c.where)
+              else if (c.ip.isNotEmpty)
+                detail('Address', c.ip),
               detail('When', askedAgo(c.age)),
               detail('Expires in', timeLeft(c.left)),
               // Who the location is from, credited beside it.
               if (c.location != null && credit != null)
                 Padding(
                   padding: const EdgeInsets.only(top: 6, left: 96),
-                  child: InkWell(
+                  child: LocationCredit(
                     key: const ValueKey('location-source'),
-                    onTap: url == null ? null : () => Core.openWebsite(url),
-                    child: Text(
-                      credit,
-                      style: TextStyle(
-                        color: url == null ? colors.muted : scheme.primary,
-                        fontSize: 12,
-                        decoration: url == null
-                            ? null
-                            : TextDecoration.underline,
-                      ),
-                    ),
+                    name: credit,
+                    url: c.sourceUrl,
                   ),
                 ),
               if (c.emailAfter != null) ...[
@@ -955,7 +1013,21 @@ class _SignInRequestDialogState extends State<SignInRequestDialog> {
               ),
               const SizedBox(height: 12),
               detail('Device', r.device),
-              if (r.ip.isNotEmpty) detail('Address', r.ip),
+              // Where it's from, with the database's credit beside it; a
+              // server without a location database, the address alone.
+              if (r.showsWhere) ...[
+                detail('Where', r.where),
+                if (r.location != null && r.sourceName != null)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 6, left: 96),
+                    child: LocationCredit(
+                      key: const ValueKey('location-source'),
+                      name: r.sourceName!,
+                      url: r.sourceUrl,
+                    ),
+                  ),
+              ] else if (r.ip.isNotEmpty)
+                detail('Address', r.ip),
               detail('Asked', askedAgo(r.age)),
               detail('Expires in', timeLeft(r.left)),
               if (error case final error?) ...[
@@ -1116,6 +1188,20 @@ class _SignInRequestsSettingsState extends State<SignInRequestsSettings> {
     if (mounted) setState(() {});
   }
 
+  /// A list entry's line, with the location database's credit under it when
+  /// it shows a location ([credit] null otherwise).
+  Widget withCredit(String line, String? credit, String? url) {
+    if (credit == null) return Text(line);
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(line),
+        LocationCredit(name: credit, url: url),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final waiting = [
@@ -1153,15 +1239,20 @@ class _SignInRequestsSettingsState extends State<SignInRequestsSettings> {
           ListTile(
             key: ValueKey('new-device-check-${c.id}'),
             title: Text(c.device),
-            subtitle: Text(
+            subtitle: withCredit(
               [
                 // Another account's: which one.
                 if (c.email case final email? when email != widget.email)
                   email,
                 'New device',
-                c.where,
+                if (c.showsWhere)
+                  c.where
+                else if (c.ip.isNotEmpty)
+                  c.ip,
                 askedAgo(c.age),
               ].join(' · '),
+              c.location != null ? c.sourceName : null,
+              c.sourceUrl,
             ),
             trailing: TextButton(
               onPressed: () => reviewNewDeviceCheck(
@@ -1177,15 +1268,20 @@ class _SignInRequestsSettingsState extends State<SignInRequestsSettings> {
           ListTile(
             key: ValueKey('sign-in-request-${r.id}'),
             title: Text(r.device),
-            subtitle: Text(
+            subtitle: withCredit(
               [
                 // Another account's: which one.
                 if (r.email case final email? when email != widget.email)
                   email,
-                if (r.ip.isNotEmpty) r.ip,
+                if (r.showsWhere)
+                  r.where
+                else if (r.ip.isNotEmpty)
+                  r.ip,
                 askedAgo(r.age),
                 'expires in ${timeLeft(r.left).toLowerCase()}',
               ].join(' · '),
+              r.location != null ? r.sourceName : null,
+              r.sourceUrl,
             ),
             trailing: TextButton(
               onPressed: () => reviewSignInRequest(

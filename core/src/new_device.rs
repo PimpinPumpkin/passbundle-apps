@@ -294,11 +294,18 @@ pub fn parse_waiting(body: &Value, fallback_now: u64) -> (Vec<Waiting>, Option<L
         })
         .collect();
     waiting.sort_by_key(|w| std::cmp::Reverse(w.created));
-    let source = text(&body["locationSource"]["name"]).map(|name| LocationSource {
+    (waiting, location_source(&body["locationSource"]))
+}
+
+/// Who the server's location database is from (`locationSource`: its
+/// name, and its address, kept only when it's https), or None from a server
+/// without one. The new-device check's list has it once; each "Sign in with
+/// a device" request has its own (device_approval.rs).
+pub fn location_source(value: &Value) -> Option<LocationSource> {
+    text(&value["name"]).map(|name| LocationSource {
         name,
-        url: text(&body["locationSource"]["url"]).filter(|u| u.starts_with("https://")),
-    });
-    (waiting, source)
+        url: text(&value["url"]).filter(|u| u.starts_with("https://")),
+    })
 }
 
 /// What answering another device's check did.
