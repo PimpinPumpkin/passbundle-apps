@@ -1,0 +1,107 @@
+{
+  "description": "Enrolling in account recovery at unlock in our apps, version 1: DESIGN.md, \"Enrolling at unlock\", \"Our apps\". Made by docs/vectors/make-recovery-at-unlock-v1.mjs with Node's crypto.",
+  "organization": {
+    "id": "8f9a7c1e-3b2d-4e5f-9a8b-7c6d5e4f3a2b",
+    "privateKey": "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDr3e7Eb3dv6uKBottG2npvhdfqWXFvamb46M1y2nQnMx+YOgnlNh4Tqc2kqkzfISUxu6+hNI6+ihJgJkh5l3ZS5YdYvlR3/ZCJyA7S9xMWgPl62lQqKLLnmXNs6imP1ymyEiN9+Fi/8fG7SXbmphDXUjqSESSSbXfvQKJwgD4YBGbVHNkhy3xxengnIyWagvjtvyoJqL6CeM7hqxmmPSXglWxOGkFcdKeKLAB+EFSsWP+xQ9fybW/eb++Bf7zLM0aH4W2aMrAThRyza4LyHgH21L8CI+uwrXN7MQ5hgQljbXlIfA8zM8DDF/Cd7s6ZzU+sY8ITjaSebSal7sqN/sH3AgMBAAECggEAHHkwsz7/jJ+u01Z9IRsLz725GH3Or1QJdT/pWVWc0wSdakuLWUPEsrv7asbyO7dtHYlaRNwq5T6WxEuq0R7jNlOmGKT1XnzaP3/KplYUVFGijF2h7mr2WfYQ1JOaC9a+HlSJO1JJKHbFJ0ZRl7txagTvtCVkpFaZtWS4l1sr48sc5MZSDUu3+dgl7S0F9P3quXLGguIGYEjftqER5DiFcRxycKHaN+is5OwgJNk1tNl252DUq2Nd9ciJKEQKozOLusRU1rS5d1zD4AXkw9Gy1cBVUWnS/k8kzeEU0xsvrZw55hQmpDjtHkdTgQEo953KKuW4FuJycxyUF975dO8VSQKBgQD7cXMZoutOUA3dTvbKc+wJ6IctO7bt95d1c3REqeSpAULXVEQUOHKh93yu6KVcP3MqtGFZ8es8zXLYoqJHQIMcdPGnIR9FZCESCPza8jphVxPXmRx8iRxqYp5wvwtI/zY44J+qKtf++tpalSO1Gk+nG0YfkSUdWKrNXrL0cLUSyQKBgQDwJDfm888BaOpGQA9kMb2xBuKYnn2PbaMDBLv314625u4oSHDaKpifQQNAymzH2qqoQg73d3iw7xgDWVVhgRqwYbntn/fTdRcmxobFEPmwydiF5D5ZQpS8oiVzGBCK9XlLPFqh0jirf0JNGuBLg7SLaAI2PH9tUcug/DGFD4jOvwKBgQCWeE7r8Y4lIE0buix//R0s1MVIMWsIP1mZBM14Zb8b0FBisd/Hxfv7pzIrLbf/W00dKjLz84zVpxDqSXEZeKa9edI/NNgU25XayBwhHkIHjGeoZs0gTaD+nSO5zun+9hNJuEp0OA1oXlAbUxK6RxORqgWt0FtIk44rNlebZnNF2QKBgCiJhKJI793GDx4SvEZmmyXiCqhGwN1QXZ8p0m0xBxda/kLwj5RUcnUXrWvnf9twzzQeCpa9pTMA+WW/U8lk2NODe7ZgNZ6Nen4CL0fe6LduK03WzKuWsLLzEC1Ql6JNc88+ffIpIYXZsqB/c/NrZTPPN+hd6AjVMPGZAOb8S1TTAoGAGL7Jv2KBMmO479fzZ+KAxyhI/KGpMn90S+9eTOeQc/pk8Q+zZk6SYBWe4bxnM/faLi/wRoeIkaZHP5hD4+kkGllKHD3RN66rSDuq+cLqoTV+N34AZPt2xgi2QyYF1psiZqDwPK07pcXbCZqFHWWKppm/Li0ntUjqfGqTHTpzsIo=",
+    "publicKey": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA693uxG93b+rigaLbRtp6b4XX6llxb2pm+OjNctp0JzMfmDoJ5TYeE6nNpKpM3yElMbuvoTSOvooSYCZIeZd2UuWHWL5Ud/2QicgO0vcTFoD5etpUKiiy55lzbOopj9cpshIjffhYv/Hxu0l25qYQ11I6khEkkm1370CicIA+GARm1RzZIct8cXp4JyMlmoL47b8qCai+gnjO4asZpj0l4JVsThpBXHSniiwAfhBUrFj/sUPX8m1v3m/vgX+8yzNGh+FtmjKwE4Ucs2uC8h4B9tS/AiPrsK1zezEOYYEJY215SHwPMzPAwxfwne7Omc1PrGPCE42knm0mpe7Kjf7B9wIDAQAB",
+    "fingerprint": "oVuf7LV49kXJFmWDfHMYBxLkYVlb480rD-rFVH-l1Zg"
+  },
+  "other": {
+    "publicKey": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEArPEA0lNqSj09kq89y7REvSCU10wCPHg0Qy+ifjT2iqxP1H78pNhVeNREgnMjya66mUPeczeFULQilHy2g37TAAxbAPiWu1QTCjjpojOXXU7UOtWNQQwkMGMGPc/7uUkYxjQ2QSXf0J/G8Khfyg9qn3eCGDqZBlZikDho/U7Ri8RTimoFOxk1Hixae1nOKBakfvAn4Y4mgvV30DpdKJD+oTsJhNEpriD39240BJ5PRfblDmNwVL6IqnisYEH18Sf/eWNE4EJzJo8ZZLZ1Ge/RY7q2lcinV8U61A14LJF6qaMqg9nKUYs7hW/yxZaiGAvG4aYHfjDa6NZR9ctHxNlFwwIDAQAB",
+    "fingerprint": "M9pM-4QWGZzspNoI3f8ms_6c77LnCI8nEEZ2f259zG4"
+  },
+  "checks": [
+    {
+      "why": "the organization's key, and its own fingerprint as the pin",
+      "publicKey": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA693uxG93b+rigaLbRtp6b4XX6llxb2pm+OjNctp0JzMfmDoJ5TYeE6nNpKpM3yElMbuvoTSOvooSYCZIeZd2UuWHWL5Ud/2QicgO0vcTFoD5etpUKiiy55lzbOopj9cpshIjffhYv/Hxu0l25qYQ11I6khEkkm1370CicIA+GARm1RzZIct8cXp4JyMlmoL47b8qCai+gnjO4asZpj0l4JVsThpBXHSniiwAfhBUrFj/sUPX8m1v3m/vgX+8yzNGh+FtmjKwE4Ucs2uC8h4B9tS/AiPrsK1zezEOYYEJY215SHwPMzPAwxfwne7Omc1PrGPCE42knm0mpe7Kjf7B9wIDAQAB",
+      "pin": "oVuf7LV49kXJFmWDfHMYBxLkYVlb480rD-rFVH-l1Zg",
+      "takes": true
+    },
+    {
+      "why": "another key (a hacked server's) with the organization's pin",
+      "publicKey": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEArPEA0lNqSj09kq89y7REvSCU10wCPHg0Qy+ifjT2iqxP1H78pNhVeNREgnMjya66mUPeczeFULQilHy2g37TAAxbAPiWu1QTCjjpojOXXU7UOtWNQQwkMGMGPc/7uUkYxjQ2QSXf0J/G8Khfyg9qn3eCGDqZBlZikDho/U7Ri8RTimoFOxk1Hixae1nOKBakfvAn4Y4mgvV30DpdKJD+oTsJhNEpriD39240BJ5PRfblDmNwVL6IqnisYEH18Sf/eWNE4EJzJo8ZZLZ1Ge/RY7q2lcinV8U61A14LJF6qaMqg9nKUYs7hW/yxZaiGAvG4aYHfjDa6NZR9ctHxNlFwwIDAQAB",
+      "pin": "oVuf7LV49kXJFmWDfHMYBxLkYVlb480rD-rFVH-l1Zg",
+      "takes": false
+    },
+    {
+      "why": "the organization's key with the other key's fingerprint as the pin",
+      "publicKey": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA693uxG93b+rigaLbRtp6b4XX6llxb2pm+OjNctp0JzMfmDoJ5TYeE6nNpKpM3yElMbuvoTSOvooSYCZIeZd2UuWHWL5Ud/2QicgO0vcTFoD5etpUKiiy55lzbOopj9cpshIjffhYv/Hxu0l25qYQ11I6khEkkm1370CicIA+GARm1RzZIct8cXp4JyMlmoL47b8qCai+gnjO4asZpj0l4JVsThpBXHSniiwAfhBUrFj/sUPX8m1v3m/vgX+8yzNGh+FtmjKwE4Ucs2uC8h4B9tS/AiPrsK1zezEOYYEJY215SHwPMzPAwxfwne7Omc1PrGPCE42knm0mpe7Kjf7B9wIDAQAB",
+      "pin": "M9pM-4QWGZzspNoI3f8ms_6c77LnCI8nEEZ2f259zG4",
+      "takes": false
+    },
+    {
+      "why": "the organization's key as PKCS#1 (RSAPublicKey) rather than SPKI: not the key the pin names",
+      "publicKey": "MIIBCgKCAQEA693uxG93b+rigaLbRtp6b4XX6llxb2pm+OjNctp0JzMfmDoJ5TYeE6nNpKpM3yElMbuvoTSOvooSYCZIeZd2UuWHWL5Ud/2QicgO0vcTFoD5etpUKiiy55lzbOopj9cpshIjffhYv/Hxu0l25qYQ11I6khEkkm1370CicIA+GARm1RzZIct8cXp4JyMlmoL47b8qCai+gnjO4asZpj0l4JVsThpBXHSniiwAfhBUrFj/sUPX8m1v3m/vgX+8yzNGh+FtmjKwE4Ucs2uC8h4B9tS/AiPrsK1zezEOYYEJY215SHwPMzPAwxfwne7Omc1PrGPCE42knm0mpe7Kjf7B9wIDAQAB",
+      "pin": "oVuf7LV49kXJFmWDfHMYBxLkYVlb480rD-rFVH-l1Zg",
+      "takes": false
+    },
+    {
+      "why": "no key from the server",
+      "publicKey": "",
+      "pin": "oVuf7LV49kXJFmWDfHMYBxLkYVlb480rD-rFVH-l1Zg",
+      "takes": false
+    },
+    {
+      "why": "not base64",
+      "publicKey": "not base64!",
+      "pin": "oVuf7LV49kXJFmWDfHMYBxLkYVlb480rD-rFVH-l1Zg",
+      "takes": false
+    }
+  ],
+  "pinForms": [
+    {
+      "why": "the install command's fingerprint",
+      "value": "oVuf7LV49kXJFmWDfHMYBxLkYVlb480rD-rFVH-l1Zg",
+      "pin": "oVuf7LV49kXJFmWDfHMYBxLkYVlb480rD-rFVH-l1Zg"
+    },
+    {
+      "why": "with spaces around it",
+      "value": " oVuf7LV49kXJFmWDfHMYBxLkYVlb480rD-rFVH-l1Zg ",
+      "pin": "oVuf7LV49kXJFmWDfHMYBxLkYVlb480rD-rFVH-l1Zg"
+    },
+    {
+      "why": "with base64's padding",
+      "value": "oVuf7LV49kXJFmWDfHMYBxLkYVlb480rD-rFVH-l1Zg=",
+      "pin": null
+    },
+    {
+      "why": "one character short",
+      "value": "oVuf7LV49kXJFmWDfHMYBxLkYVlb480rD-rFVH-l1Z",
+      "pin": null
+    },
+    {
+      "why": "in hex",
+      "value": "a15b9fecb578f645c91665837c73180712e461595be3cd2b0feac5547fa5d598",
+      "pin": null
+    },
+    {
+      "why": "with a character that isn't base64url",
+      "value": "oVuf7LV49kXJFmWDfHMYBxLkYVlb480rD-rFVH-l1Z+",
+      "pin": null
+    },
+    {
+      "why": "empty",
+      "value": "",
+      "pin": null
+    }
+  ],
+  "enrollment": {
+    "userId": "6a1f0c2e-8b3d-4c5e-9f60-7a8b9c0d1e2f",
+    "userKey": "QEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaW1xdXl9gYWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXp7fH1+fw==",
+    "seed": "wMHCw8TFxsfIycrLzM3Oz9DR0tM=",
+    "resetPasswordKey": "4.dLxTbgCkt1shegBUE+fbPghh+PmYNAx03M9mtDKYBuFa3rdyWE0SBT03RxnTgJABPQ8Qa4SLjgt11Zg2w8ZkZhJWn2ltoTvtFS70PV5J3Y1TOvVH+cYfiDGfkmNdG7hcsX20wWm8paHeBYEhlIsp/3xOv9eyg5OuCCLDwLjigC+lBbD230ugwoyJBGW7NoVNqRSLLMoOVPnxhMl1acGF6epPhgvXicLAxDi4FtP0A4+c3wbJXL7/y9o0GOCCSrvTTIhLJ6fY+wkl5ff7x1TBNdfmKFxRhdUVz8OC/z4KNcBxsKgTxQkDzFEb2XDdNaoYgvgAzlpLkBwhvhB18c1WUA==",
+    "requests": [
+      {
+        "method": "GET",
+        "path": "/api/organizations/8f9a7c1e-3b2d-4e5f-9a8b-7c6d5e4f3a2b/keys"
+      },
+      {
+        "method": "PUT",
+        "path": "/api/organizations/8f9a7c1e-3b2d-4e5f-9a8b-7c6d5e4f3a2b/users/6a1f0c2e-8b3d-4c5e-9f60-7a8b9c0d1e2f/reset-password-enrollment",
+        "body": {
+          "resetPasswordKey": "4.dLxTbgCkt1shegBUE+fbPghh+PmYNAx03M9mtDKYBuFa3rdyWE0SBT03RxnTgJABPQ8Qa4SLjgt11Zg2w8ZkZhJWn2ltoTvtFS70PV5J3Y1TOvVH+cYfiDGfkmNdG7hcsX20wWm8paHeBYEhlIsp/3xOv9eyg5OuCCLDwLjigC+lBbD230ugwoyJBGW7NoVNqRSLLMoOVPnxhMl1acGF6epPhgvXicLAxDi4FtP0A4+c3wbJXL7/y9o0GOCCSrvTTIhLJ6fY+wkl5ff7x1TBNdfmKFxRhdUVz8OC/z4KNcBxsKgTxQkDzFEb2XDdNaoYgvgAzlpLkBwhvhB18c1WUA=="
+        }
+      }
+    ]
+  }
+}
