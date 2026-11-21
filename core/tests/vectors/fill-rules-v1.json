@@ -1,0 +1,3253 @@
+{
+  "about": "Fill rules on a website: the person's \"Never fill this field on this site\" list, then the item's own rules (meta repo DESIGN.md, \"Choosing what fills where\"), as the browser extension applies them (passbundle-clients, apps/browser/src/autofill/keykeeper/fill-rules.ts, applyFillRules) and the apps' core does for Android's autofill (passbundle-apps, core/src/fill_rules.rs). Each case has a page (its scheme and host, its fields by their place, and its forms' names), an item, and the never-fill list as the settings document keeps it once it's opened. `fills` says which field gets which of the item's values (a rule's `fill`), and `never` which fields are kept empty; every other field is left to the generic matching. A field `rule` is kept as its JSON text. A case marked `apps` is for the apps only: a browser on Android may not say a page's scheme, which a page in the extension always has.",
+  "cases": [
+    {
+      "name": "a custom field into the field its rule names by id",
+      "page": {
+        "scheme": "https",
+        "host": "bank.example.test",
+        "fields": [
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "user",
+            "name": "username",
+            "label": "Username",
+            "autocomplete": "username",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "password",
+            "id": "pass",
+            "name": "password",
+            "label": "Password",
+            "autocomplete": "current-password",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "custno",
+            "name": "customer",
+            "label": "Customer number",
+            "visible": true
+          }
+        ]
+      },
+      "item": {
+        "type": "login",
+        "seesSecrets": true,
+        "codes": true,
+        "username": "ana@example.test",
+        "password": "Fake-password-1",
+        "fields": [
+          { "name": "Customer ID", "value": "C-1234", "type": 0 },
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "bank.example.test",
+              "field": {
+                "id": "custno",
+                "name": "customer",
+                "label": "customer number"
+              },
+              "fill": { "from": "field", "name": "Customer ID" }
+            }
+          }
+        ]
+      },
+      "fills": [{ "field": 2, "fill": { "from": "field", "name": "Customer ID" } }],
+      "neverFill": [],
+      "never": []
+    },
+    {
+      "name": "the id decides: a field with the rule's name and label but another id gets nothing",
+      "page": {
+        "scheme": "https",
+        "host": "bank.example.test",
+        "fields": [
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "user",
+            "name": "username",
+            "label": "Username",
+            "autocomplete": "username",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "password",
+            "id": "pass",
+            "name": "password",
+            "label": "Password",
+            "autocomplete": "current-password",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "custno-2",
+            "name": "customer",
+            "label": "Customer number",
+            "visible": true
+          }
+        ]
+      },
+      "item": {
+        "type": "login",
+        "seesSecrets": true,
+        "codes": true,
+        "username": "ana@example.test",
+        "password": "Fake-password-1",
+        "fields": [
+          { "name": "Customer ID", "value": "C-1234", "type": 0 },
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "bank.example.test",
+              "field": {
+                "id": "custno",
+                "name": "customer",
+                "label": "customer number"
+              },
+              "fill": { "from": "field", "name": "Customer ID" }
+            }
+          }
+        ]
+      },
+      "fills": [],
+      "neverFill": [],
+      "never": []
+    },
+    {
+      "name": "by its name, when the rule has no id",
+      "page": {
+        "scheme": "https",
+        "host": "bank.example.test",
+        "fields": [
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "user",
+            "name": "username",
+            "label": "Username",
+            "autocomplete": "username",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "password",
+            "id": "pass",
+            "name": "password",
+            "label": "Password",
+            "autocomplete": "current-password",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "c1",
+            "name": "customer",
+            "label": "Something else",
+            "visible": true
+          }
+        ]
+      },
+      "item": {
+        "type": "login",
+        "seesSecrets": true,
+        "codes": true,
+        "username": "ana@example.test",
+        "password": "Fake-password-1",
+        "fields": [
+          { "name": "Customer ID", "value": "C-1234", "type": 0 },
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "bank.example.test",
+              "field": { "name": "customer", "label": "customer number" },
+              "fill": { "from": "field", "name": "Customer ID" }
+            }
+          }
+        ]
+      },
+      "fills": [{ "field": 2, "fill": { "from": "field", "name": "Customer ID" } }],
+      "neverFill": [],
+      "never": []
+    },
+    {
+      "name": "by the label people see, when the rule has neither: its spaces collapsed, in any case",
+      "page": {
+        "scheme": "https",
+        "host": "bank.example.test",
+        "fields": [
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "user",
+            "name": "username",
+            "label": "Username",
+            "autocomplete": "username",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "password",
+            "id": "pass",
+            "name": "password",
+            "label": "Password",
+            "autocomplete": "current-password",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "text",
+            "label": "  Customer\n  NUMBER ",
+            "visible": true
+          }
+        ]
+      },
+      "item": {
+        "type": "login",
+        "seesSecrets": true,
+        "codes": true,
+        "username": "ana@example.test",
+        "password": "Fake-password-1",
+        "fields": [
+          { "name": "Customer ID", "value": "C-1234", "type": 0 },
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "bank.example.test",
+              "field": { "label": "customer number" },
+              "fill": { "from": "field", "name": "Customer ID" }
+            }
+          }
+        ]
+      },
+      "fills": [{ "field": 2, "fill": { "from": "field", "name": "Customer ID" } }],
+      "neverFill": [],
+      "never": []
+    },
+    {
+      "name": "the label people see is the placeholder when the field has no label",
+      "page": {
+        "scheme": "https",
+        "host": "bank.example.test",
+        "fields": [
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "user",
+            "name": "username",
+            "label": "Username",
+            "autocomplete": "username",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "password",
+            "id": "pass",
+            "name": "password",
+            "label": "Password",
+            "autocomplete": "current-password",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "text",
+            "placeholder": "Customer number",
+            "visible": true
+          }
+        ]
+      },
+      "item": {
+        "type": "login",
+        "seesSecrets": true,
+        "codes": true,
+        "username": "ana@example.test",
+        "password": "Fake-password-1",
+        "fields": [
+          { "name": "Customer ID", "value": "C-1234", "type": 0 },
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "bank.example.test",
+              "field": { "label": "customer number" },
+              "fill": { "from": "field", "name": "Customer ID" }
+            }
+          }
+        ]
+      },
+      "fills": [{ "field": 2, "fill": { "from": "field", "name": "Customer ID" } }],
+      "neverFill": [],
+      "never": []
+    },
+    {
+      "name": "the first rule for a field wins",
+      "page": {
+        "scheme": "https",
+        "host": "bank.example.test",
+        "fields": [
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "user",
+            "name": "username",
+            "label": "Username",
+            "autocomplete": "username",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "password",
+            "id": "pass",
+            "name": "password",
+            "label": "Password",
+            "autocomplete": "current-password",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "custno",
+            "name": "customer",
+            "label": "Customer number",
+            "visible": true
+          }
+        ]
+      },
+      "item": {
+        "type": "login",
+        "seesSecrets": true,
+        "codes": true,
+        "username": "ana@example.test",
+        "password": "Fake-password-1",
+        "fields": [
+          { "name": "Customer ID", "value": "C-1234", "type": 0 },
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "bank.example.test",
+              "field": {
+                "id": "custno",
+                "name": "customer",
+                "label": "customer number"
+              },
+              "fill": { "from": "field", "name": "Customer ID" }
+            }
+          },
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "bank.example.test",
+              "field": { "id": "custno" },
+              "fill": { "from": "username" }
+            }
+          }
+        ]
+      },
+      "fills": [{ "field": 2, "fill": { "from": "field", "name": "Customer ID" } }],
+      "neverFill": [],
+      "never": []
+    },
+    {
+      "name": "a login's username, password, and one-time code where its rules say",
+      "page": {
+        "scheme": "https",
+        "host": "bank.example.test",
+        "fields": [
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "login-name",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "password",
+            "id": "secret",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "otp",
+            "label": "Code",
+            "visible": true
+          }
+        ]
+      },
+      "item": {
+        "type": "login",
+        "seesSecrets": true,
+        "codes": true,
+        "username": "ana@example.test",
+        "password": "Fake-password-1",
+        "totp": "JBSWY3DPEHPK3PXP",
+        "fields": [
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "bank.example.test",
+              "field": { "id": "login-name" },
+              "fill": { "from": "username" }
+            }
+          },
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "bank.example.test",
+              "field": { "id": "secret" },
+              "fill": { "from": "password" }
+            }
+          },
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "bank.example.test",
+              "field": { "id": "otp" },
+              "fill": { "from": "totp" }
+            }
+          }
+        ]
+      },
+      "fills": [
+        { "field": 0, "fill": { "from": "username" } },
+        { "field": 1, "fill": { "from": "password" } },
+        { "field": 2, "fill": { "from": "totp" } }
+      ],
+      "neverFill": [],
+      "never": []
+    },
+    {
+      "name": "only on the host it was made on",
+      "page": {
+        "scheme": "https",
+        "host": "www.bank.example.test",
+        "fields": [
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "user",
+            "name": "username",
+            "label": "Username",
+            "autocomplete": "username",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "password",
+            "id": "pass",
+            "name": "password",
+            "label": "Password",
+            "autocomplete": "current-password",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "custno",
+            "name": "customer",
+            "label": "Customer number",
+            "visible": true
+          }
+        ]
+      },
+      "item": {
+        "type": "login",
+        "seesSecrets": true,
+        "codes": true,
+        "username": "ana@example.test",
+        "password": "Fake-password-1",
+        "fields": [
+          { "name": "Customer ID", "value": "C-1234", "type": 0 },
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "bank.example.test",
+              "field": {
+                "id": "custno",
+                "name": "customer",
+                "label": "customer number"
+              },
+              "fill": { "from": "field", "name": "Customer ID" }
+            }
+          }
+        ]
+      },
+      "fills": [],
+      "neverFill": [],
+      "never": []
+    },
+    {
+      "name": "never on an http copy of the site",
+      "page": {
+        "scheme": "http",
+        "host": "bank.example.test",
+        "fields": [
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "user",
+            "name": "username",
+            "label": "Username",
+            "autocomplete": "username",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "password",
+            "id": "pass",
+            "name": "password",
+            "label": "Password",
+            "autocomplete": "current-password",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "custno",
+            "name": "customer",
+            "label": "Customer number",
+            "visible": true
+          }
+        ]
+      },
+      "item": {
+        "type": "login",
+        "seesSecrets": true,
+        "codes": true,
+        "username": "ana@example.test",
+        "password": "Fake-password-1",
+        "fields": [
+          { "name": "Customer ID", "value": "C-1234", "type": 0 },
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "bank.example.test",
+              "field": {
+                "id": "custno",
+                "name": "customer",
+                "label": "customer number"
+              },
+              "fill": { "from": "field", "name": "Customer ID" }
+            }
+          }
+        ]
+      },
+      "fills": [],
+      "neverFill": [],
+      "never": []
+    },
+    {
+      "name": "a rule made on an http page fills there",
+      "page": {
+        "scheme": "http",
+        "host": "bank.example.test",
+        "fields": [
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "user",
+            "name": "username",
+            "label": "Username",
+            "autocomplete": "username",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "password",
+            "id": "pass",
+            "name": "password",
+            "label": "Password",
+            "autocomplete": "current-password",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "custno",
+            "name": "customer",
+            "label": "Customer number",
+            "visible": true
+          }
+        ]
+      },
+      "item": {
+        "type": "login",
+        "seesSecrets": true,
+        "codes": true,
+        "username": "ana@example.test",
+        "password": "Fake-password-1",
+        "fields": [
+          { "name": "Customer ID", "value": "C-1234", "type": 0 },
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "bank.example.test",
+              "scheme": "http",
+              "field": {
+                "id": "custno",
+                "name": "customer",
+                "label": "customer number"
+              },
+              "fill": { "from": "field", "name": "Customer ID" }
+            }
+          }
+        ]
+      },
+      "fills": [{ "field": 2, "fill": { "from": "field", "name": "Customer ID" } }],
+      "neverFill": [],
+      "never": []
+    },
+    {
+      "name": "and not on the https page",
+      "page": {
+        "scheme": "https",
+        "host": "bank.example.test",
+        "fields": [
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "user",
+            "name": "username",
+            "label": "Username",
+            "autocomplete": "username",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "password",
+            "id": "pass",
+            "name": "password",
+            "label": "Password",
+            "autocomplete": "current-password",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "custno",
+            "name": "customer",
+            "label": "Customer number",
+            "visible": true
+          }
+        ]
+      },
+      "item": {
+        "type": "login",
+        "seesSecrets": true,
+        "codes": true,
+        "username": "ana@example.test",
+        "password": "Fake-password-1",
+        "fields": [
+          { "name": "Customer ID", "value": "C-1234", "type": 0 },
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "bank.example.test",
+              "scheme": "http",
+              "field": {
+                "id": "custno",
+                "name": "customer",
+                "label": "customer number"
+              },
+              "fill": { "from": "field", "name": "Customer ID" }
+            }
+          }
+        ]
+      },
+      "fills": [],
+      "neverFill": [],
+      "never": []
+    },
+    {
+      "name": "a value rule without a site fills nowhere",
+      "page": {
+        "scheme": "https",
+        "host": "bank.example.test",
+        "fields": [
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "user",
+            "name": "username",
+            "label": "Username",
+            "autocomplete": "username",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "password",
+            "id": "pass",
+            "name": "password",
+            "label": "Password",
+            "autocomplete": "current-password",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "custno",
+            "name": "customer",
+            "label": "Customer number",
+            "visible": true
+          }
+        ]
+      },
+      "item": {
+        "type": "login",
+        "seesSecrets": true,
+        "codes": true,
+        "username": "ana@example.test",
+        "password": "Fake-password-1",
+        "fields": [
+          { "name": "Customer ID", "value": "C-1234", "type": 0 },
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "field": {
+                "id": "custno",
+                "name": "customer",
+                "label": "customer number"
+              },
+              "fill": { "from": "field", "name": "Customer ID" }
+            }
+          }
+        ]
+      },
+      "fills": [],
+      "neverFill": [],
+      "never": []
+    },
+    {
+      "name": "the item's own never rule keeps its field empty",
+      "page": {
+        "scheme": "https",
+        "host": "bank.example.test",
+        "fields": [
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "user",
+            "name": "username",
+            "label": "Username",
+            "autocomplete": "username",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "password",
+            "id": "pass",
+            "name": "password",
+            "label": "Password",
+            "autocomplete": "current-password",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "custno",
+            "name": "customer",
+            "label": "Customer number",
+            "visible": true
+          }
+        ]
+      },
+      "item": {
+        "type": "login",
+        "seesSecrets": true,
+        "codes": true,
+        "username": "ana@example.test",
+        "password": "Fake-password-1",
+        "fields": [
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "bank.example.test",
+              "field": { "id": "user" },
+              "fill": { "from": "never" }
+            }
+          }
+        ]
+      },
+      "fills": [],
+      "never": [0],
+      "neverFill": []
+    },
+    {
+      "name": "an item's never rule from before rules had a site holds on any site",
+      "page": {
+        "scheme": "https",
+        "host": "other.example.test",
+        "fields": [
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "user",
+            "name": "username",
+            "label": "Username",
+            "autocomplete": "username",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "password",
+            "id": "pass",
+            "name": "password",
+            "label": "Password",
+            "autocomplete": "current-password",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "custno",
+            "name": "customer",
+            "label": "Customer number",
+            "visible": true
+          }
+        ]
+      },
+      "item": {
+        "type": "login",
+        "seesSecrets": true,
+        "codes": true,
+        "username": "ana@example.test",
+        "password": "Fake-password-1",
+        "fields": [
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "field": { "id": "user" },
+              "fill": { "from": "never" }
+            }
+          }
+        ]
+      },
+      "fills": [],
+      "never": [0],
+      "neverFill": []
+    },
+    {
+      "name": "site-wide never-fill holds for every item, and before the item's own rule",
+      "page": {
+        "scheme": "https",
+        "host": "bank.example.test",
+        "fields": [
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "user",
+            "name": "username",
+            "label": "Username",
+            "autocomplete": "username",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "password",
+            "id": "pass",
+            "name": "password",
+            "label": "Password",
+            "autocomplete": "current-password",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "custno",
+            "name": "customer",
+            "label": "Customer number",
+            "visible": true
+          }
+        ]
+      },
+      "item": {
+        "type": "login",
+        "seesSecrets": true,
+        "codes": true,
+        "username": "ana@example.test",
+        "password": "Fake-password-1",
+        "fields": [
+          { "name": "Customer ID", "value": "C-1234", "type": 0 },
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "bank.example.test",
+              "field": {
+                "id": "custno",
+                "name": "customer",
+                "label": "customer number"
+              },
+              "fill": { "from": "field", "name": "Customer ID" }
+            }
+          }
+        ]
+      },
+      "neverFill": [
+        {
+          "v": 1,
+          "host": "bank.example.test",
+          "field": { "id": "custno" },
+          "fill": { "from": "never" }
+        }
+      ],
+      "fills": [],
+      "never": [2]
+    },
+    {
+      "name": "site-wide never-fill holds a field the generic matching would fill",
+      "page": {
+        "scheme": "https",
+        "host": "bank.example.test",
+        "fields": [
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "user",
+            "name": "username",
+            "label": "Username",
+            "autocomplete": "username",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "password",
+            "id": "pass",
+            "name": "password",
+            "label": "Password",
+            "autocomplete": "current-password",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "custno",
+            "name": "customer",
+            "label": "Customer number",
+            "visible": true
+          }
+        ]
+      },
+      "item": {
+        "type": "login",
+        "seesSecrets": true,
+        "codes": true,
+        "username": "ana@example.test",
+        "password": "Fake-password-1",
+        "fields": []
+      },
+      "neverFill": [
+        {
+          "v": 1,
+          "host": "bank.example.test",
+          "field": { "id": "user" },
+          "fill": { "from": "never" }
+        }
+      ],
+      "fills": [],
+      "never": [0]
+    },
+    {
+      "name": "site-wide never-fill for another site doesn't hold here",
+      "page": {
+        "scheme": "https",
+        "host": "bank.example.test",
+        "fields": [
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "user",
+            "name": "username",
+            "label": "Username",
+            "autocomplete": "username",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "password",
+            "id": "pass",
+            "name": "password",
+            "label": "Password",
+            "autocomplete": "current-password",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "custno",
+            "name": "customer",
+            "label": "Customer number",
+            "visible": true
+          }
+        ]
+      },
+      "item": {
+        "type": "login",
+        "seesSecrets": true,
+        "codes": true,
+        "username": "ana@example.test",
+        "password": "Fake-password-1",
+        "fields": [
+          { "name": "Customer ID", "value": "C-1234", "type": 0 },
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "bank.example.test",
+              "field": {
+                "id": "custno",
+                "name": "customer",
+                "label": "customer number"
+              },
+              "fill": { "from": "field", "name": "Customer ID" }
+            }
+          }
+        ]
+      },
+      "neverFill": [
+        {
+          "v": 1,
+          "host": "other.example.test",
+          "field": { "id": "custno" },
+          "fill": { "from": "never" }
+        }
+      ],
+      "fills": [{ "field": 2, "fill": { "from": "field", "name": "Customer ID" } }],
+      "never": []
+    },
+    {
+      "name": "site-wide never-fill for the http copy doesn't hold on https",
+      "page": {
+        "scheme": "https",
+        "host": "bank.example.test",
+        "fields": [
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "user",
+            "name": "username",
+            "label": "Username",
+            "autocomplete": "username",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "password",
+            "id": "pass",
+            "name": "password",
+            "label": "Password",
+            "autocomplete": "current-password",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "custno",
+            "name": "customer",
+            "label": "Customer number",
+            "visible": true
+          }
+        ]
+      },
+      "item": {
+        "type": "login",
+        "seesSecrets": true,
+        "codes": true,
+        "username": "ana@example.test",
+        "password": "Fake-password-1",
+        "fields": [
+          { "name": "Customer ID", "value": "C-1234", "type": 0 },
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "bank.example.test",
+              "field": {
+                "id": "custno",
+                "name": "customer",
+                "label": "customer number"
+              },
+              "fill": { "from": "field", "name": "Customer ID" }
+            }
+          }
+        ]
+      },
+      "neverFill": [
+        {
+          "v": 1,
+          "host": "bank.example.test",
+          "scheme": "http",
+          "field": { "id": "custno" },
+          "fill": { "from": "never" }
+        }
+      ],
+      "fills": [{ "field": 2, "fill": { "from": "field", "name": "Customer ID" } }],
+      "never": []
+    },
+    {
+      "name": "site-wide never-fill holds only never rules with a site",
+      "page": {
+        "scheme": "https",
+        "host": "bank.example.test",
+        "fields": [
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "user",
+            "name": "username",
+            "label": "Username",
+            "autocomplete": "username",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "password",
+            "id": "pass",
+            "name": "password",
+            "label": "Password",
+            "autocomplete": "current-password",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "custno",
+            "name": "customer",
+            "label": "Customer number",
+            "visible": true
+          }
+        ]
+      },
+      "item": {
+        "type": "login",
+        "seesSecrets": true,
+        "codes": true,
+        "username": "ana@example.test",
+        "password": "Fake-password-1",
+        "fields": [
+          { "name": "Customer ID", "value": "C-1234", "type": 0 },
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "bank.example.test",
+              "field": {
+                "id": "custno",
+                "name": "customer",
+                "label": "customer number"
+              },
+              "fill": { "from": "field", "name": "Customer ID" }
+            }
+          }
+        ]
+      },
+      "neverFill": [
+        { "v": 1, "field": { "id": "custno" }, "fill": { "from": "never" } },
+        {
+          "v": 1,
+          "host": "bank.example.test",
+          "field": { "id": "custno" },
+          "fill": { "from": "password" }
+        }
+      ],
+      "fills": [{ "field": 2, "fill": { "from": "field", "name": "Customer ID" } }],
+      "never": []
+    },
+    {
+      "name": "a password into a text field, for someone who can see it",
+      "page": {
+        "scheme": "https",
+        "host": "bank.example.test",
+        "fields": [
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "user",
+            "name": "username",
+            "label": "Username",
+            "autocomplete": "username",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "password",
+            "id": "pass",
+            "name": "password",
+            "label": "Password",
+            "autocomplete": "current-password",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "custno",
+            "name": "customer",
+            "label": "Customer number",
+            "visible": true
+          }
+        ]
+      },
+      "item": {
+        "type": "login",
+        "seesSecrets": true,
+        "codes": true,
+        "username": "ana@example.test",
+        "password": "Fake-password-1",
+        "fields": [
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "bank.example.test",
+              "field": { "id": "custno" },
+              "fill": { "from": "password" }
+            }
+          }
+        ]
+      },
+      "fills": [{ "field": 2, "fill": { "from": "password" } }],
+      "neverFill": [],
+      "never": []
+    },
+    {
+      "name": "for someone who can't see the item's secrets, a password only into a password field",
+      "page": {
+        "scheme": "https",
+        "host": "bank.example.test",
+        "fields": [
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "user",
+            "name": "username",
+            "label": "Username",
+            "autocomplete": "username",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "password",
+            "id": "pass",
+            "name": "password",
+            "label": "Password",
+            "autocomplete": "current-password",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "custno",
+            "name": "customer",
+            "label": "Customer number",
+            "visible": true
+          }
+        ]
+      },
+      "item": {
+        "type": "login",
+        "seesSecrets": false,
+        "codes": true,
+        "username": "ana@example.test",
+        "password": "Fake-password-1",
+        "fields": [
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "bank.example.test",
+              "field": { "id": "custno" },
+              "fill": { "from": "password" }
+            }
+          },
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "bank.example.test",
+              "field": { "id": "pass" },
+              "fill": { "from": "password" }
+            }
+          }
+        ]
+      },
+      "fills": [{ "field": 1, "fill": { "from": "password" } }],
+      "neverFill": [],
+      "never": []
+    },
+    {
+      "name": "and a hidden custom field likewise",
+      "page": {
+        "scheme": "https",
+        "host": "bank.example.test",
+        "fields": [
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "user",
+            "name": "username",
+            "label": "Username",
+            "autocomplete": "username",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "password",
+            "id": "pass",
+            "name": "password",
+            "label": "Password",
+            "autocomplete": "current-password",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "custno",
+            "name": "customer",
+            "label": "Customer number",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "password",
+            "id": "pin",
+            "label": "PIN",
+            "visible": true
+          }
+        ]
+      },
+      "item": {
+        "type": "login",
+        "seesSecrets": false,
+        "codes": true,
+        "username": "ana@example.test",
+        "password": "Fake-password-1",
+        "fields": [
+          { "name": "PIN", "value": "2468", "type": 1 },
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "bank.example.test",
+              "field": { "id": "custno" },
+              "fill": { "from": "field", "name": "PIN" }
+            }
+          },
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "bank.example.test",
+              "field": { "id": "pin" },
+              "fill": { "from": "field", "name": "PIN" }
+            }
+          }
+        ]
+      },
+      "fills": [{ "field": 3, "fill": { "from": "field", "name": "PIN" } }],
+      "neverFill": [],
+      "never": []
+    },
+    {
+      "name": "a text custom field fills a text field for anyone",
+      "page": {
+        "scheme": "https",
+        "host": "bank.example.test",
+        "fields": [
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "user",
+            "name": "username",
+            "label": "Username",
+            "autocomplete": "username",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "password",
+            "id": "pass",
+            "name": "password",
+            "label": "Password",
+            "autocomplete": "current-password",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "custno",
+            "name": "customer",
+            "label": "Customer number",
+            "visible": true
+          }
+        ]
+      },
+      "item": {
+        "type": "login",
+        "seesSecrets": false,
+        "codes": true,
+        "username": "ana@example.test",
+        "password": "Fake-password-1",
+        "fields": [
+          { "name": "Customer ID", "value": "C-1234", "type": 0 },
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "bank.example.test",
+              "field": {
+                "id": "custno",
+                "name": "customer",
+                "label": "customer number"
+              },
+              "fill": { "from": "field", "name": "Customer ID" }
+            }
+          }
+        ]
+      },
+      "fills": [{ "field": 2, "fill": { "from": "field", "name": "Customer ID" } }],
+      "neverFill": [],
+      "never": []
+    },
+    {
+      "name": "a one-time code fills a text field even for someone who can't see it",
+      "page": {
+        "scheme": "https",
+        "host": "bank.example.test",
+        "fields": [
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "user",
+            "name": "username",
+            "label": "Username",
+            "autocomplete": "username",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "password",
+            "id": "pass",
+            "name": "password",
+            "label": "Password",
+            "autocomplete": "current-password",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "custno",
+            "name": "customer",
+            "label": "Customer number",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "otp",
+            "label": "Code",
+            "visible": true
+          }
+        ]
+      },
+      "item": {
+        "type": "login",
+        "seesSecrets": false,
+        "codes": true,
+        "username": "ana@example.test",
+        "password": "Fake-password-1",
+        "totp": "JBSWY3DPEHPK3PXP",
+        "fields": [
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "bank.example.test",
+              "field": { "id": "otp" },
+              "fill": { "from": "totp" }
+            }
+          }
+        ]
+      },
+      "fills": [{ "field": 3, "fill": { "from": "totp" } }],
+      "neverFill": [],
+      "never": []
+    },
+    {
+      "name": "but not where the account may not use one-time codes",
+      "page": {
+        "scheme": "https",
+        "host": "bank.example.test",
+        "fields": [
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "user",
+            "name": "username",
+            "label": "Username",
+            "autocomplete": "username",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "password",
+            "id": "pass",
+            "name": "password",
+            "label": "Password",
+            "autocomplete": "current-password",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "custno",
+            "name": "customer",
+            "label": "Customer number",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "otp",
+            "label": "Code",
+            "visible": true
+          }
+        ]
+      },
+      "item": {
+        "type": "login",
+        "seesSecrets": true,
+        "codes": false,
+        "username": "ana@example.test",
+        "password": "Fake-password-1",
+        "totp": "JBSWY3DPEHPK3PXP",
+        "fields": [
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "bank.example.test",
+              "field": { "id": "otp" },
+              "fill": { "from": "totp" }
+            }
+          }
+        ]
+      },
+      "fills": [],
+      "neverFill": [],
+      "never": []
+    },
+    {
+      "name": "never a field people can't see",
+      "page": {
+        "scheme": "https",
+        "host": "bank.example.test",
+        "fields": [
+          { "tag": "input", "type": "text", "id": "a", "visible": false },
+          { "tag": "input", "type": "hidden", "id": "b", "visible": true }
+        ]
+      },
+      "item": {
+        "type": "login",
+        "seesSecrets": true,
+        "codes": true,
+        "username": "ana@example.test",
+        "password": "Fake-password-1",
+        "fields": [
+          { "name": "Customer ID", "value": "C-1234", "type": 0 },
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "bank.example.test",
+              "field": { "id": "a" },
+              "fill": { "from": "field", "name": "Customer ID" }
+            }
+          },
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "bank.example.test",
+              "field": { "id": "b" },
+              "fill": { "from": "field", "name": "Customer ID" }
+            }
+          }
+        ]
+      },
+      "fills": [],
+      "neverFill": [],
+      "never": []
+    },
+    {
+      "name": "never a field the generic matching never fills",
+      "page": {
+        "scheme": "https",
+        "host": "bank.example.test",
+        "fields": [
+          { "tag": "input", "type": "search", "id": "s", "visible": true },
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "site_search",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "q",
+            "placeholder": "Find a branch",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "captchaAnswer",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "forgot-user",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "checkbox",
+            "id": "remember",
+            "visible": true
+          },
+          { "tag": "input", "type": "radio", "id": "plan", "visible": true },
+          { "tag": "input", "type": "file", "id": "upload", "visible": true }
+        ]
+      },
+      "item": {
+        "type": "login",
+        "seesSecrets": true,
+        "codes": true,
+        "username": "ana@example.test",
+        "password": "Fake-password-1",
+        "fields": [
+          { "name": "Customer ID", "value": "C-1234", "type": 0 },
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "bank.example.test",
+              "field": { "id": "s" },
+              "fill": { "from": "field", "name": "Customer ID" }
+            }
+          },
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "bank.example.test",
+              "field": { "id": "site_search" },
+              "fill": { "from": "field", "name": "Customer ID" }
+            }
+          },
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "bank.example.test",
+              "field": { "id": "q" },
+              "fill": { "from": "field", "name": "Customer ID" }
+            }
+          },
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "bank.example.test",
+              "field": { "id": "captchaAnswer" },
+              "fill": { "from": "field", "name": "Customer ID" }
+            }
+          },
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "bank.example.test",
+              "field": { "id": "forgot-user" },
+              "fill": { "from": "field", "name": "Customer ID" }
+            }
+          },
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "bank.example.test",
+              "field": { "id": "remember" },
+              "fill": { "from": "field", "name": "Customer ID" }
+            }
+          },
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "bank.example.test",
+              "field": { "id": "plan" },
+              "fill": { "from": "field", "name": "Customer ID" }
+            }
+          },
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "bank.example.test",
+              "field": { "id": "upload" },
+              "fill": { "from": "field", "name": "Customer ID" }
+            }
+          }
+        ]
+      },
+      "fills": [],
+      "neverFill": [],
+      "never": []
+    },
+    {
+      "name": "never a field in a newsletter form, whichever field says so",
+      "page": {
+        "scheme": "https",
+        "host": "bank.example.test",
+        "fields": [
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "news-email",
+            "form": 0,
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "first",
+            "form": 1,
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "text",
+            "name": "newsletter_opt",
+            "form": 1,
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "other",
+            "form": 2,
+            "visible": true
+          }
+        ],
+        "forms": ["newsletter-signup", null, null]
+      },
+      "item": {
+        "type": "login",
+        "seesSecrets": true,
+        "codes": true,
+        "username": "ana@example.test",
+        "password": "Fake-password-1",
+        "fields": [
+          { "name": "Customer ID", "value": "C-1234", "type": 0 },
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "bank.example.test",
+              "field": { "id": "news-email" },
+              "fill": { "from": "field", "name": "Customer ID" }
+            }
+          },
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "bank.example.test",
+              "field": { "id": "first" },
+              "fill": { "from": "field", "name": "Customer ID" }
+            }
+          },
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "bank.example.test",
+              "field": { "id": "other" },
+              "fill": { "from": "field", "name": "Customer ID" }
+            }
+          }
+        ]
+      },
+      "fills": [{ "field": 3, "fill": { "from": "field", "name": "Customer ID" } }],
+      "neverFill": [],
+      "never": []
+    },
+    {
+      "name": "a field the item has nothing for is left to the generic matching",
+      "page": {
+        "scheme": "https",
+        "host": "bank.example.test",
+        "fields": [
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "user",
+            "name": "username",
+            "label": "Username",
+            "autocomplete": "username",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "password",
+            "id": "pass",
+            "name": "password",
+            "label": "Password",
+            "autocomplete": "current-password",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "custno",
+            "name": "customer",
+            "label": "Customer number",
+            "visible": true
+          }
+        ]
+      },
+      "item": {
+        "type": "login",
+        "seesSecrets": true,
+        "codes": true,
+        "username": "ana@example.test",
+        "password": "Fake-password-1",
+        "fields": [
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "bank.example.test",
+              "field": {
+                "id": "custno",
+                "name": "customer",
+                "label": "customer number"
+              },
+              "fill": { "from": "field", "name": "Customer ID" }
+            }
+          }
+        ]
+      },
+      "fills": [],
+      "neverFill": [],
+      "never": []
+    },
+    {
+      "name": "our own fields never fill a page field by name",
+      "page": {
+        "scheme": "https",
+        "host": "bank.example.test",
+        "fields": [
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "user",
+            "name": "username",
+            "label": "Username",
+            "autocomplete": "username",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "password",
+            "id": "pass",
+            "name": "password",
+            "label": "Password",
+            "autocomplete": "current-password",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "custno",
+            "name": "customer",
+            "label": "Customer number",
+            "visible": true
+          }
+        ]
+      },
+      "item": {
+        "type": "login",
+        "seesSecrets": true,
+        "codes": true,
+        "username": "ana@example.test",
+        "password": "Fake-password-1",
+        "fields": [
+          { "name": "keykeeper.expires", "value": "2027-01-31", "type": 0 },
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "bank.example.test",
+              "field": { "id": "custno" },
+              "fill": { "from": "field", "name": "keykeeper.expires" }
+            }
+          }
+        ]
+      },
+      "fills": [],
+      "neverFill": [],
+      "never": []
+    },
+    {
+      "name": "a rule it can't read fills nothing",
+      "page": {
+        "scheme": "https",
+        "host": "bank.example.test",
+        "fields": [
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "user",
+            "name": "username",
+            "label": "Username",
+            "autocomplete": "username",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "password",
+            "id": "pass",
+            "name": "password",
+            "label": "Password",
+            "autocomplete": "current-password",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "custno",
+            "name": "customer",
+            "label": "Customer number",
+            "visible": true
+          }
+        ]
+      },
+      "item": {
+        "type": "login",
+        "seesSecrets": true,
+        "codes": true,
+        "username": "ana@example.test",
+        "password": "Fake-password-1",
+        "fields": [
+          { "name": "Customer ID", "value": "C-1234", "type": 0 },
+          { "name": "keykeeper.fill", "type": 1, "value": "not json" },
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 2,
+              "host": "bank.example.test",
+              "field": {
+                "id": "custno",
+                "name": "customer",
+                "label": "customer number"
+              },
+              "fill": { "from": "field", "name": "Customer ID" }
+            }
+          },
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "bank.example.test",
+              "field": {
+                "id": "custno",
+                "name": "customer",
+                "label": "customer number"
+              },
+              "fill": { "from": "everything" }
+            }
+          },
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "bank.example.test",
+              "scheme": "ftp",
+              "field": {
+                "id": "custno",
+                "name": "customer",
+                "label": "customer number"
+              },
+              "fill": { "from": "field", "name": "Customer ID" }
+            }
+          },
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": 7,
+              "field": {
+                "id": "custno",
+                "name": "customer",
+                "label": "customer number"
+              },
+              "fill": { "from": "field", "name": "Customer ID" }
+            }
+          }
+        ]
+      },
+      "fills": [],
+      "neverFill": [],
+      "never": []
+    },
+    {
+      "name": "a card's values where its rules say",
+      "page": {
+        "scheme": "https",
+        "host": "shop.example.test",
+        "fields": [
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "cc-name",
+            "name": "ccname",
+            "label": "Name on card",
+            "autocomplete": "cc-name",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "cc-number",
+            "name": "cardnumber",
+            "label": "Card number",
+            "autocomplete": "cc-number",
+            "visible": true
+          },
+          {
+            "tag": "select",
+            "type": "select-one",
+            "id": "exp-month",
+            "name": "month",
+            "label": "Month",
+            "list": true,
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "exp-year",
+            "name": "year",
+            "label": "Year",
+            "maxLength": 2,
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "password",
+            "id": "cvc",
+            "name": "cvc",
+            "label": "Security code",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "gift",
+            "name": "gift",
+            "label": "Gift message",
+            "visible": true
+          }
+        ]
+      },
+      "item": {
+        "type": "card",
+        "seesSecrets": true,
+        "codes": true,
+        "card": {
+          "cardholderName": "Ana Lopez",
+          "brand": "Visa",
+          "number": "4111 1111 1111 1111",
+          "expMonth": "7",
+          "expYear": "2029",
+          "code": "123"
+        },
+        "fields": [
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "shop.example.test",
+              "field": { "id": "cc-number" },
+              "fill": { "from": "card", "value": "number" }
+            }
+          },
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "shop.example.test",
+              "field": { "id": "exp-month" },
+              "fill": { "from": "card", "value": "expMonth" }
+            }
+          },
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "shop.example.test",
+              "field": { "id": "exp-year" },
+              "fill": { "from": "card", "value": "expYear" }
+            }
+          },
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "shop.example.test",
+              "field": { "id": "cvc" },
+              "fill": { "from": "card", "value": "code" }
+            }
+          },
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "shop.example.test",
+              "field": { "id": "gift" },
+              "fill": { "from": "card", "value": "cardholderName" }
+            }
+          }
+        ]
+      },
+      "fills": [
+        { "field": 1, "fill": { "from": "card", "value": "number" } },
+        { "field": 2, "fill": { "from": "card", "value": "expMonth" } },
+        { "field": 3, "fill": { "from": "card", "value": "expYear" } },
+        { "field": 4, "fill": { "from": "card", "value": "code" } },
+        { "field": 5, "fill": { "from": "card", "value": "cardholderName" } }
+      ],
+      "neverFill": [],
+      "never": []
+    },
+    {
+      "name": "for someone who can't see a card's secrets, its number and code only into a password field",
+      "page": {
+        "scheme": "https",
+        "host": "shop.example.test",
+        "fields": [
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "cc-name",
+            "name": "ccname",
+            "label": "Name on card",
+            "autocomplete": "cc-name",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "cc-number",
+            "name": "cardnumber",
+            "label": "Card number",
+            "autocomplete": "cc-number",
+            "visible": true
+          },
+          {
+            "tag": "select",
+            "type": "select-one",
+            "id": "exp-month",
+            "name": "month",
+            "label": "Month",
+            "list": true,
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "exp-year",
+            "name": "year",
+            "label": "Year",
+            "maxLength": 2,
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "password",
+            "id": "cvc",
+            "name": "cvc",
+            "label": "Security code",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "gift",
+            "name": "gift",
+            "label": "Gift message",
+            "visible": true
+          }
+        ]
+      },
+      "item": {
+        "type": "card",
+        "seesSecrets": false,
+        "codes": true,
+        "card": {
+          "cardholderName": "Ana Lopez",
+          "brand": "Visa",
+          "number": "4111 1111 1111 1111",
+          "expMonth": "7",
+          "expYear": "2029",
+          "code": "123"
+        },
+        "fields": [
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "shop.example.test",
+              "field": { "id": "cc-number" },
+              "fill": { "from": "card", "value": "number" }
+            }
+          },
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "shop.example.test",
+              "field": { "id": "exp-month" },
+              "fill": { "from": "card", "value": "expMonth" }
+            }
+          },
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "shop.example.test",
+              "field": { "id": "exp-year" },
+              "fill": { "from": "card", "value": "expYear" }
+            }
+          },
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "shop.example.test",
+              "field": { "id": "cvc" },
+              "fill": { "from": "card", "value": "code" }
+            }
+          },
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "shop.example.test",
+              "field": { "id": "gift" },
+              "fill": { "from": "card", "value": "cardholderName" }
+            }
+          }
+        ]
+      },
+      "fills": [
+        { "field": 2, "fill": { "from": "card", "value": "expMonth" } },
+        { "field": 3, "fill": { "from": "card", "value": "expYear" } },
+        { "field": 4, "fill": { "from": "card", "value": "code" } },
+        { "field": 5, "fill": { "from": "card", "value": "cardholderName" } }
+      ],
+      "neverFill": [],
+      "never": []
+    },
+    {
+      "name": "a card's values only from a card",
+      "page": {
+        "scheme": "https",
+        "host": "shop.example.test",
+        "fields": [
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "cc-name",
+            "name": "ccname",
+            "label": "Name on card",
+            "autocomplete": "cc-name",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "cc-number",
+            "name": "cardnumber",
+            "label": "Card number",
+            "autocomplete": "cc-number",
+            "visible": true
+          },
+          {
+            "tag": "select",
+            "type": "select-one",
+            "id": "exp-month",
+            "name": "month",
+            "label": "Month",
+            "list": true,
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "exp-year",
+            "name": "year",
+            "label": "Year",
+            "maxLength": 2,
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "password",
+            "id": "cvc",
+            "name": "cvc",
+            "label": "Security code",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "gift",
+            "name": "gift",
+            "label": "Gift message",
+            "visible": true
+          }
+        ]
+      },
+      "item": {
+        "type": "login",
+        "seesSecrets": true,
+        "codes": true,
+        "username": "ana@example.test",
+        "password": "Fake-password-1",
+        "fields": [
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "shop.example.test",
+              "field": { "id": "cc-number" },
+              "fill": { "from": "card", "value": "number" }
+            }
+          },
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "shop.example.test",
+              "field": { "id": "exp-month" },
+              "fill": { "from": "card", "value": "expMonth" }
+            }
+          },
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "shop.example.test",
+              "field": { "id": "exp-year" },
+              "fill": { "from": "card", "value": "expYear" }
+            }
+          },
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "shop.example.test",
+              "field": { "id": "cvc" },
+              "fill": { "from": "card", "value": "code" }
+            }
+          },
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "shop.example.test",
+              "field": { "id": "gift" },
+              "fill": { "from": "card", "value": "cardholderName" }
+            }
+          }
+        ]
+      },
+      "fills": [],
+      "neverFill": [],
+      "never": []
+    },
+    {
+      "name": "a card's value only on the page's own site: a rule made in a payment service's frame gets nothing on the shop's page",
+      "page": {
+        "scheme": "https",
+        "host": "shop.example.test",
+        "fields": [
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "cc-name",
+            "name": "ccname",
+            "label": "Name on card",
+            "autocomplete": "cc-name",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "cc-number",
+            "name": "cardnumber",
+            "label": "Card number",
+            "autocomplete": "cc-number",
+            "visible": true
+          },
+          {
+            "tag": "select",
+            "type": "select-one",
+            "id": "exp-month",
+            "name": "month",
+            "label": "Month",
+            "list": true,
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "exp-year",
+            "name": "year",
+            "label": "Year",
+            "maxLength": 2,
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "password",
+            "id": "cvc",
+            "name": "cvc",
+            "label": "Security code",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "gift",
+            "name": "gift",
+            "label": "Gift message",
+            "visible": true
+          }
+        ]
+      },
+      "item": {
+        "type": "card",
+        "seesSecrets": true,
+        "codes": true,
+        "card": {
+          "cardholderName": "Ana Lopez",
+          "brand": "Visa",
+          "number": "4111 1111 1111 1111",
+          "expMonth": "7",
+          "expYear": "2029",
+          "code": "123"
+        },
+        "fields": [
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "js.stripe.com",
+              "field": { "id": "cvc" },
+              "fill": { "from": "card", "value": "code" }
+            }
+          }
+        ]
+      },
+      "fills": [],
+      "neverFill": [],
+      "never": []
+    },
+    {
+      "name": "and a rule made on the shop gets nothing on another of its sites",
+      "page": {
+        "scheme": "https",
+        "host": "pay.shop.example.test",
+        "fields": [
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "cc-name",
+            "name": "ccname",
+            "label": "Name on card",
+            "autocomplete": "cc-name",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "cc-number",
+            "name": "cardnumber",
+            "label": "Card number",
+            "autocomplete": "cc-number",
+            "visible": true
+          },
+          {
+            "tag": "select",
+            "type": "select-one",
+            "id": "exp-month",
+            "name": "month",
+            "label": "Month",
+            "list": true,
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "exp-year",
+            "name": "year",
+            "label": "Year",
+            "maxLength": 2,
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "password",
+            "id": "cvc",
+            "name": "cvc",
+            "label": "Security code",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "gift",
+            "name": "gift",
+            "label": "Gift message",
+            "visible": true
+          }
+        ]
+      },
+      "item": {
+        "type": "card",
+        "seesSecrets": true,
+        "codes": true,
+        "card": {
+          "cardholderName": "Ana Lopez",
+          "brand": "Visa",
+          "number": "4111 1111 1111 1111",
+          "expMonth": "7",
+          "expYear": "2029",
+          "code": "123"
+        },
+        "fields": [
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "shop.example.test",
+              "field": { "id": "cc-number" },
+              "fill": { "from": "card", "value": "number" }
+            }
+          },
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "shop.example.test",
+              "field": { "id": "exp-month" },
+              "fill": { "from": "card", "value": "expMonth" }
+            }
+          },
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "shop.example.test",
+              "field": { "id": "exp-year" },
+              "fill": { "from": "card", "value": "expYear" }
+            }
+          },
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "shop.example.test",
+              "field": { "id": "cvc" },
+              "fill": { "from": "card", "value": "code" }
+            }
+          },
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "shop.example.test",
+              "field": { "id": "gift" },
+              "fill": { "from": "card", "value": "cardholderName" }
+            }
+          }
+        ]
+      },
+      "fills": [],
+      "neverFill": [],
+      "never": []
+    },
+    {
+      "name": "a card's value it doesn't have is left to the generic matching",
+      "page": {
+        "scheme": "https",
+        "host": "shop.example.test",
+        "fields": [
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "cc-name",
+            "name": "ccname",
+            "label": "Name on card",
+            "autocomplete": "cc-name",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "cc-number",
+            "name": "cardnumber",
+            "label": "Card number",
+            "autocomplete": "cc-number",
+            "visible": true
+          },
+          {
+            "tag": "select",
+            "type": "select-one",
+            "id": "exp-month",
+            "name": "month",
+            "label": "Month",
+            "list": true,
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "exp-year",
+            "name": "year",
+            "label": "Year",
+            "maxLength": 2,
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "password",
+            "id": "cvc",
+            "name": "cvc",
+            "label": "Security code",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "gift",
+            "name": "gift",
+            "label": "Gift message",
+            "visible": true
+          }
+        ]
+      },
+      "item": {
+        "type": "card",
+        "seesSecrets": true,
+        "codes": true,
+        "card": {
+          "cardholderName": "Ana Lopez",
+          "brand": "Visa",
+          "number": "4111 1111 1111 1111",
+          "expMonth": "7",
+          "expYear": "2029",
+          "code": ""
+        },
+        "fields": [
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "shop.example.test",
+              "field": { "id": "cvc" },
+              "fill": { "from": "card", "value": "code" }
+            }
+          }
+        ]
+      },
+      "fills": [],
+      "neverFill": [],
+      "never": []
+    },
+    {
+      "name": "site-wide never-fill holds for a card too",
+      "page": {
+        "scheme": "https",
+        "host": "shop.example.test",
+        "fields": [
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "cc-name",
+            "name": "ccname",
+            "label": "Name on card",
+            "autocomplete": "cc-name",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "cc-number",
+            "name": "cardnumber",
+            "label": "Card number",
+            "autocomplete": "cc-number",
+            "visible": true
+          },
+          {
+            "tag": "select",
+            "type": "select-one",
+            "id": "exp-month",
+            "name": "month",
+            "label": "Month",
+            "list": true,
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "exp-year",
+            "name": "year",
+            "label": "Year",
+            "maxLength": 2,
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "password",
+            "id": "cvc",
+            "name": "cvc",
+            "label": "Security code",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "gift",
+            "name": "gift",
+            "label": "Gift message",
+            "visible": true
+          }
+        ]
+      },
+      "item": {
+        "type": "card",
+        "seesSecrets": true,
+        "codes": true,
+        "card": {
+          "cardholderName": "Ana Lopez",
+          "brand": "Visa",
+          "number": "4111 1111 1111 1111",
+          "expMonth": "7",
+          "expYear": "2029",
+          "code": "123"
+        },
+        "fields": [
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "shop.example.test",
+              "field": { "id": "cc-number" },
+              "fill": { "from": "card", "value": "number" }
+            }
+          },
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "shop.example.test",
+              "field": { "id": "exp-month" },
+              "fill": { "from": "card", "value": "expMonth" }
+            }
+          },
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "shop.example.test",
+              "field": { "id": "exp-year" },
+              "fill": { "from": "card", "value": "expYear" }
+            }
+          },
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "shop.example.test",
+              "field": { "id": "cvc" },
+              "fill": { "from": "card", "value": "code" }
+            }
+          },
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "shop.example.test",
+              "field": { "id": "gift" },
+              "fill": { "from": "card", "value": "cardholderName" }
+            }
+          }
+        ]
+      },
+      "neverFill": [
+        {
+          "v": 1,
+          "host": "shop.example.test",
+          "field": { "id": "gift" },
+          "fill": { "from": "never" }
+        },
+        {
+          "v": 1,
+          "host": "shop.example.test",
+          "field": { "id": "cc-name" },
+          "fill": { "from": "never" }
+        }
+      ],
+      "fills": [
+        { "field": 1, "fill": { "from": "card", "value": "number" } },
+        { "field": 2, "fill": { "from": "card", "value": "expMonth" } },
+        { "field": 3, "fill": { "from": "card", "value": "expYear" } },
+        { "field": 4, "fill": { "from": "card", "value": "code" } }
+      ],
+      "never": [0, 5]
+    },
+    {
+      "name": "an identity's values where its rules say, for anyone",
+      "page": {
+        "scheme": "https",
+        "host": "shop.example.test",
+        "fields": [
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "first",
+            "name": "fname",
+            "label": "First name",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "town-1",
+            "name": "town",
+            "label": "Town",
+            "visible": true
+          },
+          {
+            "tag": "select",
+            "type": "select-one",
+            "id": "region",
+            "name": "region",
+            "label": "Region",
+            "list": true,
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "note",
+            "name": "note",
+            "label": "Delivery note",
+            "visible": true
+          }
+        ]
+      },
+      "item": {
+        "type": "identity",
+        "seesSecrets": false,
+        "codes": true,
+        "identity": {
+          "title": "Ms",
+          "firstName": "Ana",
+          "lastName": "Lopez",
+          "address1": "1 Example Street",
+          "city": "Springfield",
+          "state": "IL",
+          "postalCode": "62701",
+          "country": "US",
+          "email": "ana@example.test"
+        },
+        "fields": [
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "shop.example.test",
+              "field": { "name": "town" },
+              "fill": { "from": "identity", "value": "city" }
+            }
+          },
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "shop.example.test",
+              "field": { "id": "region" },
+              "fill": { "from": "identity", "value": "state" }
+            }
+          },
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "shop.example.test",
+              "field": { "id": "note" },
+              "fill": { "from": "identity", "value": "fullName" }
+            }
+          }
+        ]
+      },
+      "fills": [
+        { "field": 1, "fill": { "from": "identity", "value": "city" } },
+        { "field": 2, "fill": { "from": "identity", "value": "state" } },
+        { "field": 3, "fill": { "from": "identity", "value": "fullName" } }
+      ],
+      "neverFill": [],
+      "never": []
+    },
+    {
+      "name": "an identity's values only from an identity",
+      "page": {
+        "scheme": "https",
+        "host": "shop.example.test",
+        "fields": [
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "first",
+            "name": "fname",
+            "label": "First name",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "town-1",
+            "name": "town",
+            "label": "Town",
+            "visible": true
+          },
+          {
+            "tag": "select",
+            "type": "select-one",
+            "id": "region",
+            "name": "region",
+            "label": "Region",
+            "list": true,
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "note",
+            "name": "note",
+            "label": "Delivery note",
+            "visible": true
+          }
+        ]
+      },
+      "item": {
+        "type": "card",
+        "seesSecrets": true,
+        "codes": true,
+        "card": {
+          "cardholderName": "Ana Lopez",
+          "brand": "Visa",
+          "number": "4111 1111 1111 1111",
+          "expMonth": "7",
+          "expYear": "2029",
+          "code": "123"
+        },
+        "fields": [
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "shop.example.test",
+              "field": { "name": "town" },
+              "fill": { "from": "identity", "value": "city" }
+            }
+          },
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "shop.example.test",
+              "field": { "id": "region" },
+              "fill": { "from": "identity", "value": "state" }
+            }
+          },
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "shop.example.test",
+              "field": { "id": "note" },
+              "fill": { "from": "identity", "value": "fullName" }
+            }
+          }
+        ]
+      },
+      "fills": [],
+      "neverFill": [],
+      "never": []
+    },
+    {
+      "name": "a rule made where the page named a port fills only where it names that port, so never on Android, which gives none",
+      "page": {
+        "scheme": "https",
+        "host": "bank.example.test",
+        "fields": [
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "user",
+            "name": "username",
+            "label": "Username",
+            "autocomplete": "username",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "password",
+            "id": "pass",
+            "name": "password",
+            "label": "Password",
+            "autocomplete": "current-password",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "custno",
+            "name": "customer",
+            "label": "Customer number",
+            "visible": true
+          }
+        ]
+      },
+      "item": {
+        "type": "login",
+        "seesSecrets": true,
+        "codes": true,
+        "username": "ana@example.test",
+        "password": "Fake-password-1",
+        "fields": [
+          { "name": "Customer ID", "value": "C-1234", "type": 0 },
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "bank.example.test:8443",
+              "field": {
+                "id": "custno",
+                "name": "customer",
+                "label": "customer number"
+              },
+              "fill": { "from": "field", "name": "Customer ID" }
+            }
+          }
+        ]
+      },
+      "fills": [],
+      "neverFill": [],
+      "never": []
+    },
+    {
+      "name": "where the browser doesn't say the page's scheme, no rule's value fills, and never-fill still holds",
+      "apps": true,
+      "page": {
+        "scheme": null,
+        "host": "bank.example.test",
+        "fields": [
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "user",
+            "name": "username",
+            "label": "Username",
+            "autocomplete": "username",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "password",
+            "id": "pass",
+            "name": "password",
+            "label": "Password",
+            "autocomplete": "current-password",
+            "visible": true
+          },
+          {
+            "tag": "input",
+            "type": "text",
+            "id": "custno",
+            "name": "customer",
+            "label": "Customer number",
+            "visible": true
+          }
+        ]
+      },
+      "item": {
+        "type": "login",
+        "seesSecrets": true,
+        "codes": true,
+        "username": "ana@example.test",
+        "password": "Fake-password-1",
+        "fields": [
+          { "name": "Customer ID", "value": "C-1234", "type": 0 },
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "bank.example.test",
+              "field": {
+                "id": "custno",
+                "name": "customer",
+                "label": "customer number"
+              },
+              "fill": { "from": "field", "name": "Customer ID" }
+            }
+          },
+          {
+            "name": "keykeeper.fill",
+            "type": 1,
+            "rule": {
+              "v": 1,
+              "host": "bank.example.test",
+              "field": { "id": "pass" },
+              "fill": { "from": "never" }
+            }
+          }
+        ]
+      },
+      "neverFill": [
+        {
+          "v": 1,
+          "host": "bank.example.test",
+          "field": { "id": "user" },
+          "fill": { "from": "never" }
+        }
+      ],
+      "fills": [],
+      "never": [0, 1]
+    }
+  ]
+}

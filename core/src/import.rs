@@ -1205,11 +1205,20 @@ fn well_formed_rule(value: &str) -> Option<String> {
         return None;
     }
     let from = rule["fill"]["from"].as_str();
-    match from {
+    // A card's or an identity's value only by a name the web vault knows
+    // (`CARD_FILL_VALUES`, `IDENTITY_FILL_VALUES`): one added later is kept
+    // under a visible name, as a rule this app can't read.
+    let value_of = |names: &[&'static str]| {
+        let value = rule["fill"]["value"].as_str()?;
+        names.iter().copied().find(|n| *n == value)
+    };
+    let value = match from {
         Some("field") if !rule["fill"]["name"].is_string() => return None,
-        Some("field" | "username" | "password" | "totp" | "never") => {}
+        Some("field" | "username" | "password" | "totp" | "never") => None,
+        Some("card") => Some(value_of(&crate::fill_rules::CARD_VALUES)?),
+        Some("identity") => Some(value_of(&crate::fill_rules::IDENTITY_VALUES)?),
         _ => return None,
-    }
+    };
     let mut field = Vec::new();
     for key in ["id", "name", "label"] {
         if let Some(part) = page_text(&rule["field"][key]).filter(|p| !p.is_empty()) {
@@ -1219,11 +1228,19 @@ fn well_formed_rule(value: &str) -> Option<String> {
     if field.is_empty() {
         return None;
     }
-    let fill = if from == Some("field") {
-        let name = page_text(&rule["fill"]["name"]).filter(|n| !n.is_empty() && !reserved(n))?;
-        format!("{{\"from\":\"field\",\"name\":{}}}", Value::from(name))
-    } else {
-        format!("{{\"from\":{}}}", Value::from(from?))
+    let fill = match (from, value) {
+        (Some("field"), _) => {
+            let name =
+                page_text(&rule["fill"]["name"]).filter(|n| !n.is_empty() && !reserved(n))?;
+            format!("{{\"from\":\"field\",\"name\":{}}}", Value::from(name))
+        }
+        // Rewritten from only its source and value.
+        (Some(from), Some(value)) => format!(
+            "{{\"from\":{},\"value\":{}}}",
+            Value::from(from),
+            Value::from(value)
+        ),
+        _ => format!("{{\"from\":{}}}", Value::from(from?)),
     };
     let host = rule["host"].as_str().map(str::to_lowercase);
     if let Some(host) = &host {
@@ -1707,6 +1724,86 @@ mod tests {
         assert_eq!(
             well_formed_rule(r#"{"v":1,"field":{"name":"otp"},"fill":{"from":"totp"}}"#).as_deref(),
             Some(r#"{"v":1,"field":{"name":"otp"},"fill":{"from":"totp"}}"#)
+        );
+    }
+
+    /// reserved-fields.spec.ts, "brings back a fill rule for a card's or an
+    /// identity's value, rewritten, and drops one it can't read".
+    #[test]
+    fn a_rule_for_a_cards_or_an_identitys_value_comes_back_rewritten() {
+        let card = r#"{"v":1,"host":"js.stripe.com","field":{"id":"cvc"},"fill":{"from":"card","value":"code","extra":1}}"#;
+        let city = r#"{"v":1,"host":"shop.example.test","field":{"name":"town"},"fill":{"from":"identity","value":"city"}}"#;
+        // A value the web vault doesn't know (one added later, say).
+        let unknown = r#"{"v":1,"host":"shop.example.test","field":{"id":"x"},"fill":{"from":"card","value":"pin"}}"#;
+        let (fields, renamed) = guarded(
+            vec![
+                field("keykeeper.fill", card, 1),
+                field("keykeeper.fill", city, 1),
+                field("keykeeper.fill", unknown, 1),
+            ],
+            true,
+        );
+        assert_eq!(
+            fields,
+            [
+                ("keykeeper.fill".into(), r#"{"v":1,"host":"js.stripe.com","field":{"id":"cvc"},"fill":{"from":"card","value":"code"}}"#.into()),
+                ("keykeeper.fill".into(), city.into()),
+                ("Imported keykeeper.fill".into(), unknown.into()),
+            ]
+        );
+        assert_eq!(renamed, 1);
+
+        // From anywhere else, they're never ours.
+        let (fields, renamed) = guarded(vec![field("keykeeper.fill", card, 1)], false);
+        assert_eq!(fields, [("Imported keykeeper.fill".into(), card.into())]);
+        assert_eq!(renamed, 1);
+    }
+
+    /// The values `CARD_FILL_VALUES` and `IDENTITY_FILL_VALUES` name, each
+    /// under its own kind of item, and nothing else.
+    #[test]
+    fn a_cards_and_an_identitys_values_are_the_web_vaults() {
+        let rule = |from: &str, value: &Value| {
+            json!({"v": 1, "host": "shop.example.test", "field": {"id": "f"}, "fill": {"from": from, "value": value}})
+                .to_string()
+        };
+        for (from, values) in [
+            ("card", &crate::fill_rules::CARD_VALUES[..]),
+            ("identity", &crate::fill_rules::IDENTITY_VALUES[..]),
+        ] {
+            for value in values {
+                // In the order the extension writes them, whatever the file's.
+                let written = format!(
+                    r#"{{"v":1,"host":"shop.example.test","field":{{"id":"f"}},"fill":{{"from":"{from}","value":"{value}"}}}}"#
+                );
+                assert_eq!(well_formed_rule(&rule(from, &json!(value))), Some(written));
+            }
+        }
+        assert_eq!(crate::fill_rules::CARD_VALUES.len(), 5);
+        assert_eq!(crate::fill_rules::IDENTITY_VALUES.len(), 14);
+        for (from, value) in [
+            // Another kind's value.
+            ("card", json!("city")),
+            ("identity", json!("number")),
+            // Secrets the web vault's rules never name.
+            ("card", json!("pin")),
+            ("identity", json!("ssn")),
+            ("identity", json!("passportNumber")),
+            // Not its name, or not one at all.
+            ("card", json!("Number")),
+            ("card", json!("cardNumber")),
+            ("identity", json!(" city")),
+            ("card", json!(1)),
+            ("card", Value::Null),
+            ("card", json!(["number"])),
+        ] {
+            let rule = rule(from, &value);
+            assert_eq!(well_formed_rule(&rule), None, "{rule}");
+        }
+        assert_eq!(
+            well_formed_rule(r#"{"v":1,"field":{"id":"f"},"fill":{"from":"card"}}"#),
+            None,
+            "no value"
         );
     }
 

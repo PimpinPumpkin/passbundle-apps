@@ -8,7 +8,7 @@
 use std::{
     collections::HashMap,
     fs,
-    io::{self, Write},
+    io::{self, Read, Write},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -128,6 +128,74 @@ impl Site {
                         Some(body) => request.respond(tiny_http::Response::from_data(body)),
                         None => request.respond(tiny_http::Response::empty(404)),
                     };
+                }
+            })
+        };
+        Site {
+            base,
+            files,
+            asked,
+            stop,
+            thread: Some(thread),
+        }
+    }
+
+    /// A stand-in that answers one request on each connection and then ends
+    /// it, without saying so first (an `HTTP/1.0` answer with no
+    /// `Connection: close`): what an HTTP/1.0 server does, such as Python's
+    /// http.server, which the meta repo's end-to-end test on Windows uses as
+    /// the site, and what any server does that ends a kept connection just
+    /// as the next request comes. It waits a moment before it ends the
+    /// connection, reading nothing more, so a request sent on that
+    /// connection in the meantime is always cut off.
+    fn ending_each_connection() -> Site {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let base = format!("http://{}/agent", listener.local_addr().unwrap());
+        let files: Arc<Mutex<HashMap<String, Vec<u8>>>> = Arc::default();
+        let asked: Arc<Mutex<Vec<String>>> = Arc::default();
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread = {
+            let (files, asked, stop) = (files.clone(), asked.clone(), stop.clone());
+            thread::spawn(move || {
+                while !stop.load(Ordering::SeqCst) {
+                    let Ok((mut stream, _)) = listener.accept() else {
+                        thread::sleep(Duration::from_millis(10));
+                        continue;
+                    };
+                    let (files, asked) = (files.clone(), asked.clone());
+                    thread::spawn(move || {
+                        stream.set_nonblocking(false).unwrap();
+                        let mut head = Vec::new();
+                        let mut byte = [0u8];
+                        while !head.ends_with(b"\r\n\r\n") {
+                            match stream.read(&mut byte) {
+                                Ok(1) => head.push(byte[0]),
+                                _ => return,
+                            }
+                        }
+                        let head = String::from_utf8_lossy(&head);
+                        let path = head.split(' ').nth(1).unwrap_or_default().to_owned();
+                        asked.lock().unwrap().push(path.clone());
+                        let body = path
+                            .strip_prefix("/agent/")
+                            .and_then(|name| files.lock().unwrap().get(name).cloned());
+                        let answer = match body {
+                            Some(body) => [
+                                format!(
+                                    "HTTP/1.0 200 OK\r\nContent-Length: {}\r\n\r\n",
+                                    body.len()
+                                )
+                                .into_bytes(),
+                                body,
+                            ]
+                            .concat(),
+                            None => b"HTTP/1.0 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_vec(),
+                        };
+                        let _ = stream.write_all(&answer);
+                        thread::sleep(Duration::from_millis(200));
+                        // Dropped: the connection ends.
+                    });
                 }
             })
         };
@@ -495,6 +563,35 @@ fn while_a_program_runs_from_the_folder_the_update_waits_and_goes_in_next_time()
         assert!(!swap::work_dir(&install).exists());
         fs::remove_dir_all(&base).unwrap();
     }
+}
+
+#[test]
+fn a_site_that_ends_each_connection_after_one_answer_still_updates() {
+    let base = temp("ending");
+    let install = installed(&base);
+    let (site, keys, machine) = (Site::ending_each_connection(), keys(), Fake::default());
+    publish(&site, &keys, "0.1.5", PLATFORM, FILES);
+    // The manifest, its signature, and the zip, each asked for on a
+    // connection of its own: one kept from the request before is cut off.
+    *machine.running.lock().unwrap() = vec![install.join("passbundle-agent.exe")];
+    assert_eq!(
+        run(&site, &keys, &install, &machine),
+        Ok(Outcome::Waiting(v("0.1.5")))
+    );
+    assert!(site.downloaded());
+    machine.running.lock().unwrap().clear();
+    assert_eq!(
+        run(&site, &keys, &install, &machine),
+        Ok(Outcome::Installed(v("0.1.5")))
+    );
+    assert!(is_version(&install, "0.1.5"));
+    // The manifest and its signature again: nothing newer.
+    assert_eq!(
+        run(&site, &keys, &install, &machine),
+        Ok(Outcome::UpToDate(v("0.1.5")))
+    );
+    assert!(!swap::work_dir(&install).exists());
+    fs::remove_dir_all(&base).unwrap();
 }
 
 #[test]
