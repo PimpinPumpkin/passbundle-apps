@@ -1227,7 +1227,8 @@ class _SignInRequestsSettingsState extends State<SignInRequestsSettings> {
             title: const Text(
               'This device signed in with another device\'s approval, so it '
               'can\'t approve "Sign in with a device" requests. To approve '
-              'them here, sign out, then sign in with your master password.',
+              'them here, sign out, then sign in with your master password '
+              'or single sign-on.',
             ),
             subtitle: const Text(
               'A new device\'s number still works here.',

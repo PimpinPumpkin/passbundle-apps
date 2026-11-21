@@ -325,7 +325,7 @@ const CONFIRMATION_LASTS: std::time::Duration = std::time::Duration::from_secs(6
 /// began from an approval: the server refuses it (DESIGN.md in the meta
 /// repo, "Approving a sign-in from another device", "Who approves").
 const APPROVAL_SESSION: Error = Error::Refused(
-    "this device signed in with another device's approval, so it can't approve another device's sign-in. To approve one here, sign out, then sign in with your master password",
+    "this device signed in with another device's approval, so it can't approve another device's sign-in. To approve one here, sign out, then sign in with your master password or single sign-on",
 );
 
 /// A request to sign in with a device (device_signin.rs), with the server

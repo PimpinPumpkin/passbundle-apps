@@ -1188,6 +1188,6 @@ mod signing_in {
 
     /// What approving from a session that began from an approval says.
     const APPROVAL_SESSION_WORDS: Error = Error::Refused(
-        "this device signed in with another device's approval, so it can't approve another device's sign-in. To approve one here, sign out, then sign in with your master password",
+        "this device signed in with another device's approval, so it can't approve another device's sign-in. To approve one here, sign out, then sign in with your master password or single sign-on",
     );
 }
